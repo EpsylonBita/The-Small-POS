@@ -357,12 +357,12 @@ export function RepairIntakeDialog({
         )}
 
         {intakeUnavailable && (
-          <p role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+          <p role="status" className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 text-sm">
             {t('repairs.messages.settingsUnavailable')}
           </p>
         )}
         {!hasSecureUuid && (
-          <p role="alert" className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm">
+          <p role="alert" className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 text-sm">
             {t('repairs.messages.secureIdUnavailable')}
           </p>
         )}
@@ -370,7 +370,7 @@ export function RepairIntakeDialog({
         {(!isQuick || !isAnonymous) && (
           <section aria-label={t('repairs.intake.customerDevice')} className="space-y-4">
             {connectivity !== 'online' && (
-              <p role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+              <p role="status" className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 text-sm">
                 {t('repairs.messages.selectorOnline')}
               </p>
             )}
@@ -396,7 +396,7 @@ export function RepairIntakeDialog({
               <ul aria-label={t('repairs.intake.customerResults')} className="grid gap-2 sm:grid-cols-2">
                 {customers.map((customer) => (
                   <li key={customer.id}>
-                    <button type="button" disabled={connectivity !== 'online'} aria-pressed={selectedCustomer?.id === customer.id} onClick={() => void chooseCustomer(customer)} className="flex min-h-11 w-full items-center gap-2 rounded-xl border border-slate-200 p-3 text-left aria-pressed:border-blue-500 aria-pressed:bg-blue-500/10 disabled:opacity-50 dark:border-white/10">
+                    <button type="button" disabled={connectivity !== 'online'} aria-pressed={selectedCustomer?.id === customer.id} onClick={() => void chooseCustomer(customer)} className="flex min-h-11 w-full items-center gap-2 rounded-xl border border-slate-200 p-3 text-left aria-pressed:border-blue-500 aria-pressed:bg-(--pos-s-surface-2) disabled:opacity-50 dark:border-white/10">
                       <UserRound aria-hidden className="h-4 w-4" />
                       {customer.displayName}
                     </button>
@@ -418,7 +418,7 @@ export function RepairIntakeDialog({
                   <ul aria-label={t('repairs.intake.deviceResults')} className="grid gap-2 sm:grid-cols-2">
                     {devices.map((item) => (
                       <li key={item.id}>
-                        <button type="button" disabled={connectivity !== 'online'} aria-pressed={selectedDevice?.id === item.id} onClick={() => setSelectedDevice(item)} className="flex min-h-11 w-full items-center gap-2 rounded-xl border border-slate-200 p-3 text-left aria-pressed:border-blue-500 aria-pressed:bg-blue-500/10 disabled:opacity-50 dark:border-white/10">
+                        <button type="button" disabled={connectivity !== 'online'} aria-pressed={selectedDevice?.id === item.id} onClick={() => setSelectedDevice(item)} className="flex min-h-11 w-full items-center gap-2 rounded-xl border border-slate-200 p-3 text-left aria-pressed:border-blue-500 aria-pressed:bg-(--pos-s-surface-2) disabled:opacity-50 dark:border-white/10">
                           <Smartphone aria-hidden className="h-4 w-4" />
                           {deviceLabel(item)}
                         </button>
@@ -444,7 +444,7 @@ export function RepairIntakeDialog({
           <section className="space-y-2" aria-label={t('customerMessaging.preferenceTitle')}>
             {preferenceError && (
               <p role={preferenceError === 'customerMessaging.preferenceFailed' ? 'alert' : 'status'}
-                className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+                className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 text-sm">
                 {t(preferenceError)}
               </p>
             )}
@@ -462,7 +462,7 @@ export function RepairIntakeDialog({
           <label className="text-sm font-semibold sm:col-span-2">{t('repairs.fields.intakeNotes')}<textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={3} maxLength={5000} className="mt-1 w-full rounded-xl border border-slate-300 bg-transparent p-3 dark:border-white/15" /></label>
         </div>
 
-        {error && <p role="alert" className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-800 dark:text-red-200">{error}</p>}
+        {error && <p role="alert" className="rounded-xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-3 text-sm text-red-800 dark:text-red-200">{error}</p>}
 
         <div className="flex flex-wrap justify-end gap-2 border-t border-slate-200 pt-4 dark:border-white/10">
           {isSubmitting && <p id="repair-intake-submit-reason" role="status" className="w-full text-right text-xs text-slate-600 dark:text-zinc-400">{t('repairs.messages.submitInProgress')}</p>}

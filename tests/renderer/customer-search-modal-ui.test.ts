@@ -14,7 +14,9 @@ test('CustomerSearchModal uses yellow focus chrome for its search input', () => 
   assert.match(source, /customer-search-yellow-input liquid-glass-modal-input/);
   assert.doesNotMatch(source, /inputBase\(resolvedTheme\)/);
   assert.match(globalsSource, /\.customer-search-yellow-input:focus\s*\{[\s\S]*border-color: rgb\(250, 204, 21\);/);
-  assert.match(globalsSource, /\.customer-search-yellow-input:focus\s*\{[\s\S]*rgba\(250, 204, 21, 0\.45\)/);
+  // Wave ΣΤ: a solid yellow focus ring, no translucent wash.
+  assert.match(globalsSource, /\.customer-search-yellow-input:focus\s*\{[\s\S]*0 0 0 1px rgb\(250, 204, 21\)/);
+  assert.doesNotMatch(globalsSource, /\.customer-search-yellow-input:focus\s*\{[^}]*rgba\(250, 204, 21/);
 });
 
 // Touch-first + on-theme contract: no hover utilities (tap/active feedback only), no styled native
@@ -40,7 +42,7 @@ test('CustomerSearchModal is touch-first and on-theme (no hover, no custom-scrol
 
 // The real-time search spinner is the yellow accent (was border-blue-500/30 border-t-blue-500).
 test('CustomerSearchModal search spinner uses the yellow accent, not blue', () => {
-  assert.match(source, /border-yellow-500\/30 border-t-yellow-500 rounded-full animate-spin/);
+  assert.match(source, /border-\(--pos-s-border\) border-t-yellow-500 rounded-full animate-spin/);
   assert.doesNotMatch(source, /border-blue-500\/30 border-t-blue-500/);
 });
 
@@ -68,7 +70,7 @@ test('CustomerSearchModal renders selected customer detail with neutral chrome a
   assert.doesNotMatch(source, /📞 \{customer\.phone\}/);
 });
 
-test('CustomerSearchModal address + action MapPins are amber/neutral (not blue) with transparent action fills', () => {
+test('CustomerSearchModal address + action MapPins are neutral (not blue); actions are solid kit buttons', () => {
   const actionSectionStart = source.indexOf('{/* Action Buttons - Add Address, Edit Customer, Delete */}');
   const actionSectionEnd = source.indexOf('{/* Add New Customer Option', actionSectionStart);
   assert.notEqual(actionSectionStart, -1);
@@ -77,18 +79,19 @@ test('CustomerSearchModal address + action MapPins are amber/neutral (not blue) 
 
   // No MapPin (or any icon) is blue anywhere in the modal.
   assert.doesNotMatch(source, /<MapPin[^>]*text-blue/);
-  // The non-selected address-row marker is neutral; the Add Address action marker is amber.
+  // The non-selected address-row marker is neutral; the action icons take the button's text colour.
   assert.match(source, /<MapPin className="w-4 h-4 text-gray-500 dark:text-gray-300 mt-0\.5 shrink-0" \/>/);
-  assert.match(actionSection, /<MapPin className="w-4 h-4 text-amber-500 dark:text-amber-300" \/>/);
+  assert.match(actionSection, /<MapPin className="w-4 h-4" \/>/);
 
-  // Selected-address border stays green; the three action fills stay transparent; edit amber, delete red.
-  assert.match(source, /border-2 border-green-500\/60 bg-transparent/);
+  // Selected-address border stays green. Wave ΣΤ2: the three actions are solid kit buttons (neutral
+  // Add address / Edit, red-text Delete) with no inline translucent borders.
+  assert.match(source, /border-2 border-green-600 bg-transparent/);
   assert.match(source, /border border-gray-200 bg-transparent/);
-  assert.match(actionSection, /backgroundColor: 'transparent'[\s\S]*modals\.customerSearch\.addNewAddress/);
-  assert.match(actionSection, /backgroundColor: 'transparent'[\s\S]*modals\.customerSearch\.editCustomer/);
-  assert.match(actionSection, /backgroundColor: 'transparent'[\s\S]*modals\.customerSearch\.deleteCustomer/);
-  assert.match(actionSection, /<Edit className="w-4 h-4 text-amber-500 dark:text-amber-300" \/>/);
-  assert.match(actionSection, /<Trash2 className="w-4 h-4 text-red-500 dark:text-red-400" \/>/);
+  assert.equal((actionSection.match(/className="pos-solid-btn pos-solid-btn--sm flex-1 /g) || []).length, 2);
+  assert.match(actionSection, /className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--danger /);
+  assert.doesNotMatch(actionSection, /rgba\(/);
+  assert.match(actionSection, /<Edit className="w-4 h-4" \/>/);
+  assert.match(actionSection, /<Trash2 className="w-4 h-4" \/>/);
 });
 
 // Touch-first a11y: the inline edit/delete address icon buttons and the delete-customer icon button
@@ -121,7 +124,7 @@ test('CustomerSearchModal add-new-customer prompt is a yellow info panel with a 
   const promptSection = source.slice(promptSectionStart, promptSectionEnd);
 
   // Yellow info panel.
-  assert.match(promptSection, /bg-yellow-50 dark:bg-yellow-500\/10 border border-yellow-200 dark:border-yellow-500\/20/);
+  assert.match(promptSection, /bg-yellow-50 dark:bg-zinc-800 border border-yellow-200 dark:border-zinc-700/);
   // Green create CTA (semantic save) with active tap feedback -- not yellow.
   assert.match(promptSection, /backgroundColor: '#16a34a'/);
   assert.match(promptSection, /color: '#ffffff'/);
@@ -147,7 +150,7 @@ test('CustomerSearchModal renders a translated, touch-sized Caller ID add-addres
 
   assert.match(callerIdActions, /type="button"/);
   assert.match(callerIdActions, /min-h-touch(?![\w.-])/);
-  assert.match(callerIdActions, /dark:border-amber-400\/50[\s\S]*dark:text-white/);
+  assert.match(callerIdActions, /[\s\S]*dark:text-white/);
   assert.match(callerIdActions, /t\('modals\.customerSearch\.addNewAddress', 'Add address'\)/);
   assert.doesNotMatch(callerIdActions, /editCustomer|deleteCustomer|Trash2|<Edit/);
 });

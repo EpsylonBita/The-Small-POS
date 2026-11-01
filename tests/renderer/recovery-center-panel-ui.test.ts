@@ -106,8 +106,8 @@ test('Round 384: recovery center panel is touch-first and avoids old sky/orange 
   assert.doesNotMatch(source, /focus:ring-blue|focus:border-blue/);
 
   // Error is semantic red; warning/blocker guidance is amber; informational/verification surfaces are neutral.
-  assert.match(source, /error:[\s\S]*?border border-red-400\/30 bg-red-500\/10 text-red-700/);
-  assert.match(source, /warning:[\s\S]*?border border-amber-400\/30 bg-amber-500\/10 text-amber-700/);
+  assert.match(source, /error:[\s\S]*?border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-red-700/);
+  assert.match(source, /warning:[\s\S]*?border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-amber-700/);
   assert.match(source, /info:[\s\S]*?border border-slate-300\/80 bg-white\/85 text-slate-700/);
   assert.match(source, /<details className="rounded-2xl border border-slate-200/);
   assert.match(source, /<summary className="min-h-touch(?![\w.-])/);
@@ -115,5 +115,5 @@ test('Round 384: recovery center panel is touch-first and avoids old sky/orange 
   // Touch feedback replaces hover on recovery actions while preserving semantic action colors.
   assert.match(source, /min-h-\[48px\][\s\S]*?disabled:opacity-50/);
   assert.match(source, /bg-amber-400[\s\S]*?active:bg-amber-300/);
-  assert.match(source, /border-red-300\/80 bg-red-50\/90 text-red-700 active:bg-red-100/);
+  assert.match(source, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-red-700 active:bg-red-100/);
 });

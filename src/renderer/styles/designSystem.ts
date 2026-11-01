@@ -191,12 +191,12 @@ export const sectionSubtle = (theme: ResolvedTheme) =>
  */
 export const inputBase = (theme: ResolvedTheme) =>
   // radius comes from the shared .liquid-glass-modal-input token (--pos-glass-radius-small)
-  `liquid-glass-modal-input w-full px-3 py-3 focus:outline-hidden focus:ring-2 focus:ring-yellow-400/50 transition-colors`;
+  `liquid-glass-modal-input w-full px-3 py-3 focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg) transition-colors`;
 
 /**
  * Button styling with liquid glass effect.
  *
- * @param variant - Button style variant ('primary' | 'secondary')
+ * @param variant - Button style variant ('primary' | 'secondary' | 'danger')
  * @param size - Button size ('sm' | 'md' | 'lg')
  * @returns CSS class string for button elements
  *
@@ -215,10 +215,14 @@ export const liquidGlassModalButton = (variant = 'primary', size: 'sm' | 'md' | 
   if (size === 'sm') sizeCls = 'px-3 py-1.5';
   else if (size === 'lg') sizeCls = 'px-6 py-3';
 
-  // Primary: yellow action; secondary: neutral glass.
+  // Solid (UI audit wave 7): primary = solid brand yellow with dark text; secondary =
+  // opaque neutral with a 1px border; danger = the neutral button with red text (it
+  // used to fall through to plain grey). Colours live in .pos-modal-* (glassmorphism.css).
   const variantCls = variant === 'primary'
-    ? 'bg-yellow-400/20 text-yellow-900 dark:text-yellow-200 border-yellow-400/40'
-    : 'text-gray-700 dark:text-gray-200';
+    ? 'pos-modal-primary'
+    : variant === 'danger'
+      ? 'pos-modal-danger'
+      : 'text-gray-700 dark:text-gray-200';
 
   return `${base} ${sizeCls} ${variantCls}`;
 };
@@ -246,10 +250,12 @@ export type LiquidGlassModalTone = 'neutral' | 'success' | 'warning' | 'danger';
 /** Readable semantic surfaces for light and dark modal content. */
 export const liquidGlassModalTone = (tone: LiquidGlassModalTone): string => {
   const tones: Record<LiquidGlassModalTone, string> = {
-    neutral: 'border-slate-200 bg-slate-50 text-slate-800 dark:border-white/10 dark:bg-slate-900/60 dark:text-slate-100',
-    success: 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100',
-    warning: 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100',
-    danger: 'border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-400/30 dark:bg-rose-500/10 dark:text-rose-100',
+    // Wave ΣΤ1: a neutral solid surface in both themes; the tone is the colour of the words (AA),
+    // never a tinted fill. Notices that must stand out use the kit pos-notice tints instead.
+    neutral: 'border-zinc-300 bg-white text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100',
+    success: 'border-zinc-300 bg-white text-emerald-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-emerald-300',
+    warning: 'border-zinc-300 bg-white text-amber-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-amber-300',
+    danger: 'border-zinc-300 bg-white text-rose-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-rose-300',
   };
   return tones[tone];
 };
@@ -268,10 +274,10 @@ export const liquidGlassModalTone = (tone: LiquidGlassModalTone): string => {
  * @see {@link ../components/ui/pos-glass-components.tsx#POSGlassBadge} for a React component alternative
  */
 export const liquidGlassModalBadge = (variant = 'default') => {
-  const base = 'px-2 py-1 rounded-full text-xs font-medium backdrop-blur-sm border';
+  const base = 'px-2 py-1 rounded-full text-xs font-medium border';
   const variantCls = variant === 'success'
-    ? 'bg-yellow-400/15 text-yellow-800 dark:text-yellow-200 border-yellow-400/30'
-    : 'bg-white/5 text-gray-500 dark:text-gray-300 border-white/10';
+    ? 'bg-(--pos-s-surface) text-(--pos-s-fg) border-(--pos-s-border)'
+    : 'bg-(--pos-s-surface) text-(--pos-s-muted) border-(--pos-s-border)';
   return `${base} ${variantCls}`;
 };
 

@@ -109,16 +109,18 @@ const OrderGrid = memo<OrderGridProps>(({
   // Memoized order cards with sequential indexing
   const orderCards = useMemo(() => 
     filteredOrders.map((order, index) => (
-      <OrderCard
-        key={order.id}
-        order={order}
-        orderIndex={index}
-        isSelected={selectedOrders.includes(order.id)}
-        onSelect={onToggleOrderSelection}
-        onDoubleClick={onOrderDoubleClick}
-        storeMapOrigin={storeMapOrigin}
-        kitchenStage={selectActiveKitchenStage(localPreparation, order)}
-      />
+      // A new order (or the cards of a newly opened tab) fades in once; CSS only.
+      <div key={order.id} className="pos-enter">
+        <OrderCard
+          order={order}
+          orderIndex={index}
+          isSelected={selectedOrders.includes(order.id)}
+          onSelect={onToggleOrderSelection}
+          onDoubleClick={onOrderDoubleClick}
+          storeMapOrigin={storeMapOrigin}
+          kitchenStage={selectActiveKitchenStage(localPreparation, order)}
+        />
+      </div>
     )),
     [filteredOrders, selectedOrders, onToggleOrderSelection, onOrderDoubleClick, storeMapOrigin, localPreparation]
   );
@@ -143,7 +145,7 @@ const OrderGrid = memo<OrderGridProps>(({
       <div className="flex flex-col items-center justify-center h-64 space-y-4">
         <ClipboardList className="h-14 w-14 opacity-50" />
         <div className={`text-lg font-medium ${resolvedTheme === 'light' ? 'text-slate-500' : 'text-white/50'}`}>{t('dashboard.noOrders', 'No orders found')}</div>
-        <div className={`text-sm ${resolvedTheme === 'light' ? 'text-slate-400' : 'text-white/30'}`}>{t('dashboard.ordersWillAppear', 'Orders will appear here when created')}</div>
+        <div className={`text-sm ${resolvedTheme === 'light' ? 'text-slate-600' : 'text-zinc-400'}`}>{t('dashboard.ordersWillAppear', 'Orders will appear here when created')}</div>
       </div>
     );
   }

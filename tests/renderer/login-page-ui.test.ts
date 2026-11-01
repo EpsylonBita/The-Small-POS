@@ -129,3 +129,107 @@ test('Round 348: login keeps multiple animated yellow orbs, not a static backgro
   // The page still mounts the animated background (no swap to a static flat element).
   assert.match(loginSource(), /<AnimatedBackground \/>/);
 });
+
+// Founder 31/10 («με το που βάλεις το σωστό PIN κάνει login μόνο του ... μήπως έβγαζα τελείως το κουμπί»):
+// the PIN screen has no sign-in button. It signs in by itself at the PIN's length, which the till keeps as a
+// digit count per slot (utils/loginPinLength) when a PIN is set and after every successful sign-in.
+test('the PIN screen has no sign-in button and every PIN path keeps the digit count', () => {
+  const login = loginSource();
+  assert.doesNotMatch(login, /onClick=\{handleLoginClick\}[\s\S]{0,200}w-full bg-yellow-400/);
+  assert.doesNotMatch(login, /\{isLoading \? t\('login\.loggingIn'\) : t\('login\.loginButton'\)\}/);
+  assert.doesNotMatch(login, /setTimeout\(resolve, 500\)/, 'no artificial wait before the PIN is checked');
+  assert.match(login, /pin\.length === autoSubmitLength/);
+  assert.match(login, /data-testid="login-enter-key"/);
+  assert.match(login, /rememberLoginPinLength\(bridge, \['admin', 'staff'\], newPin\.length\)/);
+  assert.match(login, /rememberLoginPinLength\(bridge, \['staff'\], legacyPin\.length\)/);
+  // Clear and backspace are icons in the digits' frame.
+  assert.match(login, /<X size=\{22\} aria-hidden="true" \/>/);
+
+  assert.match(read('App.tsx'), /rememberLoginPinLength\(bridge, \[loginPinSlotForRole\(userData\.role\)\], pin\.length\)/);
+  assert.match(
+    read('components/modals/ConnectionSettingsModal.tsx'),
+    /rememberLoginPinLength\(bridge, \['staff'\], pin\.length\)/,
+  );
+});
+
+// Founder 31/10 («ένα ωραίο animation όταν κάνει login και μπαίνει στο σύστημα»), then «δεν είναι ομαλό: να
+// κατεβαίνει από εκεί που είναι στο κέντρο και μετά να κάνει zoom ... επίσης καθυστερεί ... σβήνοντας και το
+// modal του login»: the exit starts the moment the PIN is accepted (before the session is completed), the card
+// fades while the logo glides from its place to the middle, and the same mounted sign-in layer then zooms away
+// over the till. Only a sign-in plays it, it paints opaque colours, and reduce motion is MotionConfig's "user".
+test('the sign-in screen leaves at once: the logo glides to the middle, then the layer zooms into the till', () => {
+  const app = read('App.tsx');
+  // 'leaving' is set right after the native PIN check, before the organisation and keyring work.
+  const success = app.indexOf("if (result && result.success && userData) {");
+  const leaving = app.indexOf("setLoginExit('leaving');", success);
+  const enrich = app.indexOf('enrichSessionUserWithOrganization(userData)', success);
+  assert.ok(success > 0 && leaving > success && leaving < enrich, 'the exit starts before the session work');
+  assert.match(app, /await loginScreenLeft;[\s\S]{0,400}setLoginExit\('opening'\)[\s\S]{0,200}setUser\(enrichedUser\);/);
+  assert.match(app, /window\.setTimeout\(resolve, LOGIN_LEAVE_MAX_MS\)/, 'never waits on an animation that does not report');
+  // One sign-in layer, kept mounted from the login screen to the zoom (no remount, no jump).
+  assert.match(app, /key="login-layer"/);
+  assert.match(app, /animate=\{\{ opacity: isOpeningTill \? 0 : 1 \}\}/);
+  assert.match(app, /delay: LOGIN_TILL_REVEAL_DELAY_S, duration: LOGIN_TILL_REVEAL_S/);
+  assert.match(app, /if \(!user\) \{\s*return \(\s*<>\s*\{null\}\s*\{loginLayer\}\s*<\/>/);
+  assert.match(app, /<\/ErrorBoundary>\s*\{loginLayer\}\s*<\/>/);
+  assert.match(app, /<MotionConfig reducedMotion="user">/);
+  // A failure after the PIN was accepted brings the card back.
+  assert.match(app, /loginLeftRef\.current = null;\s*setLoginExit\(null\);\s*throw err;/);
+
+  const login = loginSource();
+  assert.match(login, /data-testid="login-flying-logo"/);
+  assert.match(login, /: \{ x: logoFlight\.dx, y: logoFlight\.dy, scale: 1\.35, transition: \{ duration: LOGIN_LOGO_GLIDE_S/);
+  // Bounded timers, never the animation's end (motion rule: checkout never freezes).
+  assert.match(login, /window\.setTimeout\(\(\) => onLeft\?\.\(\), LOGIN_LOGO_GLIDE_S \* 1000 \+ LOGIN_LOGO_HOLD_MS\)/);
+  assert.match(app, /\(\) => setLoginExit\(null\),\s*\(LOGIN_TILL_REVEAL_DELAY_S \+ LOGIN_TILL_REVEAL_S\) \* 1000 \+ 60/);
+  assert.doesNotMatch(login + app, /onAnimationComplete/);
+  // Founder 31/10 («θα ήθελα πιο αργή την κίνηση!!»): an unhurried exit.
+  assert.match(login, /LOGIN_LOGO_GLIDE_S = 0\.9;/);
+  assert.match(login, /LOGIN_CARD_FADE_S = 0\.6;/);
+  // Founder 31/10 («να κάνει ζουμ μέχρι την πέρλα του λογοτύπου»): the logo dives into its pearl until it
+  // fills the window, around the pearl's measured centre, and the till shows through the gold.
+  assert.match(login, /const PEARL_ZOOM_STEPS = \[3, 7, 16, 36\];/);
+  assert.match(login, /scale: \[1\.35, \.\.\.PEARL_ZOOM_STEPS, logoFlight\.pearlScale\]/);
+  assert.match(login, /LOGIN_PEARL_ZOOM_S = 1\.1;/);
+  assert.match(login, /transformOrigin: PEARL\[isDark \? 'dark' : 'light'\]\.origin/);
+  assert.match(login, /pearlScale: \(Math\.hypot\(root\.width, root\.height\) \/ \(logo\.width \* PEARL\[/);
+  assert.match(app, /LOGIN_LEAVE_MAX_MS = 1600;/);
+  assert.match(login, /: isLeaving\s*\? \{ opacity: 0, scale: 0\.96, transition: \{ duration: LOGIN_CARD_FADE_S/);
+  assert.doesNotMatch(login, /rgba\(/, 'opaque colours only');
+});
+
+test('signing out plays it backwards: the till fades slowly into gold, rests, then the logo comes out of the pearl', () => {
+  // Founder 31/10: «και στο Logout πρέπει να έχει το ίδιο animation σε reverse!!», then «είναι πολύ απότομο·
+  // πρέπει να γίνεται κίτρινο όλο σιγά σιγά και να κάνει fade η εφαρμογή και μετά να ξεκινήσει το transition».
+  const app = read('App.tsx');
+  const logout = app.slice(app.indexOf('const handleLogout = async () => {'), app.indexOf('if (externalDisplayKind) {'));
+  // The layer starts fading in over the till first; the till leaves only once the gold covers it.
+  const returning = logout.indexOf("setLoginExit('returning');");
+  const nativeLogout = logout.indexOf('await bridge.auth.logout();');
+  const covered = logout.indexOf('await covered;');
+  const dropped = logout.indexOf('setUser(null);');
+  assert.ok(returning > 0 && returning < nativeLogout && nativeLogout < covered && covered < dropped, 'gold first, till after');
+  assert.match(logout, /window\.setTimeout\(resolve, LOGIN_RETURN_COVER_S \* 1000\)/);
+  assert.match(app, /initial=\{loginExit === 'returning' && user \? \{ opacity: 0 \} : false\}/);
+  assert.match(app, /: loginExit === 'returning'\s*\? \{ duration: LOGIN_RETURN_COVER_S, ease: 'easeInOut' \}/);
+  assert.match(app, /setLoginExit\(null\), LOGIN_RETURN_TOTAL_S \* 1000 \+ 60/);
+  // The native sign-out announces itself as a session end (reason 'logout'); it must not drop the till mid-fade.
+  assert.match(logout, /if \(signingOutRef\.current\) return;\s*signingOutRef\.current = true;/);
+  assert.match(logout, /\} finally \{\s*signingOutRef\.current = false;\s*\}/);
+  assert.match(app, /onLogout: \(reason\) => \{[\s\S]{0,300}if \(reason === 'logout' && signingOutRef\.current\) return;/);
+  const events = read('hooks/useAppEvents.ts');
+  assert.match(events, /if \(reason !== 'logout'\) \{\s*toast\.error\(tRef\.current\('system\.sessionExpired'\)/);
+
+  const login = loginSource();
+  // A full second of gold, a short rest, then out of the pearl (the dive's steps reversed) and home.
+  assert.match(login, /LOGIN_RETURN_COVER_S = 1\.0;/);
+  assert.match(login, /LOGIN_RETURN_HOLD_S = 0\.25;/);
+  assert.match(login, /const RETURN_ZOOM_START_S = LOGIN_RETURN_COVER_S \+ LOGIN_RETURN_HOLD_S;/);
+  assert.match(login, /\? \{ x: logoFlight\.dx, y: logoFlight\.dy, scale: logoFlight\.pearlScale \}/);
+  assert.match(login, /scale: \[logoFlight\.pearlScale, logoFlight\.pearlScale, \.\.\.\[\.\.\.PEARL_ZOOM_STEPS\]\.reverse\(\), 1\.35, 1\]/);
+  assert.match(login, /times: RETURN_TIMES,/);
+  assert.match(login, /if \(exitPhase === 'returning'\) return;/, 'no sign-in report on the way back');
+  // The card fades back in only as the logo comes home.
+  assert.match(login, /opacity: \[0, 0, 1\],[\s\S]{0,200}times: \[0, \(LOGIN_RETURN_TOTAL_S - LOGIN_CARD_FADE_S\) \/ LOGIN_RETURN_TOTAL_S, 1\]/);
+  assert.match(login, /\{exitPhase !== 'returning' && \(/, 'no gold ring on the way back');
+});

@@ -155,7 +155,7 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
 
       {/* Error State */}
       {error && (
-        <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-4 mb-6">
+        <div className="bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl p-4 mb-6">
           {error}
         </div>
       )}

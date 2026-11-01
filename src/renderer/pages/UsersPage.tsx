@@ -867,11 +867,11 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
     const tierKey = getLoyaltyTierKey(points);
     const color =
       tierKey === 'platinum'
-        ? 'text-amber-500 dark:text-amber-300'
+        ? 'text-amber-700 dark:text-amber-300'
         : tierKey === 'gold'
-          ? 'text-yellow-500 dark:text-yellow-400'
+          ? 'text-yellow-800 dark:text-yellow-400'
           : tierKey === 'silver'
-            ? 'text-zinc-500 dark:text-zinc-300'
+            ? 'text-zinc-600 dark:text-zinc-300'
             : 'text-orange-700 dark:text-orange-500';
 
     const tierLabel = t(`users.loyaltyTier.${tierKey}`, tierKey.charAt(0).toUpperCase() + tierKey.slice(1));
@@ -937,11 +937,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
             onClick={() => void loadUsers()}
             disabled={loading}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
-              resolvedTheme === 'dark'
-                ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
-                : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
-            } ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -977,7 +973,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                   ? 'text-yellow-500'
                   : resolvedTheme === 'dark'
                     ? 'text-zinc-400 active:bg-white/10'
-                    : 'text-gray-500 active:bg-gray-200'
+                    : 'text-gray-600 active:bg-gray-200'
               }`}
             >
               <Filter className="h-5 w-5" />
@@ -997,7 +993,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                   }`}
                 >
                   <div className="-mr-1 min-h-0 flex-1 overflow-y-auto pr-1 scrollbar-hide">
-                  <p className={`mb-1.5 text-xs font-semibold uppercase tracking-wider ${resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-500'}`}>
+                  <p className={`mb-1.5 text-xs font-semibold uppercase tracking-wider ${resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-600'}`}>
                     {t('users.filters.statusLabel', 'Status')}
                   </p>
                   <div className="mb-3 flex flex-col gap-1">
@@ -1020,7 +1016,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                       </button>
                     ))}
                   </div>
-                  <p className={`mb-1.5 text-xs font-semibold uppercase tracking-wider ${resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-500'}`}>
+                  <p className={`mb-1.5 text-xs font-semibold uppercase tracking-wider ${resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-600'}`}>
                     {t('users.filters.loyaltyLabel', 'Loyalty tier')}
                   </p>
                   <div className="flex flex-col gap-1">
@@ -1142,7 +1138,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                             {user.name || t('users.unnamed', 'Unnamed User')}
                           </div>
                           <div className={`text-sm ${
-                            resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                            resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
                           }`}>
                             {user.type === 'app_user' ? t('users.filterAppUsers', 'App User') : t('users.customer', 'Customer')}
                           </div>
@@ -1162,7 +1158,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                         )}
                         {user.phone && (
                           <div className={`flex items-center text-sm ${
-                            resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                            resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
                           }`}>
                             <Phone className="w-4 h-4 mr-2 text-yellow-500" />
                             {user.phone}
@@ -1186,7 +1182,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                       <div className="space-y-2">
                         {getLoyaltyBadge(user.loyalty_points)}
                         <div className={`text-xs ${
-                          resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                          resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
                         }`}>
                           {user.loyalty_points} {t('users.points') || 'points'}
                         </div>
@@ -1196,12 +1192,12 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="space-y-2">
                         {user.is_banned ? (
-                          <span className="inline-flex items-center text-xs font-medium text-red-500 dark:text-red-400">
+                          <span className="inline-flex items-center text-xs font-medium text-red-700 dark:text-red-400">
                             <Ban className="w-3 h-3 mr-1" />
                             {t('users.banned') || 'Banned'}
                           </span>
                         ) : (
-                          <span className="inline-flex items-center text-xs font-medium text-green-500 dark:text-green-400">
+                          <span className="inline-flex items-center text-xs font-medium text-green-800 dark:text-green-400">
                             <CheckCircle className="w-3 h-3 mr-1" />
                             {t('users.active') || 'Active'}
                           </span>
@@ -1213,7 +1209,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => handleViewUser(user)}
-                          className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-amber-500 transition-transform active:scale-[0.96] active:bg-amber-500/10"
+                          className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-amber-500 transition-transform active:scale-[0.96] active:bg-(--pos-s-surface-2)"
                           aria-label={t('users.viewDetails') || 'View details'}
                         >
                           <Eye className="w-5 h-5" />
@@ -1223,8 +1219,8 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                             onClick={() => handleToggleBan(user.id, user.is_banned || false)}
                             className={`inline-flex h-10 w-10 items-center justify-center rounded-xl transition-transform active:scale-[0.96] ${
                               user.is_banned
-                                ? 'text-green-600 dark:text-green-400 active:bg-green-500/10'
-                                : 'text-red-600 dark:text-red-400 active:bg-red-500/10'
+                                ? 'text-green-600 dark:text-green-400 active:bg-(--pos-s-surface-2)'
+                                : 'text-red-600 dark:text-red-400 active:bg-(--pos-s-surface-2)'
                             }`}
                             aria-label={user.is_banned ? t('users.unban') || 'Unban' : t('users.ban') || 'Ban'}
                           >
@@ -1251,7 +1247,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                 disabled={activePage === 1}
                 className={`rounded-2xl border px-3 py-2 font-medium transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
                   resolvedTheme === 'dark'
-                    ? 'border-yellow-500 text-yellow-400 active:bg-yellow-400 active:text-black'
+                    ? 'border-yellow-500 text-yellow-700 dark:text-yellow-400 active:bg-yellow-400 active:text-black'
                     : 'border-yellow-500 text-yellow-700 active:bg-yellow-400 active:text-black'
                 }`}
               >
@@ -1266,7 +1262,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                 disabled={activePage === totalPages}
                 className={`rounded-2xl border px-3 py-2 font-medium transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
                   resolvedTheme === 'dark'
-                    ? 'border-yellow-500 text-yellow-400 active:bg-yellow-400 active:text-black'
+                    ? 'border-yellow-500 text-yellow-700 dark:text-yellow-400 active:bg-yellow-400 active:text-black'
                     : 'border-yellow-500 text-yellow-700 active:bg-yellow-400 active:text-black'
                 }`}
               >
@@ -1303,13 +1299,13 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
               {/* Basic Info */}
               <div>
                 <h4 className={`text-sm font-medium mb-3 ${
-                  resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                  resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
                 }`}>
                   {t('users.basicInfo') || 'Basic Information'}
                 </h4>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
                       {t('users.name') || 'Name'}
                     </p>
                     <p className={`text-sm font-medium ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
@@ -1317,7 +1313,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                     </p>
                   </div>
                   <div>
-                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
                       {t('users.phone') || 'Phone'}
                     </p>
                     <p className={`text-sm font-medium ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
@@ -1325,7 +1321,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                     </p>
                   </div>
                   <div>
-                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
                       {t('users.email') || 'Email'}
                     </p>
                     <p className={`text-sm font-medium ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
@@ -1333,7 +1329,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                     </p>
                   </div>
                   <div>
-                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
                       {t('users.status') || 'Status'}
                     </p>
                     <p className={`text-sm font-medium ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
@@ -1351,7 +1347,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
               {userAddresses.length > 0 && (
                 <div>
                   <h4 className={`text-sm font-medium mb-3 ${
-                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
                   }`}>
                     {t('users.addresses') || 'Addresses'} ({userAddresses.length})
                   </h4>
@@ -1404,7 +1400,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                         key={index}
                                         type="button"
                                         onClick={() => handleAddressSuggestionClick(suggestion)}
-                                        className={`w-full px-3 py-2 text-left text-sm active:bg-yellow-500/10 transition-transform active:scale-[0.99] border-b last:border-b-0 ${
+                                        className={`w-full px-3 py-2 text-left text-sm active:bg-(--pos-s-surface-2) transition-transform active:scale-[0.99] border-b last:border-b-0 ${
                                           resolvedTheme === 'dark'
                                             ? 'border-gray-700 text-white'
                                             : 'border-gray-100 text-gray-900'
@@ -1417,7 +1413,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                               {suggestion.structured_formatting?.main_text || suggestion.description}
                                             </p>
                                             <p className={`text-xs truncate ${
-                                              resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                                              resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
                                             }`}>
                                               {suggestion.structured_formatting?.secondary_text || suggestion.description}
                                             </p>
@@ -1507,7 +1503,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                               </button>
                               <button
                                 onClick={handleCancelEdit}
-                                className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm border border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300 active:bg-red-500/20 active:scale-[0.98] transition-all"
+                                className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2) active:scale-[0.98] transition-all"
                               >
                                 <X className="w-4 h-4" />
                                 {t('common.actions.cancel', 'Cancel')}
@@ -1525,7 +1521,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                 {address.street_address}, {address.city}
                               </p>
                               <p className={`text-xs ${
-                                resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                                resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
                               }`}>
                                 {address.postal_code}
                                 {address.floor_number && ` • ${t('users.address.floor', 'Floor')} ${address.floor_number}`}
@@ -1533,7 +1529,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                               </p>
                               {address.delivery_notes && (
                                 <p className={`text-xs mt-1 ${
-                                  resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                                  resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
                                 }`}>
                                   {address.delivery_notes}
                                 </p>
@@ -1542,14 +1538,14 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                             <div className="flex items-center gap-2 shrink-0">
                               <button
                                 onClick={() => handleEditAddress(address)}
-                                className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-amber-500 active:bg-amber-500/10 active:scale-[0.96] transition-transform"
+                                className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-amber-500 active:bg-(--pos-s-surface-2) active:scale-[0.96] transition-transform"
                                 aria-label={t('customer.actions.editAddress')}
                               >
                                 <Edit3 className="w-5 h-5" />
                               </button>
                               <button
                                 onClick={() => handleDeleteAddress(address.id)}
-                                className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-red-600 dark:text-red-400 active:bg-red-500/10 active:scale-[0.96] transition-transform"
+                                className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-red-600 dark:text-red-400 active:bg-(--pos-s-surface-2) active:scale-[0.96] transition-transform"
                                 aria-label={t('customer.actions.deleteAddress')}
                               >
                                 <Trash2 className="w-5 h-5" />
@@ -1567,7 +1563,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
               {selectedUser.notes && (
                 <div>
                   <h4 className={`text-sm font-medium mb-2 ${
-                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
                   }`}>
                     {t('users.notes') || 'Notes'}
                   </h4>
@@ -1592,7 +1588,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                   disabled={updatingUserId === selectedUser.id}
                   className={`flex items-center justify-center gap-2 px-4 py-2 rounded-xl transition-all active:scale-[0.98] ${
                     selectedUser.is_banned
-                      ? 'bg-green-600 active:bg-green-700 text-white'
+                      ? 'bg-(--pos-s-yellow) active:bg-yellow-500 text-black'
                       : 'bg-red-600 active:bg-red-700 text-white'
                   } disabled:opacity-50 disabled:cursor-not-allowed`}
                 >

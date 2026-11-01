@@ -33,8 +33,7 @@ test('DeliveryZonesPage uses the shared page header treatment', () => {
   assert.match(page, /aria-label=\{t\('common\.refresh', 'Refresh'\)\}/);
   // Round 259: the refresh button is amber glass with active press feedback (was a stark
   // black/white square with hover utilities).
-  assert.match(page, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(page, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  assert.match(page, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) \$\{/);
   assert.match(page, /active:scale-95/);
   assert.match(page, /<RefreshCw className=\{`w-5 h-5 \$\{loading \? 'animate-spin' : ''\}`\} \/>/);
   assert.doesNotMatch(page, /<h1 className="text-xl font-bold">\{t\('deliveryZones\.title', 'Delivery Zones'\)\}<\/h1>/);
@@ -47,7 +46,7 @@ test('DeliveryZonesPage uses neutral stat icon wrappers with colored icons', () 
 
   assert.match(page, /<CheckCircle className="w-5 h-5 text-green-500" \/>/);
   assert.match(page, /<Activity className="w-5 h-5 text-yellow-400" \/>/);
-  assert.match(page, /<Truck className="w-5 h-5 text-emerald-500" \/>/);
+  assert.match(page, /<DeliveryScooterIcon className="h-6 w-6 text-emerald-500" \/>/);
   assert.match(page, /<Flame className="w-5 h-5 text-red-500" \/>/);
   assert.match(page, /p-2 rounded-2xl \$\{isDark \? 'bg-zinc-800' : 'bg-gray-100'\}/);
   assert.doesNotMatch(page, /rounded-lg/);
@@ -77,8 +76,7 @@ test('DeliveryZonesPage uses text-only status and colored zone-card icons', () =
 test('Round 259: DeliveryZonesPage refresh is amber glass, aria-label only, no native title, no hover', () => {
   const page = source();
   // Amber glass in both themes (matches Suppliers Round 257).
-  assert.match(page, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(page, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  assert.match(page, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) \$\{/);
   // The stark black/white square is gone.
   assert.doesNotMatch(page, /bg-white text-black/);
   assert.doesNotMatch(page, /bg-black text-white/);
@@ -96,8 +94,8 @@ test('Round 259: DeliveryZonesPage refresh is amber glass, aria-label only, no n
 
 test('Round 259: DeliveryZonesPage semantic icon colors are current (no stale blue)', () => {
   const page = source();
-  // Stat row: success-rate Truck = emerald, estimated-time Clock = amber, bottom info = neutral zinc.
-  assert.match(page, /<Truck className="w-5 h-5 text-emerald-500" \/>/);
+  // Stat row: success-rate scooter (founder 31/10) = emerald, estimated-time Clock = amber, bottom info = neutral zinc.
+  assert.match(page, /<DeliveryScooterIcon className="h-6 w-6 text-emerald-500" \/>/);
   assert.match(page, /<Clock className="w-4 h-4 text-amber-500" \/>/);
   assert.match(page, /<Info className="w-5 h-5 mt-0\.5 text-zinc-400" \/>/);
   // The other semantic colors stay alive: green active/success, yellow validations, red hotspots.

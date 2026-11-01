@@ -14,7 +14,7 @@ import { AddCustomerModal } from '../components/modals/AddCustomerModal';
 import { CustomerSearchModal } from '../components/modals/CustomerSearchModal';
 import { CustomerInfoModal } from '../components/modals/CustomerInfoModal';
 import { OrderConflictBanner } from '../components/OrderConflictBanner';
-import PickupOrderIcon from '../components/icons/PickupOrderIcon';
+import { DeliveryScooterIcon, PickupHandBagIcon } from '../components/icons/OrderTypeGlyphs';
 import { useOrderStore } from '../hooks/useOrderStore';
 import { useShift } from '../contexts/shift-context';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
@@ -1381,12 +1381,12 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
                 onClick={() => handleOrderTypeSelect("pickup")}
                 className={`border-2 border-yellow-500 rounded-2xl p-10 flex flex-col items-center justify-center transition-all duration-300 shadow-xl active:scale-95 backdrop-blur-sm ${resolvedTheme === 'dark'
                   ? 'bg-gray-800/40 active:bg-gray-700/50'
-                  : 'bg-white/40 active:bg-yellow-50/60'
+                  : 'bg-white/40 active:bg-(--pos-s-surface-2)'
                   }`}
               >
-                <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-6 ${resolvedTheme === 'dark' ? 'bg-yellow-500/20' : 'bg-yellow-100'
+                <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-6 ${resolvedTheme === 'dark' ? 'bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2)'
                   }`}>
-                  <PickupOrderIcon
+                  <PickupHandBagIcon
                     className={`w-12 h-12 ${resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-700'}`}
                   />
                 </div>
@@ -1407,25 +1407,14 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
                   onClick={() => handleOrderTypeSelect("delivery")}
                   className={`border-2 border-emerald-500 rounded-2xl p-10 flex flex-col items-center justify-center transition-all duration-300 shadow-xl active:scale-95 backdrop-blur-sm ${resolvedTheme === 'dark'
                     ? 'bg-gray-800/40 active:bg-gray-700/50'
-                    : 'bg-white/40 active:bg-emerald-50/60'
+                    : 'bg-white/40 active:bg-(--pos-s-surface-2)'
                     }`}
                 >
-                  <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-6 ${resolvedTheme === 'dark' ? 'bg-emerald-500/30' : 'bg-emerald-100'
+                  <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-6 ${resolvedTheme === 'dark' ? 'bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2)'
                     }`}>
-                    <svg
-                      className={`w-12 h-12 ${resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
-                        }`}
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"
-                      />
-                    </svg>
+                    <DeliveryScooterIcon
+                      className={`w-12 h-12 ${resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'}`}
+                    />
                   </div>
                   <h3 className={`text-2xl font-bold mb-3 ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
                     }`}>

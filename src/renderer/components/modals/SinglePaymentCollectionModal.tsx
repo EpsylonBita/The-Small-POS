@@ -717,10 +717,10 @@ export const SinglePaymentCollectionModal: React.FC<
         {platformHeldNotice ? (
           <PlatformHeldPaymentNotice notice={platformHeldNotice} showBlockedAction />
         ) : (
-        <div className="flex items-start gap-3 rounded-2xl border border-amber-400/20 bg-amber-500/10 p-4">
-          <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-300" />
+        <div className="flex items-start gap-3 rounded-2xl bg-(--pos-s-warn-bg) border border-(--pos-s-warn) p-4">
+          <AlertTriangle className="mt-0.5 h-5 w-5 text-(--pos-s-warn)" />
           <div className="space-y-1">
-            <p className="text-sm font-semibold uppercase tracking-[0.24em] text-amber-200/90">
+            <p className="text-sm font-semibold uppercase tracking-[0.24em] text-(--pos-s-warn)">
               {t('orderDashboard.paymentRequired', {
                 defaultValue: 'Payment Required',
               })}
@@ -769,7 +769,7 @@ export const SinglePaymentCollectionModal: React.FC<
               {method === 'card' ? (
                 <CreditCard className="h-4 w-4 text-slate-600 dark:text-slate-300" />
               ) : (
-                <Banknote className="h-4 w-4 text-emerald-300" />
+                <Banknote className="h-4 w-4 text-emerald-800 dark:text-emerald-300" />
               )}
               {method === 'card'
                 ? t('splitPayment.card', 'Card')
@@ -795,7 +795,7 @@ export const SinglePaymentCollectionModal: React.FC<
             aria-labelledby={`${manualCardPromptId}-title`}
             aria-describedby={`${manualCardPromptId}-body`}
             data-testid="manual-card-confirmation"
-            className="space-y-3 rounded-2xl border border-amber-400/40 bg-amber-500/10 p-4"
+            className="space-y-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4"
           >
             <p id={`${manualCardPromptId}-title`} className="liquid-glass-modal-text flex items-center gap-2 text-base font-semibold">
               <CreditCard className="h-4 w-4 text-amber-600 dark:text-amber-300" aria-hidden="true" />
@@ -815,7 +815,7 @@ export const SinglePaymentCollectionModal: React.FC<
                 type="button"
                 onClick={confirmManualCard}
                 disabled={isProcessing || platformHeldNotice !== null || unsavedLocked}
-                className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl border border-emerald-500/30 bg-emerald-500/15 px-4 py-3 text-sm font-semibold text-emerald-800 transition active:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60 dark:text-emerald-100"
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-yellow) bg-(--pos-s-yellow) px-4 py-3 text-sm font-semibold text-black transition active:bg-yellow-500 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {isProcessing ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -844,7 +844,7 @@ export const SinglePaymentCollectionModal: React.FC<
             disabled={
               isProcessing || amountToCollect <= 0.009 || platformHeldNotice !== null || unsavedLocked
             }
-            className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl border border-emerald-400/20 bg-emerald-500/15 px-4 py-3 text-sm font-semibold text-emerald-100 transition active:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-sm font-semibold text-emerald-800 dark:text-emerald-200 transition active:bg-(--pos-s-surface-2) disabled:cursor-not-allowed disabled:opacity-60"
           >
             {isProcessing ? (
               <Loader2 className="h-4 w-4 animate-spin" />

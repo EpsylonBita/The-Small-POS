@@ -464,19 +464,20 @@ test('Round 423: OrdersPage loading spinner is yellow, not legacy blue/cyan', ()
   assert.doesNotMatch(source, /text-cyan-500|text-blue-500/);
 });
 
-// Round 181 → 216 → 217b (pickup row icon consistency, founder screenshot): the Orders-list ORDER-TYPE
-// icon must use the shared PickupOrderIcon for pickup/takeaway -- and, like the order-type chooser, as a
-// PLAIN bag silhouette at row scale (w-6 h-6, matching the delivery/table siblings). The earlier green
-// rounded badge/holder (h-7 w-7 bg-green-600 chip wrapping a white bag) is gone: it read as a separate
-// boxed treatment. A semantic green stroke (light text-green-600 / dark text-green-400) keeps the bag
-// readable on the cream and dark rows. Never a Package/Store/storefront glyph or a raw ShoppingBag for
-// the order-type icon. The items-count <Package> + empty-state <ShoppingBag> live elsewhere, so this
-// guard is scoped to the pickupRowIcon definition + getOrderTypeIcon switch body.
-test('OrdersPage pickup/default row order-type icon is the shared plain bag at row scale, no green badge', () => {
+// Round 181 → 216 → 217b → founder 31/10: the Orders-list ORDER-TYPE icons for delivery and
+// pickup/takeaway are the founder's scooter rider and hand-held bag (OrderTypeGlyphs), at 28px, as on the
+// order card. The earlier green rounded badge/holder (bg-green-700 chip wrapping a white bag) stays gone:
+// it read as a separate boxed treatment. A semantic green stroke (light text-green-600 / dark
+// text-green-400) keeps the bag readable on the cream and dark rows. Never a Package/Store/storefront
+// glyph or a raw ShoppingBag for the order-type icon. The items-count <Package> + empty-state
+// <ShoppingBag> live elsewhere, so this guard is scoped to the pickupRowIcon definition +
+// getOrderTypeIcon switch body.
+test('OrdersPage delivery and pickup/default row icons are the founder scooter and bag, no green badge', () => {
   const source = ordersPageSource();
 
-  // Shared chooser icon is imported and rendered in the row via getOrderTypeIcon.
-  assert.match(source, /import PickupOrderIcon from '\.\.\/components\/icons\/PickupOrderIcon';/);
+  // The founder's glyphs are imported and rendered in the row via getOrderTypeIcon.
+  assert.match(source, /import \{ DeliveryScooterIcon, PickupHandBagIcon \} from '\.\.\/components\/icons\/OrderTypeGlyphs';/);
+  assert.doesNotMatch(source, /PickupOrderIcon/);
   assert.match(source, /\{getOrderTypeIcon\(order\.order_type\)\}/);
 
   // Scope to the pickupRowIcon definition + the getOrderTypeIcon switch body so the assertions do not
@@ -487,11 +488,11 @@ test('OrdersPage pickup/default row order-type icon is the shared plain bag at r
   assert.notEqual(end, -1, 'getOrderTypeIcon must close');
   const iconFn = source.slice(start, end);
 
-  // The pickup row icon is the shared PickupOrderIcon rendered as a plain bag at row scale (w-6 h-6,
-  // matching the sibling delivery/table icons) with a theme-aware semantic green stroke and no wrapper.
+  // The pickup row icon is the founder's hand-held bag at 28px with a theme-aware semantic green stroke
+  // and no wrapper.
   assert.match(
     iconFn,
-    /<PickupOrderIcon\s+className=\{`w-6 h-6 \$\{isDark \? 'text-green-400' : 'text-green-600'\}`\}\s+strokeWidth=\{2\}\s*\/>/,
+    /<PickupHandBagIcon className=\{`h-7 w-7 \$\{isDark \? 'text-green-400' : 'text-green-600'\}`\} \/>/,
   );
   // The boxed green badge/holder treatment must be gone: no green chip wrapping the bag, and the bag is
   // never forced white-on-green any more.
@@ -499,31 +500,30 @@ test('OrdersPage pickup/default row order-type icon is the shared plain bag at r
   assert.doesNotMatch(iconFn, /rounded-\[10px\]/);
   assert.doesNotMatch(iconFn, /text-white/);
 
-  // Pickup + the default fall-through reuse that plain bag; delivery/table keep their icons unchanged.
+  // Pickup + the default fall-through reuse that bag; delivery is the scooter; the table is unchanged.
   assert.match(iconFn, /case 'pickup': return pickupRowIcon;/);
   assert.match(iconFn, /default: return pickupRowIcon;/);
-  assert.match(iconFn, /case 'delivery': return <Truck className="w-6 h-6" \/>;/);
+  assert.match(iconFn, /case 'delivery': return <DeliveryScooterIcon className="h-7 w-7" \/>;/);
+  assert.doesNotMatch(iconFn, /<Truck/);
   assert.match(iconFn, /case 'dine-in': return <TableOrderIcon className="w-6 h-6" \/>;/);
 
   // The order-type icon path must NOT use a Package/Store/storefront glyph or a raw ShoppingBag for
-  // pickup/takeaway (the bag always goes through the shared PickupOrderIcon wrapper).
+  // pickup/takeaway.
   assert.doesNotMatch(iconFn, /Package/);
   assert.doesNotMatch(iconFn, /\bStore\b/);
   assert.doesNotMatch(iconFn, /<ShoppingBag/);
 });
 
-// Round 213 → 218 (founder screenshot, supervisor review): the live Dashboard order-ROW pickup icon
-// lives in components/order/OrderCard.tsx (NOT OrdersPage.tsx). Round 213 boxed it in a green badge;
-// the supervisor confirmed on the live Dashboard row that the filled green chip still reads as a
-// separate boxed treatment apart from the unboxed delivery/table siblings. It must now match the
-// standalone OrdersPage row (round 218): the shared PickupOrderIcon rendered as a PLAIN bag at row
-// scale (w-6 h-6) with a theme-aware semantic green stroke and no holder. The shared glyph is preserved
-// (no raw ShoppingBag, no Store/Package/storefront), with delivery + table icons unchanged.
-test('OrderCard pickup row icon is the shared plain bag at row scale, no green badge (matches OrdersPage)', () => {
+// Round 213 → 218 → founder 31/10: the live Dashboard order-ROW type icon lives in
+// components/order/OrderCard.tsx (NOT OrdersPage.tsx). Round 213 boxed the pickup bag in a green badge;
+// the supervisor confirmed on the live Dashboard row that the filled green chip reads as a separate
+// boxed treatment, so it stays plain. Delivery and pickup are now the founder's scooter rider and
+// hand-held bag at 28px, matching the OrdersPage row (no raw ShoppingBag, no Store/Package/storefront);
+// the table icon is unchanged.
+test('OrderCard delivery and pickup row icons are the founder scooter and bag, no green badge (matches OrdersPage)', () => {
   const source = orderCardSource();
 
-  // Shared chooser icons are imported (same bag/table source the chooser modal uses).
-  assert.match(source, /import PickupOrderIcon from '\.\.\/icons\/PickupOrderIcon';/);
+  assert.match(source, /import \{ DeliveryScooterIcon, PickupHandBagIcon \} from '\.\.\/icons\/OrderTypeGlyphs';/);
   assert.match(source, /import TableOrderIcon from '\.\.\/icons\/TableOrderIcon';/);
 
   // Scope to the OrderTypeIcon body so the assertions target the order-type icon, not unrelated UI.
@@ -533,12 +533,11 @@ test('OrderCard pickup row icon is the shared plain bag at row scale, no green b
   assert.notEqual(end, -1, 'OrderTypeIcon must close');
   const iconFn = source.slice(start, end);
 
-  // Pickup/default branch: the shared PickupOrderIcon as a PLAIN bag at row scale (w-6 h-6, matching the
-  // sibling delivery/table icons) with a theme-aware semantic green stroke (light text-green-600 / dark
-  // text-green-400) and stroke weight 2 -- no wrapper.
+  // Pickup/default branch: the founder's bag at 28px with a theme-aware semantic green stroke (light
+  // text-green-600 / dark text-green-400) -- no wrapper.
   assert.match(
     iconFn,
-    /<PickupOrderIcon\s+className=\{`w-6 h-6 \$\{resolvedTheme === 'light' \? 'text-green-600' : 'text-green-400'\}`\}\s+strokeWidth=\{2\}\s*\/>/,
+    /<PickupHandBagIcon\s+className=\{`h-7 w-7 \$\{resolvedTheme === 'light' \? 'text-green-600' : 'text-green-400'\}`\}\s*\/>/,
   );
   // The boxed green badge/holder treatment (round 213) must be gone: no green chip wrapping the bag, and
   // the bag is never forced white-on-green any more.
@@ -546,14 +545,13 @@ test('OrderCard pickup row icon is the shared plain bag at row scale, no green b
   assert.doesNotMatch(iconFn, /rounded-\[10px\]/);
   assert.doesNotMatch(iconFn, /text-white/);
 
-  // Never a Store/Package/storefront glyph, and never a separate direct lucide ShoppingBag render
-  // (pickup must go through the shared PickupOrderIcon wrapper). Scoped to JSX elements so a prose
-  // mention of "lucide ShoppingBag" in a comment does not false-match.
+  // Never a Store/Package/storefront glyph, and never a direct lucide ShoppingBag render. Scoped to JSX
+  // elements so a prose mention of "lucide ShoppingBag" in a comment does not false-match.
   assert.doesNotMatch(iconFn, /<Store|<Package|<Storefront/);
   assert.doesNotMatch(iconFn, /<ShoppingBag/);
 
-  // Delivery + table icons unchanged: orange delivery truck stroke + the table icon's own treatment.
-  assert.match(iconFn, /stroke="#d97706"/);
+  // Delivery is the founder's scooter in the truck's orange; the table icon keeps its own treatment.
+  assert.match(iconFn, /<DeliveryScooterIcon className="h-7 w-7 text-\[#d97706\]" \/>/);
   assert.match(
     iconFn,
     /<TableOrderIcon\s+className=\{`w-6 h-6 \$\{resolvedTheme === 'light' \? 'text-gray-700' : 'text-gray-300'\}`\}\s+strokeWidth=\{1\.6\}\s*\/>/,
@@ -602,8 +600,8 @@ test('OrdersPage localizes room_service order type and gives it a Bed icon, neve
     iconFn.indexOf("collapsed === 'room_service'") < iconFn.indexOf('default: return pickupRowIcon;'),
     'room_service icon branch must resolve before the pickup default',
   );
-  // Delivery / pickup / dine-in icons are unchanged (round 218 preserved).
-  assert.match(iconFn, /case 'delivery': return <Truck className="w-6 h-6" \/>;/);
+  // Delivery / pickup / dine-in keep their own icons (the founder's scooter and bag since 31/10).
+  assert.match(iconFn, /case 'delivery': return <DeliveryScooterIcon className="h-7 w-7" \/>;/);
   assert.match(iconFn, /case 'pickup': return pickupRowIcon;/);
   assert.match(iconFn, /case 'dine-in': return <TableOrderIcon className="w-6 h-6" \/>;/);
 
@@ -1111,11 +1109,11 @@ test('table floor labels keep localized case (no forced uppercase); stats/status
   const workspaceSource = tableWorkspaceSource();
   const workspaceCss = tableWorkspaceStyles();
   assert.match(dashboardSource, /floorLabel=\{getTableFloorLabel\}/);
-  assert.match(dashboardSource, /floor=\{getTableFloorLabel\(getTableFloorValue\(table\)\)\}/);
-  assert.match(workspaceSource, /\{\['all', \.\.\.floors\]\.map\(floor =>/);
-  assert.match(workspaceSource, /onClick=\{\(\) => onFloorFilter\(floor\)\}>\{floorLabel\(floor\)\}/);
-  assert.match(workspaceSource, /className="table-workspace-floor">\{floor\}<\/span>/);
-  for (const selector of ['.table-workspace', '.table-workspace button', '.table-workspace-floors', '.table-workspace-floors button', '.table-workspace-floor']) {
+  // Founder 31/10: floors are groups («Όροφος 1 · 18») and the app's dropdown, not a line on every tile.
+  assert.match(dashboardSource, /<WorkspaceGroup key=\{floorValue\} heading=\{getTableFloorLabel\(floorValue\)\} count=\{floorTables\.length\}>/);
+  assert.match(workspaceSource, /options=\{\['all', \.\.\.floors\]\.map\(\(floor\) => \(\{ value: floor, label: floorLabel\(floor\) \}\)\)\}/);
+  assert.doesNotMatch(workspaceSource, /table-workspace-floor"/);
+  for (const selector of ['.table-workspace', '.table-workspace button', '.table-workspace-group h3', ".table-workspace-select [role='listbox']"]) {
     assert.doesNotMatch(cssDeclarations(workspaceCss, selector), /text-transform:\s*uppercase/, `${selector} must preserve localized case`);
   }
   assert.doesNotMatch(workspaceSource, /floorLabel\(floor\)\.toUpperCase\(\)|\{floor\.toUpperCase\(\)\}/);
@@ -1365,7 +1363,7 @@ test('TableActionModal treats maintenance tables as out of service', () => {
   );
   assert.match(
     source,
-    /action\(t\('tableActionModal\.newReservation'[\s\S]*?handleNewReservation,[\s\S]*?\}\), isMaintenanceTable \|\| isUnavailableTable\)/,
+    /action\(t\('tableActionModal\.newReservation'[\s\S]*?handleNewReservation,[\s\S]*?(?:\}\)|: undefined), isMaintenanceTable \|\| isUnavailableTable\)/,
     'maintenance tables should not allow reservation creation',
   );
   assert.match(source, /disabled=\{disabled\} aria-disabled=\{disabled\}/);
@@ -1705,8 +1703,9 @@ test('OrderDashboard list-mode table cards keep compact opaque tiles and conditi
   const card = tableWorkspaceCardSource();
   const css = tableWorkspaceStyles();
   const tile = cssDeclarations(css, '.table-workspace button.table-workspace-card');
-  assert.match(tile, /min-height:\s*180px/);
-  assert.match(tile, /padding:\s*14px/);
+  // Founder 31/10: compact tiles (glyph, number, seats, status) so the whole room fits on one screen.
+  assert.match(tile, /min-height:\s*88px/);
+  assert.match(tile, /padding:\s*12px 14px/);
   assert.match(tile, /background:\s*var\(--table-surface\)/);
   assert.doesNotMatch(tile, /backdrop-filter:|rgba\(|min-height:\s*230px/);
   assert.match(cssDeclarations(css, '.table-workspace'), /--table-surface:\s*#ffffff/);
@@ -1718,8 +1717,8 @@ test('OrderDashboard list-mode table cards keep compact opaque tiles and conditi
   assert.match(card, /\{orderNumber && <span><ReceiptText[^>]*\/>\{orderNumber\}/);
   assert.doesNotMatch(card, /<ReceiptText[^>]*\/>\{orderId\}/);
   assert.match(card, /role="progressbar" aria-label=\{t\('tablesDashboard\.paid', 'Paid'\)\} aria-valuenow=\{paidPercent\}/);
-  assert.match(cssDeclarations(css, '.table-workspace-grid'), /grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\)/);
-  assert.match(cssDeclarations(css, '.table-workspace-grid'), /align-items:\s*start/);
+  assert.match(cssDeclarations(css, '.table-workspace-grid'), /grid-template-columns:\s*repeat\(auto-fill, minmax\(178px, 1fr\)\)/);
+  assert.match(cssDeclarations(css, '.table-workspace-grid'), /align-items:\s*stretch/);
 });
 
 test('stale reserved-table actions self-heal instead of dead-ending on reservationNotFound', () => {
@@ -1806,19 +1805,15 @@ test('reservationReleased recovery toast is localized in every POS locale', () =
 test('OrderTabsBar inactive labels/counters are neutral grey; only the active tab uses neon', () => {
   const source = orderTabsBarSource();
 
-  // Inactive tab text is neutral grey: zinc-400 in dark, gray-600 in light (no neon when inactive).
+  // Founder 31/10: the selected tab is the kit selection (yellow, dark words); inactive stays grey
+  // (zinc-400 in dark, gray-600 in light). The per-tab neon identity is gone.
   assert.match(
     source,
-    /const tabTextClass = \(color: string, isActive: boolean, isDark: boolean, withGlow: boolean\): string => \{\s*if \(!isActive\) \{[\s\S]*?return isDark \? 'text-zinc-400' : 'text-gray-600';/,
+    /const tabTextClass = \(isActive: boolean, isDark: boolean\): string => \{\s*if \(isActive\) return 'text-\(--pos-s-sel-fg\)';\s*return isDark \? 'text-zinc-400' : 'text-gray-600';/,
   );
-  // Inactive dark must NOT be white/white-70 (the over-bright value being corrected).
   assert.doesNotMatch(source, /return isDark \? 'text-white\/70'/);
-  // The active neon palette (green/orange/blue/red only) + glow, applied after the !isActive return.
-  assert.match(source, /green: 'text-green-500'/);
-  assert.match(source, /orange: 'text-\[#f97316\]'/);
-  assert.match(source, /blue: 'text-\[#3b82f6\]'/);
-  assert.match(source, /red: 'text-red-500'/);
-  assert.match(source, /const base = TAB_ACTIVE_TEXT\[color\] \?\? TAB_ACTIVE_TEXT\.red;/);
+  assert.match(source, /className="absolute inset-0 rounded-lg bg-\(--pos-s-sel-bg\)"/);
+  assert.doesNotMatch(source, /TAB_ACTIVE_TEXT|text-green-400|text-\[#3b82f6\]/);
 });
 
 // Round 201 (dashboard shell selected-state semantics, live QA): the order-status tab strip exposed
@@ -1843,9 +1838,9 @@ test('OrderTabsBar exposes tablist/tab selection semantics tied to activeTab', (
   assert.doesNotMatch(source, /\btitle=\{/);
   assert.doesNotMatch(source, /hover:/);
 
-  // Touch feedback + neon active palette preserved (no visual regression).
+  // Touch feedback preserved; the selected tab is the kit's yellow (founder 31/10).
   assert.match(source, /active:scale-95/);
-  assert.match(source, /const base = TAB_ACTIVE_TEXT\[color\] \?\? TAB_ACTIVE_TEXT\.red;/);
+  assert.match(source, /bg-\(--pos-s-sel-bg\)/);
 });
 
 // Round 201 correction (live QA): the Windows UIA tree did not expose aria-selected as a state, so the
@@ -1885,16 +1880,19 @@ test('OrderTabsBar bakes the selected state into each tab accessible name (deriv
 
 // Restoration guard (round 186): the order-type chooser modal must render the supplied Flaticon
 // TableOrderIcon (not Utensils/fork/cake) for the table card, at the same large w-full h-full
-// footprint as the pickup card's PickupOrderIcon.
+// footprint as the pickup card. Founder 31/10 («και εδώ»): delivery and pickup are his scooter rider and
+// hand-held bag, as on the order cards.
 test('OrderDashboard order-type modal table card uses TableOrderIcon at the pickup footprint, no Utensils', () => {
   const source = orderDashboardSource();
 
-  // Both order-type cards use the shared icons at full footprint; the dine-in card scales the supplied
-  // table PNG to the pickup bag's optical weight via opticalScale, in the SAME w-full h-full box.
-  assert.match(source, /<PickupOrderIcon className="w-full h-full text-white" \/>/);
-  assert.match(source, /<TableOrderIcon\s+className="w-full h-full text-white"\s+strokeWidth=\{1\.6\}\s+opticalScale=\{1\.62\}/);
+  // The order-type cards use the shared icons at full footprint; the dine-in card scales the supplied
+  // table PNG via opticalScale, in the SAME w-full h-full box.
+  assert.match(source, /<PickupHandBagIcon className="w-full h-full text-emerald-800 dark:text-emerald-400" \/>/);
+  assert.match(source, /<DeliveryScooterIcon className="w-full h-full text-yellow-800 dark:text-yellow-400" \/>/);
+  assert.match(source, /<TableOrderIcon\s+className="w-full h-full text-\[#1d4ed8\] dark:text-\[#60a5fa\]"\s+strokeWidth=\{1\.6\}\s+opticalScale=\{1\.62\}/);
   assert.match(source, /import TableOrderIcon from ['"]\.\/icons\/TableOrderIcon['"]/);
-  assert.match(source, /import PickupOrderIcon from ['"]\.\/icons\/PickupOrderIcon['"]/);
+  assert.match(source, /import \{ DeliveryScooterIcon, PickupHandBagIcon \} from ['"]\.\/icons\/OrderTypeGlyphs['"]/);
+  assert.doesNotMatch(source, /PickupOrderIcon/);
 
   // Scope to the chooser card region (pickup button -> table button close) and assert no
   // Utensils/fork/cake glyph is used there. UtensilsCrossed exists elsewhere in OrderDashboard, so
@@ -1912,18 +1910,20 @@ test('OrderDashboard order-type modal table card uses TableOrderIcon at the pick
 // Round 306 (restoration hardening): OrderFlow is the SECOND path into order taking, with a parallel
 // order-type chooser that duplicates OrderDashboard's pickup/table cards. It was previously unguarded, so
 // a refactor could reintroduce an off-theme glyph on this path alone. It must render the SAME restored
-// icons -- the Flaticon TableOrderIcon (chair/table, not Utensils/fork/cake/store/package) for dine-in and
-// the shared PickupOrderIcon bag for pickup -- at the SAME w-16 h-16 footprint, so the bag and the
-// table/chair match size.
-test('Round 306: OrderFlow order-type chooser uses TableOrderIcon + PickupOrderIcon at a matching footprint, no off-theme glyphs', () => {
+// icons -- the Flaticon TableOrderIcon (chair/table, not Utensils/fork/cake/store/package) for dine-in and,
+// since founder 31/10, his scooter rider and hand-held bag for delivery and pickup -- at the SAME
+// w-16 h-16 footprint, so the bag and the table/chair match size.
+test('Round 306: OrderFlow order-type chooser uses TableOrderIcon + the founder glyphs at a matching footprint, no off-theme glyphs', () => {
   const source = orderFlowSource();
 
   // Shared icons imported and rendered (no raw lucide order-type glyph for dine-in/pickup).
   assert.match(source, /import TableOrderIcon from ['"]\.\/icons\/TableOrderIcon['"]/);
-  assert.match(source, /import PickupOrderIcon from ['"]\.\/icons\/PickupOrderIcon['"]/);
-  assert.match(source, /<PickupOrderIcon className="w-full h-full text-white" \/>/);
+  assert.match(source, /import \{ DeliveryScooterIcon, PickupHandBagIcon \} from ['"]\.\/icons\/OrderTypeGlyphs['"]/);
+  assert.doesNotMatch(source, /PickupOrderIcon/);
+  assert.match(source, /<PickupHandBagIcon className="w-full h-full text-emerald-800 dark:text-emerald-400" \/>/);
+  assert.match(source, /<DeliveryScooterIcon className="w-full h-full text-yellow-800 dark:text-yellow-400" \/>/);
   // Round 345/361: dine-in card scales the table glyph to the pickup bag's optical weight via opticalScale.
-  assert.match(source, /<TableOrderIcon\s+className="w-full h-full text-white"\s+strokeWidth=\{1\.6\}\s+opticalScale=\{1\.62\}/);
+  assert.match(source, /<TableOrderIcon\s+className="w-full h-full text-\[#1d4ed8\] dark:text-\[#60a5fa\]"\s+strokeWidth=\{1\.6\}\s+opticalScale=\{1\.62\}/);
 
   // Scope to the chooser region (pickup card -> dine-in card close). UtensilsCrossed exists elsewhere in
   // OrderFlow, so the slice keeps this guard precise.
@@ -1984,7 +1984,7 @@ test('Round 346: OrderFlow order-type chooser matches the OrderDashboard respons
   assert.match(modalRegion, /aria-label=\{composeOrderTypeAriaLabel\(tableTitle, tableDescription\)\}/);
 
   // Descriptions breathe (text-sm leading-snug); no narrow text-xs description remains in the chooser.
-  const descriptions = modalRegion.match(/text-sm leading-snug text-white\/60/g) ?? [];
+  const descriptions = modalRegion.match(/text-sm leading-snug text-\(--pos-s-muted\)/g) ?? [];
   assert.ok(descriptions.length >= 3, `all three card descriptions must be text-sm leading-snug (found ${descriptions.length})`);
   assert.doesNotMatch(modalRegion, /text-xs text-white\/60/);
 
@@ -2046,18 +2046,12 @@ test('New Order chooser keeps its wrapper invisible and uses light-theme card su
   assert.match(block, /\.order-type-transparent-modal \.liquid-glass-modal-title \{\s*display: none;/);
   assert.match(block, /\.order-type-transparent-modal \.liquid-glass-modal-close \{\s*display: none !important;/);
   assert.match(block, /\.order-type-transparent-modal \[data-order-type-card\]/);
-  assert.match(block, /\[data-order-type-card\] \{[\s\S]*?backdrop-filter: blur\(22px\) saturate\(150%\)/);
-  assert.match(block, /\[data-order-type-card="delivery"\][\s\S]*?rgba\(254, 249, 195, 0\.68\)/);
-  assert.match(block, /\[data-order-type-card="pickup"\][\s\S]*?rgba\(209, 250, 229, 0\.68\)/);
-  assert.match(block, /\[data-order-type-card="table"\][\s\S]*?rgba\(219, 234, 254, 0\.68\)/);
-  assert.match(block, /\[data-order-type-card="room"\][\s\S]*?rgba\(243, 232, 255, 0\.68\)/);
-  assert.match(block, /\[data-order-type-card="service"\][\s\S]*?rgba\(207, 250, 254, 0\.68\)/);
-  assert.match(block, /\[data-order-type-card\] p \{[\s\S]*?color: #475569 !important;/);
-  assert.match(block, /\.dark \.order-type-transparent-modal \[data-order-type-card="delivery"\][\s\S]*?rgba\(250, 204, 21, 0\.16\)/);
-  assert.match(block, /\.dark \.order-type-transparent-modal \[data-order-type-card="pickup"\][\s\S]*?rgba\(52, 211, 153, 0\.16\)/);
-  assert.match(block, /\.dark \.order-type-transparent-modal \[data-order-type-card="table"\][\s\S]*?rgba\(96, 165, 250, 0\.16\)/);
-  assert.match(block, /\.dark \.order-type-transparent-modal \[data-order-type-card\] svg,[\s\S]*?color: #fff !important;/);
-  assert.match(block, /\.dark \.order-type-transparent-modal \[data-order-type-card\] p \{[\s\S]*?color: rgba\(255, 255, 255, 0\.6\) !important;/);
+  // Founder 31/10 («δεν είναι γυαλί»): the cards are glass — a neutral frost (white / zinc only) with a light
+  // rim and a blur; still no per-type tinted gradients, coloured alpha borders or !important colour overrides.
+  assert.match(block, /\.order-type-transparent-modal \[data-order-type-card\] \{[^}]*justify-content: flex-start;\s*border-color: rgba\(255, 255, 255, 0\.8\);\s*background: rgba\(255, 255, 255, 0\.55\);\s*backdrop-filter: blur\(24px\) saturate\(1\.2\);/);
+  assert.match(block, /\.dark \.order-type-transparent-modal \[data-order-type-card\] \{\s*border-color: rgba\(255, 255, 255, 0\.14\);\s*background: rgba\(24, 24, 27, 0\.55\);/);
+  assert.doesNotMatch(block, /\[data-order-type-card="(?:delivery|pickup|table|room|service)"\]/);
+  assert.doesNotMatch(block, /\[data-order-type-card\][^{]*\{[^}]*!important/);
   assert.doesNotMatch(block, /hover:/);
 });
 
@@ -2139,18 +2133,19 @@ test('OrderDashboard order-type chooser adapts its width/grid for up to five car
   // Width + grid are now driven by the visible card count (pickup always present; delivery/table/
   // room/service optional), so the modal stays roomy for 4-5 cards instead of a fixed 3-up.
   assert.match(source, /const visibleOrderTypeCardCount =/);
-  assert.match(source, /visibleOrderTypeCardCount >= 5\s*\?\s*"max-w-5xl!"/);
+  assert.match(source, /visibleOrderTypeCardCount >= 5\s*\?\s*"max-w-6xl!"/);
   assert.match(source, /const orderTypeGridColsClass =/);
   assert.match(source, /className=\{`\$\{orderTypeModalWidthClass\} order-type-transparent-modal`\}/);
   assert.match(source, /contentClassName="p-0! overflow-visible!"/);
-  assert.match(source, /grid gap-4 sm:gap-5 \$\{orderTypeGridColsClass\}/);
+  assert.match(source, /\$\{visibleOrderTypeCardCount >= 5 \? "" : "grid "\}gap-4 sm:gap-5 \$\{orderTypeGridColsClass\}/);
   // The old delivery+table-only fixed width/grid expressions are gone.
   assert.doesNotMatch(source, /hasDeliveryModule && hasTablesModule \? "max-w-3xl!" : "max-w-lg!"/);
 
   // Round 322: the chooser grid is intentionally composed for 4 and 5 cards (no 3+1 / no orphaned
   // bottom-left row leaving an empty bottom-right hole).
   // FIVE cards: a 6-col lg track (each card spans 2) so it reads as a centered 3+2.
-  assert.match(source, /visibleOrderTypeCardCount >= 5\s*\?\s*"grid-cols-1 sm:grid-cols-2 lg:grid-cols-6"/);
+  // Founder 31/10: five cards stand in one row; more wrap in centred rows of five.
+  assert.match(source, /visibleOrderTypeCardCount >= 5\s*\?\s*"flex flex-wrap justify-center"/);
   // FOUR cards: a clean 4-up lg row, never 3+1.
   assert.match(source, /visibleOrderTypeCardCount === 4\s*\?\s*"grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"/);
   // 1/2/3 cards keep the existing compact behavior.
@@ -2158,16 +2153,13 @@ test('OrderDashboard order-type chooser adapts its width/grid for up to five car
   // The old unconditional >=4 three-column track is gone (it caused the 3+2 hole at five cards).
   assert.doesNotMatch(source, /visibleOrderTypeCardCount >= 4\s*\?\s*"grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"/);
 
-  // Each card spans two of the six columns on lg. With exactly five cards the 5th opens the centered
-  // bottom row at column 2; with seven (v1.4.94: repair + quick service joined the picker) the 7th is
-  // centred at column 3 -- computed by visible index, so it is correct for any module combination
-  // (no card-name hardcoding). Every visible card threads its span class through the helper.
-  assert.match(source, /const orderTypeCardSpanClass = \(visibleIndex: number\): string =>/);
-  assert.match(
-    source,
-    /visibleIndex === 4 && visibleOrderTypeCardCount === 5\s*\?\s*"lg:col-span-2 lg:col-start-2"/,
-  );
-  assert.match(source, /visibleIndex === 6\s*\?\s*"lg:col-span-2 lg:col-start-3"\s*:\s*"lg:col-span-2"/);
+  // Founder 31/10: from five cards up every card takes a fifth of the row on lg (minus its share of the
+  // gaps) and half on sm, so five stand in one row and six / seven wrap into a centred second row (the old
+  // col-start-2 on the 5th card collided with the 4th, so five read 3+1+1). Every visible card threads its
+  // width through the helper.
+  assert.match(source, /const orderTypeCardSpanClass = \(_visibleIndex: number\): string =>/);
+  assert.match(source, /"w-full sm:w-\[calc\(50%-0\.625rem\)\] lg:w-\[calc\(20%-1rem\)\]"/);
+  assert.doesNotMatch(source, /lg:col-start-2|lg:grid-cols-6/);
   assert.match(source, /orderTypeCardSpanClass\(deliveryCardVisibleIndex\)/);
   assert.match(source, /orderTypeCardSpanClass\(pickupCardVisibleIndex\)/);
   assert.match(source, /orderTypeCardSpanClass\(tableCardVisibleIndex\)/);
@@ -2186,24 +2178,26 @@ test('OrderDashboard order-type chooser adapts its width/grid for up to five car
 
   // Descriptions are more readable (text-sm leading-snug), not the cramped text-xs.
   assert.ok(
-    (source.match(/<p className="text-sm leading-snug text-white\/60 transition-colors">/g) || []).length >= 3,
+    (source.match(/<p className="text-sm leading-snug text-\(--pos-s-muted\)">/g) || []).length >= 3,
     'all three order-type cards should use the readable text-sm leading-snug description',
   );
 
-  // Card icons keep their full footprint. The delivery glyph itself is neutral white; accent belongs
-  // to the card/title, matching pickup/table/room/service.
-  assert.match(source, /<PickupOrderIcon className="w-full h-full text-white" \/>/);
-  assert.match(source, /<TableOrderIcon\s+className="w-full h-full text-white"/);
-  assert.match(source, /<svg\s+className="w-full h-full text-white"/);
-  assert.doesNotMatch(source, /<svg\s+className="w-full h-full text-yellow-400/);
-  assert.match(source, /border-\[#facc15\]\/45 bg-\[linear-gradient\(135deg,rgba\(250,204,21,0\.16\),rgba\(234,179,8,0\.06\)\)\]/);
-  assert.match(source, /border-\[#34d399\]\/45 bg-\[linear-gradient\(135deg,rgba\(52,211,153,0\.16\),rgba\(22,163,74,0\.06\)\)\]/);
-  assert.match(source, /border-\[#60a5fa\]\/45 bg-\[linear-gradient\(135deg,rgba\(96,165,250,0\.16\),rgba\(37,99,235,0\.06\)\)\]/);
-  assert.match(source, /border-\[#a855f7\]\/45 bg-\[linear-gradient\(135deg,rgba\(168,85,247,0\.16\),rgba\(126,34,206,0\.06\)\)\]/);
-  assert.match(source, /border-\[#22d3ee\]\/45 bg-\[linear-gradient\(135deg,rgba\(34,211,238,0\.16\),rgba\(8,145,178,0\.06\)\)\]/);
-  assert.match(source, /text-yellow-400 transition-colors mb-1/);
-  assert.match(source, /text-green-400 transition-colors mb-1/);
-  assert.match(source, /text-\[#60a5fa\] transition-colors mb-1/);
+  // Wave ΣΤ2: solid kit cards. Card icons keep their full footprint; the order type keeps its
+  // identity as the icon + title colour (AA shade per theme; blue / purple / cyan / violet are arbitrary
+  // hex because the POS palette maps those families to zinc), never a tinted wash.
+  assert.match(source, /<PickupHandBagIcon className="w-full h-full text-emerald-800 dark:text-emerald-400" \/>/);
+  assert.match(source, /<TableOrderIcon\s+className="w-full h-full text-\[#1d4ed8\] dark:text-\[#60a5fa\]"/);
+  assert.match(source, /<DeliveryScooterIcon className="w-full h-full text-yellow-800 dark:text-yellow-400" \/>/);
+  assert.equal(
+    (source.match(/rounded-2xl border-2 border-\(--pos-s-border\) bg-\(--pos-s-surface\) transition-transform duration-150 active:scale-95/g) || []).length,
+    7,
+    'all seven order-type cards are solid kit cards',
+  );
+  assert.doesNotMatch(source, /border-\[#[0-9a-f]{6}\]\/45/);
+  assert.doesNotMatch(source, /bg-\[linear-gradient\(135deg,rgba/);
+  assert.match(source, /text-lg font-bold text-yellow-800 dark:text-yellow-400 mb-1/);
+  assert.match(source, /text-lg font-bold text-emerald-800 dark:text-emerald-400 mb-1/);
+  assert.match(source, /text-lg font-bold text-\[#1d4ed8\] dark:text-\[#60a5fa\] mb-1/);
 
   // Accessibility labels still come from composeOrderTypeAriaLabel for every card.
   assert.ok(
@@ -2225,12 +2219,12 @@ test('OrderDashboard adds conditional Room + Service order-type cards wired to t
   // opens the services hub. Both are module-gated and keep centered icon/text.
   assert.match(source, /\{hasRoomsModule && \(/);
   assert.match(source, /onClick=\{handleSelectRoomFlow\}/);
-  assert.match(source, /<BedDouble className="w-full h-full text-white" strokeWidth=\{1\.5\} \/>/);
-  assert.match(source, /text-\[#a855f7\] transition-colors mb-1/);
+  assert.match(source, /<BedDouble className="w-full h-full text-\[#7e22ce\] dark:text-\[#c084fc\]" strokeWidth=\{1\.5\} \/>/);
+  assert.match(source, /text-lg font-bold text-\[#7e22ce\] dark:text-\[#c084fc\] mb-1/);
   assert.match(source, /\{hasServicesModule && \(/);
   assert.match(source, /onClick=\{handleSelectServiceFlow\}/);
-  assert.match(source, /<CalendarClock className="w-full h-full text-white" strokeWidth=\{1\.5\} \/>/);
-  assert.match(source, /text-\[#22d3ee\] transition-colors mb-1/);
+  assert.match(source, /<CalendarClock className="w-full h-full text-\[#155e75\] dark:text-\[#22d3ee\]" strokeWidth=\{1\.5\} \/>/);
+  assert.match(source, /text-lg font-bold text-\[#155e75\] dark:text-\[#22d3ee\] mb-1/);
 
   // Both new cards build their accessible name via the shared helper.
   assert.match(source, /composeOrderTypeAriaLabel\(roomTitle, roomDescription\)/);
@@ -2533,7 +2527,7 @@ test('Round 238: room workflow buttons follow the cancel=red / confirm=green rul
   // feedback (active:scale + darker red) and a disabled state.
   const redCancel =
     moduleSource.match(
-      /border border-red-400\/40 bg-red-500\/15 py-3 font-medium text-red-300 transition-transform duration-150 active:scale-95 active:bg-red-500\/25 disabled:opacity-50/g,
+      /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) py-3 font-medium text-\(--pos-s-fg\) transition-transform duration-150 active:scale-95 active:bg-\(--pos-s-surface-2\) disabled:opacity-50/g,
     ) || [];
   assert.ok(redCancel.length >= 2, `both Cancel buttons must use the red glass treatment (found ${redCancel.length})`);
   assert.match(moduleSource, /onClick=\{onClose\}/);
@@ -2544,7 +2538,7 @@ test('Round 238: room workflow buttons follow the cancel=red / confirm=green rul
   // (Round 255 swapped the disabled state from a dimmed-green disabled:opacity-50 to neutral glass.)
   const greenConfirm =
     moduleSource.match(
-      /border border-emerald-500 bg-emerald-600 py-3 font-medium text-white transition-transform duration-150 active:scale-95 disabled:bg-zinc-400\/20 disabled:text-zinc-400 disabled:border-zinc-400\/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100/g,
+      /border border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\) py-3 font-medium text-black transition-transform duration-150 active:scale-95 disabled:bg-zinc-400\/20 disabled:text-zinc-400 disabled:border-zinc-400\/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100/g,
     ) || [];
   assert.ok(greenConfirm.length >= 2, `both submit buttons must be enabled-emerald with neutral disabled glass (found ${greenConfirm.length})`);
   assert.match(moduleSource, /onClick=\{handleCheckin\}/);
@@ -2590,14 +2584,14 @@ test('Round 255: room confirm buttons stay enabled-emerald but are neutral/muted
   // Both Complete Check-in and Create Reservation: enabled emerald (with border), disabled neutral glass.
   const neutralDisabled =
     moduleSource.match(
-      /border border-emerald-500 bg-emerald-600[^"]*disabled:bg-zinc-400\/20 disabled:text-zinc-400 disabled:border-zinc-400\/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100/g,
+      /border border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\)[^"]*disabled:bg-zinc-400\/20 disabled:text-zinc-400 disabled:border-zinc-400\/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100/g,
     ) || [];
   assert.ok(neutralDisabled.length >= 2, `both room confirm buttons must be neutral when disabled (found ${neutralDisabled.length})`);
   // No emerald confirm carries the old dimmed-green opacity; Cancel stays red (its opacity is untouched).
   assert.doesNotMatch(moduleSource, /bg-emerald-600[^"]*disabled:opacity-50/);
   assert.match(
     moduleSource,
-    /border border-red-400\/40 bg-red-500\/15[^"]*disabled:opacity-50/,
+    /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\)[^"]*disabled:opacity-50/,
   );
 });
 
@@ -2691,9 +2685,11 @@ test('Round 239: OrderTypeSelector gates dine-in by Tables, pickup always, deliv
     source,
     /availableOrderTypes\.length === 3[\s\S]*?'grid-cols-3'[\s\S]*?availableOrderTypes\.length === 2[\s\S]*?'grid-cols-2'[\s\S]*?'grid-cols-1'/,
   );
-  // The supplied table/pickup icons are unchanged (no fallback to emoji/cake glyphs).
+  // The supplied table icon is unchanged (no fallback to emoji/cake glyphs); pickup and delivery are the
+  // founder's bag and scooter (31/10).
   assert.match(source, /<TableOrderIcon className="w-6 h-6" \/>/);
-  assert.match(source, /<PickupOrderIcon className="w-6 h-6" \/>/);
+  assert.match(source, /<PickupHandBagIcon className="h-7 w-7" \/>/);
+  assert.match(source, /<DeliveryScooterIcon className="h-7 w-7" \/>/);
 });
 
 test('Caller ID handoff can continue as pickup without registering a customer', () => {
@@ -2734,10 +2730,10 @@ test('Round 264: legacy OrderTypeSelector uses POS yellow selection (no blue), m
 
   // No blue selected fill or blue focus ring anywhere on the component.
   assert.doesNotMatch(source, /blue/);
-  // Selected = yellow/amber with black text (light) + warm yellow glass (dark); yellow focus ring.
-  assert.match(source, /border-yellow-400 bg-yellow-400 text-black/);
-  assert.match(source, /border-yellow-400\/50 bg-yellow-400\/15 text-yellow-200/);
-  assert.match(source, /focus:ring-yellow-400\/40/);
+  // Wave ΣΤ8b: selected = the kit selection in both themes; fg focus ring.
+  assert.match(source, /"border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)"/);
+  assert.doesNotMatch(source, /border-yellow-400 bg-yellow-400 text-black/);
+  assert.match(source, /focus:ring-\(--pos-s-fg\)/);
   // Modern touch-first cards: rounded-2xl, centered, min touch size, active press only (no hover).
   assert.match(source, /rounded-2xl/);
   assert.match(source, /flex flex-col items-center justify-center min-h-\[88px\]/);
@@ -2750,10 +2746,10 @@ test('Round 264: legacy OrderTypeSelector uses POS yellow selection (no blue), m
   assert.match(source, /types\.push\("pickup"\);/);
   assert.match(source, /if \(hasDeliveryModule\) \{\s*types\.push\("delivery"\);\s*\}/);
 
-  // Supplied icons preserved (TableOrderIcon / PickupOrderIcon / Truck); no Utensils/Cake/Store/Package.
+  // Supplied table icon preserved, the founder's bag and scooter (31/10); no Utensils/Cake/Store/Package.
   assert.match(source, /<TableOrderIcon className="w-6 h-6" \/>/);
-  assert.match(source, /<PickupOrderIcon className="w-6 h-6" \/>/);
-  assert.match(source, /<Truck className="w-6 h-6" \/>/);
+  assert.match(source, /<PickupHandBagIcon className="h-7 w-7" \/>/);
+  assert.match(source, /<DeliveryScooterIcon className="h-7 w-7" \/>/);
   assert.doesNotMatch(source, /Utensils|Cake|Store|Package/);
 });
 
@@ -2888,7 +2884,7 @@ const bulkActionsBarSource = () =>
 test('Round 246: bulk-action bar has no off-theme blue/slate, no hover/title, and 44px touch targets', () => {
   const source = bulkActionsBarSource();
 
-  // No legacy blue/slate families. Sky is reserved exclusively for RESET.
+  // No legacy blue/slate families (Wave ΣΤ2: RESET is the kit yellow primary, no sky).
   assert.doesNotMatch(source, /(?:bg|text|border|ring|shadow|from|to|via)-(?:slate|blue|indigo|cyan|violet|purple)-\d/);
 
   // Touch POS: press feedback only, no hover-only utilities, no native title tooltips.
@@ -2900,29 +2896,25 @@ test('Round 246: bulk-action bar has no off-theme blue/slate, no hover/title, an
   assert.match(source, /flex items-center justify-center/);
 });
 
-test('Round 246: bulk-action variants encode meaning — green success, red danger, amber Edit, neutral utilities', () => {
+test('Wave ΣΤ2: bulk-action variants are solid kit buttons — one yellow primary, neutral secondaries, red-text Cancel', () => {
   const source = bulkActionsBarSource();
 
-  // Success (Delivered) stays green; danger (Cancel) stays red.
-  assert.match(source, /case 'success':[\s\S]*?bg-emerald-600[\s\S]*?bg-emerald-500\/90/);
-  assert.match(source, /case 'danger':[\s\S]*?bg-red-500[\s\S]*?bg-red-500\/90/);
+  // Delivered / Restore / Reset are the yellow primary; Cancel is the red-text danger button.
+  assert.match(source, /case 'success':\s*case 'reset':\s*return `\$\{baseStyles\} pos-solid-btn--primary`;/);
+  assert.match(source, /case 'danger':\s*return `\$\{baseStyles\} pos-solid-btn--danger`;/);
+  assert.match(source, /const baseStyles =\s*'pos-solid-btn pos-solid-btn--sm /);
 
-  // Warning = amber utility — used by Edit.
-  assert.match(source, /case 'warning':[\s\S]*?bg-amber-500[\s\S]*?bg-amber-500\/90/);
-  // Both Edit buttons (delivery + pickup selection) use the amber warning variant, not info/slate.
+  // Both Edit buttons (delivery + pickup selection) keep the warning variant, which is a neutral secondary.
   const editButtons = source.match(/getButtonStyles\('warning'\)\} onClick=\{\(e\) => \{ e\.preventDefault\(\); onBulkAction\('edit'\); \}\}/g) || [];
-  assert.ok(editButtons.length >= 2, `both Edit buttons must use the amber warning variant (found ${editButtons.length})`);
-
-  // Non-semantic utility actions (Assign/Return/Map/View/Clear) collapse to one neutral glass (zinc),
-  // never an off-theme fill.
+  assert.ok(editButtons.length >= 2, `both Edit buttons must use the warning variant (found ${editButtons.length})`);
   assert.match(
     source,
-    /const neutralGlass =[\s\S]*?bg-white\/80 text-zinc-700 border-zinc-300[\s\S]*?bg-zinc-800\/80 text-zinc-100 border-zinc-600\/50/,
+    /case 'warning':\s*case 'primary':\s*case 'secondary':\s*case 'info':\s*case 'map':\s*case 'neutral':\s*return baseStyles;/,
   );
-  assert.match(
-    source,
-    /case 'primary':\s*case 'secondary':\s*case 'info':\s*case 'map':\s*case 'neutral':\s*return `\$\{baseStyles\} \$\{neutralGlass\}`;/,
-  );
+  // One yellow per selection: Ready is primary only when Delivered is not offered.
+  assert.match(source, /getButtonStyles\(deliverySelectionCanBeCompleted \? 'neutral' : 'success'\)\} onClick=\{\(e\) => \{ e\.preventDefault\(\); onBulkAction\('platform_ready'\)/);
+  // No translucent, blurred or tinted chrome anywhere in the bar.
+  assert.doesNotMatch(source, /backdrop-blur|shadow-[a-z]+-\d{3}\/|bg-[a-z]+-\d{3}\/\d/);
   // View and Clear render through the neutral variant (View compact); Assign/Map through neutral too.
   assert.match(source, /getButtonStyles\('neutral', true\)\} onClick=\{\(e\) => \{ e\.preventDefault\(\); onBulkAction\('view'\); \}\}/);
   assert.match(source, /onClearSelection\(\);[\s\S]*?className=\{getButtonStyles\('neutral'\)\}/);
@@ -2933,9 +2925,8 @@ test('Round 246: bulk-action variants encode meaning — green success, red dang
 test('Round 246: selection-count chip is on-theme (neutral + amber ring), and labels/handlers are preserved', () => {
   const source = bulkActionsBarSource();
 
-  // Count chip: neutral fill + a subtle amber ring (no slate).
-  assert.match(source, /bg-zinc-100\/80 border-amber-400\/50 text-zinc-800/);
-  assert.match(source, /bg-zinc-800\/60 border-amber-400\/40 text-zinc-100/);
+  // Count chip: neutral solid fill with a solid yellow ring (Wave ΣΤ2).
+  assert.match(source, /border-2 border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\)/);
 
   // Localized labels + bulk handlers are unchanged (no behaviour/data-flow change).
   for (const key of ['delivered', 'edit', 'cancel', 'map', 'view', 'clear', 'driver']) {
@@ -2972,29 +2963,17 @@ test('Round 285: Service card OR-gate is intentional + documented, and room gate
 test('Round 348: OrderTabsBar full color map, inactive label+counter grey, active-only neon, no hover', () => {
   const source = orderTabsBarSource();
 
-  // Full active text-color map (all six tab identities).
-  assert.match(source, /green: 'text-green-500'/);
-  assert.match(source, /orange: 'text-\[#f97316\]'/);
-  assert.match(source, /blue: 'text-\[#3b82f6\]'/);
-  assert.match(source, /red: 'text-red-500'/);
-  assert.match(source, /purple: 'text-\[#a855f7\]'/);
-  assert.match(source, /teal: 'text-\[#14b8a6\]'/);
+  // Founder 31/10 replaced the six tab colours with the kit selection: one yellow selected tab.
+  assert.doesNotMatch(source, /color: '(?:green|orange|blue|purple|teal|red)'/);
+  assert.match(source, /className="absolute inset-0 rounded-lg bg-\(--pos-s-sel-bg\)"/);
 
-  // Each tab id keeps its semantic color (orders/delivered/tables/rooms/services/canceled).
-  assert.match(source, /id: 'orders',[\s\S]*?color: 'green'/);
-  assert.match(source, /id: 'delivered',[\s\S]*?color: 'orange'/);
-  assert.match(source, /id: 'tables',[\s\S]*?color: 'blue'/);
-  assert.match(source, /id: 'rooms',[\s\S]*?color: 'purple'/);
-  assert.match(source, /id: 'services',[\s\S]*?color: 'teal'/);
-  assert.match(source, /id: 'canceled',[\s\S]*?color: 'red'/);
-
-  // Inactive (label and counter) is neutral grey; only the active tab gets neon.
-  assert.match(source, /if \(!isActive\) \{[\s\S]*?return isDark \? 'text-zinc-400' : 'text-gray-600';/);
-  // Both the label (withGlow=true) and the counter (withGlow=false) route through tabTextClass.
+  // Inactive (label and counter) is neutral grey; the selected tab reads in the selection ink.
+  assert.match(source, /if \(isActive\) return 'text-\(--pos-s-sel-fg\)';\s*return isDark \? 'text-zinc-400' : 'text-gray-600';/);
   assert.match(source, /\{tab\.label\}/);
   assert.match(source, /\{tab\.count\}/);
-  assert.match(source, /tabTextClass\(tab\.color, activeTab === tab\.id, resolvedTheme === 'dark', true\)/);
-  assert.match(source, /tabTextClass\(tab\.color, activeTab === tab\.id, resolvedTheme === 'dark', false\)/);
+  assert.match(source, /tabTextClass\(activeTab === tab\.id, resolvedTheme === 'dark'\)/);
+  // A count shows only when there is something to count («Τραπέζια 0» read as "no tables").
+  assert.match(source, /\{tab\.count > 0 && \(/);
 
   // Touch-first: no hover utilities in the tab bar.
   assert.doesNotMatch(source, /hover:/);
@@ -3012,7 +2991,7 @@ test('Round 348: order-type table card uses TableOrderIcon + blue title (OrderDa
     assert.notEqual(start, -1, `${name} dine-in card must exist`);
     const card = src.slice(start, src.indexOf('</button>', start) + '</button>'.length);
     assert.match(card, /<TableOrderIcon/, `${name} table card must use the shared TableOrderIcon`);
-    assert.match(card, /text-\[#60a5fa\]/, `${name} table card title must stay blue`);
+    assert.match(card, /text-\[#1d4ed8\] dark:text-\[#60a5fa\] mb-1/, `${name} table card title must stay blue`);
     assert.doesNotMatch(card, /Cake|Utensils|Fork|\bStore\b|\bPackage\b/, `${name} table card must not use a food/store glyph`);
   }
 });
@@ -3032,12 +3011,10 @@ test('Delivered selections expose RESET instead of the active-order Delivered ac
   assert.match(deliveredBranch, /getButtonStyles\('reset'\)/);
   assert.match(deliveredBranch, /bulk-action-reset/);
   assert.doesNotMatch(deliveredBranch, /onBulkAction\('delivered'\)/);
-  assert.match(source, /case 'reset':[\s\S]*?bg-sky-500[\s\S]*?border-sky-600[\s\S]*?bg-sky-400\/90/);
-
+  // Wave ΣΤ2: RESET is the kit's yellow primary; the sky fill and glow overrides are gone.
+  assert.match(source, /case 'success':\s*case 'reset':\s*return `\$\{baseStyles\} pos-solid-btn--primary`;/);
   const css = glassmorphismSource();
-  assert.match(css, /\.bulk-action-reset\s*\{[\s\S]*?background:\s*#0ea5e9\s*!important;/);
-  assert.match(css, /\.bulk-action-reset\s*\{[\s\S]*?border-color:\s*#0284c7\s*!important;/);
-  assert.match(css, /\.dark \.bulk-action-reset\s*\{[\s\S]*?background:\s*#38bdf8\s*!important;/);
+  assert.doesNotMatch(css, /\.bulk-action-reset\s*\{/);
 });
 
 test('RESET uses the dedicated local-first order reset command', () => {
@@ -3109,19 +3086,25 @@ test('dashboard lists and counters share their lane predicates, with tables gati
 // paid labels with no receipt remain protected; platform decline stays separate.
 test('dashboard cancellation prepares paid returns and preserves protected-order refusals', () => {
   const source = orderDashboardSource();
-  const prepareStart = source.indexOf('} else if (action === "cancel") {');
-  const prepareEnd = source.indexOf('} else if (action === "edit") {', prepareStart);
-  assert.ok(prepareStart >= 0 && prepareEnd > prepareStart, 'bulk cancel preparation must exist');
+  // The bulk Cancel and the Refund screen's full-return hand-off (founder
+  // 31/10/2026) share one preparation, so the refusals below guard both.
+  const bulkStart = source.indexOf('} else if (action === "cancel") {');
+  const bulkEnd = source.indexOf('} else if (action === "edit") {', bulkStart);
+  assert.ok(bulkStart >= 0 && bulkEnd > bulkStart, 'bulk cancel must exist');
+  assert.match(source.slice(bulkStart, bulkEnd), /if \(selectedOrders\.length > 0\) await beginOrderCancellation\(selectedOrders\);/);
+  const prepareStart = source.indexOf('const beginOrderCancellation = async (orderIds: string[], refundHandoff = false): Promise<boolean> => {');
+  const prepareEnd = source.indexOf('const handleBulkAction = async', prepareStart);
+  assert.ok(prepareStart >= 0 && prepareEnd > prepareStart, 'shared cancel preparation must exist');
   const prepare = source.slice(prepareStart, prepareEnd);
-  assert.match(prepare, /const refusals = await findCancelRefusals\(selectedOrders\);/);
+  assert.match(prepare, /const refusals = await findCancelRefusals\(orderIds\);/);
   assert.match(prepare, /if \(refusals\.notRecorded\.length > 0\) announceCancelRefusedNotRecorded\(refusals\.notRecorded\);/);
   assert.match(
     prepare,
-    /for \(const orderId of new Set\(\[\.\.\.refusals\.hasPayments, \.\.\.tableIds\]\)\) \{\s*try \{\s*plans\[orderId\] = await prepareManualOrderCancellation\(bridge, orderId\);\s*\} catch \(error\) \{[\s\S]*?protectedOrders\.push\(orderId\);/,
+    /for \(const orderId of new Set\(\[\.\.\.refusals\.hasPayments, \.\.\.tableIds, \.\.\.\(refundHandoff \? orderIds : \[\]\)\]\)\) \{\s*try \{\s*plans\[orderId\] = await prepareManualOrderCancellation\(bridge, orderId\);\s*\} catch \(error\) \{[\s\S]*?protectedOrders\.push\(orderId\);/,
     'paid and table orders must obtain native plans; failed preflight remains protected',
   );
-  assert.match(prepare, /const cancellable = selectedOrders\.filter\(id => !refusals\.notRecorded\.includes\(id\) && !protectedOrders\.includes\(id\)\);/);
-  assert.match(prepare, /if \(cancellable\.length === 0\) return;/);
+  assert.match(prepare, /const cancellable = orderIds\.filter\(id => !refusals\.notRecorded\.includes\(id\) && !protectedOrders\.includes\(id\)\);/);
+  assert.match(prepare, /if \(cancellable\.length === 0\) return true;/);
   assert.match(prepare, /setManualCancelPlans\(plans\);\s*setPendingCancelOrders\(cancellable\);\s*setShowCancelModal\(true\);/);
   assert.ok(prepare.indexOf('await prepareManualOrderCancellation(') < prepare.indexOf('setShowCancelModal(true)'), 'preflight must finish before the reason opens');
   assert.match(
@@ -3148,7 +3131,7 @@ test('dashboard cancellation prepares paid returns and preserves protected-order
     "the till's refusals must be told as such",
   );
   assert.match(source, /if \(manualPlan\.requiresReturn && !returnChannel\) return;/);
-  assert.match(source, /await runTableReleaseApproval\(\{\s*scope: "cash_drawer_control",\s*action: \(\) => commitManualOrderCancellation\(bridge, manualPlan, trimmedReason, returnChannel \|\| "cash_drawer"\),[\s\S]*?approvalSubtitle: t\("modals\.orderCancellation\.managerApprovalSubtitle"\),\s*\}\);\s*\}\s*continue;/, 'a planned return uses the atomic command, asks an approver when the till needs one, and skips generic status cancellation');
+  assert.match(source, /await runTableReleaseApproval\(\{\s*scope: "cash_drawer_control",\s*action: \(managerPin\) => applyPreparedOrderCancellation\(bridge, manualPlan, trimmedReason, returnChannel \|\| "cash_drawer", managerPin\),[\s\S]*?approvalSubtitle: t\("modals\.orderCancellation\.managerApprovalSubtitle"\),\s*\}\);\s*continue;/, 'a planned return uses the atomic command, asks an approver when the till needs one, and skips generic status cancellation');
   // Founder 07/10/2026: closing the approver's PIN prompt cancels nothing and
   // is not reported as a failure.
   assert.match(source, /catch \(error\) \{\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*if \(error instanceof Error && error\.message === "Privileged action confirmation cancelled"\) return;\s*console\.error\("Failed to cancel orders:", error\);/);

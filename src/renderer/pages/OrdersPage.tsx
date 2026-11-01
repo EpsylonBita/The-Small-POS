@@ -1,3 +1,4 @@
+import { useReturnedOrderCancellation } from '../hooks/useReturnedOrderCancellation';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -11,13 +12,12 @@ import {
   User,
   Phone,
   Package,
-  Truck,
   X,
   RotateCcw,
   Bed
 } from 'lucide-react';
 import TableOrderIcon from '../components/icons/TableOrderIcon';
-import PickupOrderIcon from '../components/icons/PickupOrderIcon';
+import { DeliveryScooterIcon, PickupHandBagIcon } from '../components/icons/OrderTypeGlyphs';
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
 import OrderDetailsModal from '../components/modals/OrderDetailsModal';
@@ -122,15 +122,15 @@ const getDisplayOrderNumber = (order: Order): string =>
 // semantic accents (amber/green/red); unknown statuses fall back to the yellow pending
 // skin. No hover utilities: the pill is informational, not an action.
 const ORDER_STATUS_PILL_CLASSES: Record<string, string> = {
-  pending: 'bg-amber-200 text-amber-900 border-amber-300 dark:bg-amber-400/20 dark:text-amber-200 dark:border-amber-400/45',
-  confirmed: 'bg-yellow-200 text-yellow-950 border-yellow-300 dark:bg-yellow-400/20 dark:text-yellow-100 dark:border-yellow-400/45',
+  pending: 'bg-amber-200 text-amber-900 border-amber-300 dark:bg-zinc-800 dark:text-amber-200 dark:border-zinc-700',
+  confirmed: 'bg-yellow-200 text-yellow-950 border-yellow-300 dark:bg-zinc-800 dark:text-yellow-100 dark:border-zinc-700',
   processing: 'bg-zinc-200 text-zinc-900 border-zinc-300 dark:bg-zinc-500/20 dark:text-zinc-100 dark:border-zinc-400/35',
   preparing: 'bg-zinc-200 text-zinc-900 border-zinc-300 dark:bg-zinc-500/20 dark:text-zinc-100 dark:border-zinc-400/35',
-  ready: 'bg-green-200 text-green-900 border-green-300 dark:bg-green-400/20 dark:text-green-200 dark:border-green-400/45',
-  out_for_delivery: 'bg-amber-300 text-amber-950 border-amber-400 dark:bg-amber-400/25 dark:text-amber-100 dark:border-amber-300/50',
+  ready: 'bg-green-200 text-green-900 border-green-300 dark:bg-zinc-800 dark:text-green-200 dark:border-zinc-700',
+  out_for_delivery: 'bg-amber-300 text-amber-950 border-amber-400 dark:bg-zinc-800 dark:text-amber-100 dark:border-zinc-700',
   completed: 'bg-gray-300 text-gray-900 border-gray-400 dark:bg-zinc-600/60 dark:text-zinc-100 dark:border-zinc-500/60',
   delivered: 'bg-gray-300 text-gray-900 border-gray-400 dark:bg-zinc-600/60 dark:text-zinc-100 dark:border-zinc-500/60',
-  cancelled: 'bg-red-200 text-red-900 border-red-300 dark:bg-red-400/20 dark:text-red-200 dark:border-red-400/45',
+  cancelled: 'bg-red-200 text-red-900 border-red-300 dark:bg-zinc-800 dark:text-red-200 dark:border-zinc-700',
 };
 
 const getOrderStatusPillClasses = (status?: string) => {
@@ -472,6 +472,8 @@ const OrdersPage: React.FC = () => {
     bridge.sync,
   ]);
 
+  const returnedCancellation = useReturnedOrderCancellation(fetchOrders);
+
   useEffect(() => {
     fetchOrders();
   }, [fetchOrders]);
@@ -615,26 +617,22 @@ const OrdersPage: React.FC = () => {
     };
   }, [fetchOrders]);
 
-  // Pickup / takeaway (and the default fall-through) render the shared PickupOrderIcon as a plain bag
-  // silhouette at row scale -- the same bag glyph as the order-type chooser, sized (w-6 h-6) to match
-  // the sibling delivery/table row icons. No green badge/holder: a semantic green stroke
-  // (light text-green-600 / dark text-green-400) keeps it readable on both the cream and dark rows
-  // while reading as a bag, not a boxed chip. Never a Store/Package/storefront glyph or a raw
-  // ShoppingBag for the order-type icon (the bag always goes through the shared PickupOrderIcon).
+  // Pickup / takeaway (and the default fall-through): founder 31/10, his hand holding the bag, as on the
+  // order card. No green badge/holder: a semantic green stroke (light text-green-600 / dark
+  // text-green-400) keeps it readable on both the cream and dark rows. Never a Store/Package/storefront
+  // glyph or a raw ShoppingBag for the order-type icon. 28px, since the drawing has more in it than a
+  // 24px glyph can hold.
   const pickupRowIcon = (
-    <PickupOrderIcon
-      className={`w-6 h-6 ${isDark ? 'text-green-400' : 'text-green-600'}`}
-      strokeWidth={2}
-    />
+    <PickupHandBagIcon className={`h-7 w-7 ${isDark ? 'text-green-400' : 'text-green-600'}`} />
   );
   const getOrderTypeIcon = (type: string) => {
     // Room service is matched first via the ZReportModal slug-collapse idea ('-'/'_'/space -> '_') so
     // room_service / room-service / room service all resolve to the Bed icon and never fall through to
-    // the pickup bag. Delivery / pickup / dine-in keep their existing icons unchanged (round 218).
+    // the pickup bag. Delivery and pickup are the founder's scooter and bag (31/10); dine-in keeps its table.
     const collapsed = String(type || '').trim().toLowerCase().replace(/[\s_-]+/g, '_');
     if (collapsed === 'room_service') return <Bed className="w-6 h-6" />;
     switch (type) {
-      case 'delivery': return <Truck className="w-6 h-6" />;
+      case 'delivery': return <DeliveryScooterIcon className="h-7 w-7" />;
       case 'pickup': return pickupRowIcon;
       case 'dine-in': return <TableOrderIcon className="w-6 h-6" />;
       default: return pickupRowIcon;
@@ -728,7 +726,7 @@ const OrdersPage: React.FC = () => {
 
           {/* Search and Filters */}
           <div className="space-y-3">
-            <div className={`flex items-center gap-2 px-4 py-3 rounded-xl border ${isDark ? 'bg-zinc-900/90 border-zinc-800 focus-within:border-yellow-500/50' : 'bg-[#fffdf8] border-amber-100/80 focus-within:border-amber-300'}`}>
+            <div className={`flex items-center gap-2 px-4 py-3 rounded-xl border ${isDark ? 'bg-zinc-900/90 border-zinc-800 focus-within:border-(--pos-s-yellow)' : 'bg-[#fffdf8] border-(--pos-s-border) focus-within:border-(--pos-s-yellow)'}`}>
               <Search className={`w-5 h-5 ${isDark ? 'text-zinc-500' : 'text-gray-400'}`} />
               <input
                 type="text"
@@ -754,8 +752,8 @@ const OrdersPage: React.FC = () => {
                 onClick={() => setShowFilters(!showFilters)}
                 aria-label={filterLabel}
                 className={`ml-2 inline-flex shrink-0 items-center justify-center transition-colors ${showFilters
-                  ? isDark ? 'text-yellow-300' : 'text-yellow-600'
-                  : isDark ? 'text-zinc-400 active:text-yellow-300' : 'text-gray-500 active:text-yellow-600'
+                  ? 'text-(--pos-s-fg)'
+                  : 'text-(--pos-s-muted) active:text-(--pos-s-fg)'
                   }`}
               >
                 <Filter className="w-5 h-5" />
@@ -771,7 +769,7 @@ const OrdersPage: React.FC = () => {
                   exit={{ height: 0, opacity: 0 }}
                   className="overflow-hidden"
                 >
-                  <div className={`grid grid-cols-1 md:grid-cols-3 gap-3 p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-[#fffdf8] border-amber-100/80'}`}>
+                  <div className={`grid grid-cols-1 md:grid-cols-3 gap-3 p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-[#fffdf8] border-(--pos-s-border)'}`}>
                     <div>
                       <label className="text-xs mb-1 block opacity-70">
                         {t('orders.filters.status', { defaultValue: 'Status' })}
@@ -780,7 +778,7 @@ const OrdersPage: React.FC = () => {
                         value={statusFilter}
                         onChange={(e) => setStatusFilter(e.target.value)}
                         aria-label={statusFilterLabel}
-                        className={`w-full px-3 py-2 rounded-2xl text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-amber-200/70'}`}
+                        className={`w-full px-3 py-2 rounded-2xl text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-(--pos-s-border)'}`}
                       >
                         <option value="all">{t('orders.filters.allStatuses', { defaultValue: 'All Statuses' })}</option>
                         {ORDER_STATUS_FILTER_OPTIONS.map((status) => (
@@ -798,7 +796,7 @@ const OrdersPage: React.FC = () => {
                         value={orderTypeFilter}
                         onChange={(e) => setOrderTypeFilter(e.target.value)}
                         aria-label={orderTypeFilterLabel}
-                        className={`w-full px-3 py-2 rounded-2xl text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-amber-200/70'}`}
+                        className={`w-full px-3 py-2 rounded-2xl text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-(--pos-s-border)'}`}
                       >
                         <option value="all">{t('orders.filters.allTypes', { defaultValue: 'All Types' })}</option>
                         {ORDER_TYPE_FILTER_OPTIONS.map((type) => (
@@ -817,7 +815,7 @@ const OrdersPage: React.FC = () => {
                         value={dateFrom}
                         onChange={(e) => setDateFrom(e.target.value)}
                         aria-label={dateFromFilterLabel}
-                        className={`w-full px-3 py-2 rounded-2xl text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-amber-200/70'}`}
+                        className={`w-full px-3 py-2 rounded-2xl text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-[#fffaf1] border-(--pos-s-border)'}`}
                       />
                     </div>
                   </div>
@@ -829,8 +827,8 @@ const OrdersPage: React.FC = () => {
                     onClick={handleClearFilters}
                     className={`mt-3 inline-flex min-h-touch items-center justify-center gap-2 rounded-2xl border px-4 py-2 text-sm font-medium transition active:scale-[0.97] ${
                       isDark
-                        ? 'border-yellow-300/30 bg-yellow-400/10 text-yellow-200 active:bg-yellow-400/20'
-                        : 'border-amber-300 bg-amber-100/70 text-amber-800 active:bg-amber-200'
+                        ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200 active:bg-(--pos-s-surface-2)'
+                        : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 active:bg-(--pos-s-surface-2)'
                     }`}
                   >
                     <RotateCcw className="w-4 h-4" strokeWidth={2} />
@@ -884,11 +882,11 @@ const OrdersPage: React.FC = () => {
                     className={`p-5 rounded-xl border cursor-pointer transition-all ${
                       order.is_test
                         ? isDark
-                          ? 'border-cyan-500/70 bg-cyan-950/20 active:bg-cyan-950/30'
-                          : 'border-cyan-500 bg-cyan-50 active:bg-cyan-100'
+                          ? 'border-cyan-600 bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2)'
+                          : 'border-cyan-500 bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2)'
                         : isDark
-                          ? 'border-zinc-800 bg-zinc-950/80 active:border-amber-400/40 active:bg-zinc-900'
-                          : 'border-amber-100/80 bg-[#fffaf1]/90 active:border-amber-300/90 active:bg-[#fff7e8] active:shadow-md'
+                          ? 'border-zinc-800 bg-zinc-950/80 active:border-(--pos-s-border) active:bg-zinc-900'
+                          : 'border-(--pos-s-border) bg-[#fffaf1] active:border-(--pos-s-border) active:bg-[#fff7e8] active:shadow-md'
                     }`}
                     onClick={() => setSelectedOrder(order)}
                   >
@@ -897,7 +895,7 @@ const OrdersPage: React.FC = () => {
                         <div className="flex flex-wrap items-center gap-3 mb-2">
                           <span className="font-mono font-bold text-lg">{displayOrderNumber}</span>
                           {order.is_test && (
-                            <span className="rounded-full border border-cyan-500 bg-cyan-500/15 px-2 py-1 text-[11px] font-black tracking-wide text-cyan-700 dark:text-cyan-200">
+                            <span className="rounded-full border border-cyan-500 bg-(--pos-s-surface-2) px-2 py-1 text-[11px] font-black tracking-wide text-cyan-700 dark:text-cyan-200">
                               TEST / SANDBOX
                             </span>
                           )}
@@ -943,8 +941,8 @@ const OrdersPage: React.FC = () => {
                         </div>
 
                         {showDeliveredDriver && (
-                          <div className={`mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${isDark ? 'bg-green-950/70 border border-green-800 text-green-200' : 'bg-green-50 border border-green-200 text-green-700'}`}>
-                            <Truck className="w-3.5 h-3.5" />
+                          <div className={`mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${isDark ? 'bg-(--pos-s-surface-2) border border-green-800 text-green-800 dark:text-green-200' : 'bg-(--pos-s-surface-2) border border-(--pos-s-border) text-green-700'}`}>
+                            <DeliveryScooterIcon className="h-5 w-5" />
                             <span>{t('orders.deliveredBy', { defaultValue: 'Delivered by {{name}}', name: deliveredDriverName })}</span>
                           </div>
                         )}
@@ -969,7 +967,7 @@ const OrdersPage: React.FC = () => {
 
       {/* Pagination */}
       {totalPages > 1 && (
-        <div className={`border-t p-4 ${isDark ? 'border-zinc-800 bg-zinc-950/90' : 'border-amber-100/70 bg-[#fffaf1]'}`}>
+        <div className={`border-t p-4 ${isDark ? 'border-zinc-800 bg-zinc-950/90' : 'border-(--pos-s-border) bg-[#fffaf1]'}`}>
           <div className="flex items-center justify-between">
             <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
               {t('orders.pageOf', {
@@ -984,8 +982,8 @@ const OrdersPage: React.FC = () => {
                 disabled={currentPage === 1}
                 aria-label={t('orders.pagination.previous', { defaultValue: 'Previous page' })}
                 className={`px-3 py-2 rounded-2xl border ${currentPage === 1
-                  ? isDark ? 'opacity-40 cursor-not-allowed bg-zinc-900 border-zinc-700' : 'opacity-40 cursor-not-allowed bg-[#fffdf8] border-amber-200/70'
-                  : isDark ? 'bg-zinc-800 active:bg-zinc-700 border-zinc-700' : 'bg-[#fffdf8] active:bg-[#fff7e8] border-amber-200/70'
+                  ? isDark ? 'opacity-40 cursor-not-allowed bg-zinc-900 border-zinc-700' : 'opacity-40 cursor-not-allowed bg-[#fffdf8] border-(--pos-s-border)'
+                  : isDark ? 'bg-zinc-800 active:bg-zinc-700 border-zinc-700' : 'bg-[#fffdf8] active:bg-[#fff7e8] border-(--pos-s-border)'
                   }`}
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -995,8 +993,8 @@ const OrdersPage: React.FC = () => {
                 disabled={currentPage === totalPages}
                 aria-label={t('orders.pagination.next', { defaultValue: 'Next page' })}
                 className={`px-3 py-2 rounded-2xl border ${currentPage === totalPages
-                  ? isDark ? 'opacity-40 cursor-not-allowed bg-zinc-900 border-zinc-700' : 'opacity-40 cursor-not-allowed bg-[#fffdf8] border-amber-200/70'
-                  : isDark ? 'bg-zinc-800 active:bg-zinc-700 border-zinc-700' : 'bg-[#fffdf8] active:bg-[#fff7e8] border-amber-200/70'
+                  ? isDark ? 'opacity-40 cursor-not-allowed bg-zinc-900 border-zinc-700' : 'opacity-40 cursor-not-allowed bg-[#fffdf8] border-(--pos-s-border)'
+                  : isDark ? 'bg-zinc-800 active:bg-zinc-700 border-zinc-700' : 'bg-[#fffdf8] active:bg-[#fff7e8] border-(--pos-s-border)'
                   }`}
               >
                 <ChevronRight className="w-4 h-4" />
@@ -1006,12 +1004,14 @@ const OrdersPage: React.FC = () => {
         </div>
       )}
 
+      {returnedCancellation.modal}
       {/* Order Detail Modal */}
       <OrderDetailsModal
         isOpen={!!selectedOrder}
-        orderId={selectedOrder?.id || selectedOrder?.order_number || ''}
+        orderId={selectedOrder?.local_order_id || selectedOrder?.id || selectedOrder?.order_number || ''}
         order={selectedOrder}
         openPaymentOnMount={openSelectedOrderPayment}
+        onRequestCancellation={returnedCancellation.requestCancellation}
         onClose={() => {
           setSelectedOrder(null);
           setOpenSelectedOrderPayment(false);

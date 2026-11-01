@@ -32,8 +32,7 @@ test('AnalyticsPage refresh button keeps aria-label, handler, disabled-loading, 
   assert.match(source, /<RefreshCw className=\{`w-5 h-5 \$\{loading \? 'animate-spin' : ''\}`\} \/>/);
 
   // Amber glass + active (touch) feedback; spinner on loading.
-  assert.match(source, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(source, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  assert.match(source, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
   assert.match(source, /active:scale-95/);
   assert.match(source, /opacity-60 cursor-not-allowed/);
   assert.doesNotMatch(source, /border border-white\/80 bg-white text-black/);

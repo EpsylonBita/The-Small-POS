@@ -162,6 +162,13 @@ const queueState = (jobs = [makeJob()]) => ({
   reprintJob: mocks.reprintJob,
 })
 
+// UI audit wave 7A2: pausing or cancelling the whole queue lives under "Settings for technicians".
+const technicianButton = (name: string) => {
+  const toggle = screen.queryByRole('button', { name: 'Settings for technicians' })
+  if (toggle && toggle.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle)
+  return screen.getByRole('button', { name })
+}
+
 const setQueue = (state: ReturnType<typeof queueState>) => {
   mocks.current = state
   mocks.usePrintQueue.mockImplementation(() => mocks.current)
@@ -185,18 +192,19 @@ describe('PrintQueuePanel managed POS controls', () => {
   it('uses the typed hook only and exposes the POS-only queue as a semantic section/list/article', () => {
     render(<PrintQueuePanel />)
 
-    expect(mocks.usePrintQueue).toHaveBeenCalledWith({ limit: 20, offset: 0 })
+    expect(mocks.usePrintQueue).toHaveBeenCalledWith({ limit: 20, offset: 0, status: 'failed' })
     expect(mocks.directPrinter.listJobs).not.toHaveBeenCalled()
 
-    const queue = screen.getByRole('region', { name: 'POS Print Queue' })
+    const queue = screen.getByRole('region', { name: 'Prints that did not come out' })
     expect(queue).toHaveAttribute('aria-busy', 'false')
     expect(within(queue).getByText(/only print jobs created by The Small POS/i)).toBeVisible()
     expect(within(queue).getByRole('list')).toBeVisible()
     expect(within(queue).getAllByRole('article')).toHaveLength(1)
     expect(within(queue).getByText('Front counter MCP31')).toBeVisible()
-    expect(within(queue).getByText('MCP31 - Ethernet:TCP;')).toBeVisible()
-    expect(within(queue).getByText('POS status')).toBeVisible()
-    expect(within(queue).getByText('Transport status')).toBeVisible()
+    // One row per job: title, printer, time and one plain status line; the technical target stays out.
+    expect(within(queue).queryByText('MCP31 - Ethernet:TCP;')).not.toBeInTheDocument()
+    expect(within(queue).queryByText('POS status')).not.toBeInTheDocument()
+    expect(queue.querySelector('[data-print-job-status]')?.textContent).toMatch(/ · /)
 
     expect(screen.queryByText('job-source-1')).not.toBeInTheDocument()
     expect(screen.queryByText('profile-private-1')).not.toBeInTheDocument()
@@ -250,7 +258,7 @@ describe('PrintQueuePanel managed POS controls', () => {
     })
 
     render(<PrintQueuePanel />)
-    fireEvent.click(screen.getByRole('button', { name: 'Pause and cancel POS jobs' }))
+    fireEvent.click(technicianButton('Pause and cancel POS jobs'))
 
     expect(mocks.cancelAllJobs).not.toHaveBeenCalled()
     const dialog = screen.getByRole('dialog', { name: 'Pause and cancel POS jobs?' })
@@ -269,8 +277,8 @@ describe('PrintQueuePanel managed POS controls', () => {
     expect(feedback).toHaveTextContent('1 native control confirmed')
     expect(feedback).toHaveTextContent('1 native control failed')
     expect(feedback).toHaveTextContent('1 ownership refused')
-    expect(feedback).toHaveClass('bg-yellow-50')
-    expect(feedback).not.toHaveClass('bg-emerald-50')
+    expect(feedback).toHaveClass('pos-notice--warn')
+    expect(feedback).not.toHaveClass('pos-notice--ok')
   })
 
   it('locks global and row mutations while a bulk cancellation is pending', async () => {
@@ -296,11 +304,11 @@ describe('PrintQueuePanel managed POS controls', () => {
     mocks.cancelAllJobs.mockReturnValue(pendingBulk.promise)
     render(<PrintQueuePanel />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Pause and cancel POS jobs' }))
+    fireEvent.click(technicianButton('Pause and cancel POS jobs'))
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Pause and cancel' }))
 
-    expect(screen.getByRole('button', { name: 'Pause POS print queue' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Pause and cancel POS jobs' })).toBeDisabled()
+    expect(technicianButton('Pause POS print queue')).toBeDisabled()
+    expect(technicianButton('Pause and cancel POS jobs')).toBeDisabled()
     const cancelJob = screen.getByRole('button', { name: 'Cancel POS print job' })
     const retryJob = screen.getByRole('button', { name: 'Retry POS print job' })
     const reprintJob = screen.getByRole('button', { name: 'Reprint POS print job' })
@@ -331,7 +339,7 @@ describe('PrintQueuePanel managed POS controls', () => {
       await pendingBulk.promise
     })
 
-    expect(screen.getByRole('button', { name: 'Pause POS print queue' })).toBeEnabled()
+    expect(technicianButton('Pause POS print queue')).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Cancel POS print job' })).toBeEnabled()
   })
 
@@ -444,7 +452,7 @@ describe('PrintQueuePanel managed POS controls', () => {
       'Could not load the POS print queue. Current queue status is unavailable.',
     )
     expect(screen.queryByText(/last good data remains visible/i)).not.toBeInTheDocument()
-    expect(screen.queryByText('No POS print jobs are available.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Every print came out.')).not.toBeInTheDocument()
     expect(screen.queryByText(/SQLite private-profile-id initial load stack trace/)).not.toBeInTheDocument()
     expect(screen.queryByRole('status', { name: 'POS print queue counts' })).not.toBeInTheDocument()
     expect(screen.queryByText('0 active')).not.toBeInTheDocument()
@@ -464,7 +472,7 @@ describe('PrintQueuePanel managed POS controls', () => {
     const view = render(<PrintQueuePanel />)
 
     expect(screen.getByRole('status', { name: 'Loading POS print queue' })).toBeVisible()
-    expect(screen.queryByText('No POS print jobs are available.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Every print came out.')).not.toBeInTheDocument()
     expect(screen.queryByRole('status', { name: 'POS print queue counts' })).not.toBeInTheDocument()
     expect(screen.queryByText('Showing 0 of 0 POS jobs')).not.toBeInTheDocument()
 
@@ -474,7 +482,7 @@ describe('PrintQueuePanel managed POS controls', () => {
     }
     view.rerender(<PrintQueuePanel />)
     expect(screen.queryByRole('status', { name: 'Loading POS print queue' })).not.toBeInTheDocument()
-    expect(screen.getByText('No POS print jobs are available.')).toBeVisible()
+    expect(screen.getByText('Every print came out.')).toBeVisible()
     expect(screen.getByRole('status', { name: 'POS print queue counts' })).toHaveTextContent(
       '0 active',
     )
@@ -504,7 +512,7 @@ describe('PrintQueuePanel managed POS controls', () => {
 
     for (const nextLimit of [40, 60, 80, 100]) {
       fireEvent.click(screen.getByRole('button', { name: 'Show more POS print jobs' }))
-      expect(mocks.usePrintQueue).toHaveBeenLastCalledWith({ limit: nextLimit, offset: 0 })
+      expect(mocks.usePrintQueue).toHaveBeenLastCalledWith({ limit: nextLimit, offset: 0, status: 'failed' })
       expect(screen.getAllByRole('article')).toHaveLength(nextLimit)
       expect(screen.getByText(`Printer ${nextLimit}-1`)).toBeVisible()
       expect(screen.queryByText(`Printer ${nextLimit - 20}-1`)).not.toBeInTheDocument()
@@ -541,7 +549,7 @@ describe('PrintQueuePanel managed POS controls', () => {
     let showMore = screen.getByRole('button', { name: 'Show more POS print jobs' })
     expect(showMore).toBeDisabled()
     fireEvent.click(showMore)
-    expect(mocks.usePrintQueue).not.toHaveBeenCalledWith({ limit: 40, offset: 0 })
+    expect(mocks.usePrintQueue).not.toHaveBeenCalledWith({ limit: 40, offset: 0, status: 'failed' })
 
     await act(async () => {
       pendingRetry.resolve({
@@ -562,12 +570,12 @@ describe('PrintQueuePanel managed POS controls', () => {
     showMore = screen.getByRole('button', { name: 'Show more POS print jobs' })
     expect(showMore).toBeDisabled()
     fireEvent.click(showMore)
-    expect(mocks.usePrintQueue).not.toHaveBeenCalledWith({ limit: 40, offset: 0 })
+    expect(mocks.usePrintQueue).not.toHaveBeenCalledWith({ limit: 40, offset: 0, status: 'failed' })
 
     loading = false
     view.rerender(<PrintQueuePanel />)
     fireEvent.click(screen.getByRole('button', { name: 'Show more POS print jobs' }))
-    expect(mocks.usePrintQueue).toHaveBeenLastCalledWith({ limit: 40, offset: 0 })
+    expect(mocks.usePrintQueue).toHaveBeenLastCalledWith({ limit: 40, offset: 0, status: 'failed' })
   })
 
   it('retains the last authoritative offset-zero snapshot when Show More loads then fails', () => {
@@ -603,7 +611,7 @@ describe('PrintQueuePanel managed POS controls', () => {
     expect(screen.getByText('Showing 20 of 47 POS jobs')).toBeVisible()
 
     fireEvent.click(screen.getByRole('button', { name: 'Show more POS print jobs' }))
-    expect(mocks.usePrintQueue).toHaveBeenLastCalledWith({ limit: 40, offset: 0 })
+    expect(mocks.usePrintQueue).toHaveBeenLastCalledWith({ limit: 40, offset: 0, status: 'failed' })
     expect(screen.getAllByRole('article')).toHaveLength(20)
     expect(screen.getByText('Authoritative printer 1')).toBeVisible()
     expect(screen.getByRole('status', { name: 'POS print queue counts' })).toHaveTextContent(
@@ -884,8 +892,8 @@ describe('PrintQueuePanel managed POS controls', () => {
     expect(feedback).toHaveTextContent(
       'Printer pause removed for paused printer 1. POS print queue remains paused.',
     )
-    expect(feedback).toHaveClass('bg-yellow-50')
-    expect(feedback).not.toHaveClass('bg-emerald-50')
+    expect(feedback).toHaveClass('pos-notice--warn')
+    expect(feedback).not.toHaveClass('pos-notice--ok')
     expect(view.container.innerHTML).not.toContain(unseenProfileIds[0])
 
     view.rerender(<PrintQueuePanel />)
@@ -953,7 +961,7 @@ describe('PrintQueuePanel managed POS controls', () => {
 
   it('dismisses destructive confirmations without issuing a mutation', () => {
     render(<PrintQueuePanel />)
-    fireEvent.click(screen.getByRole('button', { name: 'Pause and cancel POS jobs' }))
+    fireEvent.click(technicianButton('Pause and cancel POS jobs'))
     let dialog = screen.getByRole('dialog', { name: 'Pause and cancel POS jobs?' })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Keep printing' }))
     expect(mocks.cancelAllJobs).not.toHaveBeenCalled()
@@ -992,7 +1000,7 @@ describe('PrintQueuePanel managed POS controls', () => {
     expect(screen.getByRole('button', { name: 'Retry POS print job' })).toBeDisabled()
     const reprint = screen.getByRole('button', { name: 'Reprint POS print job' })
     expect(reprint).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Pause and cancel POS jobs' })).toBeDisabled()
+    expect(technicianButton('Pause and cancel POS jobs')).toBeDisabled()
     fireEvent.click(reprint)
     expect(mocks.reprintJob).not.toHaveBeenCalled()
     expect(screen.queryByRole('dialog', { name: 'Reprint POS print job?' })).not.toBeInTheDocument()
@@ -1044,7 +1052,7 @@ describe('PrintQueuePanel managed POS controls', () => {
     const secondReprint = within(rows[1]).getByRole('button', { name: /^Reprint POS print job/ })
     expect(secondCancel).toBeDisabled()
     expect(secondReprint).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Pause POS print queue' })).toBeDisabled()
+    expect(technicianButton('Pause POS print queue')).toBeDisabled()
 
     fireEvent.click(secondCancel)
     fireEvent.click(secondReprint)
@@ -1090,7 +1098,7 @@ describe('PrintQueuePanel managed POS controls', () => {
     mocks.pauseQueue.mockReturnValue(pendingPause.promise)
     render(<PrintQueuePanel />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Pause POS print queue' }))
+    fireEvent.click(technicianButton('Pause POS print queue'))
     const cancel = screen.getByRole('button', { name: 'Cancel POS print job' })
     const retry = screen.getByRole('button', { name: 'Retry POS print job' })
     const reprint = screen.getByRole('button', { name: 'Reprint POS print job' })
@@ -1155,7 +1163,7 @@ describe('PrintQueuePanel managed POS controls', () => {
     expect(cancel).toBeDisabled()
     expect(retry).toBeDisabled()
     expect(reprint).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Pause and cancel POS jobs' })).toBeDisabled()
+    expect(technicianButton('Pause and cancel POS jobs')).toBeDisabled()
 
     fireEvent.click(cancel)
     fireEvent.click(retry)
@@ -1215,17 +1223,17 @@ describe('PrintQueuePanel managed POS controls', () => {
     })
     render(<PrintQueuePanel />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Pause POS print queue' }))
+    fireEvent.click(technicianButton('Pause POS print queue'))
     let feedback = await screen.findByRole('status', { name: 'Print queue action result' })
     expect(feedback).toHaveTextContent('POS print queue remains active')
     expect(feedback).not.toHaveTextContent('POS print queue paused')
-    expect(feedback).toHaveClass('bg-yellow-50')
+    expect(feedback).toHaveClass('pos-notice--warn')
 
     fireEvent.click(screen.getByRole('button', { name: 'Resume Paused printer' }))
     feedback = await screen.findByRole('status', { name: 'Print queue action result' })
     expect(feedback).toHaveTextContent('Paused printer remains paused')
     expect(feedback).not.toHaveTextContent('Paused printer resumed')
-    expect(feedback).toHaveClass('bg-yellow-50')
+    expect(feedback).toHaveClass('pos-notice--warn')
   })
 
   it('warns when a printer pause is removed but the returned global queue stays paused', async () => {
@@ -1257,8 +1265,8 @@ describe('PrintQueuePanel managed POS controls', () => {
       'Printer pause removed for Kitchen printer. POS print queue remains paused.',
     )
     expect(feedback).not.toHaveTextContent('Kitchen printer resumed')
-    expect(feedback).toHaveClass('bg-yellow-50')
-    expect(feedback).not.toHaveClass('bg-emerald-50')
+    expect(feedback).toHaveClass('pos-notice--warn')
+    expect(feedback).not.toHaveClass('pos-notice--ok')
   })
 
   it('warns after a global Resume when returned printer-specific pauses remain', async () => {
@@ -1287,8 +1295,8 @@ describe('PrintQueuePanel managed POS controls', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Resume POS print queue' }))
     const feedback = await screen.findByRole('status', { name: 'Print queue action result' })
     expect(feedback).toHaveTextContent('POS print queue resumed. 2 printer pauses remain.')
-    expect(feedback).toHaveClass('bg-yellow-50')
-    expect(feedback).not.toHaveClass('bg-emerald-50')
+    expect(feedback).toHaveClass('pos-notice--warn')
+    expect(feedback).not.toHaveClass('pos-notice--ok')
     for (const profileId of remainingProfileIds) {
       expect(view.container.innerHTML).not.toContain(profileId)
     }
@@ -1467,7 +1475,7 @@ describe('PrintQueuePanel managed POS controls', () => {
       printerProfileId: 'profile-visible',
     }))
 
-    fireEvent.click(screen.getByRole('button', { name: 'Pause POS print queue' }))
+    fireEvent.click(technicianButton('Pause POS print queue'))
     await waitFor(() => expect(mocks.pauseQueue).toHaveBeenCalledWith())
     const serializedArgs = JSON.stringify([
       mocks.cancelJob.mock.calls,
@@ -1476,5 +1484,22 @@ describe('PrintQueuePanel managed POS controls', () => {
       mocks.pauseQueue.mock.calls,
     ])
     expect(serializedArgs).not.toMatch(/spool|ownership|target|queueName|attempt/i)
+  })
+})
+
+// UI audit wave 7Γ: «Prints that did not come out» is the first view; «All» shows every job.
+describe('PrintQueuePanel failed-first view', () => {
+  beforeEach(() => { mocks.usePrintQueue.mockReturnValue(queueState([])) })
+  afterEach(() => cleanup())
+
+  it('opens on the jobs that did not print and switches to every job', () => {
+    render(<PrintQueuePanel />)
+    expect(mocks.usePrintQueue).toHaveBeenLastCalledWith({ limit: 20, offset: 0, status: 'failed' })
+    expect(screen.getByRole('heading', { name: 'Prints that did not come out' })).toBeVisible()
+    expect(screen.getByText('Every print came out.')).toBeVisible()
+    fireEvent.click(screen.getByRole('radio', { name: 'All' }))
+    expect(mocks.usePrintQueue).toHaveBeenLastCalledWith({ limit: 20, offset: 0 })
+    expect(screen.getByRole('heading', { name: 'POS Print Queue' })).toBeVisible()
+    expect(screen.getByText('No POS print jobs are available.')).toBeVisible()
   })
 })

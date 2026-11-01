@@ -144,8 +144,8 @@ export function PlatformHeldPaymentNotice({
       });
 
   const tone = unsynced || pending || refundReview
-    ? "border-amber-400/40 bg-amber-500/10 text-amber-100"
-    : "border-emerald-400/35 bg-emerald-500/10 text-emerald-100";
+    ? "border-(--pos-s-warn) bg-(--pos-s-warn-bg) text-(--pos-s-fg)"
+    : "border-(--pos-s-ok) bg-(--pos-s-ok-bg) text-(--pos-s-fg)";
 
   return (
     <div

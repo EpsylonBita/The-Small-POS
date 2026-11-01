@@ -20,10 +20,11 @@ test('ComboChoiceModal keeps the glass shell, hidden scrollbars, and combo confi
 test('ComboChoiceModal uses yellow selection, green add-to-cart, and tap feedback', () => {
   const source = readFileSync(sourcePath, 'utf8');
 
-  assert.match(source, /border-green-500\/70 bg-green-600 text-white active:scale-\[0\.98\] active:bg-green-700/);
-  assert.match(source, /border-yellow-400\/70 bg-yellow-400\/12/);
-  assert.match(source, /border-yellow-500\/70 bg-yellow-50/);
-  assert.match(source, /bg-yellow-400\/14/);
+  assert.match(source, /border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\) text-black active:scale-\[0\.98\] active:bg-yellow-500/);
+  // Wave ΣΤ8b: a chosen dropdown is an fg line, not yellow.
+  assert.match(source, /border-\(--pos-s-sel-bg\) ring-1 ring-\(--pos-s-sel-bg\) bg-\(--pos-s-surface-2\)/); // founder 31/10: selection = the yellow kit sel
+  assert.doesNotMatch(source, /'border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\)'/);
+  assert.match(source, /bg-\(--pos-s-surface-2\)/);
   assert.match(source, /border-2 border-yellow-400 border-t-transparent/);
   assert.match(source, /active:scale-\[0\.99\]/);
   assert.match(source, /type="button"/);

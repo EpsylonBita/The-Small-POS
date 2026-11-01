@@ -213,14 +213,14 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmDiscardId, setConfirmDiscardId] = useState<string | null>(null);
 
-  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-500';
+  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-600';
   const cardClass = isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50';
   const secondaryButtonClass = isDark
     ? 'border-zinc-800 bg-zinc-900 text-zinc-100 active:bg-zinc-800'
     : 'border-gray-200 bg-white text-gray-800 active:bg-gray-100';
   const primaryButtonClass = isDark
-    ? 'border-yellow-400/70 text-white active:bg-yellow-400/10'
-    : 'border-yellow-400 text-gray-950 active:bg-yellow-50';
+    ? 'border-(--pos-s-yellow) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'
+    : 'border-yellow-400 text-gray-950 active:bg-(--pos-s-surface-2)';
 
   /**
    * Re-read the queue, writing state only when something actually differs.

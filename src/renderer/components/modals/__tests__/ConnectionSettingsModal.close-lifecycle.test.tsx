@@ -29,6 +29,8 @@ vi.mock('../../settings/WaiterDevicesSection', () => ({ WaiterDevicesSection: ()
 vi.mock('../../recovery/RecoveryPanel', () => ({ default: () => null }));
 vi.mock('../../printing/PrintQueuePanel', () => ({ default: () => null }));
 vi.mock('../../settings/SettingsRuntimePreferences', () => ({ SettingsRuntimePreferences: () => null }));
+vi.mock('../../../hooks/useEfoodPartner', () => ({ useEfoodPartner: () => ({ available: false, efoodControllable: false, settings: { enabled: false, muted: false }, updateSettings: vi.fn() }) }));
+vi.mock('../../settings/PlatformNotificationSoundSettings', () => ({ PlatformNotificationSoundSettings: () => null }));
 // LiquidGlassModal and ConfirmDialog deliberately stay real: their exit lifecycle
 // must not remove the settings shell before the dirty-close request is accepted.
 
@@ -46,7 +48,7 @@ it.each(['Escape', 'backdrop'])('keeps the real settings modal editable after di
   const onClose = vi.fn();
   render(<ConnectionSettingsModal isOpen onClose={onClose} />);
   await screen.findByText('Settings are up to date');
-  fireEvent.click(screen.getByRole('button', { name: /^Devices\s*Scale, scanner and hardware/i }));
+  fireEvent.click(screen.getByRole('button', { name: 'Scale, display, scanner' }));
   fireEvent.change(screen.getByDisplayValue('COM7'), { target: { value: 'COM9' } });
   const settings = screen.getByRole('dialog', { name: 'modals.connectionSettings.title' });
 

@@ -355,7 +355,7 @@ const applyLocalTableSessionSnapshot = async (session: TableSessionDetails, loca
   if (result?.success === false) throw new Error(result.error || 'Failed to save table ownership locally');
 };
 const glassSurfaceClass =
-  'rounded-xl border liquid-glass-modal-border bg-white/55 shadow-[0_14px_36px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:bg-black/20 dark:shadow-[0_18px_42px_rgba(2,6,23,0.35)]';
+  'rounded-xl border liquid-glass-modal-border bg-white/55 backdrop-blur-xl dark:bg-black/20';
 const glassSubtleSurfaceClass =
   'rounded-xl border liquid-glass-modal-border bg-white/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] backdrop-blur-xl dark:bg-white/4.5';
 const glassInputClass = 'liquid-glass-modal-input w-full';
@@ -911,7 +911,7 @@ const TableDestinationPicker: React.FC<TableDestinationPickerProps> = ({
             className={`flex min-h-10 w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors ${
               selected
                 ? 'bg-blue-600 text-white shadow-xs'
-                : 'text-gray-900 hover:bg-black/5 dark:text-zinc-100 dark:hover:bg-white/10'
+                : 'text-gray-900 dark:text-zinc-100 '
             }`}
           >
             <span className="truncate">{optionLabel(option)}</span>
@@ -951,7 +951,7 @@ const ActionButton: React.FC<ActionButtonProps> = ({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`liquid-glass-modal-button flex min-h-11 items-center justify-center gap-2 px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:translate-y-0 ${toneClass} ${className}`}
+      className={`liquid-glass-modal-button flex min-h-11 items-center justify-center gap-2 px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45 ${toneClass} ${className}`}
     >
       {children}
     </button>
@@ -2681,7 +2681,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       >
         <div className="liquid-glass-modal-header px-5 py-4">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border liquid-glass-modal-border bg-blue-500/15 text-blue-700 backdrop-blur-xl dark:text-blue-300">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border liquid-glass-modal-border bg-(--pos-s-surface-2) text-blue-700 backdrop-blur-xl dark:text-blue-300">
               <Receipt className="h-5 w-5" />
             </div>
             <div className="min-w-0">
@@ -2691,12 +2691,12 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               <p className="truncate text-sm liquid-glass-modal-text-muted">{mainSubtitle}</p>
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 {occupiedSinceLabel ? (
-                  <span className="truncate text-xs font-medium text-blue-700/80 dark:text-blue-200/80">{occupiedSinceLabel}</span>
+                  <span className="truncate text-xs font-medium text-blue-700 dark:text-blue-200">{occupiedSinceLabel}</span>
                 ) : null}
                 <button
                   type="button"
                   onClick={openAssignWaiterModal}
-                  className="inline-flex max-w-[220px] items-center gap-1.5 rounded-lg border border-blue-400/25 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-800 transition-colors hover:bg-blue-500/15 dark:text-blue-200"
+                  className="inline-flex max-w-[220px] items-center gap-1.5 rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) px-2.5 py-1 text-xs font-semibold text-blue-800 transition-colors dark:text-blue-200"
                 >
                   <UserCheck className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{currentWaiterLabel}</span>
@@ -2750,7 +2750,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                     <button
                       type="button"
                       onClick={clearBatchSelection}
-                      className="rounded-lg border liquid-glass-modal-border px-3 py-2 text-sm font-semibold liquid-glass-modal-text-muted transition-colors hover:bg-white/25 dark:hover:bg-white/10"
+                      className="rounded-lg border liquid-glass-modal-border px-3 py-2 text-sm font-semibold liquid-glass-modal-text-muted transition-colors "
                     >
                       {tr('actions.clearSelection', 'Clear')}
                     </button>
@@ -2832,10 +2832,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                           initial={{ opacity: 0, y: 8 }}
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ delay: Math.min(index * 0.025, 0.18) }}
-                          whileHover={{ scale: 1.01 }}
                           whileTap={{ scale: 0.99 }}
-                          className={`${glassSubtleSurfaceClass} grid w-full grid-cols-[auto_1fr_auto] items-center gap-4 px-4 py-3 text-left transition-colors hover:border-blue-400/40 hover:bg-blue-500/10 focus:outline-hidden focus:ring-2 focus:ring-blue-400/40 ${
-                            isSelectedForBatch ? 'border-blue-400/70 bg-blue-500/15' : ''
+                          className={`${glassSubtleSurfaceClass} grid w-full grid-cols-[auto_1fr_auto] items-center gap-4 px-4 py-3 text-left transition-colors focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg) ${
+                            isSelectedForBatch ? 'border-blue-600 bg-(--pos-s-surface-2)' : ''
                           }`}
                         >
                           <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition-colors ${
@@ -2914,8 +2913,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
             </section>
 
             <aside className="hide-scrollbar flex min-h-0 flex-col gap-3 overflow-y-auto">
-              <div className={`${glassSurfaceClass} border-blue-400/25 p-4`}>
-                <p className="text-xs font-medium uppercase tracking-wide text-blue-700/75 dark:text-blue-200/75">
+              <div className={`${glassSurfaceClass} border-(--pos-s-border) p-4`}>
+                <p className="text-xs font-medium uppercase tracking-wide text-blue-700 dark:text-blue-200">
                   {tr('labels.due', 'Due')}
                 </p>
                 <p className="mt-1 text-4xl font-semibold liquid-glass-modal-text">{money(outstanding)}</p>
@@ -2929,7 +2928,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   <button
                     type="button"
                     onClick={() => setSecondaryModal('covers')}
-                    className={`${glassSubtleSurfaceClass} px-4 py-3 text-left transition-colors hover:bg-white/45 dark:hover:bg-white/8`}
+                    className={`${glassSubtleSurfaceClass} px-4 py-3 text-left transition-colors `}
                   >
                     <p className="text-[11px] font-medium uppercase tracking-wide liquid-glass-modal-text-muted">
                       {tr('labels.covers', 'Covers')}
@@ -3206,7 +3205,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
                     discountMode === 'percentage'
                       ? 'liquid-glass-modal-primary'
-                      : 'liquid-glass-modal-text-muted hover:bg-white/20 dark:hover:bg-white/10'
+                      : 'liquid-glass-modal-text-muted '
                   }`}
                 >
                   {tr('labels.percent', 'Percent')}
@@ -3217,7 +3216,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
                     discountMode === 'fixed'
                       ? 'liquid-glass-modal-primary'
-                      : 'liquid-glass-modal-text-muted hover:bg-white/20 dark:hover:bg-white/10'
+                      : 'liquid-glass-modal-text-muted '
                   }`}
                 >
                   {tr('labels.amount', 'Amount')}
@@ -3366,7 +3365,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                       className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
                         discountMode === 'percentage'
                           ? 'liquid-glass-modal-primary'
-                          : 'liquid-glass-modal-text-muted hover:bg-white/20 dark:hover:bg-white/10'
+                          : 'liquid-glass-modal-text-muted '
                       }`}
                     >
                       {tr('labels.percent', 'Percent')}
@@ -3377,7 +3376,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                       className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
                         discountMode === 'fixed'
                           ? 'liquid-glass-modal-primary'
-                          : 'liquid-glass-modal-text-muted hover:bg-white/20 dark:hover:bg-white/10'
+                          : 'liquid-glass-modal-text-muted '
                       }`}
                     >
                       {tr('labels.amount', 'Amount')}
@@ -3531,8 +3530,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   onClick={() => setSelectedWaiterId('')}
                   className={`${glassSubtleSurfaceClass} flex items-center justify-between gap-3 px-3 py-3 text-left transition-colors ${
                     selectedWaiterId === ''
-                      ? 'border-blue-400/50 bg-blue-500/10'
-                      : 'hover:bg-white/45 dark:hover:bg-white/8'
+                      ? 'border-blue-600 bg-(--pos-s-surface-2)'
+                      : ''
                   }`}
                 >
                   <span className="font-semibold liquid-glass-modal-text">{tr('labels.unassignedWaiter', 'Unassigned')}</span>
@@ -3555,8 +3554,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                       onClick={() => setSelectedWaiterId(waiter.id)}
                       className={`${glassSubtleSurfaceClass} flex items-center justify-between gap-3 px-3 py-3 text-left transition-colors ${
                         selectedWaiterId === waiter.id
-                          ? 'border-blue-400/50 bg-blue-500/10'
-                          : 'hover:bg-white/45 dark:hover:bg-white/8'
+                          ? 'border-blue-600 bg-(--pos-s-surface-2)'
+                          : ''
                       }`}
                     >
                       <span className="min-w-0">

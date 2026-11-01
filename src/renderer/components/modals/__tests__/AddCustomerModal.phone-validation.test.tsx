@@ -117,7 +117,7 @@ const renderModal = async (
 };
 
 const fillRequiredFields = () => {
-  fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.namePlaceholder), {
+  fireEvent.change(screen.getByLabelText(en.modals.addCustomer.nameLabel.replace(' *', ''), { exact: false }), {
     target: { value: 'Synthetic Customer' },
   });
   fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.manualAddressPlaceholder), {
@@ -126,7 +126,7 @@ const fillRequiredFields = () => {
   fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.floorPlaceholder), {
     target: { value: '2' },
   });
-  fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.nameOnRingerPlaceholder), {
+  fireEvent.change(screen.getByLabelText(en.modals.addCustomer.nameOnRingerLabel.replace(' *', ''), { exact: false }), {
     target: { value: 'Synthetic' },
   });
 };
@@ -532,7 +532,7 @@ describe('refusals from this register, and refused address writes', () => {
       target: { value: 'Synthetic Street 9' },
     });
     fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.floorPlaceholder), { target: { value: '2' } });
-    fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.nameOnRingerPlaceholder), {
+    fireEvent.change(screen.getByLabelText(en.modals.addCustomer.nameOnRingerLabel.replace(' *', ''), { exact: false }), {
       target: { value: 'Synthetic' },
     });
     submit(container);
@@ -547,7 +547,7 @@ describe('refusals from this register, and refused address writes', () => {
       target: { value: 'Synthetic Street 9' },
     });
     fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.floorPlaceholder), { target: { value: '2' } });
-    fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.nameOnRingerPlaceholder), {
+    fireEvent.change(screen.getByLabelText(en.modals.addCustomer.nameOnRingerLabel.replace(' *', ''), { exact: false }), {
       target: { value: 'Synthetic' },
     });
     submit(container);

@@ -4,13 +4,12 @@ import { getBridge } from '../../../lib';
 import type { WindowsSettingsSection } from '../../../lib/ipc-adapter';
 import { applySavedAppAudioPreference, playAppAudioTest, useAppAudioEnabled } from '../../services/appAudio';
 import { requireSettingsSuccess } from '../../utils/settings-operation';
+import { POSGlassSwitch } from '../ui/pos-glass-components';
+import { solidButton } from './SettingsKit';
 
-interface SettingsRuntimePreferencesProps {
-  onOpenPrinterSettings?: () => void;
-  onOpenSecurity?: () => void;
-}
-
-export function SettingsRuntimePreferences({ onOpenPrinterSettings, onOpenSecurity }: SettingsRuntimePreferencesProps) {
+// Sections link to each other only through the settings rail (one navigation per screen).
+/** soundExtras: the other sound settings (platform order sound, efood mute) shown with the POS sounds. */
+export function SettingsRuntimePreferences({ soundExtras }: { soundExtras?: React.ReactNode } = {}) {
   const { t } = useTranslation();
   const bridge = useMemo(() => getBridge(), []);
   const savedAudioEnabled = useAppAudioEnabled();
@@ -63,45 +62,48 @@ export function SettingsRuntimePreferences({ onOpenPrinterSettings, onOpenSecuri
     { section: 'touch', label: t('settings.workflow.windowsTouch', { defaultValue: 'Pointer and touch feedback' }) },
     { section: 'power', label: t('settings.workflow.windowsPower', { defaultValue: 'Screen sleep and power' }) },
   ];
-  const buttonClass = 'min-h-touch rounded-xl border liquid-glass-modal-border px-4 py-3 text-sm font-medium liquid-glass-modal-text active:bg-black/5 dark:active:bg-white/5 disabled:cursor-wait disabled:opacity-50';
+  const buttonClass = solidButton('secondary', 'md');
 
   return (
     <div className="space-y-5" data-testid="settings-runtime-preferences">
-      <section className="rounded-2xl border liquid-glass-modal-border p-4 space-y-3">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h3 id={audioLabelId} className="font-medium liquid-glass-modal-text">
+      <section className="pos-group">
+        <div className="pos-row">
+          <div className="pos-row__label">
+            <h3 id={audioLabelId} className="pos-row__title">
               {t('settings.workflow.posSounds', { defaultValue: 'POS notification sounds' })}
             </h3>
-            <p className="text-xs liquid-glass-modal-text-muted mt-1">
+            <p className="pos-row__help">
               {t('settings.workflow.posSoundsHelp', { defaultValue: 'Sounds for incoming orders, kiosk notifications and kitchen updates. Visual alerts stay active.' })}
             </p>
           </div>
-          <button type="button" role="switch" aria-labelledby={audioLabelId} aria-checked={audioEnabled}
-            disabled={savingAudio} onClick={() => void saveAudio()}
-            className="flex h-11 w-14 shrink-0 items-center justify-center rounded-xl disabled:opacity-50">
-            <span className={`relative h-7 w-12 rounded-full transition-colors ${audioEnabled ? 'bg-yellow-400' : 'bg-slate-400/50'}`}>
-              <span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${audioEnabled ? 'left-1 translate-x-5' : 'left-1'}`} />
-            </span>
-          </button>
+          <div className="pos-row__control">
+            <POSGlassSwitch aria-labelledby={audioLabelId} checked={audioEnabled}
+              disabled={savingAudio} onChange={() => void saveAudio()} />
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          <button type="button" disabled={!savedAudioEnabled || savingAudio} className={buttonClass} onClick={() => playAppAudioTest()}>
-            {t('settings.workflow.testSound', { defaultValue: 'Test sound' })}
-          </button>
-          {savingAudio && <span role="status" className="text-xs liquid-glass-modal-text-muted">{t('settings.workflow.saving', { defaultValue: 'Saving…' })}</span>}
+        <div className="pos-row pos-row--stack">
+          <div className="flex items-center gap-3">
+            <button type="button" disabled={!savedAudioEnabled || savingAudio} className={buttonClass} onClick={() => playAppAudioTest()}>
+              {t('settings.workflow.testSound', { defaultValue: 'Test sound' })}
+            </button>
+            {savingAudio && <span role="status" className="text-sm liquid-glass-modal-text-muted">{t('settings.workflow.saving', { defaultValue: 'Saving…' })}</span>}
+          </div>
+          {audioError && <p role="alert" className="pos-notice pos-notice--bad text-sm">
+            {t('settings.workflow.audioSaveFailed', { defaultValue: 'Could not save the sound setting.' })} {audioError}
+          </p>}
         </div>
-        {audioError && <p role="alert" className="text-sm text-red-600 dark:text-red-300">
-          {t('settings.workflow.audioSaveFailed', { defaultValue: 'Could not save the sound setting.' })} {audioError}
-        </p>}
       </section>
 
-      <section className="rounded-2xl border liquid-glass-modal-border p-4 space-y-3">
-        <h3 className="font-medium liquid-glass-modal-text">{t('settings.workflow.windowsDeviceSettings', { defaultValue: 'Windows device settings' })}</h3>
-        <p className="text-xs liquid-glass-modal-text-muted">
-          {t('settings.workflow.windowsDeviceHelp', { defaultValue: 'Windows manages monitor brightness, speakers, pointer and touch feedback, and screen sleep. Open the relevant page to adjust this device.' })}
-        </p>
-        <div className="grid gap-2 sm:grid-cols-2">
+      {soundExtras}
+
+      <section className="pos-group">
+        <header className="pos-group__head">
+          <h3 className="pos-group__title">{t('settings.workflow.windowsDeviceSettings', { defaultValue: 'Windows device settings' })}</h3>
+          <p className="pos-group__desc">
+            {t('settings.workflow.windowsDeviceHelp', { defaultValue: 'Windows manages monitor brightness, speakers, pointer and touch feedback, and screen sleep. Open the relevant page to adjust this device.' })}
+          </p>
+        </header>
+        <div className="grid gap-2 px-5 pb-4 pt-2 sm:grid-cols-2">
           {systemSections.map(({ section, label }) => (
             <button type="button" key={section} className={buttonClass} disabled={openingSection !== null}
               onClick={() => void openSystemSettings(section)}>
@@ -109,20 +111,15 @@ export function SettingsRuntimePreferences({ onOpenPrinterSettings, onOpenSecuri
             </button>
           ))}
         </div>
-        {openingSection && <p role="status" className="text-xs liquid-glass-modal-text-muted">{t('settings.workflow.openingWindows', { defaultValue: 'Opening Windows settings…' })}</p>}
-        {systemError && <p role="alert" className="text-sm text-red-600 dark:text-red-300">
-          {t('settings.workflow.windowsOpenFailed', { defaultValue: 'Could not open Windows settings.' })} {systemError}
-        </p>}
+        {(openingSection || systemError) && (
+          <div className="px-5 pb-4">
+            {openingSection && <p role="status" className="text-sm liquid-glass-modal-text-muted">{t('settings.workflow.openingWindows', { defaultValue: 'Opening Windows settings…' })}</p>}
+            {systemError && <p role="alert" className="pos-notice pos-notice--bad text-sm">
+              {t('settings.workflow.windowsOpenFailed', { defaultValue: 'Could not open Windows settings.' })} {systemError}
+            </p>}
+          </div>
+        )}
       </section>
-
-      {(onOpenPrinterSettings || onOpenSecurity) && <div className="flex flex-wrap gap-2">
-        {onOpenPrinterSettings && <button type="button" className={buttonClass} onClick={onOpenPrinterSettings}>
-          {t('settings.workflow.receiptSettings', { defaultValue: 'Receipt and printer settings' })}
-        </button>}
-        {onOpenSecurity && <button type="button" className={buttonClass} onClick={onOpenSecurity}>
-          {t('settings.workflow.securitySettings', { defaultValue: 'PIN and security settings' })}
-        </button>}
-      </div>}
     </div>
   );
 }

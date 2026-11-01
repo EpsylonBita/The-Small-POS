@@ -631,7 +631,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
               />
               {hasDeliveryPro && isLoadingAddresses && (
                 <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
-                  <div className="w-4 h-4 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin"></div>
+                  <div className="w-4 h-4 border-2 border-(--pos-s-border) border-t-amber-500 rounded-full animate-spin"></div>
                 </div>
               )}
             </div>
@@ -701,7 +701,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
               )}
 
               {(validationStatus === 'out_of_zone' || validationStatus === 'unverified_offline') && (
-                <div className="space-y-2 rounded-2xl border border-orange-500/30 bg-orange-500/10 p-3">
+                <div className="space-y-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
                   <label className="flex items-center gap-2 text-sm text-orange-200">
                     <input
                       type="checkbox"

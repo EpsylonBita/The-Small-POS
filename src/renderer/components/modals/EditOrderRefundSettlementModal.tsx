@@ -223,7 +223,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
             type="button"
             onClick={() => void handleConfirm()}
             disabled={isSubmitting}
-            className="rounded-xl border border-orange-500/30 bg-orange-500/15 px-5 py-2.5 text-sm font-semibold text-orange-800 dark:text-orange-300 transition-colors active:bg-orange-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+            className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-5 py-2.5 text-sm font-semibold text-orange-800 dark:text-orange-300 transition-colors active:bg-(--pos-s-surface-2) disabled:cursor-not-allowed disabled:opacity-60"
           >
             {isSubmitting
               ? t('common.loading', { defaultValue: 'Processing...' })
@@ -234,9 +234,9 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
     >
       {!preview ? null : (
         <div className="space-y-4">
-          <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-4">
+          <div className="rounded-2xl border border-(--pos-s-warn) bg-(--pos-s-warn-bg) p-4">
             <div className="flex items-start gap-3">
-              <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-800 dark:text-amber-300" />
+              <AlertTriangle className="mt-0.5 h-5 w-5 text-(--pos-s-warn)" />
               <div className="space-y-1">
                 <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">
                   {totalReduced
@@ -247,7 +247,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                         defaultValue: 'This edit leaves the order overpaid and requires a recorded refund',
                       })}
                 </h3>
-                <p className="text-sm text-amber-900 dark:text-amber-100/80">
+                <p className="text-sm text-amber-900 dark:text-amber-100">
                   {orderNumber
                     ? `#${orderNumber} • `
                     : ''}
@@ -255,14 +255,14 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                     defaultValue: 'Choose exactly how the refunded amount was settled before the order edit can finish.',
                   })}
                 </p>
-                <p className="text-xs text-amber-800 dark:text-amber-100/70">
+                <p className="text-xs text-amber-800 dark:text-amber-100">
                   {t('modals.refund.originalVsNext', {
                     defaultValue: 'Order total changed from {{from}} to {{to}}',
                     from: originalMoney(preview.originalTotal),
                     to: originalMoney(preview.nextTotal),
                   })}
                 </p>
-                <p className="text-xs text-amber-800 dark:text-amber-100/70">
+                <p className="text-xs text-amber-800 dark:text-amber-100">
                   {t('modals.refund.netPaidAfterRefunds', {
                     defaultValue: 'Paid after previous refunds: {{amount}}',
                     amount: originalMoney(preview.paidTotal),
@@ -330,7 +330,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                           aria-label={t('modals.refund.amount', { defaultValue: 'Amount' })}
                           value={draft.amount}
                           onValueChange={(amount) => setDraft(payment.id, (current) => ({ ...current, amount }))}
-                          className="liquid-glass-modal-input w-full rounded-2xl py-2 pl-12 pr-3 text-sm focus:border-orange-400/50 focus:outline-hidden"
+                          className="liquid-glass-modal-input w-full rounded-2xl py-2 pl-12 pr-3 text-sm focus:border-orange-600 focus:outline-hidden"
                           placeholder="0,00"
                         />
                       </div>
@@ -344,7 +344,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                         rows={2}
                         value={draft.reason}
                         onChange={(event) => setDraft(payment.id, (current) => ({ ...current, reason: event.target.value }))}
-                        className="liquid-glass-modal-input w-full rounded-2xl px-3 py-2 text-sm focus:border-orange-400/50 focus:outline-hidden"
+                        className="liquid-glass-modal-input w-full rounded-2xl px-3 py-2 text-sm focus:border-orange-600 focus:outline-hidden"
                         placeholder={t('modals.refund.reasonPlaceholder', { defaultValue: 'Enter refund reason...' })}
                       />
                     </label>

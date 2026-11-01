@@ -349,7 +349,7 @@ const shortId = (value: string | null | undefined) =>
 const actionClass =
   'inline-flex items-center justify-center rounded-xl border border-slate-200/80 bg-white/80 px-4 py-2.5 text-sm font-semibold text-slate-700 transition-all disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/10 dark:bg-white/10 dark:text-slate-200';
 const primaryActionClass =
-  'inline-flex items-center justify-center rounded-xl bg-yellow-400 px-4 py-2.5 text-sm font-bold text-black shadow-[0_12px_28px_rgba(250,204,21,0.28)] transition-all disabled:cursor-not-allowed disabled:opacity-60';
+  'inline-flex items-center justify-center rounded-xl bg-yellow-400 px-4 py-2.5 text-sm font-bold text-black transition-all disabled:cursor-not-allowed disabled:opacity-60';
 
 export function GiftCloseAmount({ testId, label, cents, currency, signed = false, strong = false }: {
   testId: string;
@@ -573,10 +573,10 @@ export function GiftCloseRecoveryPanel({ bridge, target, isCurrent, print, onDon
       data-testid="gift-close-recovery"
       data-state={state ?? 'loading'}
       data-closing-key={target.closingKey}
-      className="space-y-4 rounded-2xl border border-yellow-300/60 bg-white/80 p-5 shadow-[0_10px_24px_rgba(15,23,42,0.06)] dark:border-yellow-300/20 dark:bg-white/5"
+      className="space-y-4 rounded-2xl border border-(--pos-s-border) bg-white/80 p-5 dark:border-zinc-700 dark:bg-white/5"
     >
       <div>
-        <div className="text-xs uppercase tracking-[0.22em] text-yellow-700 dark:text-yellow-300/90">
+        <div className="text-xs uppercase tracking-[0.22em] text-yellow-700 dark:text-yellow-300">
           {label('title', 'Gift card cash close')}
         </div>
         <h3 className="mt-2 text-2xl font-black text-slate-900 dark:text-white">{title}</h3>
@@ -618,7 +618,7 @@ export function GiftCloseRecoveryPanel({ bridge, target, isCurrent, print, onDon
       )}
 
       {canonical && (
-        <section data-testid="gift-close-canonical" className="rounded-xl border border-emerald-300/60 p-4 dark:border-emerald-300/20">
+        <section data-testid="gift-close-canonical" className="rounded-xl border border-(--pos-s-border) p-4 dark:border-zinc-700">
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700 dark:text-emerald-300">
             {label('canonical', 'Confirmed terms')}
           </div>
@@ -738,7 +738,7 @@ export function GiftClosePendingList({ state, onSelect, onReload }: {
   if (state.kind === 'loading') return null;
   if (state.kind === 'failed') {
     return (
-      <div data-testid="gift-close-pending-failed" data-code={state.code} className="flex flex-col gap-3 rounded-2xl border border-amber-300/60 bg-amber-50/70 p-4 sm:flex-row sm:items-center sm:justify-between dark:border-amber-300/20 dark:bg-amber-400/10">
+      <div data-testid="gift-close-pending-failed" data-code={state.code} className="flex flex-col gap-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4 sm:flex-row sm:items-center sm:justify-between dark:border-zinc-700 dark:bg-zinc-800">
         <p className="text-sm text-slate-700 dark:text-slate-200">
           {label('pendingListFailed', 'Pending gift card closes for this cashier could not be checked.')}
         </p>
@@ -751,7 +751,7 @@ export function GiftClosePendingList({ state, onSelect, onReload }: {
   if (state.closings.length === 0) return null;
 
   return (
-    <div data-testid="gift-close-pending-list" className="rounded-2xl border border-yellow-300/60 bg-yellow-50/70 p-4 dark:border-yellow-300/20 dark:bg-yellow-400/10">
+    <div data-testid="gift-close-pending-list" className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4 dark:border-zinc-700 dark:bg-zinc-800">
       <div className="text-sm font-bold text-slate-900 dark:text-white">
         {label('pendingListTitle', 'Pending gift card closes')}
       </div>

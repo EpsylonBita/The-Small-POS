@@ -260,7 +260,8 @@ test('cashier-first notice uses readable semantic text on its light yellow surfa
   assert.ok(noticeStart > 0 && noticeEnd > noticeStart);
   const notice = modalSource.slice(noticeStart, noticeEnd);
 
-  assert.match(notice, /bg-yellow-50/);
+  // Wave ΣΤ5: the kit warn notice (solid tint in both themes).
+  assert.match(notice, /border-\(--pos-s-warn\) bg-\(--pos-s-warn-bg\)/);
   assert.match(notice, /text-yellow-900/);
   assert.doesNotMatch(notice, /text-white/, 'white copy is unreadable on the light warning surface');
 });

@@ -860,7 +860,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     const selectedOwner = portion.collectedBy ?? defaultCollectedBy ?? 'cashier_drawer';
     return (
       <div className="space-y-1">
-        <p className="text-[11px] font-semibold text-slate-500 dark:text-white/40">
+        <p className="text-[11px] font-semibold text-(--pos-s-muted)">
           {collectionMode.label || t('splitPayment.collectedBy', { defaultValue: 'Collected By' })}
         </p>
         {collectionMode.description ? (
@@ -871,7 +871,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             type="button"
             disabled={locked}
             onClick={() => setPortionCollectedBy(portion.id, 'cashier_drawer')}
-            className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner !== 'driver_shift' ? 'border border-emerald-400/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300' : 'text-slate-500 active:text-slate-700 dark:text-white/50 dark:active:text-white/70'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
+            className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner !== 'driver_shift' ? 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 dark:text-emerald-300' : 'text-slate-500 active:text-slate-700 dark:text-white/50 dark:active:text-white/70'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
           >
             {t('splitPayment.cashierDrawer', { defaultValue: 'Cashier' })}
           </button>
@@ -913,7 +913,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         <span>{formatCurrency(portion.amount)}</span>
       </div>
       {portion.status === 'paid' ? (
-        <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-200">
+        <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-xs text-emerald-700 dark:text-emerald-200">
           {t('modals.orderDetails.paid', { defaultValue: 'Paid' })} • {t(portion.method === 'card' ? 'modals.orderDetails.card' : 'modals.orderDetails.cash', { defaultValue: portion.method === 'card' ? 'Card' : 'Cash' })}
           {portion.paymentOrigin === 'terminal' ? ` • ${t('splitPayment.terminalApproved', { defaultValue: 'Terminal' })}` : ''}
         </div>
@@ -922,7 +922,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           {t('splitPayment.waitingForApproval', { defaultValue: 'Waiting for card approval on the payment terminal...' })}
         </div>
       ) : portion.status === 'unsaved' ? (
-        <div data-testid={`split-portion-unsaved-${portion.id}`} className="rounded-2xl border border-red-400/40 bg-red-500/10 px-3 py-2 text-xs font-semibold text-red-800 dark:text-red-200">
+        <div data-testid={`split-portion-unsaved-${portion.id}`} className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-xs font-semibold text-red-800 dark:text-red-200">
           {t('splitPayment.portionNotSaved', { defaultValue: 'Card charged, payment not saved yet. Do not charge again.' })}
         </div>
       ) : (
@@ -942,7 +942,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
               {discountEditorPortionId === portion.id ? (
                 <div className="flex items-center gap-2 rounded-2xl border border-slate-200/90 bg-slate-50/80 p-2 dark:border-white/10 dark:bg-white/5">
                   <div className="relative flex-1">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-500 dark:text-white/40">{currency ?? getStoreCurrency() ?? '—'}</span>
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-(--pos-s-muted)">{currency ?? getStoreCurrency() ?? '—'}</span>
                     <SplitAmountInput
                       amount={Number(discountDraftValue) || 0}
                       label={t('splitPayment.discount', { defaultValue: 'Discount' })}
@@ -953,7 +953,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                   <button
                     type="button"
                     onClick={() => saveDiscount(portion.id)}
-                    className="rounded-2xl border border-emerald-500/30 bg-emerald-600/20 px-3 py-2 text-xs font-semibold text-emerald-700 dark:text-emerald-300"
+                    className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-xs font-semibold text-emerald-700 dark:text-emerald-300"
                   >
                     {t('common.actions.apply', { defaultValue: 'Apply' })}
                   </button>
@@ -1006,18 +1006,18 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
               className="split-payment-person space-y-2">
               <div className="flex items-center justify-between">
                 <span className="flex items-center gap-2 text-sm font-semibold liquid-glass-modal-text">
-                  <Users className="h-4 w-4 text-slate-500 dark:text-white/40" />{portion.label}
+                  <Users className="h-4 w-4 text-(--pos-s-muted)" />{portion.label}
                 </span>
                 {portions.length > 2 && portion.status === 'draft' && (
                   <button type="button" onClick={() => removePerson(portion.id)}
-                    className="rounded-2xl p-1 text-red-400/60 transition-colors active:bg-red-500/10 active:text-red-400">
+                    className="rounded-2xl p-1 text-red-700 dark:text-red-400 transition-colors active:bg-(--pos-s-surface-2) active:text-red-400">
                     <Trash2 className="h-4 w-4" />
                   </button>
                 )}
               </div>
               <div className="split-payment-amount-row flex items-center gap-3">
                 <div className="relative min-w-0 flex-1">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-slate-500 dark:text-white/40">{currency ?? getStoreCurrency() ?? '—'}</span>
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-(--pos-s-muted)">{currency ?? getStoreCurrency() ?? '—'}</span>
                   <SplitAmountInput amount={portion.grossAmount} label={portion.label}
                     disabled={portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight}
                     onAmountChange={(amount) => updatePortionGrossAmount(portion.id, amount)} />
@@ -1042,7 +1042,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     return (
       <div className="split-payment-items-grid grid grid-cols-2 gap-4">
         <div className="space-y-2">
-          <h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-slate-500 dark:text-white/40">
+          <h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-(--pos-s-muted)">
             <ShoppingCart className="h-3.5 w-3.5" />
             {t("splitPayment.orderItems", "Order Items")}
           </h4>
@@ -1055,12 +1055,12 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             return (
               <div
                 key={itemIndex}
-                className={`rounded-2xl border p-2.5 transition-colors ${assignedTo ? "border-emerald-300/60 bg-emerald-50/80 dark:border-emerald-400/20 dark:bg-emerald-500/5" : "border-slate-200/90 bg-white/80 dark:border-white/10 dark:bg-white/5"}`}
+                className={`rounded-2xl border p-2.5 transition-colors ${assignedTo ? "border-(--pos-s-border) bg-(--pos-s-surface-2) dark:border-zinc-700 dark:bg-zinc-800" : "border-slate-200/90 bg-white/80 dark:border-white/10 dark:bg-white/5"}`}
               >
                 <div className="mb-1.5 flex items-center justify-between">
                   <span className="flex-1 truncate text-sm font-medium liquid-glass-modal-text">
                     {item.quantity > 1 && (
-                      <span className="mr-1 text-slate-500 dark:text-white/40">
+                      <span className="mr-1 text-(--pos-s-muted)">
                         {item.quantity}x
                       </span>
                     )}
@@ -1097,7 +1097,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                         type="button"
                         aria-pressed={!assignedTo}
                         onClick={() => assignItem(itemIndex, null)}
-                        className={`w-full px-3 py-2 text-left text-xs transition-colors ${!assignedTo ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300" : "text-slate-800 active:bg-slate-100 dark:text-white/80 dark:active:bg-white/8"}`}
+                        className={`w-full px-3 py-2 text-left text-xs transition-colors ${!assignedTo ? "bg-emerald-100 text-emerald-700 dark:bg-zinc-800 dark:text-emerald-300" : "text-slate-800 active:bg-slate-100 dark:text-white/80 dark:active:bg-white/8"}`}
                       >
                         {t("splitPayment.unassigned", "-- Unassigned --")}
                       </button>
@@ -1109,7 +1109,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                             type="button"
                             aria-pressed={assignedTo === portion.id}
                             onClick={() => assignItem(itemIndex, portion.id)}
-                            className={`w-full px-3 py-2 text-left text-xs transition-colors ${assignedTo === portion.id ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300" : "text-slate-900 active:bg-slate-100 dark:text-white dark:active:bg-white/8"}`}
+                            className={`w-full px-3 py-2 text-left text-xs transition-colors ${assignedTo === portion.id ? "bg-emerald-100 text-emerald-700 dark:bg-zinc-800 dark:text-emerald-300" : "text-slate-900 active:bg-slate-100 dark:text-white dark:active:bg-white/8"}`}
                           >
                             {portion.label}
                           </button>
@@ -1121,7 +1121,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             );
           })}
           {availableItems.length === 0 && (
-            <div className="rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-2 text-center">
+            <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-2 text-center">
               <span className="text-xs font-medium text-emerald-500 dark:text-emerald-400">
                 {t("splitPayment.allItemsPaid", {
                   defaultValue:
@@ -1131,7 +1131,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             </div>
           )}
           {availableItems.length > 0 && unassignedCount > 0 && (
-            <div className="rounded-2xl border border-amber-400/30 bg-amber-500/10 p-2 text-center">
+            <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-2 text-center">
               <span className="text-xs font-medium text-amber-500 dark:text-amber-400">
                 {t("splitPayment.unassignedWarning", {
                   count: unassignedCount,
@@ -1141,14 +1141,14 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           )}
         </div>
         <div className="space-y-2">
-          <h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-slate-500 dark:text-white/40">
+          <h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-(--pos-s-muted)">
             <Users className="h-3.5 w-3.5" />
             {t("splitPayment.people", "People")}
           </h4>
           {portions.map((portion) => (
             <div
               key={portion.id}
-              className={`space-y-2 rounded-2xl border p-2.5 ${portion.status === "paid" ? "border-emerald-300/60 bg-emerald-50/80 dark:border-emerald-400/20 dark:bg-emerald-500/5" : portion.status === "processing" ? "border-slate-300/70 bg-slate-100/80 dark:border-slate-400/25 dark:bg-slate-500/5" : "border-slate-200/90 bg-white/80 dark:border-white/10 dark:bg-white/5"}`}
+              className={`space-y-2 rounded-2xl border p-2.5 ${portion.status === "paid" ? "border-(--pos-s-border) bg-(--pos-s-surface-2) dark:border-zinc-700 dark:bg-zinc-800" : portion.status === "processing" ? "border-slate-300/70 bg-slate-100/80 dark:border-slate-400/25 dark:bg-slate-500/5" : "border-slate-200/90 bg-white/80 dark:border-white/10 dark:bg-white/5"}`}
             >
               <div className="flex items-center justify-between">
                 <span className="text-sm font-semibold liquid-glass-modal-text">
@@ -1158,7 +1158,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                   <button
                     type="button"
                     onClick={() => removePerson(portion.id)}
-                    className="rounded-full p-1 text-red-400/60 transition-colors active:bg-red-500/10 active:text-red-400"
+                    className="rounded-full p-1 text-red-700 dark:text-red-400 transition-colors active:bg-(--pos-s-surface-2) active:text-red-400"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -1236,14 +1236,14 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         <button
           type="button"
           onClick={() => setReceiptMode("combined")}
-          className={`rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === "combined" ? "border border-yellow-400 bg-yellow-400 text-black split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
+          className={`rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === "combined" ? "border border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) split-payment-segment-selected" : "text-(--pos-s-muted) active:text-(--pos-s-fg)"}`}
         >
           {t("splitPayment.receiptCombined", "All Together")}
         </button>
         <button
           type="button"
           onClick={() => setReceiptMode("individual")}
-          className={`rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === "individual" ? "border border-yellow-400 bg-yellow-400 text-black split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
+          className={`rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === "individual" ? "border border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) split-payment-segment-selected" : "text-(--pos-s-muted) active:text-(--pos-s-fg)"}`}
         >
           {t("splitPayment.receiptIndividual", "Separate")}
         </button>
@@ -1252,7 +1252,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         {alreadyPaidAmount > 0 && (
           <span className="liquid-glass-modal-text-muted">
             {t("splitPayment.alreadyPaid", "Already Paid")}:{" "}
-            <span className="font-bold text-emerald-400">
+            <span className="font-bold text-emerald-700 dark:text-emerald-400">
               {formatCurrency(alreadyPaidAmount)}
             </span>
           </span>
@@ -1279,14 +1279,14 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         </span>
         <span className="liquid-glass-modal-text-muted">
           {t("splitPayment.assigned", "Assigned")}:{" "}
-          <span className="font-bold text-emerald-400">
+          <span className="font-bold text-emerald-700 dark:text-emerald-400">
             {formatCurrency(assignedDraftAmount)}
           </span>
         </span>
         <span className="liquid-glass-modal-text-muted">
           {t("splitPayment.remaining", "Remaining")}:{" "}
           <span
-            className={`font-bold ${Math.abs(remaining) < 0.01 ? "text-emerald-400" : "text-amber-400"}`}
+            className={`font-bold ${Math.abs(remaining) < 0.01 ? "text-emerald-700 dark:text-emerald-400" : "text-amber-700 dark:text-amber-400"}`}
           >
             {formatCurrency(remaining)}
           </span>
@@ -1389,7 +1389,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                 <button
                   type="button"
                   onClick={() => setActiveTab("by-amount")}
-                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-amount" ? "bg-yellow-400 text-black shadow-xs split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
+                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-amount" ? "bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-xs split-payment-segment-selected" : "text-(--pos-s-muted) active:text-(--pos-s-fg)"}`}
                 >
                   <Split className="h-4 w-4" />
                   {t("splitPayment.byAmount", "By Amount")}
@@ -1397,7 +1397,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                 <button
                   type="button"
                   onClick={() => setActiveTab("by-items")}
-                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-items" ? "bg-yellow-400 text-black shadow-xs split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
+                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-items" ? "bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-xs split-payment-segment-selected" : "text-(--pos-s-muted) active:text-(--pos-s-fg)"}`}
                 >
                   <ShoppingCart className="h-4 w-4" />
                   {t("splitPayment.byItems", "By Items")}

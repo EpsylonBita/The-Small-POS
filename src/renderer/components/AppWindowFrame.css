@@ -25,12 +25,8 @@
   inset: -3px;
   border-radius: 0.875rem; /* pill rounded-xl (0.75rem) + the 3px outset */
   padding: 2px;
-  background: conic-gradient(
-    from var(--app-frame-ring-angle),
-    rgba(120, 53, 15, 0) 0deg,
-    rgba(120, 53, 15, 0.85) 300deg,
-    rgba(120, 53, 15, 0) 360deg
-  );
+  /* Wave ΣΤ1: a still solid ring (no translucent spinning arc). */
+  background: #78350f;
   -webkit-mask:
     linear-gradient(#fff 0 0) content-box,
     linear-gradient(#fff 0 0);
@@ -39,7 +35,6 @@
     linear-gradient(#fff 0 0) content-box,
     linear-gradient(#fff 0 0);
   mask-composite: exclude;
-  animation: app-frame-ring-spin 2.4s linear infinite;
   pointer-events: none;
 }
 
@@ -52,10 +47,6 @@
 @media (prefers-reduced-motion: reduce) {
   .app-frame-update-pill[data-update-status='available']::before {
     animation: none;
-    background: conic-gradient(
-      from 0deg,
-      rgba(120, 53, 15, 0.45) 0deg,
-      rgba(120, 53, 15, 0.45) 360deg
-    );
+    background: #78350f;
   }
 }

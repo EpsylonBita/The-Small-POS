@@ -93,7 +93,7 @@ export const TerminalCard: React.FC<Props> = ({
         backdrop-blur-sm border border-gray-700/50
         transition-all duration-200
         ${!device.enabled ? 'opacity-60' : ''}
-        ${device.isDefault ? 'ring-2 ring-amber-500/50' : ''}
+        ${device.isDefault ? 'ring-2 ring-(--pos-s-fg)' : ''}
       `}
     >
       {/* Header */}
@@ -106,7 +106,7 @@ export const TerminalCard: React.FC<Props> = ({
             <div className="flex items-center gap-2">
               <h3 className="font-semibold text-white">{device.name}</h3>
               {device.isDefault && (
-                <Star className="w-4 h-4 text-yellow-400 fill-yellow-400" />
+                <Star className="w-4 h-4 text-yellow-700 dark:text-yellow-400 fill-yellow-400" />
               )}
             </div>
             <p className="text-sm text-gray-400">{protocolLabels[device.protocol]}</p>
@@ -126,7 +126,7 @@ export const TerminalCard: React.FC<Props> = ({
           </p>
         )}
         {status?.errorMessage && (
-          <p className="text-sm text-red-400">{status.errorMessage}</p>
+          <p className="text-sm text-red-700 dark:text-red-400">{status.errorMessage}</p>
         )}
       </div>
 
@@ -137,7 +137,7 @@ export const TerminalCard: React.FC<Props> = ({
             onClick={onDisconnect}
             disabled={connectionActionsDisabled}
             aria-label={connectionActionsDisabledReason || t('ecr.disconnect', 'Disconnect')}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/20 text-red-400 active:bg-red-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 active:bg-(--pos-s-surface-2) transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <PowerOff className="w-4 h-4" />
             {t('ecr.disconnect', 'Disconnect')}
@@ -147,7 +147,7 @@ export const TerminalCard: React.FC<Props> = ({
             onClick={onConnect}
             disabled={isConnecting || !device.enabled || connectionActionsDisabled}
             aria-label={connectionActionsDisabledReason || t('ecr.connect', 'Connect')}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-500/20 text-green-400 active:bg-green-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 active:bg-(--pos-s-surface-2) transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Power className="w-4 h-4" />
             {isConnecting
@@ -176,7 +176,7 @@ export const TerminalCard: React.FC<Props> = ({
 
         <button
           onClick={onDelete}
-          className="p-2 rounded-lg bg-gray-700/50 text-red-400 active:bg-red-500/20 transition-colors"
+          className="p-2 rounded-lg bg-gray-700/50 text-red-700 dark:text-red-400 active:bg-(--pos-s-surface-2) transition-colors"
           aria-label={t('common.delete', 'Delete')}
         >
           <Trash2 className="w-4 h-4" />

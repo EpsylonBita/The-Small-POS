@@ -1,4 +1,5 @@
 import type { PlatformBridge } from '../../lib';
+import { tableCancellationFields } from './TableManualCancellation';
 
 export interface ManualCancellationPlan {
   orderId: string;
@@ -23,9 +24,9 @@ export interface ManualCancellationPlan {
 export async function prepareManualOrderCancellation(bridge: Pick<PlatformBridge, 'invoke'>, orderId: string): Promise<ManualCancellationPlan> {
   const result = await bridge.invoke('order_prepare_manual_cancel', { orderId });
   const financial = result?.requiresReturn === true || result?.requiresHandback === true;
-  const table = typeof result?.tableSessionId === 'string' && result.tableSessionId.length > 0;
-  if (result?.success !== true || (!financial && !table) || result.orderId !== orderId
-    || typeof result.generation !== 'string' || !Number.isSafeInteger(result.amountCents) || result.amountCents < 0 || (result.requiresReturn === true && result.amountCents === 0)
+  if (result?.success !== true || typeof result.requiresReturn !== 'boolean' || result.orderId !== orderId
+    || typeof result.generation !== 'string' || !Number.isSafeInteger(result.amountCents) || result.amountCents < 0
+    || (result.requiresReturn ? result.amountCents === 0 : result.amountCents !== 0)
     || (financial && (typeof result.currency !== 'string' || !/^[A-Z]{3}$/.test(result.currency)))) {
     throw new Error('CANCELLATION_PAYMENT_CHANGED');
   }
@@ -38,6 +39,30 @@ export async function commitManualOrderCancellation(bridge: Pick<PlatformBridge,
     orderId: plan.orderId, generation: plan.generation, requestId: plan.requestId, reason, returnChannel,
   });
   if (result?.success !== true) throw new Error(result?.error || 'ORDER_CANCELLATION_FAILED');
+}
+
+/** One commit path for the dashboard and history Refund hosts. Native guards
+ * recheck the original and require the same approval as the Cancel action. */
+export async function applyPreparedOrderCancellation(
+  bridge: Pick<PlatformBridge, 'invoke' | 'orders'>,
+  plan: ManualCancellationPlan,
+  reason: string,
+  returnChannel: 'cash_drawer' | 'bank',
+  managerPin?: string,
+): Promise<void> {
+  if (plan.tableSessionId) {
+    const result = await bridge.orders.cancelWithApproval({
+      orderId: plan.orderId, reason, tableSessionId: plan.tableSessionId,
+      managerPin,
+      ...tableCancellationFields({ ...plan, tableSessionId: plan.tableSessionId, requiresHandback: Boolean(plan.requiresHandback) }, returnChannel),
+    });
+    if (result?.success !== true) throw new Error('ORDER_CANCELLATION_FAILED');
+  } else if (plan.requiresReturn || plan.requiresHandback) {
+    await commitManualOrderCancellation(bridge, plan, reason, returnChannel);
+  } else {
+    const result = await bridge.orders.updateStatus(plan.orderId, 'cancelled', { cancellationReason: reason });
+    if (result?.success !== true) throw new Error(result?.error || 'ORDER_CANCELLATION_FAILED');
+  }
 }
 
 const errorCode = (error: unknown): string => {

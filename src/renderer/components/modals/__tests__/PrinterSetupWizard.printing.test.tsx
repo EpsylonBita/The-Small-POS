@@ -209,7 +209,7 @@ const wizardProps = (overrides: Record<string, unknown> = {}) => ({
 const enterVerificationStep = async () => {
   await screen.findByText('MCP31 Front Counter')
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-  await screen.findByRole('heading', { name: 'Step 2: Verify Compatibility' })
+  await screen.findByRole('heading', { name: 'Print a test receipt' })
 }
 
 const confirmTrackedPaper = async (
@@ -221,7 +221,7 @@ const confirmTrackedPaper = async (
   view.rerender(<PrinterSetupWizard {...props} />)
   fireEvent.click(within(await screen.findByRole('group', {
     name: 'Did the paper output print correctly?',
-  })).getByRole('button', { name: 'Yes' }))
+  })).getByRole('button', { name: 'Yes, it printed correctly' }))
 }
 
 const completeCoreVerification = async (
@@ -240,9 +240,9 @@ const completeCoreVerification = async (
 
 const openSaveStep = async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-  await screen.findByRole('heading', { name: 'Step 3: Defaults & Readability' })
+  await screen.findByRole('heading', { name: 'How the receipt looks' })
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-  await screen.findByRole('heading', { name: 'Step 4: Save & Assign' })
+  await screen.findByRole('heading', { name: 'Save the printer' })
 }
 
 const queueSample = (
@@ -795,7 +795,7 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
     await waitFor(() => expect(componentMocks.testDraft).toHaveBeenCalledTimes(1))
 
     fireEvent.click(screen.getByRole('button', { name: 'detect' }))
-    const refresh = screen.getByRole('button', { name: 'Refresh' })
+    const refresh = screen.getByRole('button', { name: 'Search again' })
     const otherCandidate = screen.getByRole('button', { name: /MCP31 Kitchen/ })
     expect(refresh).toBeDisabled()
     expect(otherCandidate).toBeDisabled()
@@ -819,7 +819,7 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
       finishRefresh = resolve
     })
     componentMocks.scanNetwork.mockReturnValueOnce(pendingRefresh)
-    const refresh = screen.getByRole('button', { name: 'Refresh' })
+    const refresh = screen.getByRole('button', { name: 'Search again' })
     fireEvent.click(refresh)
     expect(refresh).toBeDisabled()
 
@@ -1127,7 +1127,7 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
     )
 
     expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
-    const explicitContinue = screen.getByRole('checkbox', {
+    const explicitContinue = screen.getByRole('switch', {
       name: 'Continue without verified logo output',
     })
     fireEvent.click(explicitContinue)
@@ -1229,7 +1229,7 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
     view.rerender(<PrinterSetupWizard {...props} />)
     fireEvent.click(within(await screen.findByRole('group', {
       name: 'Did the paper output print correctly?',
-    })).getByRole('button', { name: 'Yes' }))
+    })).getByRole('button', { name: 'Yes, it printed correctly' }))
 
     fireEvent.click(await screen.findByRole('button', { name: 'Send encoding sample' }))
     await waitFor(() => expect(componentMocks.testDraft).toHaveBeenCalledTimes(2))
@@ -1244,15 +1244,15 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
     view.rerender(<PrinterSetupWizard {...props} />)
     fireEvent.click(within(await screen.findByRole('group', {
       name: 'Did the paper output print correctly?',
-    })).getByRole('button', { name: 'Yes' }))
+    })).getByRole('button', { name: 'Yes, it printed correctly' }))
 
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-    await screen.findByRole('heading', { name: 'Step 3: Defaults & Readability' })
+    await screen.findByRole('heading', { name: 'How the receipt looks' })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-    await screen.findByRole('heading', { name: 'Step 4: Save & Assign' })
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Kitchen' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Bar' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Label' }))
+    await screen.findByRole('heading', { name: 'Save the printer' })
+    fireEvent.click(screen.getByRole('switch', { name: 'Kitchen' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Bar' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Label' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(componentMocks.add).toHaveBeenCalledTimes(4))
@@ -1399,7 +1399,7 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
     const view = render(<PrinterSetupWizard {...props} />)
     await screen.findByText('Counter Bluetooth')
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-    await screen.findByRole('heading', { name: 'Step 2: Verify Compatibility' })
+    await screen.findByRole('heading', { name: 'Print a test receipt' })
     await completeCoreVerification(view, props, 'identity-channel-transport', 'identity-channel-encoding')
     await openSaveStep()
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
@@ -1444,7 +1444,7 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
     view.rerender(<PrinterSetupWizard {...props} />)
     fireEvent.click(within(await screen.findByRole('group', {
       name: 'Did the paper output print correctly?',
-    })).getByRole('button', { name: 'Yes' }))
+    })).getByRole('button', { name: 'Yes, it printed correctly' }))
 
     fireEvent.click(await screen.findByRole('button', { name: 'Send encoding sample' }))
     await waitFor(() => expect(componentMocks.testDraft).toHaveBeenCalledTimes(2))
@@ -1456,7 +1456,7 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
     view.rerender(<PrinterSetupWizard {...props} />)
     fireEvent.click(within(await screen.findByRole('group', {
       name: 'Did the paper output print correctly?',
-    })).getByRole('button', { name: 'Yes' }))
+    })).getByRole('button', { name: 'Yes, it printed correctly' }))
 
     fireEvent.click(await screen.findByRole('button', { name: 'Send branding sample' }))
     await waitFor(() => expect(componentMocks.testDraft).toHaveBeenCalledTimes(3))
@@ -1468,15 +1468,15 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
     view.rerender(<PrinterSetupWizard {...props} />)
     fireEvent.click(within(await screen.findByRole('group', {
       name: 'Did the paper output print correctly?',
-    })).getByRole('button', { name: 'Yes' }))
+    })).getByRole('button', { name: 'Yes, it printed correctly' }))
 
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-    await screen.findByRole('heading', { name: 'Step 3: Defaults & Readability' })
+    await screen.findByRole('heading', { name: 'How the receipt looks' })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-    await screen.findByRole('heading', { name: 'Step 4: Save & Assign' })
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Kitchen' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Bar' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Label' }))
+    await screen.findByRole('heading', { name: 'Save the printer' })
+    fireEvent.click(screen.getByRole('switch', { name: 'Kitchen' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Bar' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Label' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(componentMocks.update).toHaveBeenCalledTimes(4))
@@ -1554,7 +1554,7 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
     await enterVerificationStep()
     await completeCoreVerification(view, props, 'partial-save-transport', 'partial-save-encoding')
     await openSaveStep()
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Kitchen' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Kitchen' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1))
@@ -1580,7 +1580,7 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
     await enterVerificationStep()
     await completeCoreVerification(view, props, 'throwing-save-transport', 'throwing-save-encoding')
     await openSaveStep()
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Kitchen' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Kitchen' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1))
@@ -1615,7 +1615,7 @@ describe('PrinterSetupWizard tracked sample workflow', () => {
     })
     expect(componentMocks.add).toHaveBeenCalledTimes(1)
     expect(onBusyChange).toHaveBeenCalledWith(true)
-    expect(screen.getByRole('heading', { name: 'Step 4: Save & Assign' })).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Save the printer' })).toBeVisible()
     expect(detectStep).toBeDisabled()
 
     await act(async () => {

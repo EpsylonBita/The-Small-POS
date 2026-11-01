@@ -68,8 +68,10 @@ test('the shared catalog snapshot refreshes in the background after native menu 
 test('order-flow modals use a short enter and exit motion budget', () => {
   const styles = readFileSync(glassStylesPath, 'utf8');
 
-  assert.match(styles, /animation:\s*backdropEnter 180ms/);
-  assert.match(styles, /animation:\s*liquidModalEnter 180ms/);
-  assert.match(styles, /\.liquid-glass-modal-shell\.leaving\s*\{[^}]*liquidModalExit 180ms/s);
-  assert.match(styles, /\.liquid-glass-modal-backdrop\.leaving\s*\{[^}]*backdropExit 180ms/s);
+  // UI audit wave 5: the modals run on the shared 180 ms token (--pos-motion-base).
+  assert.match(styles, /--pos-motion-base: 180ms;/);
+  assert.match(styles, /animation:\s*backdropEnter var\(--pos-motion-base, 180ms\)/);
+  assert.match(styles, /animation:\s*liquidModalEnter var\(--pos-motion-base, 180ms\)/);
+  assert.match(styles, /\.liquid-glass-modal-shell\.leaving\s*\{[^}]*liquidModalExit var\(--pos-motion-base, 180ms\)/s);
+  assert.match(styles, /\.liquid-glass-modal-backdrop\.leaving\s*\{[^}]*backdropExit var\(--pos-motion-base, 180ms\)/s);
 });

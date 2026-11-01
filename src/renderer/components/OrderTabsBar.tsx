@@ -1,4 +1,5 @@
 import React, { useMemo, useCallback } from 'react';
+import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 
@@ -8,7 +9,6 @@ interface TabConfig {
   id: TabId;
   label: string;
   count: number;
-  color: string;
 }
 
 interface OrderTabsBarProps {
@@ -30,36 +30,12 @@ interface OrderTabsBarProps {
   showServicesTab?: boolean;
 }
 
-// EXCEPTION to the white/black/grey/yellow palette: ONLY the active/selected order tab
-// shows its own neon color (orders green, delivered orange, tables blue, canceled red)
-// with a matching glow. Inactive tabs stay neutral grey — gray-600 in light, a dark-safe
-// zinc/grey (zinc-400) in dark. Arbitrary hex for orange/blue so the global Tailwind
-// palette remap can't neutralize the active neon; green/red stay semantic classes.
-const TAB_ACTIVE_TEXT: Record<string, string> = {
-  green: 'text-green-500',
-  orange: 'text-[#f97316]',
-  blue: 'text-[#3b82f6]',
-  red: 'text-red-500',
-  // Hub tabs (Round 236): rooms purple (matches the reserved-room accent), services teal.
-  purple: 'text-[#a855f7]',
-  teal: 'text-[#14b8a6]',
-};
-const TAB_GLOW: Record<string, string> = {
-  green: 'drop-shadow-[0_0_8px_rgba(34,197,94,0.8)]',
-  orange: 'drop-shadow-[0_0_8px_rgba(249,115,22,0.8)]',
-  blue: 'drop-shadow-[0_0_8px_rgba(59,130,246,0.8)]',
-  red: 'drop-shadow-[0_0_8px_rgba(239,68,68,0.8)]',
-  purple: 'drop-shadow-[0_0_8px_rgba(168,85,247,0.8)]',
-  teal: 'drop-shadow-[0_0_8px_rgba(20,184,166,0.8)]',
-};
-const tabTextClass = (color: string, isActive: boolean, isDark: boolean, withGlow: boolean): string => {
-  if (!isActive) {
-    // Inactive tab labels/counters are quiet grey in both themes (a dark-safe zinc in dark, not
-    // white); only the active tab gets its neon color/glow below.
-    return isDark ? 'text-zinc-400' : 'text-gray-600';
-  }
-  const base = TAB_ACTIVE_TEXT[color] ?? TAB_ACTIVE_TEXT.red;
-  return withGlow ? `${base} ${TAB_GLOW[color] ?? TAB_GLOW.red}` : base;
+// Founder 31/10 («ναι πάμε»): the selected tab is the kit selection -- yellow with dark words -- like
+// every other choice on the POS; the per-tab green/orange/blue/purple/teal/red identity is gone.
+// Inactive labels stay quiet grey (a dark-safe zinc in dark).
+const tabTextClass = (isActive: boolean, isDark: boolean): string => {
+  if (isActive) return 'text-(--pos-s-sel-fg)';
+  return isDark ? 'text-zinc-400' : 'text-gray-600';
 };
 
 const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
@@ -80,7 +56,6 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
           id: 'orders',
           label: t('dashboard.tabs.orders', 'Orders'),
           count: orderCounts.orders,
-          color: 'green', // EXCEPTION: order tabs keep distinct neon identity
         },
       ];
 
@@ -89,7 +64,6 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
         id: 'delivered',
         label: t('dashboard.tabs.delivered', 'Delivered'),
         count: orderCounts.delivered,
-        color: 'orange',
       });
 
       // Add Tables tab only if Tables module is acquired
@@ -98,7 +72,6 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
           id: 'tables',
           label: t('dashboard.tabs.tables', 'Tables'),
           count: orderCounts.tables || 0,
-          color: 'blue',
         });
       }
 
@@ -108,7 +81,6 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
           id: 'rooms',
           label: t('dashboard.tabs.rooms', 'Rooms'),
           count: orderCounts.rooms || 0,
-          color: 'purple',
         });
       }
 
@@ -118,7 +90,6 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
           id: 'services',
           label: t('dashboard.tabs.services', 'Services'),
           count: orderCounts.services || 0,
-          color: 'teal',
         });
       }
 
@@ -127,7 +98,6 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
         id: 'canceled',
         label: t('dashboard.tabs.canceled', 'Canceled'),
         count: orderCounts.canceled,
-        color: 'red',
       });
 
       return allTabs;
@@ -141,12 +111,14 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
     );
 
     return (
-      <div
+      // layoutScroll: the strip scrolls sideways, so the sliding indicator measures from it.
+      <motion.div
+        layoutScroll
         role="tablist"
         aria-label={t('dashboard.tabs.tablistLabel', 'Order status tabs')}
         className={`flex backdrop-blur-sm rounded-xl p-1.5 sm:p-2 border overflow-x-auto scrollbar-hide touch-pan-x ${
           resolvedTheme === 'light'
-            ? 'bg-[#fbf4e9]/90 border-amber-200/60 shadow-xs'
+            ? 'bg-[#fbf4e9] border-(--pos-s-border) shadow-xs'
             : 'bg-white/10 border-white/20'
         }`}
         style={{ WebkitOverflowScrolling: 'touch' }}
@@ -173,31 +145,43 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
             onClick={() => handleTabChange(tab.id)}
             className={`flex-1 min-w-[90px] px-3 sm:px-4 py-2.5 sm:py-3 rounded-lg font-medium transition-all duration-200 relative touch-feedback active:scale-95 ${
               activeTab === tab.id
-                ? resolvedTheme === 'light'
-                  ? 'bg-[#fffdf8]/95 backdrop-blur-sm shadow-xs border border-amber-100/80'
-                  : 'bg-white/20 shadow-lg'
+                ? ''
                 : resolvedTheme === 'light'
-                  ? 'active:bg-[#fff7e8]/90'
+                  ? 'active:bg-[#fff7e8]'
                   : 'active:bg-white/20'
             }`}
           >
-            <div className="flex items-center justify-center gap-1.5 sm:gap-2">
+            {/* The selected background slides to the newly selected tab (180 ms ease-out).
+                Visual only: the tab changes on the same press; "reduce motion" makes it jump. */}
+            {activeTab === tab.id && (
+              <motion.span
+                layoutId="order-tabs-indicator"
+                aria-hidden="true"
+                transition={{ duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
+                className="absolute inset-0 rounded-lg bg-(--pos-s-sel-bg)"
+              />
+            )}
+            <div className="relative flex items-center justify-center gap-1.5 sm:gap-2">
               <span
-                className={`text-sm sm:text-lg font-bold transition-all duration-200 ${tabTextClass(tab.color, activeTab === tab.id, resolvedTheme === 'dark', true)}`}
+                className={`text-sm sm:text-lg font-bold transition-all duration-200 ${tabTextClass(activeTab === tab.id, resolvedTheme === 'dark')}`}
               >
                 {tab.label}
               </span>
 
-              {/* Tab counter — same color as its tab label */}
-              <span
-                className={`text-[10px] sm:text-xs font-bold transition-all duration-200 ${tabTextClass(tab.color, activeTab === tab.id, resolvedTheme === 'dark', false)}`}
-              >
-                {tab.count}
-              </span>
+              {/* A count only when there is something to count: «Τραπέζια 0» read as "no tables". */}
+              {tab.count > 0 && (
+                <span
+                  className={`min-w-[20px] rounded-full px-1.5 text-center text-[10px] sm:text-xs font-bold transition-all duration-200 ${tabTextClass(activeTab === tab.id, resolvedTheme === 'dark')} ${
+                    activeTab === tab.id ? 'bg-black/12' : resolvedTheme === 'dark' ? 'bg-white/10' : 'bg-black/[0.06]'
+                  }`}
+                >
+                  {tab.count}
+                </span>
+              )}
             </div>
           </button>
         ))}
-      </div>
+      </motion.div>
     );
   }
 );

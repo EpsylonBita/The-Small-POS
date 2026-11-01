@@ -43,10 +43,11 @@
   transition: background-color 150ms, border-color 150ms, transform 150ms;
 }
 
+/* Wave ΣΤ7: the chosen tender is the kit selection; yellow stays on the one primary (confirm). */
 .split-payment-modal button.split-payment-method[aria-pressed='true'] {
-  border-color: var(--split-accent) !important;
-  background: var(--split-accent) !important;
-  color: #18181b !important;
+  border-color: var(--pos-s-sel-bg) !important;
+  background: var(--pos-s-sel-bg) !important;
+  color: var(--pos-s-sel-fg) !important;
 }
 
 .split-payment-modal button.split-payment-method svg,
@@ -213,7 +214,7 @@
 
 .split-payment-modal .split-payment-assignment-menu button[aria-pressed='true'] {
   background: var(--split-control) !important;
-  box-shadow: inset 3px 0 var(--split-accent);
+  box-shadow: inset 3px 0 var(--pos-s-sel-bg);
 }
 
 .split-payment-modal .split-payment-payable {
@@ -269,17 +270,6 @@
 
 .split-payment-modal .split-payment-summary > span {
   white-space: nowrap;
-}
-
-@media (hover: hover) {
-  .split-payment-modal button.split-payment-method:not(:disabled):hover,
-  .split-payment-modal button.split-payment-secondary:not(:disabled):hover {
-    border-color: var(--split-accent) !important;
-  }
-
-  .split-payment-modal button.split-payment-confirm:not(:disabled):hover {
-    filter: brightness(1.05);
-  }
 }
 
 @media (max-width: 640px) {

@@ -10,7 +10,8 @@ import {
 } from '../services/shiftConflictNotice';
 
 interface UseAppEventsProps {
-    onLogout: () => void;
+    /** `reason` is the native event's: 'logout' when the native sign-out announces itself. */
+    onLogout: (reason?: string) => void;
 }
 
 type ShutdownKind = 'shutdown' | 'restart';
@@ -158,11 +159,16 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
 
         const handleSessionTimeout = (data: any) => {
             console.warn('Session timeout received:', data);
-            toast.error(tRef.current('system.sessionExpired'), {
-                duration: 5000,
-                icon: createElement(Clock, { className: 'w-4 h-4 text-amber-500' }),
-            });
-            onLogoutRef.current();
+            const reason = typeof data?.reason === 'string' ? data.reason : undefined;
+            // The native sign-out announces itself here too (reason 'logout'): a sign-out, not an
+            // expired session, so it gets no «Η συνεδρία έληξε» (founder 31/10).
+            if (reason !== 'logout') {
+                toast.error(tRef.current('system.sessionExpired'), {
+                    duration: 5000,
+                    icon: createElement(Clock, { className: 'w-4 h-4 text-amber-500' }),
+                });
+            }
+            onLogoutRef.current(reason);
         };
 
         const handleTerminalSettingsUpdated = (settings: any) => {

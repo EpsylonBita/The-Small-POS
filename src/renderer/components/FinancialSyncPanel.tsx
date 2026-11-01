@@ -96,7 +96,7 @@ const getStatusPresentation = (
       return {
         label: t('sync.financial.conflict', { defaultValue: 'Conflict' }),
         badgeClassName:
-          'bg-orange-500/15 text-orange-700 dark:text-orange-300 border border-orange-500/30',
+          'bg-(--pos-s-surface-2) text-orange-700 dark:text-orange-300 border border-(--pos-s-border)',
         accentClassName: 'text-orange-600 dark:text-orange-300',
         description: t('sync.financial.conflictGroupDesc', {
           defaultValue: 'These items require operator review before they can sync.',
@@ -106,7 +106,7 @@ const getStatusPresentation = (
       return {
         label: t('sync.financial.failed', { defaultValue: 'Failed' }),
         badgeClassName:
-          'bg-red-500/15 text-red-700 dark:text-red-300 border border-red-500/30',
+          'bg-(--pos-s-surface-2) text-red-700 dark:text-red-300 border border-(--pos-s-border)',
         accentClassName: 'text-red-600 dark:text-red-300',
         description: t('sync.financial.failedGroupDesc', {
           defaultValue: 'These items stopped syncing and need intervention.',
@@ -116,7 +116,7 @@ const getStatusPresentation = (
       return {
         label: t('sync.financial.pending', { defaultValue: 'Pending' }),
         badgeClassName:
-          'bg-blue-500/15 text-blue-700 dark:text-blue-300 border border-blue-500/30',
+          'bg-(--pos-s-surface-2) text-blue-700 dark:text-blue-300 border border-(--pos-s-border)',
         accentClassName: 'text-blue-600 dark:text-blue-300',
         description: t('sync.financial.pendingGroupDesc', {
           defaultValue: 'These items are queued locally and still waiting to sync.',
@@ -126,7 +126,7 @@ const getStatusPresentation = (
       return {
         label: t('sync.financial.deferred', { defaultValue: 'Deferred' }),
         badgeClassName:
-          'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30',
+          'bg-(--pos-s-surface-2) text-amber-700 dark:text-amber-300 border border-(--pos-s-border)',
         accentClassName: 'text-amber-600 dark:text-amber-300',
         description: t('sync.financial.deferredGroupDesc', {
           defaultValue: 'These items were delayed by retry or backpressure handling.',
@@ -136,7 +136,7 @@ const getStatusPresentation = (
       return {
         label: t('sync.financial.inProgress', { defaultValue: 'In Progress' }),
         badgeClassName:
-          'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30',
+          'bg-(--pos-s-surface-2) text-cyan-700 dark:text-cyan-300 border border-(--pos-s-border)',
         accentClassName: 'text-cyan-600 dark:text-cyan-300',
         description: t('sync.financial.inProgressGroupDesc', {
           defaultValue: 'These items are being processed right now.',
@@ -398,7 +398,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
           <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5 sm:px-6">
             {incomingReadFailed && <p role="alert">{t('sync.financial.queueDetailsUnavailableHint')}</p>}
             {incomingCount>0 && (
-              <div role="status" className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
+              <div role="status" className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4">
                 <p>{t('sync.financial.incomingRecovery',{count:incomingCount})}</p>
                 <button onClick={handleRetryIncoming} disabled={!!processing} className="liquid-glass-modal-button mt-3">
                   {t('sync.financial.incomingRetry')}
@@ -407,11 +407,11 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
             )}
             {loading ? (
               <div className="flex h-40 items-center justify-center">
-                <div className="h-10 w-10 animate-spin rounded-full border-4 border-blue-500/30 border-t-blue-500" />
+                <div className="h-10 w-10 animate-spin rounded-full border-4 border-(--pos-s-border) border-t-blue-500" />
               </div>
             ) : !hasQueueDetails && !hasActionableSummary && incomingCount===0 && !incomingReadFailed ? (
               <div className="py-14 text-center">
-                <div className="mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-full bg-green-500/20">
+                <div className="mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-full bg-(--pos-s-surface-2)">
                   <svg
                     className="h-10 w-10 text-green-500"
                     fill="none"
@@ -434,24 +434,24 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                 </p>
               </div>
             ) : !hasQueueDetails && (incomingReadFailed || (incomingCount>0 && actionableSummaryCount<=incomingCount)) ? null : !hasQueueDetails ? (
-              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-5">
+              <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-5">
                 <div className="mb-2 text-sm font-bold text-amber-700 dark:text-amber-300">
                   {t('sync.financial.queueDetailsUnavailable', {
                     defaultValue: 'Financial sync still has actionable items.',
                   })}
                 </div>
-                <p className="text-sm font-medium text-amber-700/90 dark:text-amber-200">
+                <p className="text-sm font-medium text-amber-700 dark:text-amber-200">
                   {t('sync.financial.queueDetailsUnavailableHint', {
                     defaultValue:
                       'The local summary still reports pending or failed financial sync rows, but their queue details were not returned.',
                   })}
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2 text-xs font-semibold">
-                  <span className="rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-1.5 text-blue-700 dark:text-blue-300">
+                  <span className="rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-blue-700 dark:text-blue-300">
                     {t('sync.financial.pending', { defaultValue: 'Pending' })}:{' '}
                     {queueSummary?.pending ?? 0}
                   </span>
-                  <span className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-red-700 dark:text-red-300">
+                  <span className="rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-red-700 dark:text-red-300">
                     {t('sync.financial.failed', { defaultValue: 'Failed' })}:{' '}
                     {queueSummary?.failed ?? 0}
                   </span>
@@ -477,7 +477,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                     <button
                       onClick={handleRetryAll}
                       disabled={!!processing}
-                      className="rounded-xl bg-linear-to-r from-blue-500 to-cyan-500 px-4 py-2 text-sm font-bold text-white shadow-lg shadow-blue-500/25 transition-all hover:from-blue-600 hover:to-cyan-600 hover:shadow-blue-500/40 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-xl bg-linear-to-r from-blue-500 to-cyan-500 px-4 py-2 text-sm font-bold text-white shadow-lg transition-all disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {processing === 'all'
                         ? t('sync.financial.retryingAll')
@@ -488,7 +488,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                     <button
                       onClick={handleRepairOrphanedAdjustments}
                       disabled={!!processing}
-                      className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm font-bold text-amber-700 transition-all hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-400/30 dark:text-amber-200 dark:hover:bg-amber-400/10"
+                      className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2 text-sm font-bold text-amber-700 transition-all disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-amber-200"
                     >
                       {processing === 'repair-orphaned'
                         ? t('sync.financial.repairingOrphanedAdjustments', {
@@ -539,7 +539,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                             return (
                               <div
                                 key={item.id}
-                                className="rounded-2xl border border-white/10 bg-black/5 p-4 dark:bg-white/3"
+                                className="rounded-2xl border border-white/10 bg-black/5 p-4 dark:bg-white/3 dark:border-zinc-700"
                               >
                                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                                   <div className="min-w-0 flex-1">
@@ -560,12 +560,12 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                                     </div>
 
                                     {isDeferred && queueError ? (
-                                      <div className="mb-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3">
+                                      <div className="mb-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
                                         <div className="text-sm font-semibold text-amber-700 dark:text-amber-200">
                                           {queueError}
                                         </div>
                                         {item.nextRetryAt && (
-                                          <div className="mt-2 text-xs font-medium text-amber-800/80 dark:text-amber-100/80">
+                                          <div className="mt-2 text-xs font-medium text-amber-800 dark:text-amber-100">
                                             {t('sync.financial.nextRetryAt', {
                                               defaultValue: 'Next retry',
                                             })}
@@ -582,7 +582,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                                     )}
 
                                     <details className="group cursor-pointer text-xs">
-                                      <summary className="font-semibold text-blue-600 transition-colors hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300">
+                                      <summary className="font-semibold text-blue-600 transition-colors dark:text-blue-400 ">
                                         {t('sync.financial.viewPayload')}
                                       </summary>
                                       <pre className="mt-2 overflow-x-auto rounded-xl border border-slate-300/50 bg-slate-100 p-3 font-mono text-[10px] text-slate-700 dark:border-slate-600/50 dark:bg-slate-800/50 dark:text-slate-300">
@@ -604,7 +604,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                                           void handleRetryItem(item.id)
                                         }
                                         disabled={!!processing}
-                                        className="rounded-xl border border-slate-300/50 px-4 py-2 text-xs font-bold text-black transition-all hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:text-white dark:hover:bg-white/10"
+                                        className="rounded-xl border border-slate-300/50 px-4 py-2 text-xs font-bold text-black transition-all disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:text-white "
                                       >
                                         {processing === item.id
                                           ? '...'

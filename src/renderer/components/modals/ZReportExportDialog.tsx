@@ -94,12 +94,12 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
   const { resolvedTheme } = useTheme();
   const isDarkTheme = resolvedTheme === 'dark';
   const shellClassName = isDarkTheme
-    ? 'z-report-glass-shell border-yellow-400/25 text-white shadow-2xl shadow-black/40'
-    : 'z-report-glass-shell border-yellow-500/30 text-slate-950 shadow-2xl shadow-slate-950/20';
+    ? 'z-report-glass-shell border-(--pos-s-border) text-white shadow-2xl shadow-black/40'
+    : 'z-report-glass-shell border-(--pos-s-border) text-slate-950 shadow-2xl shadow-slate-950/20';
   const contentClassName = isDarkTheme ? 'z-report-glass-content p-4! text-white' : 'z-report-glass-content p-4! text-slate-950';
   const insetClass = isDarkTheme
-    ? 'border-yellow-400/15 bg-black/30 shadow-xs shadow-black/20 backdrop-blur-xl'
-    : 'border-yellow-500/25 bg-white/70 shadow-xs shadow-slate-950/10 backdrop-blur-xl';
+    ? 'border-(--pos-s-border) bg-black/30 shadow-xs shadow-black/20 backdrop-blur-xl'
+    : 'border-(--pos-s-border) bg-white/70 shadow-xs shadow-slate-950/10 backdrop-blur-xl';
   const tileClass = isDarkTheme
     ? 'border-white/12 bg-white/8 text-white'
     : 'border-slate-900/12 bg-white/80 text-slate-950';
@@ -107,9 +107,9 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
   const mutedText = isDarkTheme ? 'text-white/85' : 'text-slate-700';
   const softText = isDarkTheme ? 'text-white/60' : 'text-slate-500';
   const secondaryButton = isDarkTheme
-    ? 'border-yellow-400/20 bg-black/30 text-white active:bg-white/12'
-    : 'border-yellow-500/25 bg-white/80 text-slate-900 active:bg-white';
-  const primaryButton = 'border-yellow-500/40 bg-yellow-400 text-black shadow-lg shadow-yellow-500/20 active:bg-yellow-300';
+    ? 'border-(--pos-s-border) bg-black/30 text-white active:bg-white/12'
+    : 'border-(--pos-s-border) bg-white/80 text-slate-900 active:bg-white';
+  const primaryButton = 'border-(--pos-s-border) bg-yellow-400 text-black shadow-lg active:bg-yellow-300';
   const buttonBase = 'inline-flex min-h-touch items-center justify-center gap-2 rounded-xl border px-4 text-sm font-black transition disabled:cursor-not-allowed disabled:opacity-50';
 
   const listTitleId = useId();
@@ -324,7 +324,7 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
         data-z-report-export-row
         onClick={() => selectRow(view.id)}
         className={`w-full rounded-2xl border p-3 text-left transition active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 ${
-          isSelected ? 'border-yellow-400 bg-yellow-400/16 ring-2 ring-yellow-400/60' : tileClass
+          isSelected ? 'border-(--pos-s-sel-bg) bg-(--pos-s-surface-2) ring-2 ring-(--pos-s-sel-bg)' : tileClass
         }`}
       >
         <div className="flex items-start justify-between gap-2">
@@ -332,7 +332,7 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
             {identity.terminalName || identity.terminalId || '—'}
           </span>
           {view.id === shownZReportId && (
-            <span className="shrink-0 rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-[11px] font-black text-emerald-700 dark:text-emerald-200">
+            <span className="shrink-0 rounded-full border border-(--pos-s-border) bg-(--pos-s-surface-2) px-2 py-0.5 text-[11px] font-black text-emerald-700 dark:text-emerald-200">
               {t('modals.zReport.exportDialog.shownNow')}
             </span>
           )}
@@ -388,7 +388,7 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
                 </div>
               )}
               {list.status === 'error' && (
-                <div role="alert" data-z-report-export-list-error className="rounded-xl border border-rose-400/40 bg-rose-500/10 p-3 text-sm font-bold text-rose-700 dark:text-rose-200">
+                <div role="alert" data-z-report-export-list-error className="rounded-xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-3 text-sm font-bold text-rose-700 dark:text-rose-200">
                   <div>{t('modals.zReport.exportDialog.loadFailed')}</div>
                   {list.detail && <div className={`mt-1 wrap-break-word text-[11px] font-semibold ${softText}`}>{list.detail}</div>}
                   <button
@@ -437,7 +437,7 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
                           <th
                             colSpan={2}
                             scope="colgroup"
-                            className="border-t border-slate-900/10 bg-yellow-400/10 px-3 py-1.5 text-left text-xs font-black dark:border-white/10"
+                            className="border-t border-slate-900/10 bg-(--pos-s-surface-2) px-3 py-1.5 text-left text-xs font-black dark:border-white/10"
                           >
                             {section.rows[0]?.section}
                           </th>
@@ -499,7 +499,7 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
           <section
             aria-labelledby={provisionalTitleId}
             data-z-report-export-provisional
-            className="rounded-2xl border border-dashed border-amber-500/50 bg-amber-400/8 p-4"
+            className="rounded-2xl border border-dashed border-(--pos-s-yellow) bg-(--pos-s-surface-2) p-4"
           >
             <div className="flex items-start gap-3">
               <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" aria-hidden="true" />
@@ -546,8 +546,8 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
             data-z-report-export-notice={notice.tone}
             className={`rounded-2xl border p-3 text-sm font-bold ${
               notice.tone === 'error'
-                ? 'border-rose-400/40 bg-rose-500/10 text-rose-700 dark:text-rose-200'
-                : 'border-emerald-500/25 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
+                ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-rose-700 dark:text-rose-200'
+                : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200'
             }`}
           >
             <div className="wrap-break-word">{notice.text}</div>

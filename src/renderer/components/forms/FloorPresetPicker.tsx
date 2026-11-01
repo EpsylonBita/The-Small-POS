@@ -43,7 +43,8 @@ export const FloorPresetPicker: React.FC<FloorPresetPickerProps> = ({
   return (
     <div>
       <label className="mb-2 block text-sm font-medium liquid-glass-modal-text">
-        {label}
+        {label.replace(' *', '')}
+        {required && <span className="text-red-500"> *</span>}
       </label>
       <div className="relative">
         <Building2 className="liquid-glass-modal-field-icon absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2" />
@@ -60,7 +61,8 @@ export const FloorPresetPicker: React.FC<FloorPresetPickerProps> = ({
         />
       </div>
       <div
-        className="mt-2 grid grid-cols-4 gap-2"
+        // Founder 31/10: one row of solid picks (the two named floors a little wider than the numbers).
+        className="mt-2 grid grid-cols-[1.5fr_1.5fr_repeat(6,1fr)] gap-1.5"
         role="group"
         aria-label={t('common.floorPresets.quickPick', 'Quick floor selection')}
       >
@@ -72,10 +74,10 @@ export const FloorPresetPicker: React.FC<FloorPresetPickerProps> = ({
               type="button"
               onClick={() => onChange(preset.value)}
               aria-pressed={isSelected}
-              className={`min-h-9 rounded-xl border px-2 py-1.5 text-xs font-semibold transition-colors active:scale-[0.98] ${preset.wide ? 'col-span-2' : ''} ${
+              className={`min-h-11 rounded-xl border px-1 py-1.5 text-xs font-semibold transition-colors active:scale-[0.98] ${
                 isSelected
-                  ? 'border-blue-400/60 bg-blue-500/20 text-blue-100'
-                  : 'border-white/10 bg-white/5 liquid-glass-modal-text hover:bg-white/10'
+                  ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
+                  : 'border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'
               }`}
             >
               {preset.label}

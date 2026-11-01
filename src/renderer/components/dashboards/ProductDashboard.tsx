@@ -282,11 +282,11 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
       {hasLowStock && (
         <div className={`
           rounded-xl border p-4 flex items-center gap-4
-          ${isDark ? 'bg-amber-900/20 border-amber-500/30' : 'bg-amber-50 border-amber-200'}
+          ${isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border-(--pos-s-border)'}
         `}>
           <div className={`
             w-10 h-10 rounded-full flex items-center justify-center
-            ${isDark ? 'bg-amber-500/20' : 'bg-amber-100'}
+            ${isDark ? 'bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2)'}
           `}>
             <AlertTriangle className={`w-5 h-5 ${isDark ? 'text-amber-400' : 'text-amber-600'}`} />
           </div>
@@ -294,7 +294,7 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
             <div className={`font-semibold ${isDark ? 'text-amber-400' : 'text-amber-700'}`}>
               {t('dashboard.lowStockWarning', { defaultValue: 'Low Stock Warning' })}
             </div>
-            <div className={`text-sm ${isDark ? 'text-amber-400/70' : 'text-amber-600'}`}>
+            <div className={`text-sm ${isDark ? 'text-amber-400' : 'text-amber-600'}`}>
               {t('dashboard.lowStockItems', {
                 defaultValue: '{{count}} items are below minimum stock levels.',
                 count: metrics.lowStockCount,
@@ -305,8 +305,8 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
             onClick={handleNavigateToInventory}
             className={`ml-auto px-3 py-1.5 rounded-xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 ${
               isDark
-                ? 'bg-amber-500/20 text-amber-300'
-                : 'bg-amber-100 text-amber-800'
+                ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200'
+                : 'bg-(--pos-s-surface-2) text-amber-800'
             }`}
           >
             {t('common.view', { defaultValue: 'View' })}
@@ -371,11 +371,11 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
       {showInventory && !hasLowStock && !metrics.isLoading && (
         <div className={`
           rounded-xl border p-6 flex items-center gap-4
-          ${isDark ? 'bg-green-900/20 border-green-500/30' : 'bg-green-50 border-green-200'}
+          ${isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border-(--pos-s-border)'}
         `}>
           <div className={`
             w-12 h-12 rounded-full flex items-center justify-center
-            ${isDark ? 'bg-green-500/20' : 'bg-green-100'}
+            ${isDark ? 'bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2)'}
           `}>
             <Package className={`w-6 h-6 ${isDark ? 'text-green-400' : 'text-green-600'}`} />
           </div>
@@ -383,7 +383,7 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
             <div className={`font-semibold ${isDark ? 'text-green-400' : 'text-green-700'}`}>
               {t('dashboard.inventoryHealthy', { defaultValue: 'Inventory Healthy' })}
             </div>
-            <div className={`text-sm ${isDark ? 'text-green-400/70' : 'text-green-600'}`}>
+            <div className={`text-sm ${isDark ? 'text-green-400' : 'text-green-600'}`}>
               {t('dashboard.allStockLevelsGood', { defaultValue: 'All stock levels are above minimum thresholds.' })}
             </div>
           </div>

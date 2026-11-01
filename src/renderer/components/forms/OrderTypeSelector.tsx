@@ -2,9 +2,8 @@ import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { useAcquiredModules } from '../../hooks/useAcquiredModules';
-import { Truck } from 'lucide-react';
 import TableOrderIcon from '../icons/TableOrderIcon';
-import PickupOrderIcon from '../icons/PickupOrderIcon';
+import { DeliveryScooterIcon, PickupHandBagIcon } from '../icons/OrderTypeGlyphs';
 
 interface OrderTypeSelectorProps {
   orderType: "dine-in" | "pickup" | "delivery";
@@ -63,18 +62,16 @@ export const OrderTypeSelector: React.FC<OrderTypeSelectorProps> = ({
             onClick={() => setOrderType(type)}
             className={`flex flex-col items-center justify-center min-h-[88px] p-4 border rounded-2xl text-center transition-all duration-300 backdrop-blur-sm ${
               orderType === type
-                ? resolvedTheme === 'dark'
-                  ? "border-yellow-400/50 bg-yellow-400/15 text-yellow-200"
-                  : "border-yellow-400 bg-yellow-400 text-black"
+                ? "border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)"
                 : resolvedTheme === 'dark'
                   ? "border-gray-600/50 bg-gray-700/30 text-gray-300 active:border-gray-500/70 active:bg-gray-700/50"
                   : "border-gray-200 bg-white/50 text-gray-700 active:border-gray-300 active:bg-white/70"
-            } active:scale-[0.98] transform focus:outline-hidden focus:ring-2 focus:ring-yellow-400/40`}
+            } active:scale-[0.98] transform focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg)`}
           >
             <div className="text-2xl mb-2 flex items-center justify-center">
               {type === "dine-in" && <TableOrderIcon className="w-6 h-6" />}
-              {type === "pickup" && <PickupOrderIcon className="w-6 h-6" />}
-              {type === "delivery" && <Truck className="w-6 h-6" />}
+              {type === "pickup" && <PickupHandBagIcon className="h-7 w-7" />}
+              {type === "delivery" && <DeliveryScooterIcon className="h-7 w-7" />}
             </div>
             <div className="font-medium capitalize">
               {type === "dine-in"

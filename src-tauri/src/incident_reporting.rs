@@ -268,7 +268,28 @@ pub fn classify_incidents(health: &Value) -> Vec<PosIncidentCandidate> {
     }
 
     let failed_printer_jobs = printer_failed_job_count(health);
-    if failed_printer_jobs >= 3 {
+    // A till with no printer profile at all has no printer to stop responding:
+    // its jobs fail with "no hardware printer profile". Report a quiet warning
+    // (stored for support, never paged) instead of the high printer alarm that
+    // paged every 30 minutes from a printerless dev till (founder 31/10/2026).
+    // Only an explicit `configured: false` counts; a missing flag keeps the alarm.
+    let no_printer_configured = value_path(health, &["printerStatus", "configured"])
+        .and_then(Value::as_bool)
+        == Some(false);
+    if failed_printer_jobs >= 3 && no_printer_configured {
+        incidents.push(PosIncidentCandidate {
+            issue_code: "printer.not_configured".to_string(),
+            severity: PosIncidentSeverity::Warning,
+            fingerprint: format!("{terminal_id}:printer.not_configured:no_profile"),
+            summary: "No printer is set up on this POS, so its print jobs cannot print."
+                .to_string(),
+            evidence: json!({
+                "failedRecentJobs": failed_printer_jobs,
+                "configured": false,
+            }),
+            should_report: true,
+        });
+    } else if failed_printer_jobs >= 3 {
         incidents.push(PosIncidentCandidate {
             issue_code: "printer.critical_failure".to_string(),
             severity: PosIncidentSeverity::High,
@@ -797,7 +818,9 @@ fn incident_sources(issue_code: &str) -> Option<&'static [&'static str]> {
             "pendingOrders",
         ],
         "sync.invalid_orders" => &["invalidOrders"],
-        "printer.critical_failure" | "printer.jobs_not_printing" => &["printerStatus"],
+        "printer.critical_failure" | "printer.jobs_not_printing" | "printer.not_configured" => {
+            &["printerStatus"]
+        }
         NETWORK_OFFLINE_ISSUE_CODE | NETWORK_UNSTABLE_ISSUE_CODE => {
             &["syncBacklog", "syncStatusSummary", "pendingOrders"]
         }
@@ -2014,6 +2037,44 @@ mod tests {
             read_open_reports(&db).keys().cloned().collect::<Vec<_>>(),
             vec![fingerprint.to_string()]
         );
+    }
+
+    fn failed_print_health(configured: Option<bool>) -> Value {
+        let failed = json!({ "status": "failed", "entityType": "order_receipt" });
+        let mut printer = json!({ "recentJobs": [failed.clone(), failed.clone(), failed] });
+        if let Some(configured) = configured {
+            printer["configured"] = json!(configured);
+        }
+        json!({ "terminalContext": { "terminalId": "term-1" }, "printerStatus": printer })
+    }
+
+    #[test]
+    fn a_till_without_any_printer_reports_a_quiet_warning_not_the_printer_alarm() {
+        let candidates = classify_incidents(&failed_print_health(Some(false)));
+        let codes: Vec<&str> = candidates.iter().map(|c| c.issue_code.as_str()).collect();
+        assert_eq!(codes, vec!["printer.not_configured"]);
+        assert_eq!(candidates[0].severity, PosIncidentSeverity::Warning);
+        assert_eq!(
+            candidates[0].fingerprint,
+            "term-1:printer.not_configured:no_profile"
+        );
+        assert!(candidates[0].should_report);
+        // A failed printerStatus read still holds this incident open.
+        let unreadable = unreadable_fingerprints(&json!({
+            "terminalContext": { "terminalId": "term-1" },
+            "readFailures": ["printerStatus"],
+        }));
+        assert!(unreadable("term-1:printer.not_configured:no_profile"));
+    }
+
+    #[test]
+    fn a_configured_printer_or_a_missing_flag_keeps_the_printer_alarm() {
+        for configured in [Some(true), None] {
+            let candidates = classify_incidents(&failed_print_health(configured));
+            assert_eq!(candidates.len(), 1, "{configured:?}");
+            assert_eq!(candidates[0].issue_code, "printer.critical_failure");
+            assert_eq!(candidates[0].severity, PosIncidentSeverity::High);
+        }
     }
 
     #[test]

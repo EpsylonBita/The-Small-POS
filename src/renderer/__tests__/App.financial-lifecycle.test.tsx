@@ -64,7 +64,14 @@ vi.mock('../pages/KitchenDisplayPage', () => ({
 }));
 vi.mock('../pages/LoginPage', async () => {
   const { useShift } = await import('../contexts/shift-context');
-  return { default: function LoginPageStub() { fixture.shiftApi = useShift(); return <div data-testid="login" />; } };
+  return {
+    default: function LoginPageStub() { fixture.shiftApi = useShift(); return <div data-testid="login" />; },
+    // The sign-in layer's timings (founder 31/10): signing out fades the till into gold over a second.
+    LOGIN_TILL_REVEAL_DELAY_S: 0.77,
+    LOGIN_TILL_REVEAL_S: 0.45,
+    LOGIN_RETURN_COVER_S: 1.0,
+    LOGIN_RETURN_TOTAL_S: 3.25,
+  };
 });
 // The real layout receives App's actual handleLogout; the stub only exposes it.
 vi.mock('../components/RefactoredMainLayout', async () => {
@@ -88,6 +95,8 @@ vi.mock('../components/notices/CancellationNoticeManager', () => ({ Cancellation
 // The release's global incoming-order alert (1.4.120) mounts in App too.
 vi.mock('../components/notices/IncomingOrderAlertManager', () => ({ IncomingOrderAlertManager: () => null }));
 vi.mock('../components/SyncStatusIndicator', () => ({ SyncStatusIndicator: () => null }));
+// The right utility rail (health, expenses, theme; founder 31/10) holds the health heart now.
+vi.mock('../components/UtilityRail', () => ({ UtilityRail: () => null }));
 vi.mock('../components/callerid/CallerIdCustomerSearchModalHost', () => ({ CallerIdCustomerSearchModalHost: () => null }));
 vi.mock('../components/ui/DeferredModal', () => ({ DeferredModal: () => null }));
 vi.mock('../components/recovery/SyncRecoveryModal', () => ({ default: () => null }));
@@ -120,6 +129,7 @@ vi.mock('../hooks/useOrderStore', () => ({
   useOrderStore: (select: (state: typeof fixture.orders) => unknown) => select(fixture.orders),
 }));
 
+import { toast } from 'react-hot-toast';
 import App from '../App';
 import { emitCompatEvent } from '../../lib';
 import { resetBridge, setBridge } from '../../lib/ipc-adapter';
@@ -264,6 +274,32 @@ describe('App dedicated financial authority lifecycle', () => {
     expect(fixture.order).toEqual(['clear', 'logout', 'session-clear']);
     expect(fixture.shiftApi?.activeShift?.id).toBe('shift-1');
     expect(localStorage.getItem('activeShift')).toBe(storedShift);
+  });
+
+  it('the native sign-out announcing itself keeps the till under the slow gold fade, with no «session expired»', async () => {
+    // Founder 31/10: auth_logout also emits session_timeout { reason: 'logout' }. It dropped the till at once,
+    // so the gold showed straight away (with «Η συνεδρία έληξε») instead of the till fading into it slowly.
+    await mountSignedIn();
+    const sessionExpired = vi.spyOn(toast, 'error');
+    const heldLogout = deferred();
+    bridge.auth.logout.mockImplementationOnce(() => {
+      fixture.order.push('logout');
+      emitCompatEvent('session-timeout', { reason: 'logout' });
+      return heldLogout.promise;
+    });
+    fireEvent.click(screen.getByTestId('layout'));
+    await settle();
+    expect(screen.getByTestId('layout')).toBeTruthy();
+    expect(screen.getByTestId('login-layer')).toBeTruthy();
+    expect(fixture.order).toEqual(['clear', 'logout']);
+    expect(sessionExpired).not.toHaveBeenCalled();
+
+    await act(async () => { heldLogout.resolve({ success: true }); await fixture.logout; });
+    expect(screen.queryByTestId('layout')).toBeNull();
+    await appears('login');
+    expect(fixture.order).toEqual(['clear', 'logout', 'session-clear']);
+    expect(sessionExpired).not.toHaveBeenCalled();
+    sessionExpired.mockRestore();
   });
 
   it('the actual session-timeout event fences authority and ends only the session', async () => {

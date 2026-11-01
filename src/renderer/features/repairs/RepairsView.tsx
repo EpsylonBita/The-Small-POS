@@ -590,7 +590,7 @@ export default function RepairsView({
     return (
       <div className="m-4 space-y-3 text-slate-950 dark:text-white">
         <h1 className="text-2xl font-bold tracking-tight">{t('repairs.title')}</h1>
-        <p role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm">
+        <p role="status" className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4 text-sm">
           {t('repairs.messages.activeShiftRequired')}
         </p>
       </div>
@@ -599,7 +599,7 @@ export default function RepairsView({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {error && <div role="alert" className="mx-4 mt-3 shrink-0 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-800 dark:text-red-200">{error}</div>}
+      {error && <div role="alert" className="mx-4 mt-3 shrink-0 rounded-xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-3 text-sm text-red-800 dark:text-red-200">{error}</div>}
       <div className="min-h-0 flex-1">
         <RepairsShell
           key={`${scopedOrganizationId ?? 'no-org'}:${scopedBranchId ?? 'no-branch'}:${activeActorKey ?? 'no-actor'}`}

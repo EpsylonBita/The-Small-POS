@@ -26,6 +26,7 @@ import type {
   PrintQueueSnapshot,
 } from './print-queue-contract'
 import { ConfirmDialog } from '../ui/ConfirmDialog'
+import { SegmentedControl, StatusLine, TechDisclosure, solidButton, type StatusTone } from '../settings/SettingsKit'
 
 const INITIAL_LIMIT = 20
 const LIMIT_STEP = 20
@@ -89,6 +90,13 @@ const isSuccessfulMutation = (value: unknown): value is { success: true } =>
 
 const positive = (value: number | undefined) =>
   Number.isSafeInteger(value) && (value ?? 0) > 0 ? value as number : 0
+
+/** One plain status line per job: red when it failed, green once it reached the printer. */
+const jobStatusTone = (status: string, needsAttention: boolean): StatusTone => {
+  if (status === 'failed') return 'bad'
+  if (status === 'printed' || status === 'dispatched' || status === 'completed') return 'ok'
+  return needsAttention ? 'warn' : 'idle'
+}
 
 type Label = (
   key: string,
@@ -217,11 +225,9 @@ const PrintQueueIssue: React.FC<PrintQueueIssueProps> = ({
   const detailsId = `print-queue-issue-${generatedId}`
 
   return (
-    <div className="rounded-xl border border-yellow-300 bg-yellow-50 px-2 py-2 text-xs text-yellow-900 dark:border-yellow-400/30 dark:bg-yellow-500/10 dark:text-yellow-100">
-      <div className="flex items-start gap-2">
-        <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
-        <span className="min-w-0 flex-1 wrap-break-word">{summary}</span>
-      </div>
+    <div className="pos-notice pos-notice--warn pos-queue__issue">
+      <AlertTriangle aria-hidden="true" className="pos-notice__icon h-4 w-4" />
+      <span className="min-w-0 flex-1 wrap-break-word text-sm">{summary}</span>
       {details && (
         <>
           <button
@@ -244,7 +250,7 @@ const PrintQueueIssue: React.FC<PrintQueueIssueProps> = ({
             aria-expanded={expanded}
             aria-controls={detailsId}
             onClick={() => setExpanded((current) => !current)}
-            className="mt-2 inline-flex min-h-touch min-w-touch items-center gap-1 rounded-xl border border-yellow-400/60 px-2 py-1 text-xs font-semibold active:bg-yellow-100 dark:active:bg-yellow-500/20"
+            className="pos-text-disclosure"
           >
             {expanded
               ? <ChevronUp aria-hidden="true" className="h-4 w-4" />
@@ -254,7 +260,7 @@ const PrintQueueIssue: React.FC<PrintQueueIssueProps> = ({
               : label('settings.printQueue.showDetails', 'Show details')}
           </button>
           {expanded && (
-            <p id={detailsId} className="mt-2 wrap-break-word border-t border-yellow-300 pt-2 text-xs dark:border-yellow-400/30">
+            <p id={detailsId} className="pos-notice__details">
               {details}
             </p>
           )}
@@ -280,7 +286,7 @@ const UnseenPausedPrinterControls: React.FC<UnseenPausedPrinterControlsProps> = 
   const generatedId = useId()
 
   return (
-    <div className="mt-2 flex flex-wrap gap-2">
+    <div className="flex flex-wrap gap-2">
       {profileIds.map((profileId, index) => {
         const position = index + 1
         const printerName = label(
@@ -300,9 +306,9 @@ const UnseenPausedPrinterControls: React.FC<UnseenPausedPrinterControlsProps> = 
             )}
             onClick={() => onResume(`unseen-${position}`, profileId, printerName)}
             disabled={busy}
-            className="inline-flex min-h-touch min-w-touch items-center justify-center gap-1 rounded-xl border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 active:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 dark:active:bg-emerald-500/20"
+            className={solidButton('secondary', 'sm')}
           >
-            <PlayCircle aria-hidden="true" className="h-4 w-4" />
+            <PlayCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
             {label('settings.printQueue.resumePrinter', 'Resume')}
           </button>
         )
@@ -314,7 +320,9 @@ const UnseenPausedPrinterControls: React.FC<UnseenPausedPrinterControlsProps> = 
 const PrintQueuePanel: React.FC = () => {
   const { t } = useTranslation()
   const [limit, setLimit] = useState(INITIAL_LIMIT)
-  const queue = usePrintQueue({ limit, offset: 0 })
+  // UI audit wave 7Γ: «Prints that did not come out» first; every job one tap away.
+  const [jobFilter, setJobFilter] = useState<'failed' | 'all'>('failed')
+  const queue = usePrintQueue(jobFilter === 'failed' ? { limit, offset: 0, status: 'failed' } : { limit, offset: 0 })
   const [confirmation, setConfirmation] = useState<Confirmation>(null)
   const [busyActions, setBusyActions] = useState<Set<string>>(() => new Set())
   const [feedback, setFeedback] = useState<ActionFeedback | null>(null)
@@ -716,135 +724,142 @@ const PrintQueuePanel: React.FC = () => {
     ? label(`settings.printQueue.transport.${normalizeKey(status)}`, titleCase(status))
     : label('settings.printQueue.transport.notStarted', 'Not started'), [label])
 
+  // UI audit wave 7A2: one solid group. A cashier sees the jobs and their own actions;
+  // pausing or cancelling the whole queue lives under "Settings for technicians". The list
+  // refreshes itself (native events, 5 s polling while visible, on focus), so there is no
+  // Refresh button; a failed load offers a retry in its notice.
   return (
     <section
       aria-labelledby="print-queue-title"
       aria-busy={queue.loading}
-      className="rounded-2xl border border-slate-200 bg-white/80 px-4 py-4 text-slate-800 dark:border-white/10 dark:bg-gray-900/40 dark:text-slate-100"
+      className="pos-group"
     >
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <Printer aria-hidden="true" className="h-4 w-4 text-yellow-600 dark:text-yellow-300" />
-            <h3 id="print-queue-title" className="text-sm font-semibold text-slate-900 dark:text-white">
-              {label('settings.printQueue.posTitle', 'POS Print Queue')}
-            </h3>
-          </div>
-          <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">
-            {label(
-              'settings.printQueue.posOnlyScope',
-              'This panel controls only print jobs created by The Small POS. Jobs from other applications are never controlled here.',
-            )}
-          </p>
-
-          {displaySnapshot && (
-            <div
-              role="status"
-              aria-label={label('settings.printQueue.countsLabel', 'POS print queue counts')}
-              className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-600 dark:text-slate-300"
-            >
-              <span>{label('settings.printQueue.counts.active', `${displaySnapshot.counts.active} active`, { count: displaySnapshot.counts.active })}</span>
-              <span>{label('settings.printQueue.counts.failed', `${displaySnapshot.counts.failed} failed`, { count: displaySnapshot.counts.failed })}</span>
-              <span>{label('settings.printQueue.counts.stale', `${displaySnapshot.counts.stale} stale`, { count: displaySnapshot.counts.stale })}</span>
-              <span>{label('settings.printQueue.counts.history', `${displaySnapshot.counts.history} history`, { count: displaySnapshot.counts.history })}</span>
-            </div>
-          )}
-
-          {displayPausedPrinterProfileIds.length > 0 && (
-            <div className="mt-2 text-[11px] text-yellow-800 dark:text-yellow-200">
-              {visiblePausedProfileNames.size > 0 && (
-                <span>
-                  {label(
-                    'settings.printQueue.visiblePausedPrinters',
-                    `Paused: ${[...visiblePausedProfileNames.values()].join(', ')}`,
-                    { printers: [...visiblePausedProfileNames.values()].join(', ') },
-                  )}
-                </span>
-              )}
-              {unnamedPausedCount > 0 && (
-                <>
-                  <span className={visiblePausedProfileNames.size > 0 ? 'ms-2' : undefined}>
-                    {label(
-                      'settings.printQueue.unnamedPausedPrinters',
-                      `${unnamedPausedCount} printer${unnamedPausedCount === 1 ? ' is' : 's are'} paused`,
-                      { count: unnamedPausedCount },
-                    )}
-                  </span>
-                  <UnseenPausedPrinterControls
-                    profileIds={unseenPausedProfileIds}
-                    busy={anyMutationBusy}
-                    label={label}
-                    onResume={handleResumePrinter}
-                  />
-                </>
-              )}
-            </div>
-          )}
+      <header className="pos-group__head">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h3 id="print-queue-title" className="pos-group__title">
+            {jobFilter === 'failed'
+              ? label('settings.printQueue.failedTitle', 'Prints that did not come out')
+              : label('settings.printQueue.posTitle', 'POS Print Queue')}
+          </h3>
+          <SegmentedControl
+            ariaLabel={label('settings.printQueue.filterLabel', 'Show')}
+            value={jobFilter}
+            onChange={(value) => { setJobFilter(value); setLimit(INITIAL_LIMIT) }}
+            options={[
+              { value: 'failed', label: label('settings.printQueue.filterFailed', 'Not printed') },
+              { value: 'all', label: label('settings.printQueue.filterAll', 'All') },
+            ]}
+          />
         </div>
-
-        <div className="grid w-full shrink-0 grid-cols-1 gap-2 md:w-56">
-          <button
-            type="button"
-            aria-label={label('settings.printQueue.refreshAria', 'Refresh POS print queue')}
-            onClick={() => void queue.refresh()}
-            disabled={queue.loading}
-            className="inline-flex min-h-touch w-full items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition active:bg-slate-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-white/15 dark:bg-white/10 dark:text-slate-100 dark:active:bg-white/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
+        <p className="pos-group__desc">
+          {label(
+            'settings.printQueue.posOnlyScope',
+            'This panel controls only print jobs created by The Small POS. Jobs from other applications are never controlled here.',
+          )}
+        </p>
+        {displaySnapshot && (
+          <p
+            role="status"
+            aria-label={label('settings.printQueue.countsLabel', 'POS print queue counts')}
+            className="pos-queue__counts"
           >
-            <RefreshCw aria-hidden="true" className={`h-4 w-4 ${queue.loading ? 'animate-spin' : ''}`} />
-            {label('settings.printQueue.refresh', 'Refresh')}
-          </button>
+            {[
+              label('settings.printQueue.counts.active', `${displaySnapshot.counts.active} active`, { count: displaySnapshot.counts.active }),
+              label('settings.printQueue.counts.failed', `${displaySnapshot.counts.failed} failed`, { count: displaySnapshot.counts.failed }),
+              label('settings.printQueue.counts.stale', `${displaySnapshot.counts.stale} stale`, { count: displaySnapshot.counts.stale }),
+              label('settings.printQueue.counts.history', `${displaySnapshot.counts.history} history`, { count: displaySnapshot.counts.history }),
+            ].join(' · ')}
+          </p>
+        )}
+      </header>
+
+      {displayQueuePaused && (
+        <div className="pos-notice pos-notice--warn pos-notice--row pos-queue__notice">
+          <span role="status" className="text-sm font-semibold">
+            {label('settings.printQueue.queuePausedNotice', 'Printing is paused on this till. Nothing prints until you resume it.')}
+          </span>
           <button
             type="button"
-            aria-label={displayQueuePaused
-              ? label('settings.printQueue.resumeQueueAria', 'Resume POS print queue')
-              : label('settings.printQueue.pauseQueueAria', 'Pause POS print queue')}
+            aria-label={label('settings.printQueue.resumeQueueAria', 'Resume POS print queue')}
             onClick={handleQueuePauseToggle}
             disabled={queue.loading || anyMutationBusy}
-            className="inline-flex min-h-touch w-full items-center justify-center gap-2 rounded-2xl border border-yellow-400 bg-yellow-50 px-3 py-2 text-xs font-semibold text-yellow-900 transition active:bg-yellow-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-yellow-400/35 dark:bg-yellow-400/10 dark:text-yellow-100 dark:active:bg-yellow-400/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
+            className={solidButton('secondary', 'sm')}
           >
-            {displayQueuePaused
-              ? <PlayCircle aria-hidden="true" className="h-4 w-4" />
-              : <PauseCircle aria-hidden="true" className="h-4 w-4" />}
-            {displayQueuePaused
-              ? label('settings.printQueue.resume', 'Resume queue')
-              : label('settings.printQueue.pause', 'Pause queue')}
-          </button>
-          <button
-            type="button"
-            aria-label={label('settings.printQueue.pauseCancelAria', 'Pause and cancel POS jobs')}
-            onClick={() => setConfirmation({ kind: 'bulk' })}
-            disabled={queue.loading || bulkMutationBusy}
-            className="inline-flex min-h-touch w-full items-center justify-center gap-2 rounded-2xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition active:bg-rose-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-rose-400/30 dark:bg-rose-500/10 dark:text-rose-100 dark:active:bg-rose-500/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
-          >
-            <XCircle aria-hidden="true" className="h-4 w-4" />
-            {label('settings.printQueue.pauseCancel', 'Pause and cancel POS jobs')}
+            <PlayCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
+            {label('settings.printQueue.resume', 'Resume queue')}
           </button>
         </div>
-      </div>
+      )}
+
+      {displayPausedPrinterProfileIds.length > 0 && (
+        <div className="pos-notice pos-notice--warn pos-notice--stack pos-queue__notice">
+          {visiblePausedProfileNames.size > 0 && (
+            <span className="text-sm">
+              {label(
+                'settings.printQueue.visiblePausedPrinters',
+                `Paused: ${[...visiblePausedProfileNames.values()].join(', ')}`,
+                { printers: [...visiblePausedProfileNames.values()].join(', ') },
+              )}
+            </span>
+          )}
+          {unnamedPausedCount > 0 && (
+            <>
+              <span className="text-sm">
+                {label(
+                  'settings.printQueue.unnamedPausedPrinters',
+                  `${unnamedPausedCount} printer${unnamedPausedCount === 1 ? ' is' : 's are'} paused`,
+                  { count: unnamedPausedCount },
+                )}
+              </span>
+              <UnseenPausedPrinterControls
+                profileIds={unseenPausedProfileIds}
+                busy={anyMutationBusy}
+                label={label}
+                onResume={handleResumePrinter}
+              />
+            </>
+          )}
+        </div>
+      )}
 
       {queue.stale && (
         <div
           role="status"
           aria-live="polite"
           aria-label={label('settings.printQueue.freshnessLabel', 'Print queue freshness')}
-          className="mt-3 rounded-xl border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs text-yellow-900 dark:border-yellow-400/30 dark:bg-yellow-500/10 dark:text-yellow-100"
+          className="pos-notice pos-notice--warn pos-queue__notice"
         >
-          {hasAuthoritativeSnapshot
-            ? label('settings.printQueue.stale', 'Queue data may be out of date. The last good data remains visible.')
-            : label('settings.printQueue.unavailable', 'Queue status is unavailable. Refresh to try again.')}
+          <AlertTriangle aria-hidden="true" className="pos-notice__icon h-4 w-4" />
+          <span className="text-sm">
+            {hasAuthoritativeSnapshot
+              ? label('settings.printQueue.stale', 'Queue data may be out of date. The last good data remains visible.')
+              : label('settings.printQueue.unavailable', 'Queue status is unavailable. Refresh to try again.')}
+          </span>
         </div>
       )}
 
       {queue.error && (
-        <div role="alert" className="mt-3 rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-800 dark:border-rose-400/30 dark:bg-rose-500/10 dark:text-rose-100">
-          {label(
-            hasAuthoritativeSnapshot
-              ? 'settings.printQueue.loadFailedSafe'
-              : 'settings.printQueue.initialLoadFailedSafe',
-            hasAuthoritativeSnapshot
-              ? 'Could not refresh the POS print queue. The last good data remains visible.'
-              : 'Could not load the POS print queue. Current queue status is unavailable.',
-          )}
+        <div role="alert" className="pos-notice pos-notice--bad pos-notice--row pos-queue__notice">
+          <span className="text-sm">
+            {label(
+              hasAuthoritativeSnapshot
+                ? 'settings.printQueue.loadFailedSafe'
+                : 'settings.printQueue.initialLoadFailedSafe',
+              hasAuthoritativeSnapshot
+                ? 'Could not refresh the POS print queue. The last good data remains visible.'
+                : 'Could not load the POS print queue. Current queue status is unavailable.',
+            )}
+          </span>
+          <button
+            type="button"
+            aria-label={label('settings.printQueue.refreshAria', 'Refresh POS print queue')}
+            onClick={() => void queue.refresh()}
+            disabled={queue.loading}
+            className={solidButton('secondary', 'sm')}
+          >
+            <RefreshCw aria-hidden="true" className={`h-4 w-4 shrink-0 ${queue.loading ? 'animate-spin' : ''}`} />
+            {label('common.retry', 'Retry')}
+          </button>
         </div>
       )}
 
@@ -855,225 +870,195 @@ const PrintQueuePanel: React.FC = () => {
           aria-label={feedback.kind !== 'alert'
             ? label('settings.printQueue.actionResultLabel', 'Print queue action result')
             : undefined}
-          className={`mt-3 rounded-xl border px-3 py-2 text-xs ${feedback.kind === 'alert'
-            ? 'border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-400/30 dark:bg-rose-500/10 dark:text-rose-100'
+          className={`pos-notice pos-queue__notice ${feedback.kind === 'alert'
+            ? 'pos-notice--bad'
             : feedback.kind === 'warning'
-              ? 'border-yellow-300 bg-yellow-50 text-yellow-900 dark:border-yellow-400/30 dark:bg-yellow-500/10 dark:text-yellow-100'
-              : 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100'}`}
+              ? 'pos-notice--warn'
+              : 'pos-notice--ok'}`}
         >
-          {feedback.message}
+          <span className="text-sm">{feedback.message}</span>
         </div>
       )}
 
-      <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200 dark:border-white/10">
-        {queue.loading && !hasAuthoritativeSnapshot ? (
-          <div
-            role="status"
-            aria-live="polite"
-            aria-label={label('settings.printQueue.loadingLabel', 'Loading POS print queue')}
-            className="px-3 py-5 text-sm text-slate-600 dark:text-slate-300"
-          >
-            {label('settings.printQueue.loading', 'Loading POS print jobs…')}
-          </div>
-        ) : !hasAuthoritativeSnapshot ? (
-          <div className="px-3 py-5 text-sm text-slate-600 dark:text-slate-300">
-            {label('settings.printQueue.unavailableBody', 'POS print queue is currently unavailable.')}
-          </div>
-        ) : displayJobs.length === 0 ? (
-          <div className="px-3 py-5 text-sm text-slate-600 dark:text-slate-300">
-            {label('settings.printQueue.empty', 'No POS print jobs are available.')}
-          </div>
-        ) : (
-          <ul className="max-h-96 list-none divide-y divide-slate-200 overflow-y-auto p-0 scrollbar-hide dark:divide-white/10">
-            {displayJobs.map((job: PrintQueueJob, index) => {
-              const { entityLabel, rowContext, duplicateContext } = rowPresentations[index]
-              const actionContext = displayJobs.length > 1 ? rowContext : null
-              const articleLabel = label(
-                'settings.printQueue.jobArticleAria',
-                `POS print job: ${rowContext}`,
-                { context: rowContext },
-              )
-              // A known native reason code reads in the operator's language;
-              // its English native text is not repeated as "details".
-              const knownReason = printQueueReasonText(job.warningCode, label)
-              const issueSummary = knownReason ?? (job.warningMessage
-                ? operatorSafeDetail(job.warningMessage)
-                : job.lastError
-                  ? label('settings.printQueue.issue.genericAttention', 'This POS print job needs attention.')
-                  : null)
-              const issueDetails = !knownReason && job.lastError
-                ? operatorSafeDetail(job.lastError)
-                : null
-              const printerPaused = Boolean(
-                job.printerProfileId
-                && displayPausedPrinterProfileIds.includes(job.printerProfileId),
-              )
-              const lastSeen = job.lastSeenAt
-              const jobBusy = anyMutationBusy
-              return (
-                <li key={job.id} className="p-0">
-                  <article
-                    aria-label={articleLabel}
-                    className="grid gap-3 px-3 py-3 text-sm md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.9fr)_minmax(0,1fr)]"
-                  >
-                    <div className="min-w-0">
-                      <div className="font-semibold text-slate-900 dark:text-white">
-                        {entityLabel}
-                      </div>
+      {queue.loading && !hasAuthoritativeSnapshot ? (
+        <p
+          role="status"
+          aria-live="polite"
+          aria-label={label('settings.printQueue.loadingLabel', 'Loading POS print queue')}
+          className="pos-queue__empty"
+        >
+          {label('settings.printQueue.loading', 'Loading POS print jobs…')}
+        </p>
+      ) : !hasAuthoritativeSnapshot ? (
+        <p className="pos-queue__empty">
+          {label('settings.printQueue.unavailableBody', 'POS print queue is currently unavailable.')}
+        </p>
+      ) : displayJobs.length === 0 ? (
+        <p className="pos-queue__empty">
+          {jobFilter === 'failed'
+            ? label('settings.printQueue.emptyFailed', 'Every print came out.')
+            : label('settings.printQueue.empty', 'No POS print jobs are available.')}
+        </p>
+      ) : (
+        <ul className="pos-queue__list">
+          {displayJobs.map((job: PrintQueueJob, index) => {
+            const { entityLabel, rowContext, duplicateContext } = rowPresentations[index]
+            const actionContext = displayJobs.length > 1 ? rowContext : null
+            const articleLabel = label(
+              'settings.printQueue.jobArticleAria',
+              `POS print job: ${rowContext}`,
+              { context: rowContext },
+            )
+            // A known native reason code reads in the operator's language;
+            // its English native text is not repeated as "details".
+            const knownReason = printQueueReasonText(job.warningCode, label)
+            const issueSummary = knownReason ?? (job.warningMessage
+              ? operatorSafeDetail(job.warningMessage)
+              : job.lastError
+                ? label('settings.printQueue.issue.genericAttention', 'This POS print job needs attention.')
+                : null)
+            const issueDetails = !knownReason && job.lastError
+              ? operatorSafeDetail(job.lastError)
+              : null
+            const printerPaused = Boolean(
+              job.printerProfileId
+              && displayPausedPrinterProfileIds.includes(job.printerProfileId),
+            )
+            const jobBusy = anyMutationBusy
+            return (
+              <li key={job.id}>
+                <article aria-label={articleLabel} className="pos-job">
+                  <div className="pos-job__main">
+                    <div className="pos-job__title">
+                      {entityLabel}
                       {highlightedNewJobId === job.id && (
-                        <span className="mt-1 inline-flex rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-200">
+                        <span className="pos-badge pos-badge--ok">
                           {label('settings.printQueue.newReprint', 'New reprint')}
                         </span>
                       )}
-                      <div className="mt-1 text-xs text-slate-700 dark:text-slate-200">
-                        {job.printerDisplayName}
-                      </div>
-                      {job.resolvedTarget && (
-                        <div className="wrap-break-word text-[11px] text-slate-600 dark:text-slate-400">
-                          {job.resolvedTarget}
-                        </div>
-                      )}
-                      <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                    </div>
+                    <div className="pos-row__help">
+                      <span>{job.printerDisplayName}</span>
+                      {' · '}
+                      <span>
                         {label('settings.printQueue.updatedAt', `Updated ${formatTimestamp(job.updatedAt)}`, {
                           value: formatTimestamp(job.updatedAt),
                         })}
-                      </div>
-                      {lastSeen && (
-                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                          {label('settings.printQueue.lastSeenAt', `Last seen ${formatTimestamp(lastSeen)}`, {
-                            value: formatTimestamp(lastSeen),
-                          })}
-                        </div>
-                      )}
+                      </span>
                     </div>
+                    <StatusLine tone={jobStatusTone(job.status, Boolean(issueSummary))}>
+                      <span data-print-job-status>
+                        {statusLabel(job.status)}
+                        {' · '}
+                        {transportLabel(job.transportState)}
+                      </span>
+                    </StatusLine>
+                    {issueSummary && (
+                      <PrintQueueIssue
+                        summary={issueSummary}
+                        details={issueDetails}
+                        actionContext={actionContext}
+                        label={label}
+                      />
+                    )}
+                  </div>
 
-                    <div className="grid grid-cols-2 gap-2 md:grid-cols-1">
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-2 py-2 dark:border-white/10 dark:bg-white/5">
-                        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                          {label('settings.printQueue.localStatus', 'POS status')}
-                        </div>
-                        <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-100">
-                          {statusLabel(job.status)}
-                        </div>
-                      </div>
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-2 py-2 dark:border-white/10 dark:bg-white/5">
-                        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                          {label('settings.printQueue.transportStatus', 'Transport status')}
-                        </div>
-                        <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-100">
-                          {transportLabel(job.transportState)}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex min-w-0 flex-col gap-2">
-                      {issueSummary && (
-                        <PrintQueueIssue
-                          summary={issueSummary}
-                          details={issueDetails}
-                          actionContext={actionContext}
-                          label={label}
-                        />
-                      )}
-
-                      <div className="flex flex-wrap gap-2">
-                        {job.cancellable && (
-                          <button
-                            type="button"
-                            aria-label={actionContext
-                              ? label(
-                                  'settings.printQueue.cancelJobWithContextAria',
-                                  `Cancel POS print job for ${actionContext}`,
-                                  { context: actionContext },
-                                )
-                              : label('settings.printQueue.cancelJobAria', 'Cancel POS print job')}
-                            onClick={() => handleCancelJob(job.id)}
-                            disabled={jobBusy}
-                            className="inline-flex min-h-touch min-w-touch items-center justify-center gap-1 rounded-xl border border-rose-300 bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700 active:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-400/30 dark:bg-rose-500/10 dark:text-rose-100 dark:active:bg-rose-500/20"
-                          >
-                            <XCircle aria-hidden="true" className="h-4 w-4" />
-                            {label('settings.printQueue.cancel', 'Cancel')}
-                          </button>
-                        )}
-                        {job.retryable && (
-                          <button
-                            type="button"
-                            aria-label={actionContext
-                              ? label(
-                                  'settings.printQueue.retryJobWithContextAria',
-                                  `Retry POS print job for ${actionContext}`,
-                                  { context: actionContext },
-                                )
-                              : label('settings.printQueue.retryJobAria', 'Retry POS print job')}
-                            onClick={() => handleRetryJob(job.id)}
-                            disabled={jobBusy}
-                            className="inline-flex min-h-touch min-w-touch items-center justify-center gap-1 rounded-xl border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 active:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 dark:active:bg-emerald-500/20"
-                          >
-                            <RotateCcw aria-hidden="true" className="h-4 w-4" />
-                            {label('settings.printQueue.retry', 'Retry')}
-                          </button>
-                        )}
-                        {job.reprintable && (
-                          <button
-                            type="button"
-                            aria-label={actionContext
-                              ? label(
-                                  'settings.printQueue.reprintJobWithContextAria',
-                                  `Reprint POS print job for ${actionContext}`,
-                                  { context: actionContext },
-                                )
-                              : label('settings.printQueue.reprintJobAria', 'Reprint POS print job')}
-                            onClick={() => setConfirmation({
-                              kind: 'reprint',
-                              jobId: job.id,
-                              actionContext: rowContext,
-                            })}
-                            disabled={jobBusy}
-                            className="inline-flex min-h-touch min-w-touch items-center justify-center gap-1 rounded-xl border border-yellow-400 bg-yellow-50 px-2 py-1 text-xs font-semibold text-yellow-900 active:bg-yellow-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-yellow-400/35 dark:bg-yellow-400/10 dark:text-yellow-100 dark:active:bg-yellow-400/20"
-                          >
-                            <Printer aria-hidden="true" className="h-4 w-4" />
-                            {label('settings.printQueue.reprint', 'Reprint')}
-                          </button>
-                        )}
-                        {printerPaused && job.printerProfileId && (
-                          <button
-                            type="button"
-                            aria-label={duplicateContext
-                              ? label(
-                                  'settings.printQueue.resumePrinterWithContextAria',
-                                  `Resume printer for ${rowContext}`,
-                                  { context: rowContext },
-                                )
-                              : label(
-                                  'settings.printQueue.resumePrinterAria',
-                                  `Resume ${job.printerDisplayName}`,
-                                  { printer: job.printerDisplayName },
-                                )}
-                            onClick={() => handleResumePrinter(
-                              job.id,
-                              job.printerProfileId as string,
-                              job.printerDisplayName,
+                  <div className="pos-job__actions">
+                    {job.retryable && (
+                      <button
+                        type="button"
+                        aria-label={actionContext
+                          ? label(
+                              'settings.printQueue.retryJobWithContextAria',
+                              `Retry POS print job for ${actionContext}`,
+                              { context: actionContext },
+                            )
+                          : label('settings.printQueue.retryJobAria', 'Retry POS print job')}
+                        onClick={() => handleRetryJob(job.id)}
+                        disabled={jobBusy}
+                        className={solidButton('secondary', 'sm')}
+                      >
+                        <RotateCcw aria-hidden="true" className="h-4 w-4 shrink-0" />
+                        {label('settings.printQueue.retry', 'Retry')}
+                      </button>
+                    )}
+                    {job.reprintable && (
+                      <button
+                        type="button"
+                        aria-label={actionContext
+                          ? label(
+                              'settings.printQueue.reprintJobWithContextAria',
+                              `Reprint POS print job for ${actionContext}`,
+                              { context: actionContext },
+                            )
+                          : label('settings.printQueue.reprintJobAria', 'Reprint POS print job')}
+                        onClick={() => setConfirmation({
+                          kind: 'reprint',
+                          jobId: job.id,
+                          actionContext: rowContext,
+                        })}
+                        disabled={jobBusy}
+                        className={solidButton('secondary', 'sm')}
+                      >
+                        <Printer aria-hidden="true" className="h-4 w-4 shrink-0" />
+                        {label('settings.printQueue.reprint', 'Reprint')}
+                      </button>
+                    )}
+                    {printerPaused && job.printerProfileId && (
+                      <button
+                        type="button"
+                        aria-label={duplicateContext
+                          ? label(
+                              'settings.printQueue.resumePrinterWithContextAria',
+                              `Resume printer for ${rowContext}`,
+                              { context: rowContext },
+                            )
+                          : label(
+                              'settings.printQueue.resumePrinterAria',
+                              `Resume ${job.printerDisplayName}`,
+                              { printer: job.printerDisplayName },
                             )}
-                            disabled={jobBusy
-                              || [...busyActions].some((key) => key.startsWith(`resume:${job.printerProfileId}:`))}
-                            className="inline-flex min-h-touch min-w-touch items-center justify-center gap-1 rounded-xl border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 active:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 dark:active:bg-emerald-500/20"
-                          >
-                            <PlayCircle aria-hidden="true" className="h-4 w-4" />
-                            {label('settings.printQueue.resumePrinter', 'Resume')}
-                          </button>
+                        onClick={() => handleResumePrinter(
+                          job.id,
+                          job.printerProfileId as string,
+                          job.printerDisplayName,
                         )}
-                      </div>
-                    </div>
-                  </article>
-                </li>
-              )
-            })}
-          </ul>
-        )}
-      </div>
+                        disabled={jobBusy
+                          || [...busyActions].some((key) => key.startsWith(`resume:${job.printerProfileId}:`))}
+                        className={solidButton('secondary', 'sm')}
+                      >
+                        <PlayCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
+                        {label('settings.printQueue.resumePrinter', 'Resume')}
+                      </button>
+                    )}
+                    {job.cancellable && (
+                      <button
+                        type="button"
+                        aria-label={actionContext
+                          ? label(
+                              'settings.printQueue.cancelJobWithContextAria',
+                              `Cancel POS print job for ${actionContext}`,
+                              { context: actionContext },
+                            )
+                          : label('settings.printQueue.cancelJobAria', 'Cancel POS print job')}
+                        onClick={() => handleCancelJob(job.id)}
+                        disabled={jobBusy}
+                        className={solidButton('danger', 'sm')}
+                      >
+                        <XCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
+                        {label('settings.printQueue.cancel', 'Cancel')}
+                      </button>
+                    )}
+                  </div>
+                </article>
+              </li>
+            )
+          })}
+        </ul>
+      )}
 
       {displaySnapshot && (
-        <div className="mt-3 flex flex-col items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+        <div className="pos-queue__foot">
           <span>
             {label(
               'settings.printQueue.pagination',
@@ -1087,13 +1072,43 @@ const PrintQueuePanel: React.FC = () => {
               aria-label={label('settings.printQueue.showMoreAria', 'Show more POS print jobs')}
               onClick={() => setLimit((current) => Math.min(MAX_LIMIT, current + LIMIT_STEP))}
               disabled={queue.loading || queue.stale || Boolean(queue.error) || anyMutationBusy}
-              className="inline-flex min-h-touch min-w-touch items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2 font-semibold text-slate-700 active:bg-slate-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-white/15 dark:bg-white/10 dark:text-slate-100 dark:active:bg-white/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
+              className={solidButton('secondary', 'md')}
             >
               {label('settings.printQueue.showMore', 'Show more')}
             </button>
           )}
         </div>
       )}
+
+      <TechDisclosure title={label('settings.printer.forTechnicians', 'Settings for technicians')}>
+        <p className="pos-row__help">
+          {label('settings.printQueue.techniciansHelp', 'Stop or clear the whole queue of this till. Use only while fixing a printer.')}
+        </p>
+        <div className="flex flex-wrap gap-3">
+          {!displayQueuePaused && (
+            <button
+              type="button"
+              aria-label={label('settings.printQueue.pauseQueueAria', 'Pause POS print queue')}
+              onClick={handleQueuePauseToggle}
+              disabled={queue.loading || anyMutationBusy}
+              className={solidButton('secondary', 'md')}
+            >
+              <PauseCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
+              {label('settings.printQueue.pause', 'Pause queue')}
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label={label('settings.printQueue.pauseCancelAria', 'Pause and cancel POS jobs')}
+            onClick={() => setConfirmation({ kind: 'bulk' })}
+            disabled={queue.loading || bulkMutationBusy}
+            className={solidButton('danger', 'md')}
+          >
+            <XCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
+            {label('settings.printQueue.pauseCancel', 'Pause and cancel POS jobs')}
+          </button>
+        </div>
+      </TechDisclosure>
 
       <ConfirmDialog
         isOpen={confirmation?.kind === 'bulk'}

@@ -251,17 +251,17 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     ? 'z-report-glass-content overflow-hidden! p-4! text-white'
     : 'z-report-glass-content overflow-hidden! p-4! text-slate-950';
   const modalShellClassName = isDarkTheme
-    ? 'z-report-glass-shell border-yellow-400/25 text-white shadow-2xl shadow-black/40'
-    : 'z-report-glass-shell border-yellow-500/30 text-slate-950 shadow-2xl shadow-slate-950/20';
-  const modalInsetClassName = isDarkTheme
-    ? 'border-yellow-400/15 bg-black/30 shadow-xs shadow-black/20 backdrop-blur-xl'
-    : 'border-yellow-500/25 bg-white/70 shadow-xs shadow-slate-950/10 backdrop-blur-xl';
+    ? 'z-report-glass-shell border-(--pos-s-border) text-white shadow-2xl shadow-black/40'
+    : 'z-report-glass-shell border-(--pos-s-border) text-slate-950 shadow-2xl shadow-slate-950/20';
+  // Founder 31/10 («όχι μόνο το γυαλί»): the Z is glass like every modal -- the shared frost shell and
+  // frost cards on it (the modal tokens follow the theme), with no white panels piled on each other.
+  const modalInsetClassName = 'border-(--modal-glass-card-border) bg-(--modal-glass-card)';
   const strongTextClass = isDarkTheme ? 'text-white' : 'text-slate-950';
   const mutedTextClass = isDarkTheme ? 'text-white/85' : 'text-slate-700';
-  const softTextClass = isDarkTheme ? 'text-white/60' : 'text-slate-500';
+  const softTextClass = isDarkTheme ? 'text-white/60' : 'text-slate-600';
   const glassControlClass = isDarkTheme
-    ? 'border-yellow-400/20 bg-black/30 text-white shadow-xs shadow-black/10 backdrop-blur-xl active:bg-white/12'
-    : 'border-yellow-500/25 bg-white/80 text-slate-900 shadow-xs shadow-slate-950/10 backdrop-blur-xl active:bg-white';
+    ? 'border-(--modal-glass-card-border) bg-(--modal-glass-card) text-white active:bg-white/12'
+    : 'border-(--modal-glass-card-border) bg-(--modal-glass-card) text-slate-900 active:bg-white';
   const canExecuteZReport =
     isFeatureEnabled('zReportExecution') ||
     (!featuresLoading && (isMainTerminal || (!isMobileWaiter && !parentTerminalId)));
@@ -1126,6 +1126,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const isBusinessDateValid = !Number.isNaN(businessDateValue.getTime());
   const localToday = toLocalDateString(new Date());
   const isLiveDay = !lockDate && isBusinessDateValid && resolvedBusinessDate === localToday;
+  // Founder 31/10: the day runs from the first check-in to the Z, not to midnight. The live report of a
+  // day that began before today is still the open day -- never «Past day», and never «Today» either.
+  const isOpenPastDay = !isLiveDay && !lockDate && isUsingLiveDefaultDate && isBusinessDateValid && resolvedBusinessDate < localToday;
   const friendlyBusinessDate = !isBusinessDateValid
     ? resolvedBusinessDate
     : formatDate(businessDateValue, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
@@ -1136,7 +1139,6 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         return 'border-slate-900/[0.14] bg-slate-900/5 text-slate-700 dark:border-white/16 dark:bg-white/8 dark:text-white/80';
       case 'cashier':
       case 'manager':
-        return 'border-amber-500/30 bg-amber-500/15 text-amber-800 dark:border-amber-300/30 dark:text-amber-100';
       case 'server':
       case 'waiter':
         return 'border-slate-900/[0.14] bg-slate-900/5 text-slate-700 dark:border-white/16 dark:bg-white/8 dark:text-white/80';
@@ -1148,21 +1150,21 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const getShiftStatusBadgeClasses = (status?: string) => {
     switch (String(status || '').toLowerCase()) {
       case 'active':
-        return 'border-emerald-500/30 bg-emerald-500/15 text-emerald-800 dark:border-emerald-300/30 dark:text-emerald-100';
+        return 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:border-zinc-700 dark:text-emerald-100';
       case 'closed':
         return 'border-slate-900/[0.14] bg-slate-900/5 text-slate-700 dark:border-white/16 dark:bg-white/8 dark:text-white/80';
       default:
-        return 'border-amber-500/30 bg-amber-500/15 text-amber-800 dark:border-amber-300/30 dark:text-amber-100';
+        return 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:border-zinc-700 dark:text-amber-100';
     }
   };
 
   const getHandoverBadgeClasses = (handover: ZReportPhoneShiftHandover | null) => {
     switch (handover) {
       case 'received':
-        return 'border-emerald-500/30 bg-emerald-500/15 text-emerald-800 dark:border-emerald-300/30 dark:text-emerald-100';
+        return 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:border-zinc-700 dark:text-emerald-100';
       case 'pending':
       case 'not_counted':
-        return 'border-amber-500/30 bg-amber-500/15 text-amber-800 dark:border-amber-300/30 dark:text-amber-100';
+        return 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:border-zinc-700 dark:text-amber-100';
       default:
         return 'border-slate-900/[0.14] bg-slate-900/5 text-slate-700 dark:border-white/16 dark:bg-white/8 dark:text-white/80';
     }
@@ -1216,7 +1218,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     if (drawer?.reconciled) {
       return {
         label: t('modals.zReport.reconciled'),
-        className: 'border-emerald-500/30 bg-emerald-500/15 text-emerald-800 dark:border-emerald-300/30 dark:text-emerald-100',
+        className: 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:border-zinc-700 dark:text-emerald-100',
       };
     }
     if (!drawer?.closedAt) {
@@ -1227,7 +1229,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     }
     return {
       label: t('modals.zReport.needsAttention'),
-      className: 'border-amber-500/30 bg-amber-500/15 text-amber-800 dark:border-amber-300/30 dark:text-amber-100',
+      className: 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:border-zinc-700 dark:text-amber-100',
     };
   };
 
@@ -1832,7 +1834,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     },
     {
       key: 'staff',
-      label: t('modals.zReport.staffPerformance'),
+      label: t('modals.zReport.staff'),
       description: hasActiveStaffShifts
         ? t('modals.zReport.allStaffCheckoutSubtitle', { count: activeShiftCount })
         : showMainTerminalWarning
@@ -1937,70 +1939,17 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   ];
   const totalCashOut = expensesTotal + staffPaymentsTotal + drawerDrops + driverCashGiven;
   const totalCashInAdjustments = driverCashReturned;
-  const netAfterExpenses = collectedTotal - expensesTotal - staffPaymentsTotal;
-  const moneyOverviewMessage = loading
-    ? t('modals.zReport.closeoutLoading')
-    : closeoutReady
-      ? t('modals.zReport.clarity.readyHint', { defaultValue: 'Everything checks out -- submit to admin.' })
-      : closeoutNeedsStaffCheckout
-        ? t('modals.zReport.allStaffCheckoutSubtitle', { count: activeShiftCount })
-        : closeoutNeedsCashierCheckout
-        ? t('modals.zReport.cashDrawerCheckoutNeeded')
-        : closeoutIssueCount > 0
-        ? t('modals.zReport.clarity.reviewHint', {
-          count: closeoutIssueCount,
-          defaultValue: 'Fix {{count}} item(s) below, then submit.',
-        })
-        : t('modals.zReport.reviewBeforeClose');
-  const moneyOverviewCards = [
-    {
-      key: 'opening',
-      label: t('modals.zReport.opening'),
-      value: formatMoney(drawerOpening),
-      tone: strongTextClass,
-      helper: t('modals.zReport.cashDrawer', { defaultValue: 'Cash Drawer' }),
-    },
-    {
-      key: 'earned',
-      label: t('modals.zReport.actualEarned'),
-      value: formatMoney(collectedTotal),
-      tone: 'text-emerald-600 dark:text-emerald-300',
-      helper: `${t('modals.zReport.orders', { defaultValue: 'Orders' })}: ${totalOrders} · ${t('modals.zReport.staff', { defaultValue: 'Staff' })}: ${totalShiftCount}`,
-    },
-    {
-      key: 'expected',
-      label: t('modals.zReport.expectedCash'),
-      value: formatMoney(expectedCash),
-      tone: Math.abs(closeoutDrawerVariance) >= 0.01
-        ? 'text-amber-600 dark:text-amber-300'
-        : 'text-emerald-600 dark:text-emerald-300',
-      helper: t('modals.zReport.netCashPosition', { defaultValue: 'Net Cash Position' }),
-    },
-    {
-      key: 'net',
-      label: t('modals.zReport.cashFlow', { defaultValue: 'Cash Flow' }),
-      value: formatMoney(netAfterExpenses),
-      tone: strongTextClass,
-      helper: reportSections.expenses ? t('modals.zReport.totalExpenses', { defaultValue: 'Total Expenses' }) + `: ${formatMoney(expensesTotal + staffPaymentsTotal)}` : '',
-    },
-  ];
+  // Founder 31/10: the Check tab's cash card follows the drawer only, from the opening to what it should
+  // hold. Card, TWINT and platform money never pass through the drawer; they sit in the revenue split.
+  // The variance shows once a drawer is counted: an open drawer's 0,00 is not a result.
+  const drawerCounted = closeoutHasVariance
+    || (Array.isArray(zReport?.drawers) ? zReport.drawers : []).some((drawer) => Boolean(drawer?.closedAt || drawer?.reconciled));
   const moneyFlowRows = [
     { key: 'start', label: t('modals.zReport.opening'), value: formatMoney(drawerOpening), tone: strongTextClass },
-    { key: 'cash', label: t('modals.zReport.cashSales'), value: `+${formatMoney(drawerCashNet)}`, tone: 'text-emerald-600 dark:text-emerald-300' },
-    { key: 'card', label: t('modals.zReport.cardSales'), value: formatMoney(cardCollected), tone: strongTextClass },
-    ...(reportSections.twint ? [{ key: 'twint', label: 'TWINT', value: formatMoney(twintCollected), tone: strongTextClass }] : []),
-    ...(platformOnlineCollected > 0
-      ? [{ key: 'platformOnline', label: t('modals.zReport.platformOnlineSales'), value: formatMoney(platformOnlineCollected), tone: strongTextClass }]
-      : []),
-    ...(platformCodCollected > 0
-      ? [{ key: 'platformCod', label: t('modals.zReport.platformCodSales'), value: formatMoney(platformCodCollected), tone: strongTextClass }]
-      : []),
-    ...(otherCollected >= 0.005
-      ? [{ key: 'other', label: t('modals.zReport.otherTender'), value: formatMoney(otherCollected), tone: strongTextClass }]
-      : []),
-    ...(reportSections.expenses || totalCashOut !== 0 ? [{ key: 'out', label: t('modals.zReport.totalExpenses'), value: totalCashOut > 0 ? `-${formatMoney(totalCashOut)}` : formatMoney(0), tone: 'text-rose-600 dark:text-rose-300' },] : []),
+    { key: 'cash', label: t('modals.zReport.cashSales'), value: `+${formatMoney(drawerCashNet)}`, tone: strongTextClass },
+    ...(reportSections.expenses || totalCashOut !== 0 ? [{ key: 'out', label: t('modals.zReport.totalExpenses'), value: totalCashOut > 0 ? `-${formatMoney(totalCashOut)}` : formatMoney(0), tone: strongTextClass },] : []),
     ...(totalCashInAdjustments > 0
-      ? [{ key: 'returned', label: t('modals.zReport.driverCashReturned'), value: `+${formatMoney(totalCashInAdjustments)}`, tone: 'text-emerald-600 dark:text-emerald-300' }]
+      ? [{ key: 'returned', label: t('modals.zReport.driverCashReturned'), value: `+${formatMoney(totalCashInAdjustments)}`, tone: strongTextClass }]
       : []),
     // Gift card cash is a drawer liability: in the canonical expectation once, never a sale.
     ...(giftCloseDrawer
@@ -2011,8 +1960,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         { key: 'giftLiabilityCash', label: giftCloseText('giftLiabilityCash'), value: `+${formatGiftMoney(giftCloseDrawer.giftLiabilityCashCents, giftClose.currency)}`, tone: strongTextClass },
         { key: 'giftExpected', label: giftCloseText('expected'), value: formatMoney(expectedCash), tone: strongTextClass },
       ]
+      : [{ key: 'expected', label: t('modals.zReport.expectedCash'), value: formatMoney(expectedCash), tone: strongTextClass }]),
+    ...(drawerCounted
+      ? [{ key: 'variance', label: t('modals.zReport.variance'), value: formatMoney(closeoutDrawerVariance), tone: closeoutHasVariance ? 'text-amber-600 dark:text-amber-300' : strongTextClass }]
       : []),
-    { key: 'variance', label: t('modals.zReport.variance'), value: formatMoney(closeoutDrawerVariance), tone: closeoutHasVariance ? 'text-amber-600 dark:text-amber-300' : 'text-emerald-600 dark:text-emerald-300' },
   ];
   const drawerRows = Array.isArray(zReport?.drawers) ? zReport.drawers : [];
   const expenseRows = Array.isArray(summaryExpenses.items) ? summaryExpenses.items : [];
@@ -2032,12 +1983,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   ];
   const filteredOrderDetails = filterOrders(dayOrderDetails);
   const dashboardPanelClass = isDarkTheme
-    ? 'border-yellow-400/20 bg-black/35 text-white shadow-2xl shadow-black/25 backdrop-blur-2xl'
-    : 'border-yellow-500/25 bg-white/75 text-slate-950 shadow-2xl shadow-slate-950/15 backdrop-blur-2xl';
+    ? 'border-(--modal-glass-line) bg-transparent text-white'
+    : 'border-(--modal-glass-line) bg-transparent text-slate-950';
   const dashboardInsetClass = `${modalInsetClassName} ${strongTextClass}`;
   const dashboardTileClass = isDarkTheme
-    ? 'border-white/12 bg-white/8 text-white shadow-lg shadow-black/10 backdrop-blur-xl'
-    : 'border-slate-900/12 bg-white/80 text-slate-950 shadow-lg shadow-slate-950/10 backdrop-blur-xl';
+    ? 'border-(--modal-glass-card-border) bg-(--modal-glass-card) text-white'
+    : 'border-(--modal-glass-card-border) bg-(--modal-glass-card) text-slate-950';
 
   const renderChecklistIcon = (state: CloseoutChecklistState) => {
     if (state === 'ready') {
@@ -2067,10 +2018,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       header={(
         <header
           data-z-report-command-header
-          className={`flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3 backdrop-blur-xl ${
-            isDarkTheme
-              ? 'border-yellow-400/15 bg-black/25 text-white'
-              : 'border-yellow-500/20 bg-white/70 text-slate-950'
+          className={`flex shrink-0 items-center justify-between gap-3 border-b border-(--modal-glass-line) bg-transparent px-4 py-3 ${
+            isDarkTheme ? 'text-white' : 'text-slate-950'
           }`}
         >
           {/* Round 322: a calm, human identity block -- "Close day" + the working day as a FRIENDLY
@@ -2078,23 +2027,25 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
               whether it is today's live day or a past day. The verdict ("ready"/"needs attention") lives
               ONLY in the status card below, so the header no longer repeats it. */}
           <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-yellow-500/20 bg-white/65 backdrop-blur-xl dark:border-yellow-400/20 dark:bg-white/8">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-(--modal-glass-card-border) bg-(--modal-glass-card)">
               <FileText className={`h-5 w-5 ${softTextClass}`} />
             </div>
             <div className="min-w-0">
-              <h2 className={`text-2xl font-black tracking-tight ${strongTextClass}`}>
+              <h2 className={`text-2xl font-bold tracking-tight ${strongTextClass}`}>
                 {t('modals.zReport.clarity.assistantTitle', { defaultValue: 'Close day' })}
               </h2>
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 <span className={`wrap-break-word text-sm font-bold ${softTextClass}`}>{friendlyBusinessDate}</span>
                 <span
                   data-z-report-day-chip
-                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-black ${isLiveDay ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200' : 'border-slate-900/[0.14] bg-slate-900/4 text-slate-600 dark:border-white/18 dark:bg-white/8 dark:text-white/70'}`}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${isLiveDay || isOpenPastDay ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 dark:text-emerald-200' : 'border-slate-900/[0.14] bg-slate-900/4 text-slate-600 dark:border-white/18 dark:bg-white/8 dark:text-white/70'}`}
                 >
-                  {isLiveDay ? <CheckCircle className="h-3 w-3" /> : <CalendarDays className="h-3 w-3" />}
+                  {isLiveDay || isOpenPastDay ? <CheckCircle className="h-3 w-3" /> : <CalendarDays className="h-3 w-3" />}
                   {isLiveDay
                     ? t('modals.zReport.clarity.dayLive', { defaultValue: 'Today' })
-                    : t('modals.zReport.clarity.dayHistorical', { defaultValue: 'Past day' })}
+                    : isOpenPastDay
+                      ? t('modals.zReport.clarity.dayOpen', { defaultValue: 'Open day' })
+                      : t('modals.zReport.clarity.dayHistorical', { defaultValue: 'Past day' })}
                 </span>
               </div>
             </div>
@@ -2130,7 +2081,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
               </div>
             )}
             {error && (
-              <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm font-bold text-red-700 dark:text-red-200">
+              <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-sm font-bold text-red-700 dark:text-red-200">
                 {error}
               </div>
             )}
@@ -2150,13 +2101,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         <div data-z-report-close-assistant className="flex shrink-0 flex-col gap-2.5">
           <div
             data-z-report-decision-panel
-            className={`rounded-3xl border p-4 sm:p-5 ${
-              lockedTerminal
-                ? 'border-yellow-500/25 bg-white/55 dark:border-yellow-400/20 dark:bg-black/25'
-                : closeoutReady
-                  ? 'border-emerald-400/40 bg-emerald-500/8'
-                  : 'border-amber-400/45 bg-amber-400/10'
-            }`}
+            className="rounded-2xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-4"
           >
             {/* The verdict ("Can I close now?") + the single Commit Z report action. */}
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -2166,12 +2111,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                 ) : lockedTerminal ? (
                   <Lock className={`mt-1 h-7 w-7 shrink-0 ${softTextClass}`} />
                 ) : closeoutReady ? (
-                  <CheckCircle className="mt-1 h-8 w-8 shrink-0 text-emerald-400" />
+                  <CheckCircle className="mt-1 h-8 w-8 shrink-0 text-emerald-700 dark:text-emerald-400" />
                 ) : (
                   <AlertTriangle className="mt-1 h-8 w-8 shrink-0 text-amber-500" />
                 )}
                 <div className="min-w-0">
-                  <div className={`wrap-break-word text-2xl font-black leading-tight ${strongTextClass}`}>{closeoutStatusLabel}</div>
+                  <div className={`wrap-break-word text-xl font-bold leading-tight ${strongTextClass}`}>{closeoutStatusLabel}</div>
                   <div className={`mt-1 max-w-3xl wrap-break-word text-sm font-semibold leading-5 ${mutedTextClass}`}>
                     {closeoutSubtitle}
                   </div>
@@ -2183,9 +2128,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                 <button
                   type="button"
                   onClick={handleSubmitReport}
-                  className={`inline-flex min-h-[48px] w-full items-center justify-center rounded-2xl border px-6 text-base font-black transition sm:w-auto ${
+                  className={`inline-flex min-h-[48px] w-full items-center justify-center rounded-2xl border px-6 text-base font-bold transition sm:w-auto ${
                     canCommitZReport
-                      ? 'border-emerald-500/40 bg-emerald-600 text-white shadow-lg shadow-emerald-500/20 active:scale-[0.99] active:bg-emerald-500'
+                      ? 'border-(--pos-s-border) bg-(--pos-s-yellow) text-black shadow-lg active:scale-[0.99] active:bg-yellow-500'
                       : 'cursor-not-allowed border-slate-900/[0.14] bg-slate-900/5 text-slate-500 opacity-70 dark:border-white/[0.14] dark:bg-white/8 dark:text-white/55'
                   }`}
                   disabled={!canCommitZReport}
@@ -2199,13 +2144,13 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             {/* Technical detail tucked behind a small summary: change the working day, and see From/Until +
                 terminal in plain words. Closed by default so the first view stays calm. */}
             <details data-z-report-day-details className="group mt-3">
-              <summary className={`flex min-h-touch cursor-pointer list-none items-center gap-2 rounded-xl border px-3 text-xs font-black ${dashboardInsetClass} [&::-webkit-details-marker]:hidden`}>
+              <summary className={`flex min-h-touch cursor-pointer list-none items-center gap-2 rounded-xl border px-3 text-xs font-bold ${dashboardInsetClass} [&::-webkit-details-marker]:hidden`}>
                 <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" />
                 <span>{t('modals.zReport.clarity.detailsSummary', { defaultValue: 'Details' })}</span>
               </summary>
               <div className="mt-2 flex flex-col gap-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className={`flex items-center gap-1.5 text-xs font-black ${softTextClass}`}>
+                  <span className={`flex items-center gap-1.5 text-xs font-bold ${softTextClass}`}>
                     <CalendarDays className="h-4 w-4" />
                     {t('modals.zReport.clarity.dayStepTitle', { defaultValue: 'Business day' })}
                   </span>
@@ -2216,7 +2161,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                       setIsUsingLiveDefaultDate(false);
                       setSelectedDate(e.target.value);
                     }}
-                    className={`min-h-touch flex-1 rounded-xl border px-3 py-2 text-center text-sm font-black outline-hidden sm:flex-none ${glassControlClass}`}
+                    className={`min-h-touch flex-1 rounded-xl border px-3 py-2 text-center text-sm font-bold outline-hidden sm:flex-none ${glassControlClass}`}
                     aria-label={t('modals.zReport.selectBusinessDay')}
                     disabled={lockDate}
                   />
@@ -2228,7 +2173,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             </details>
 
             {submitResult && (
-              <div className="mt-3 rounded-2xl border border-emerald-500/25 bg-emerald-500/10 p-3 text-xs font-bold leading-5 text-emerald-800 dark:text-emerald-200">
+              <div className="mt-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 text-xs font-bold leading-5 text-emerald-800 dark:text-emerald-200">
                 {submitResult}
               </div>
             )}
@@ -2245,7 +2190,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                 on the left; the tools sit right, deliberately muted -- reachable, never competing with the
                 three close-day steps above. */}
             <div className="flex shrink-0 flex-col gap-2 border-b border-slate-900/10 p-3 dark:border-white/10 lg:flex-row lg:items-center">
-              <div className="grid flex-1 rounded-xl border border-slate-900/12 bg-white/55 p-1 backdrop-blur-xl dark:border-white/12 dark:bg-black/10 sm:grid-cols-4">
+              <div className="grid flex-1 rounded-xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-1 sm:grid-cols-4">
                 {reportTabs.map((tab) => {
                   const TabIcon = tab.icon;
                   return (
@@ -2253,9 +2198,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                     key={tab.key}
                     type="button"
                     onClick={() => setActiveTab(tab.key)}
-                    className={`inline-flex min-h-touch items-center justify-center gap-2 rounded-lg px-3 text-sm font-black transition-transform duration-150 active:scale-[0.98] ${
+                    className={`inline-flex min-h-touch items-center justify-center gap-2 rounded-lg px-3 text-sm font-bold transition-transform duration-150 active:scale-[0.98] ${
                       activeTab === tab.key
-                        ? 'bg-yellow-400 text-black shadow-lg shadow-yellow-500/20'
+                        ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                         : isDarkTheme
                           ? 'text-white/70'
                           : 'text-slate-600'
@@ -2264,15 +2209,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                     <TabIcon className="h-4 w-4" />
                     <span>{tab.label}</span>
                     {typeof tab.badge === 'number' && tab.badge > 0 && (
-                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-black ${activeTab === tab.key ? 'bg-black/15 text-black' : 'bg-amber-500/20 text-amber-700 dark:text-amber-200'}`}>{tab.badge}</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${activeTab === tab.key ? 'bg-black/15 text-(--pos-s-sel-fg)' : 'bg-(--pos-s-surface-2) text-amber-700 dark:text-amber-200'}`}>{tab.badge}</span>
                     )}
                   </button>
                   );
                 })}
               </div>
+              <div className="flex flex-col items-end gap-1">
               <div
                 data-z-report-utility-tools
-                className="flex items-center justify-end gap-1 rounded-xl border border-slate-900/10 bg-white/55 p-1 backdrop-blur-xl dark:border-white/10 dark:bg-white/4"
+                className="flex items-center justify-end gap-1 rounded-xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-1"
               >
                 {[
                   { key: 'refresh', label: t('modals.zReport.refresh'), icon: RefreshCw, onClick: handleRefreshReport, disabled: loading },
@@ -2297,6 +2243,13 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                   );
                 })}
               </div>
+              {/* Why Print is unavailable, visible: a title tooltip never shows on a touch till. */}
+              {printUnavailableHint && (
+                <p data-z-print-hint className={`max-w-md text-right text-[11px] font-semibold ${softTextClass}`}>
+                  {printUnavailableHint}
+                </p>
+              )}
+              </div>
             </div>
 
             <div data-z-report-center-scroll className="min-h-0 flex-1 overflow-y-auto p-4 pb-6 scroll-pb-6 scrollbar-hide">
@@ -2308,20 +2261,20 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                   <div data-z-report-money-glance className="grid grid-cols-2 gap-3">
                     <div className={`rounded-2xl border p-3 ${dashboardTileClass}`}>
                       <div className={`flex items-center gap-1.5 text-[11px] font-bold ${softTextClass}`}><Banknote className="h-3.5 w-3.5" />{t('modals.zReport.clarity.totalSales', { defaultValue: 'Total sales' })}</div>
-                      <div className="mt-0.5 wrap-break-word text-lg font-black text-emerald-600 dark:text-emerald-300">{formatMoney(totalSales)}</div>
+                      <div className={`mt-0.5 wrap-break-word text-lg font-bold ${strongTextClass}`}>{formatMoney(totalSales)}</div>
                     </div>
                     <div className={`rounded-2xl border p-3 ${dashboardTileClass}`}>
                       <div className={`flex items-center gap-1.5 text-[11px] font-bold ${softTextClass}`}><ShieldCheck className="h-3.5 w-3.5" />{t('modals.zReport.clarity.expectedCash', { defaultValue: 'Expected cash' })}</div>
-                      <div className={`mt-0.5 wrap-break-word text-lg font-black ${strongTextClass}`}>{formatMoney(expectedCash)}</div>
+                      <div className={`mt-0.5 wrap-break-word text-lg font-bold ${strongTextClass}`}>{formatMoney(expectedCash)}</div>
                     </div>
                   </div>
                   <section data-z-report-money-reconciliation className="space-y-4">
                     <div>
-                      <h3 className={`text-2xl font-black ${strongTextClass}`}>{t('modals.zReport.moneyReconciliation')}</h3>
+                      <h3 className={`text-2xl font-bold ${strongTextClass}`}>{t('modals.zReport.moneyReconciliation')}</h3>
                     </div>
 
                     <div className={`rounded-2xl border p-4 ${dashboardInsetClass}`}>
-                      <div className="grid gap-3 text-center text-sm font-black md:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr_auto_1fr]">
+                      <div className="grid gap-3 text-center text-sm font-bold md:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr_auto_1fr]">
                         <div><div className={softTextClass}>{t('modals.zReport.opening')}</div><div>{formatMoney(drawerOpening)}</div></div>
                         <div className={`hidden md:block ${softTextClass}`}>+</div>
                         <div><div className={softTextClass}>{t('modals.zReport.cashSales')}</div><div>{formatMoney(cashCollected)}</div></div>
@@ -2336,7 +2289,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           </>
                         )}
                         <div className={`hidden md:block ${softTextClass}`}>=</div>
-                        <div><div className={softTextClass}>{t('modals.zReport.expected')}</div><div className="text-emerald-600 dark:text-emerald-300">{formatMoney(expectedCash)}</div></div>
+                        <div><div className={softTextClass}>{t('modals.zReport.expected')}</div><div>{formatMoney(expectedCash)}</div></div>
                       </div>
                     </div>
                   </section>
@@ -2344,18 +2297,18 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                     <section
                       data-z-report-gift-close
                       data-gift-close-state={giftClose.state}
-                      className={`space-y-3 rounded-2xl border p-4 ${giftCloseBlocksFinal ? 'border-rose-400/40 bg-rose-500/10' : dashboardInsetClass}`}
+                      className={`space-y-3 rounded-2xl border p-4 ${giftCloseBlocksFinal ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)' : dashboardInsetClass}`}
                     >
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <h3 className={`text-lg font-black ${strongTextClass}`}>{giftCloseText('title')}</h3>
+                          <h3 className={`text-lg font-bold ${strongTextClass}`}>{giftCloseText('title')}</h3>
                           <div className={`mt-1 wrap-break-word text-xs font-semibold leading-5 ${mutedTextClass}`}>{giftCloseText('outsideSales')}</div>
                         </div>
                         <span
                           data-z-report-gift-close-status
-                          className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-black ${giftCloseBlocksFinal
-                            ? 'border-rose-500/30 bg-rose-500/15 text-rose-700 dark:text-rose-200'
-                            : 'border-emerald-500/30 bg-emerald-500/15 text-emerald-800 dark:text-emerald-100'}`}
+                          className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-bold ${giftCloseBlocksFinal
+                            ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-rose-700 dark:text-rose-200'
+                            : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-100'}`}
                         >
                           {giftCloseStatusLabel}
                         </span>
@@ -2368,8 +2321,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           className={`rounded-xl border p-3 ${dashboardTileClass}`}
                         >
                           <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className={`truncate text-sm font-black ${strongTextClass}`}>{giftCloseStaffLabel(original)}</span>
-                            <span data-z-report-gift-close-currency className={`text-[11px] font-black ${softTextClass}`}>
+                            <span className={`truncate text-sm font-bold ${strongTextClass}`}>{giftCloseStaffLabel(original)}</span>
+                            <span data-z-report-gift-close-currency className={`text-[11px] font-bold ${softTextClass}`}>
                               {giftCloseText('currency')}: {original.currency}
                             </span>
                           </div>
@@ -2383,7 +2336,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                             ].map((row) => (
                               <div key={row.key} className="min-w-0">
                                 <div className={`truncate text-[11px] font-bold ${softTextClass}`}>{row.label}</div>
-                                <div className={`mt-0.5 truncate text-sm font-black ${strongTextClass}`}>{formatGiftMoney(row.cents, original.currency)}</div>
+                                <div className={`mt-0.5 truncate text-sm font-bold ${strongTextClass}`}>{formatGiftMoney(row.cents, original.currency)}</div>
                               </div>
                             ))}
                           </div>
@@ -2410,7 +2363,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                   {activeTab === 'money' && (
                     <section className="grid gap-4 2xl:grid-cols-2">
                       <div className={`rounded-2xl border p-4 ${dashboardInsetClass}`}>
-                        <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.drawerLedger')}</h3>
+                        <h3 className={`text-lg font-bold ${strongTextClass}`}>{t('modals.zReport.drawerLedger')}</h3>
                         <div className="mt-4 space-y-3">
                           {drawerRows.length > 0 ? drawerRows.map((drawer) => {
                             const expected = resolveDrawerExpectedAmount(drawer);
@@ -2418,37 +2371,37 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                             const status = getDrawerStatusBadge(drawer);
                             const stats = [
                               { key: 'opening', label: t('modals.zReport.opening'), value: drawer.opening, tone: strongTextClass },
-                              { key: 'cash', label: t('modals.zReport.cashSales'), value: drawer.cashSales, tone: 'text-amber-600 dark:text-amber-300' },
-                              { key: 'card', label: t('modals.zReport.cardSales'), value: drawer.cardSales, tone: 'text-amber-600 dark:text-amber-300' },
+                              { key: 'cash', label: t('modals.zReport.cashSales'), value: drawer.cashSales, tone: strongTextClass },
+                              { key: 'card', label: t('modals.zReport.cardSales'), value: drawer.cardSales, tone: strongTextClass },
                               { key: 'drops', label: t('modals.zReport.drops'), value: drawer.drops, tone: strongTextClass },
-                              { key: 'given', label: t('modals.zReport.driverCashGiven'), value: drawer.driverCashGiven, tone: 'text-orange-600 dark:text-orange-300' },
-                              { key: 'returned', label: t('modals.zReport.driverCashReturned'), value: drawer.driverCashReturned, tone: mutedTextClass },
-                              { key: 'staff', label: t('modals.zReport.staffPayments'), value: drawer.staffPayments, tone: 'text-rose-600 dark:text-rose-300' },
-                              { key: 'variance', label: t('modals.zReport.variance'), value: variance, tone: Math.abs(variance) < 0.01 ? 'text-emerald-600 dark:text-emerald-300' : 'text-amber-600 dark:text-amber-300' },
+                              { key: 'given', label: t('modals.zReport.driverCashGiven'), value: drawer.driverCashGiven, tone: strongTextClass },
+                              { key: 'returned', label: t('modals.zReport.driverCashReturned'), value: drawer.driverCashReturned, tone: strongTextClass },
+                              { key: 'staff', label: t('modals.zReport.staffPayments'), value: drawer.staffPayments, tone: strongTextClass },
+                              { key: 'variance', label: t('modals.zReport.variance'), value: variance, tone: Math.abs(variance) < 0.01 ? strongTextClass : 'text-amber-600 dark:text-amber-300' },
                             ];
 
                             return (
                               <article key={drawer.id} className={`rounded-xl border p-4 ${dashboardTileClass}`}>
                                 <div className="flex flex-wrap items-start justify-between gap-3">
                                   <div className="min-w-0">
-                                    <div className={`truncate text-base font-black ${strongTextClass}`}>{drawer.staffName || '-'}</div>
+                                    <div className={`truncate text-base font-bold ${strongTextClass}`}>{drawer.staffName || '-'}</div>
                                     <div className={`mt-1 text-xs font-semibold ${softTextClass}`}>
-                                      {formatWindowDateTime(drawer.openedAt)} - {drawer.closedAt ? formatWindowDateTime(drawer.closedAt) : t('common.status.active', { defaultValue: 'Active' })}
+                                      {formatWindowDateTime(drawer.openedAt)}{drawer.closedAt ? ` - ${formatWindowDateTime(drawer.closedAt)}` : ''}
                                     </div>
                                   </div>
                                   <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${status.className}`}>{status.label}</span>
                                 </div>
 
-                                <div className="mt-4 rounded-2xl border border-slate-900/10 bg-white/45 p-4 dark:border-white/12 dark:bg-black/10">
-                                  <div className={`text-[11px] font-black uppercase tracking-[0.12em] ${softTextClass}`}>{t('modals.zReport.expected')}</div>
-                                  <div className="mt-2 text-3xl font-black text-emerald-600 dark:text-emerald-300">{formatMoney(expected)}</div>
+                                <div className="mt-4 rounded-2xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-4">
+                                  <div className={`text-[11px] font-bold uppercase tracking-[0.12em] ${softTextClass}`}>{t('modals.zReport.expected')}</div>
+                                  <div className={`mt-2 text-3xl font-bold tabular-nums ${strongTextClass}`}>{formatMoney(expected)}</div>
                                 </div>
 
-                                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 2xl:grid-cols-4">
+                                <div className="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4">
                                   {stats.map((row) => (
-                                    <div key={row.key} className="min-w-0 rounded-2xl border border-slate-900/10 bg-white/45 p-3 dark:border-white/12 dark:bg-black/10">
-                                      <div className={`wrap-break-word text-xs font-black leading-4 ${softTextClass}`}>{row.label}</div>
-                                      <div className={`mt-1 wrap-break-word text-base font-black ${row.tone}`}>{formatMoney(row.value)}</div>
+                                    <div key={row.key} className="min-w-0 rounded-xl bg-(--modal-glass-card) px-3 py-2">
+                                      <div className={`wrap-break-word text-xs font-bold leading-4 ${softTextClass}`}>{row.label}</div>
+                                      <div className={`mt-1 wrap-break-word text-base font-bold ${row.tone}`}>{formatMoney(row.value)}</div>
                                     </div>
                                   ))}
                                 </div>
@@ -2462,15 +2415,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
 
                       {reportSections.expenses && (
                       <div className={`rounded-2xl border p-4 ${dashboardInsetClass}`}>
-                        <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.expenseLedger')}</h3>
+                        <h3 className={`text-lg font-bold ${strongTextClass}`}>{t('modals.zReport.expenseLedger')}</h3>
                         <div className="mt-4 space-y-2">
                           {expenseRows.length > 0 ? expenseRows.map((expense) => (
                             <div key={expense.id} className={`grid grid-cols-[minmax(0,1fr)_auto] gap-3 rounded-2xl border p-3 ${dashboardTileClass}`}>
                               <div className="min-w-0">
-                                <div className="truncate text-sm font-black">{expense.description}</div>
+                                <div className="truncate text-sm font-bold">{expense.description}</div>
                                 <div className={`mt-1 text-xs font-semibold ${softTextClass}`}>{expense.staffName || expense.expenseType || '-'}</div>
                               </div>
-                              <div className="text-right text-sm font-black text-rose-600 dark:text-rose-300">{formatMoney(expense.amount)}</div>
+                              <div className={`text-right text-sm font-bold ${strongTextClass}`}>{formatMoney(expense.amount)}</div>
                             </div>
                           )) : (
                             <div className="rounded-2xl border border-dashed border-slate-900/[0.14] bg-slate-900/3 p-6 text-center text-sm font-semibold text-slate-600 dark:border-white/16 dark:bg-white/4 dark:text-white/65">{t('modals.zReport.noExpenseDetails')}</div>
@@ -2483,7 +2436,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
 
                   {activeTab === 'staff' && (
                     <section className={`rounded-xl border p-4 ${dashboardInsetClass}`}>
-                      <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.staffPerformance')}</h3>
+                      <h3 className={`text-lg font-bold ${strongTextClass}`}>{t('modals.zReport.staffPerformance')}</h3>
                       <div className="mt-4">
                         {visibleStaffReports.length > 0 ? (
                           /* Round 321: only go two-column when there is more than one staff report -- a lone
@@ -2499,19 +2452,19 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 : t('modals.zReport.orders');
                               const statRows = [
                                 { key: 'activity', label: activityLabel, value: resolveShiftActivityCount(staff), tone: strongTextClass },
-                                { key: 'sales', label: t('modals.zReport.sales'), value: formatMoney(resolveShiftEarnedTotal(staff)), tone: 'text-emerald-600 dark:text-emerald-300' },
-                                { key: 'cash', label: t('modals.zReport.cash'), value: formatMoney(staff.orders?.cashAmount), tone: 'text-amber-600 dark:text-amber-300' },
-                                { key: 'card', label: t('modals.zReport.card'), value: formatMoney(staff.orders?.cardAmount), tone: 'text-amber-600 dark:text-amber-300' },
+                                { key: 'sales', label: t('modals.zReport.sales'), value: formatMoney(resolveShiftEarnedTotal(staff)), tone: strongTextClass },
+                                { key: 'cash', label: t('modals.zReport.cash'), value: formatMoney(staff.orders?.cashAmount), tone: strongTextClass },
+                                { key: 'card', label: t('modals.zReport.card'), value: formatMoney(staff.orders?.cardAmount), tone: strongTextClass },
                                 ...(staff.orders?.twintAmount ? [{ key: 'twint', label: 'TWINT', value: formatMoney(staff.orders.twintAmount), tone: strongTextClass }] : []),
-                                { key: 'return', label: t('modals.zReport.cashToReturn'), value: formatMoney(resolveStaffReturnAmount(staff)), tone: mutedTextClass },
+                                { key: 'return', label: t('modals.zReport.cashToReturn'), value: formatMoney(resolveStaffReturnAmount(staff)), tone: strongTextClass },
                               ];
                               return (
                                 <article key={staff.staffShiftId} className={`rounded-xl border p-4 ${dashboardTileClass}`}>
                                   <div className="flex flex-wrap items-start justify-between gap-3">
                                     <div className="min-w-0">
-                                      <div className={`truncate text-base font-black ${strongTextClass}`}>{staff.staffName || staff.staffId}</div>
+                                      <div className={`truncate text-base font-bold ${strongTextClass}`}>{staff.staffName || staff.staffId}</div>
                                       <div className={`mt-1 text-xs font-semibold ${softTextClass}`}>
-                                        {formatWindowDateTime(shiftWindow.start)} - {staff.checkOut ? formatWindowDateTime(shiftWindow.end) : t('common.status.active', { defaultValue: 'Active' })}
+                                        {formatWindowDateTime(shiftWindow.start)}{staff.checkOut ? ` - ${formatWindowDateTime(shiftWindow.end)}` : ''}
                                       </div>
                                     </div>
                                     <div className="flex shrink-0 flex-wrap justify-end gap-2">
@@ -2520,11 +2473,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                     </div>
                                   </div>
 
-                                  <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                  <div className="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-3">
                                     {statRows.map((row) => (
-                                      <div key={row.key} className="min-w-0 rounded-2xl border border-slate-900/10 bg-white/45 p-3 dark:border-white/12 dark:bg-black/10">
-                                        <div className={`wrap-break-word text-xs font-black leading-4 ${softTextClass}`}>{row.label}</div>
-                                        <div className={`mt-1 wrap-break-word text-base font-black ${row.tone}`}>{row.value}</div>
+                                      <div key={row.key} className="min-w-0 rounded-xl bg-(--modal-glass-card) px-3 py-2">
+                                        <div className={`wrap-break-word text-xs font-bold leading-4 ${softTextClass}`}>{row.label}</div>
+                                        <div className={`mt-1 wrap-break-word text-base font-bold ${row.tone}`}>{row.value}</div>
                                       </div>
                                     ))}
                                   </div>
@@ -2540,7 +2493,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           shift sold and how its till was handed over. Never part of the totals above. */}
                       {(phoneShiftStaffRows.length > 0 || (phoneShiftsKey && phoneShiftsUnavailable)) && (
                         <div data-z-report-phone-shifts-staff className="mt-5">
-                          <h4 className={`text-base font-black ${strongTextClass}`}>{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
+                          <h4 className={`text-base font-bold ${strongTextClass}`}>{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
                           {phoneShiftStaffRows.length === 0 ? (
                             <div className={`mt-2 wrap-break-word text-xs font-semibold leading-5 ${mutedTextClass}`}>
                               {t('phoneShifts.unavailable', {
@@ -2559,9 +2512,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                     : null;
                                 const statRows = [
                                   { key: 'orders', label: t('modals.zReport.orders'), value: row.ordersCount === null ? '—' : String(row.ordersCount), tone: strongTextClass },
-                                  { key: 'sales', label: t('modals.zReport.sales'), value: money(row.salesTotal), tone: 'text-emerald-600 dark:text-emerald-300' },
-                                  { key: 'cash', label: t('modals.zReport.cash'), value: money(row.cashSales), tone: 'text-amber-600 dark:text-amber-300' },
-                                  { key: 'card', label: t('modals.zReport.card'), value: money(row.cardSales), tone: 'text-amber-600 dark:text-amber-300' },
+                                  { key: 'sales', label: t('modals.zReport.sales'), value: money(row.salesTotal), tone: strongTextClass },
+                                  { key: 'cash', label: t('modals.zReport.cash'), value: money(row.cashSales), tone: strongTextClass },
+                                  { key: 'card', label: t('modals.zReport.card'), value: money(row.cardSales), tone: strongTextClass },
                                   { key: 'counted', label: t('modals.zReport.phoneShifts.countedCash', { defaultValue: 'Counted cash' }), value: money(row.countedCash), tone: mutedTextClass },
                                   // The till's count against what it should hold: "+" over, "-" short.
                                   {
@@ -2581,7 +2534,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                   <article key={row.id} data-z-report-phone-shift={row.id} className={`rounded-xl border p-4 ${dashboardTileClass}`}>
                                     <div className="flex flex-wrap items-start justify-between gap-3">
                                       <div className="min-w-0">
-                                        <div className={`truncate text-base font-black ${strongTextClass}`}>{row.staffName}</div>
+                                        <div className={`truncate text-base font-bold ${strongTextClass}`}>{row.staffName}</div>
                                         <div className={`mt-1 wrap-break-word text-xs font-semibold ${softTextClass}`}>
                                           {phoneMarker ? `${row.phoneName} (${phoneMarker})` : row.phoneName} · {formatWindowDateTime(row.checkIn)} - {formatWindowDateTime(row.checkOut)}
                                         </div>
@@ -2598,11 +2551,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                       </div>
                                     </div>
 
-                                    <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                    <div className="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-3">
                                       {statRows.map((stat) => (
-                                        <div key={stat.key} className="min-w-0 rounded-2xl border border-slate-900/10 bg-white/45 p-3 dark:border-white/12 dark:bg-black/10">
-                                          <div className={`wrap-break-word text-xs font-black leading-4 ${softTextClass}`}>{stat.label}</div>
-                                          <div className={`mt-1 wrap-break-word text-base font-black ${stat.tone}`}>{stat.value}</div>
+                                        <div key={stat.key} className="min-w-0 rounded-xl bg-(--modal-glass-card) px-3 py-2">
+                                          <div className={`wrap-break-word text-xs font-bold leading-4 ${softTextClass}`}>{stat.label}</div>
+                                          <div className={`mt-1 wrap-break-word text-base font-bold ${stat.tone}`}>{stat.value}</div>
                                         </div>
                                       ))}
                                     </div>
@@ -2617,12 +2570,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           staff member, shown only when there is one. Stylists without a shift show here only. */}
                       {staffTipRows.length > 0 && (
                         <div data-z-report-staff-tips className="mt-5">
-                          <h4 className={`text-base font-black ${strongTextClass}`}>{t('salonStaff.tipsByStaff', { defaultValue: 'Tips by staff' })}</h4>
+                          <h4 className={`text-base font-bold ${strongTextClass}`}>{t('salonStaff.tipsByStaff', { defaultValue: 'Tips by staff' })}</h4>
                           <div className="mt-3 grid gap-2 sm:grid-cols-2">
                             {staffTipRows.map((tip) => (
-                              <div key={tip.staffId || tip.staffName} data-z-report-staff-tip={tip.staffId} className="flex min-w-0 items-center justify-between gap-3 rounded-2xl border border-slate-900/10 bg-white/45 p-3 dark:border-white/12 dark:bg-black/10">
-                                <span className={`truncate text-sm font-black ${strongTextClass}`}>{tip.staffName || tip.staffId}</span>
-                                <span className="shrink-0 text-base font-black text-emerald-600 dark:text-emerald-300">{formatMoney(tip.amount)}</span>
+                              <div key={tip.staffId || tip.staffName} data-z-report-staff-tip={tip.staffId} className="flex min-w-0 items-center justify-between gap-3 rounded-2xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-3">
+                                <span className={`truncate text-sm font-bold ${strongTextClass}`}>{tip.staffName || tip.staffId}</span>
+                                <span className={`shrink-0 text-base font-bold ${strongTextClass}`}>{formatMoney(tip.amount)}</span>
                               </div>
                             ))}
                           </div>
@@ -2635,12 +2588,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                     <section data-z-report-orders-list className={`rounded-xl border p-4 ${dashboardInsetClass}`}>
                       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                         <div className="flex flex-wrap items-center gap-2">
-                          <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.orderDetails')}</h3>
-                          <span className={`rounded-full border border-slate-900/12 px-2 py-0.5 text-xs font-black ${softTextClass} dark:border-white/[0.14]`}>{dayOrderDetailCount}</span>
+                          <h3 className={`text-lg font-bold ${strongTextClass}`}>{t('modals.zReport.orderDetails')}</h3>
+                          <span className={`rounded-full border border-slate-900/12 px-2 py-0.5 text-xs font-bold ${softTextClass} dark:border-white/[0.14]`}>{dayOrderDetailCount}</span>
                           <button
                             type="button"
                             onClick={handleExportOrdersReport}
-                            className="min-h-[36px] rounded-lg border border-slate-900/12 px-3 text-xs font-black text-slate-700 transition active:bg-slate-900/6 disabled:opacity-50 dark:border-white/[0.14] dark:text-white/80 dark:active:bg-white/10"
+                            className="min-h-[36px] rounded-lg border border-slate-900/12 px-3 text-xs font-bold text-slate-700 transition active:bg-slate-900/6 disabled:opacity-50 dark:border-white/[0.14] dark:text-white/80 dark:active:bg-white/10"
                           >
                             {t('modals.zReport.exportOrdersCSV')}
                           </button>
@@ -2649,15 +2602,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           ) : null}
                         </div>
                         <div className="flex flex-col gap-2 xl:items-end">
-                          <div className="flex flex-wrap gap-1 rounded-xl border border-slate-900/10 bg-white/45 p-1 backdrop-blur-xl dark:border-white/12 dark:bg-black/10">
+                          <div className="flex flex-wrap gap-1 rounded-xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-1">
                             {orderTypeFilterOptions.map((option) => (
                               <button
                                 key={option.value}
                                 type="button"
                                 onClick={() => setOrderTypeFilter(option.value)}
-                                className={`min-h-[36px] rounded-lg px-3 text-xs font-black transition ${
+                                className={`min-h-[36px] rounded-lg px-3 text-xs font-bold transition ${
                                   orderTypeFilter === option.value
-                                    ? 'bg-amber-500 text-black shadow-lg shadow-amber-500/20'
+                                    ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                                     : 'text-slate-600 active:bg-slate-900/6 dark:text-white/70 dark:active:bg-white/10'
                                 }`}
                               >
@@ -2665,15 +2618,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               </button>
                             ))}
                           </div>
-                          <div className="flex flex-wrap gap-1 rounded-xl border border-slate-900/10 bg-white/45 p-1 backdrop-blur-xl dark:border-white/12 dark:bg-black/10">
+                          <div className="flex flex-wrap gap-1 rounded-xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-1">
                             {paymentMethodFilterOptions.map((option) => (
                               <button
                                 key={option.value}
                                 type="button"
                                 onClick={() => setPaymentMethodFilter(option.value)}
-                                className={`min-h-[36px] rounded-lg px-3 text-xs font-black transition ${
+                                className={`min-h-[36px] rounded-lg px-3 text-xs font-bold transition ${
                                   paymentMethodFilter === option.value
-                                    ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
+                                    ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                                     : 'text-slate-600 active:bg-slate-900/6 dark:text-white/70 dark:active:bg-white/10'
                                 }`}
                               >
@@ -2687,7 +2640,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                         {filteredOrderDetails.length > 0 ? filteredOrderDetails.map((order, index) => (
                           <div key={order.id || index} className={`grid gap-3 rounded-2xl border p-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_auto] ${dashboardTileClass}`}>
                             <div className="min-w-0">
-                              <div className={`truncate text-sm font-black ${strongTextClass}`}>{order.orderNumber || '—'}</div>
+                              <div className={`truncate text-sm font-bold ${strongTextClass}`}>{order.orderNumber || '—'}</div>
                               <div className={`mt-1 text-xs font-semibold ${softTextClass}`}>
                                 {formatTime(order.createdAt)} · {[
                                   order.staffName,
@@ -2698,7 +2651,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               </div>
                             </div>
                             <div className={`text-xs font-semibold ${softTextClass}`}>{localizeZReportOrderType(order.orderType, t)} · {localizeZReportPaymentLabel(order.paymentMethod, t)}</div>
-                            <div className="text-right text-sm font-black text-emerald-600 dark:text-emerald-300">{formatMoney(order.amount)}</div>
+                            <div className={`text-right text-sm font-bold tabular-nums ${strongTextClass}`}>{formatMoney(order.amount)}</div>
                           </div>
                         )) : (
                           <div className="rounded-2xl border border-dashed border-slate-900/[0.14] bg-slate-900/3 p-6 text-center text-sm font-semibold text-slate-600 dark:border-white/16 dark:bg-white/4 dark:text-white/65">{t('modals.zReport.noOrdersMatchFilter')}</div>
@@ -2709,10 +2662,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
 
                   {activeTab === 'review' && (
                     <div className="space-y-3">
-                      <section data-z-report-review-money-overview className={`rounded-2xl border p-4 ${dashboardInsetClass}`}>
-                        <div className="flex flex-col gap-4 xl:flex-row xl:items-stretch">
-                          <div className="min-w-0 flex-1 rounded-2xl border border-yellow-400/25 bg-yellow-400/8 p-4">
-                            <div className={`text-xs font-black uppercase tracking-[0.12em] ${softTextClass}`}>
+                      <section data-z-report-review-money-overview>
+                        <div className="flex flex-col gap-3 xl:flex-row xl:items-start">
+                          <div className="min-w-0 flex-[1.4] rounded-2xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-4">
+                            <div className={`text-xs font-bold uppercase tracking-[0.12em] ${softTextClass}`}>
                               {t('modals.zReport.tabs.overview', { defaultValue: 'Overview' })}
                             </div>
                             <div className="mt-2">
@@ -2720,17 +2673,18 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 <div className={`wrap-break-word text-sm font-bold ${mutedTextClass}`}>
                                   {t('modals.zReport.actualEarned')}
                                 </div>
-                                <div className="mt-1 wrap-break-word text-4xl font-black leading-none text-yellow-300 sm:text-5xl">
+                                <div className={`mt-1 wrap-break-word text-4xl font-bold leading-none tabular-nums sm:text-5xl ${strongTextClass}`}>
                                   {formatMoney(collectedTotal)}
                                 </div>
-                                <div data-z-report-earned-source className={`mt-2 wrap-break-word text-xs font-black uppercase tracking-[0.08em] ${softTextClass}`}>
-                                  {t('modals.zReport.orders', { defaultValue: 'Orders' })}: {totalOrders} · {t('modals.zReport.liveCurrentWindow')} · {t('modals.zReport.totalShifts')}: {totalShiftCount} · {t('common.status.active', { defaultValue: 'Active' })}: {activeShiftCount} · {t('common.status.closed', { defaultValue: 'Closed' })}: {closedShiftCount}
+                                {/* Plain counts in sentence case; the open/past day is the header chip's job, not «live window» jargon. */}
+                                <div data-z-report-earned-source className={`mt-2 wrap-break-word text-xs font-semibold ${softTextClass}`}>
+                                  {t('modals.zReport.orders', { defaultValue: 'Orders' })}: {totalOrders} · {t('modals.zReport.totalShifts')}: {totalShiftCount} · {t('common.status.active', { defaultValue: 'Active' })}: {activeShiftCount} · {t('common.status.closed', { defaultValue: 'Closed' })}: {closedShiftCount}
                                 </div>
                                 <div data-z-report-revenue-split className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
                                   {revenueSplitTiles.map((tile) => (
                                     <div key={tile.key} className={`min-w-0 rounded-xl border p-2 ${dashboardTileClass}`}>
                                       <div className={`truncate text-[11px] font-bold ${softTextClass}`}>{tile.key === 'twint' ? <img src={twintLogo} alt="TWINT" className="h-5 mx-auto rounded-sm" /> : tile.label}</div>
-                                      <div className={`mt-0.5 truncate text-base font-black ${strongTextClass}`}>{tile.value}</div>
+                                      <div className={`mt-0.5 truncate text-base font-bold ${strongTextClass}`}>{tile.value}</div>
                                     </div>
                                   ))}
                                 </div>
@@ -2739,37 +2693,26 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 </div>
                               </div>
                             </div>
-                            <div className={`mt-3 wrap-break-word text-sm font-semibold leading-6 ${mutedTextClass}`}>
-                              {moneyOverviewMessage}
+                          </div>
+
+                          {/* Founder 31/10 («έλεγξε το όλο»): one card for the drawer's cash, opening to expected.
+                              It replaces four tall cards (one repeated the headline) and a strip that mixed card
+                              money into the cash flow. */}
+                          <div data-z-report-cash-flow className={`min-w-0 flex-1 rounded-2xl border p-4 ${dashboardTileClass}`}>
+                            <div className={`text-xs font-bold uppercase tracking-[0.12em] ${softTextClass}`}>
+                              {t('modals.zReport.cashFlow', { defaultValue: 'Cash Flow' })}
                             </div>
-                          </div>
-
-                          <div className="grid min-w-0 flex-[1.35] grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                            {moneyOverviewCards.map((item) => (
-                              <div key={item.key} className={`rounded-2xl border p-3 ${dashboardTileClass}`}>
-                                <div className={`wrap-break-word text-[11px] font-black uppercase tracking-[0.08em] ${softTextClass}`}>
-                                  {item.label}
-                                </div>
-                                <div className={`mt-1 wrap-break-word text-xl font-black ${item.tone}`}>{item.value}</div>
-                                <div className={`mt-1 wrap-break-word text-[11px] font-semibold leading-4 ${softTextClass}`}>
-                                  {item.helper}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="mt-3 rounded-2xl border border-slate-900/10 bg-white/45 p-3 dark:border-white/12 dark:bg-black/10">
-                          <div className={`mb-2 text-xs font-black uppercase tracking-[0.12em] ${softTextClass}`}>
-                            {t('modals.zReport.cashFlow', { defaultValue: 'Cash Flow' })}
-                          </div>
-                          <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-7">
-                            {moneyFlowRows.map((row) => (
-                              <div key={row.key} className="min-w-0 rounded-xl border border-slate-900/10 bg-white/55 p-2.5 dark:border-white/10 dark:bg-white/4">
-                                <div className={`truncate text-[11px] font-bold ${softTextClass}`}>{row.label}</div>
-                                <div className={`mt-1 truncate text-sm font-black ${row.tone}`}>{row.value}</div>
-                              </div>
-                            ))}
+                            <dl className="mt-1 divide-y divide-(--modal-glass-line)">
+                              {moneyFlowRows.map((row) => {
+                                const result = row.key === 'expected' || row.key === 'giftExpected';
+                                return (
+                                  <div key={row.key} className={`flex items-baseline justify-between gap-3 py-2 ${result ? 'text-base' : 'text-sm'}`}>
+                                    <dt className={`min-w-0 wrap-break-word font-semibold ${result ? strongTextClass : softTextClass}`}>{row.label}</dt>
+                                    <dd className={`shrink-0 font-bold tabular-nums ${row.tone}`}>{row.value}</dd>
+                                  </div>
+                                );
+                              })}
+                            </dl>
                           </div>
                         </div>
                       </section>
@@ -2778,16 +2721,17 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           we drill into ONLY the checks that still need action (so a clean day stays short),
                           keep the full payment-blocker resolve panel for real blockers, and show a brief
                           all-clear when the day is ready -- no green-tick walls. */}
-                      {closeoutChecklistItems.filter((item) => item.state !== 'ready').map((item) => (
+                      {closeoutChecklistItems.filter((item) => item.state !== 'ready'
+                        && !(item.description === closeoutSubtitle && !item.details?.length && item.key !== 'phone-shifts' && item.key !== 'fiscal')).map((item) => (
                         <div key={item.key} className={`flex items-start gap-3 rounded-2xl border p-3 ${dashboardInsetClass}`}>
                           <div className="shrink-0">{renderChecklistIcon(item.state)}</div>
                           <div className="min-w-0 flex-1">
-                            <div className={`wrap-break-word text-sm font-black ${strongTextClass}`}>{item.label}</div>
+                            <div className={`wrap-break-word text-sm font-bold ${strongTextClass}`}>{item.label}</div>
                             <div className={`mt-0.5 wrap-break-word text-xs font-semibold leading-5 ${mutedTextClass}`}>{item.description}</div>
                             {item.details && item.details.length > 0 && (
                               <ul data-z-report-checklist-details={item.key} className="mt-1.5 space-y-0.5">
                                 {item.details.map((line, index) => (
-                                  <li key={`${item.key}-${index}`} className={`wrap-break-word text-xs font-black leading-5 ${strongTextClass}`}>
+                                  <li key={`${item.key}-${index}`} className={`wrap-break-word text-xs font-bold leading-5 ${strongTextClass}`}>
                                     {line}
                                   </li>
                                 ))}
@@ -2801,7 +2745,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               onClick={retryPhoneShifts}
                               disabled={phoneShiftsReading}
                               aria-busy={phoneShiftsReading}
-                              className={`inline-flex min-h-touch shrink-0 items-center gap-1.5 rounded-xl border px-3 text-xs font-black transition ${glassControlClass} ${phoneShiftsReading ? 'cursor-not-allowed opacity-60' : ''}`}
+                              className={`inline-flex min-h-touch shrink-0 items-center gap-1.5 rounded-xl border px-3 text-xs font-bold transition ${glassControlClass} ${phoneShiftsReading ? 'cursor-not-allowed opacity-60' : ''}`}
                             >
                               <RefreshCw className={`h-4 w-4 ${phoneShiftsReading ? 'animate-spin' : ''}`} />
                               {t('phoneShifts.retry', { defaultValue: 'Retry' })}
@@ -2813,21 +2757,18 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               onClick={handleRetryFiscalQueue}
                               disabled={retryingFiscalQueue}
                               aria-busy={retryingFiscalQueue}
-                              className={`inline-flex min-h-touch shrink-0 items-center gap-1.5 rounded-xl border px-3 text-xs font-black transition ${glassControlClass} ${retryingFiscalQueue ? 'cursor-not-allowed opacity-60' : ''}`}
+                              className={`inline-flex min-h-touch shrink-0 items-center gap-1.5 rounded-xl border px-3 text-xs font-bold transition ${glassControlClass} ${retryingFiscalQueue ? 'cursor-not-allowed opacity-60' : ''}`}
                             >
                               <RefreshCw className={`h-4 w-4 ${retryingFiscalQueue ? 'animate-spin' : ''}`} />
                               {item.actionLabel}
                             </button>
                           ) : (
                             <span
-                              className={`shrink-0 text-[11px] font-black ${
-                                item.state === 'error'
-                                  ? 'text-rose-600 dark:text-rose-300'
-                                  : item.state === 'pending'
-                                    ? softTextClass
-                                    : 'text-amber-600 dark:text-amber-300'
-                              }`}
+                              className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold border-(--modal-glass-card-border) bg-(--modal-glass-card) ${mutedTextClass}`}
                             >
+                              <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${
+                                item.state === 'error' ? 'bg-rose-500' : item.state === 'pending' ? 'bg-zinc-400' : 'bg-amber-500'
+                              }`} />
                               {item.actionLabel ?? closeoutStateLabel(item.state)}
                             </span>
                           )}
@@ -2840,9 +2781,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                       {fiscalQueueBlocking && fiscalQueue && fiscalQueue.rows.length > 0 && (
                         <section
                           data-z-report-fiscal-queue
-                          className="rounded-2xl border border-rose-400/40 bg-rose-500/10 p-4"
+                          className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4"
                         >
-                          <div className={`mb-2 text-xs font-black uppercase tracking-[0.12em] ${softTextClass}`}>
+                          <div className={`mb-2 text-xs font-bold uppercase tracking-[0.12em] ${softTextClass}`}>
                             {t('modals.zReport.fiscalQueue.listTitle', {
                               count: fiscalQueueCount,
                               defaultValue: 'Fiscal submissions waiting ({{count}})',
@@ -2888,37 +2829,37 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                         || (integrity.unclassifiedPlatforms?.length ?? 0) > 0) && (
                         <section className={`rounded-2xl border p-4 ${integrity.reconciled
                           ? dashboardInsetClass
-                          : 'border-rose-400/40 bg-rose-500/10'}`}>
-                          <div className={`mb-2 text-xs font-black uppercase tracking-[0.12em] ${softTextClass}`}>
+                          : 'border-(--pos-s-border) bg-(--pos-s-surface-2)'}`}>
+                          <div className={`mb-2 text-xs font-bold uppercase tracking-[0.12em] ${softTextClass}`}>
                             {t('modals.zReport.reconciliationTitle', { defaultValue: 'Reconciliation' })}
                           </div>
                           <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-                            <div className="min-w-0 rounded-xl border border-slate-900/10 bg-white/55 p-2.5 dark:border-white/10 dark:bg-white/4">
+                            <div className="min-w-0 rounded-xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-2.5">
                               <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
                                 {t('modals.zReport.orderTurnover', { defaultValue: 'Order turnover' })}
                               </div>
-                              <div className={`mt-1 truncate text-sm font-black ${strongTextClass}`}>
+                              <div className={`mt-1 truncate text-sm font-bold ${strongTextClass}`}>
                                 {formatMoney(integrity.orderTurnover ?? 0)}
                               </div>
                             </div>
-                            <div className="min-w-0 rounded-xl border border-slate-900/10 bg-white/55 p-2.5 dark:border-white/10 dark:bg-white/4">
+                            <div className="min-w-0 rounded-xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-2.5">
                               <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
                                 {t('modals.zReport.paymentCoverage', { defaultValue: 'Payment coverage' })}
                               </div>
-                              <div className={`mt-1 truncate text-sm font-black ${strongTextClass}`}>
+                              <div className={`mt-1 truncate text-sm font-bold ${strongTextClass}`}>
                                 {formatMoney(integrity.paymentCoverage ?? 0)}
                               </div>
                             </div>
-                            <div className="min-w-0 rounded-xl border border-slate-900/10 bg-white/55 p-2.5 dark:border-white/10 dark:bg-white/4">
+                            <div className="min-w-0 rounded-xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-2.5">
                               <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
                                 {t('modals.zReport.reconciliationDifference', { defaultValue: 'Difference' })}
                               </div>
                               {/* Colour on what is UNEXPLAINED, not on raw
                                   arithmetic: a normal refund leaves a real
                                   difference and must not read as a gap. */}
-                              <div className={`mt-1 truncate text-sm font-black ${Math.abs(integrity.unexplainedDifference ?? integrity.difference ?? 0) >= 0.01
+                              <div className={`mt-1 truncate text-sm font-bold ${Math.abs(integrity.unexplainedDifference ?? integrity.difference ?? 0) >= 0.01
                                 ? 'text-rose-600 dark:text-rose-300'
-                                : 'text-emerald-600 dark:text-emerald-300'}`}>
+                                : strongTextClass}`}>
                                 {formatMoney(integrity.difference ?? 0)}
                               </div>
                               {(integrity.refundedOrders?.orders ?? 0) > 0 && (
@@ -2930,11 +2871,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 </div>
                               )}
                             </div>
-                            <div className="min-w-0 rounded-xl border border-slate-900/10 bg-white/55 p-2.5 dark:border-white/10 dark:bg-white/4">
+                            <div className="min-w-0 rounded-xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-2.5">
                               <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
                                 {t('modals.zReport.reconciliationOrdersAffected', { defaultValue: 'Orders affected' })}
                               </div>
-                              <div className={`mt-1 truncate text-sm font-black ${strongTextClass}`}>
+                              <div className={`mt-1 truncate text-sm font-bold ${strongTextClass}`}>
                                 {integrity.blockingFindings ?? 0}
                               </div>
                             </div>
@@ -3030,7 +2971,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                       )}
 
                       {closeoutReady && (
-                        <div className="rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-4 text-center text-sm font-bold text-emerald-700 dark:text-emerald-200">
+                        <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4 text-center text-sm font-bold text-emerald-700 dark:text-emerald-200">
                           {t('modals.zReport.clarity.readyHint', { defaultValue: 'Everything checks out -- submit to admin.' })}
                         </div>
                       )}

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { solidButton } from '../settings/SettingsKit'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components'
@@ -296,7 +297,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
       }
       size="md"
       footer={
-        <div className="px-8 py-4 border-t liquid-glass-modal-border bg-white/85 dark:bg-black/55 backdrop-blur-xl shadow-[0_-8px_24px_rgba(0,0,0,0.18)]">
+        <div className="px-8 py-4 border-t pos-glass-footer">
           {/* Round 352: a calm inline hint (amber, on-palette) explains what is missing while Add is disabled.
               Only shown when required fields are incomplete and not saving, so the footer never feels crowded. */}
           {bluetoothUnavailable && (
@@ -321,7 +322,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
             <button
               type="button"
               onClick={onClose}
-              className="inline-flex items-center justify-center px-6 py-2 rounded-xl bg-red-500/10 active:bg-red-500/20 text-red-600 dark:text-red-300 font-medium border border-red-500/40 transition-colors active:scale-[0.98]"
+              className={solidButton('secondary', 'md')}
             >
               {t('common.actions.cancel', 'Cancel')}
             </button>
@@ -329,7 +330,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
               type="submit"
               form="terminal-config-form"
               disabled={isSaving || bluetoothUnavailable || deviceTypeBlocked || !requiredFieldsComplete}
-              className="inline-flex items-center justify-center px-6 py-2 rounded-xl bg-green-600 active:bg-green-700 text-white font-medium border border-green-600 shadow-xs shadow-green-600/25 transition-colors active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+              className={solidButton('primary', 'md')}
             >
               {isSaving
                 ? t('common.actions.saving', 'Saving...')
@@ -354,7 +355,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={t('ecr.config.namePlaceholder', 'e.g., Main Terminal')}
-              className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+              className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
             />
           </div>
 
@@ -380,11 +381,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                     aria-checked={selected}
                     disabled={option === 'payment_terminal' && identityIsFiscal}
                     onClick={() => setDeviceType(option)}
-                    className={`min-h-touch rounded-xl border px-3 py-2 text-sm font-medium transition-all active:scale-[0.98] disabled:opacity-50 ${
-                      selected
-                        ? 'border-green-600 bg-green-600/15 text-green-800 dark:text-green-200'
-                        : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text'
-                    }`}
+                    className={`pos-choice${selected ? ' is-selected' : ''}`}
                   >
                     {option === 'payment_terminal'
                       ? t('settings.peripherals.cashRegister.paymentTerminal', 'Payment Terminal')
@@ -396,14 +393,14 @@ export const TerminalConfigModal: React.FC<Props> = ({
             {effectiveDeviceType === 'cash_register' && (
               <div
                 role="alert"
-                className="mt-2 space-y-2 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200"
+                className="mt-2 space-y-2 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950 p-3 text-xs text-amber-800 dark:text-amber-200"
               >
                 <p>{fiscalRegisterMessage}</p>
                 {onOpenCashRegisterSetup && (
                   <button
                     type="button"
                     onClick={onOpenCashRegisterSetup}
-                    className="inline-flex min-h-[36px] items-center rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 font-medium active:bg-amber-500/25"
+                    className={solidButton('secondary', 'sm')}
                   >
                     {t('ecr.discovery.configureCashRegister', 'Configure Cash Register')}
                   </button>
@@ -420,7 +417,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
               <select
                 value={connectionType}
                 onChange={(e) => setConnectionType(e.target.value as ConnectionType)}
-                className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
               >
                 <option value="serial_usb">USB/Serial</option>
                 <option value="bluetooth" disabled>{t('ecr.bluetoothUnavailableOption', 'Bluetooth (unavailable)')}</option>
@@ -435,7 +432,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
               <select
                 value={protocol}
                 onChange={(e) => setProtocol(e.target.value as Protocol)}
-                className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
               >
                 {showLegacyGenericOption && (
                   <option value="generic">
@@ -450,7 +447,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
         </div>
 
         {/* Connection Details */}
-        <div className="space-y-4 p-4 rounded-2xl border border-black/10 dark:border-white/10 bg-white/40 dark:bg-white/5 backdrop-blur-sm">
+        <div className="space-y-4 p-4 rounded-2xl border border-zinc-200 dark:border-zinc-700">
           <h3 className="text-sm font-medium liquid-glass-modal-text">
             {t('ecr.config.connectionDetails', 'Connection Details')}
           </h3>
@@ -466,7 +463,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                   value={btAddress}
                   onChange={(e) => setBtAddress(e.target.value)}
                   placeholder="XX:XX:XX:XX:XX:XX"
-                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
+                  className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
                 />
               </div>
               <div>
@@ -479,7 +476,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                   onChange={(e) => setBtChannel(parseInt(e.target.value) || 1)}
                   min={1}
                   max={30}
-                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
                 />
               </div>
             </div>
@@ -496,7 +493,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                   value={serialPort}
                   onChange={(e) => setSerialPort(e.target.value)}
                   placeholder="COM3"
-                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
+                  className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
                 />
               </div>
               <div>
@@ -506,7 +503,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                 <select
                   value={baudRate}
                   onChange={(e) => setBaudRate(parseInt(e.target.value))}
-                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
                 >
                   <option value={9600}>9600</option>
                   <option value={19200}>19200</option>
@@ -529,7 +526,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                   value={networkIp}
                   onChange={(e) => setNetworkIp(e.target.value)}
                   placeholder="192.168.1.100"
-                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
+                  className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
                 />
               </div>
               <div>
@@ -542,7 +539,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                   onChange={(e) => setNetworkPort(parseInt(e.target.value) || 20007)}
                   min={1}
                   max={65535}
-                  className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
                 />
               </div>
             </div>
@@ -560,7 +557,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
               value={terminalId}
               onChange={(e) => setTerminalId(e.target.value)}
               placeholder="12345678"
-              className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
+              className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
             />
           </div>
           <div>
@@ -572,13 +569,13 @@ export const TerminalConfigModal: React.FC<Props> = ({
               value={merchantId}
               onChange={(e) => setMerchantId(e.target.value)}
               placeholder="123456789012345"
-              className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
+              className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent font-mono"
             />
           </div>
         </div>
 
         {/* Settings */}
-        <div className="space-y-4 p-4 rounded-2xl border border-black/10 dark:border-white/10 bg-white/40 dark:bg-white/5 backdrop-blur-sm">
+        <div className="space-y-4 p-4 rounded-2xl border border-zinc-200 dark:border-zinc-700">
           <h3 className="text-sm font-medium liquid-glass-modal-text">
             {t('ecr.config.settings', 'Settings')}
           </h3>
@@ -594,12 +591,12 @@ export const TerminalConfigModal: React.FC<Props> = ({
                 onChange={(e) => setTransactionTimeout(parseInt(e.target.value) || 60)}
                 min={30}
                 max={300}
-                className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                className="w-full min-h-11 px-4 py-2 rounded-xl bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
               />
             </div>
           </div>
 
-          <div className="flex min-h-touch items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
+          <div className="flex min-h-touch items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border px-3 py-2">
             <span className="text-sm liquid-glass-modal-text">
               {t('ecr.config.printOnTerminal', 'Print receipt on terminal')}
             </span>
@@ -611,7 +608,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
             />
           </div>
 
-          <div className="flex min-h-touch items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
+          <div className="flex min-h-touch items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border px-3 py-2">
             <span className="text-sm liquid-glass-modal-text">
               {t('ecr.config.setDefault', 'Set as default terminal')}
             </span>
@@ -623,7 +620,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
             />
           </div>
 
-          <div className="flex min-h-touch items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
+          <div className="flex min-h-touch items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border px-3 py-2">
             <span className="text-sm liquid-glass-modal-text">
               {t('ecr.config.enabled', 'Terminal enabled')}
             </span>

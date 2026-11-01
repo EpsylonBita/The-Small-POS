@@ -82,8 +82,8 @@ export const CaptureNotificationManager: React.FC = () => {
     (message: string, captureId: string | undefined) => {
       toast.custom(
         (instance) => (
-          <div className="flex max-w-md items-center gap-3 rounded-2xl border border-amber-400/40 bg-black/85 px-4 py-3 text-sm text-white shadow-2xl">
-            <FileText className="h-5 w-5 shrink-0 text-amber-300" />
+          <div className="flex max-w-md items-center gap-3 rounded-2xl border border-(--pos-s-border) bg-black/85 px-4 py-3 text-sm text-white shadow-2xl">
+            <FileText className="h-5 w-5 shrink-0 text-amber-800 dark:text-amber-300" />
             <span className="min-w-0 flex-1">{message}</span>
             {captureId ? (
               <button
@@ -92,7 +92,7 @@ export const CaptureNotificationManager: React.FC = () => {
                   toast.dismiss(instance.id);
                   requestCaptureReview(captureId);
                 }}
-                className="inline-flex min-h-10 shrink-0 items-center rounded-2xl border border-amber-400 px-3 text-sm font-semibold text-amber-200 active:bg-amber-400/20"
+                className="inline-flex min-h-10 shrink-0 items-center rounded-2xl border border-amber-400 px-3 text-sm font-semibold text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)"
               >
                 {t('suppliers.capture.notifications.check', 'Check invoice')}
               </button>

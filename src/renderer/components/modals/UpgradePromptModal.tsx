@@ -96,7 +96,7 @@ const UpgradePromptModal: React.FC<UpgradePromptModalProps> = ({ isOpen, onClose
         <h3 className="text-xl font-bold">{metadata?.name || feature || t('modules.unknownModule', { defaultValue: 'This feature' })}</h3>
         {guidance ? <p>{t(guidance.summaryKey)}</p> : metadata?.description ? <p>{metadata.description}</p> : null}
         {guidance && <DisplayPurchaseGuidance moduleId={feature} />}
-        {offer ? <section className="rounded-2xl border border-amber-400/40 bg-amber-400/10 p-4 space-y-3">
+        {offer ? <section className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4 space-y-3">
           <h4 className="font-semibold">{offer.name}</h4>
           <div className="flex gap-3" role="group" aria-label={t('modules.launchPurchase.cycle')}>
             {(['monthly', 'annual'] as const).map(value => <button key={value} type="button" aria-pressed={cycle === value}

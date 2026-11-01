@@ -27,7 +27,7 @@ test('CallerIdPopup uses touch-safe on-palette actions', () => {
   assert.doesNotMatch(source, /bg-blue-|text-blue-|border-blue-|ring-blue-/);
   // Close: labelled, with press feedback and a visible focus ring.
   assert.match(source, /aria-label=\{t\('common\.actions\.close', 'Close'\)\}/);
-  assert.match(source, /active:scale-95 active:bg-white\/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300\/80/);
+  assert.match(source, /active:scale-95 active:bg-white\/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-\(--pos-s-fg\)/);
   // Since 27/07/2026 the toast's only action opens the customer search with the caller's
   // number (amber, touch height, press feedback). The green "Start Order" action is gone:
   // the toast never starts or changes operational work.
@@ -43,7 +43,7 @@ test('DashboardCard maps legacy blue/purple variants onto the POS palette withou
   assert.doesNotMatch(source, /bg-blue-|text-blue-|ring-blue-/);
   assert.doesNotMatch(source, /bg-purple-|text-purple-/);
   assert.doesNotMatch(source, /hover:/);
-  assert.match(source, /blue: \{\s*bg: \{ light: 'bg-amber-50'/);
+  assert.match(source, /blue: \{\s*bg: \{ light: 'bg-\(--pos-s-surface-2\)'/);
   assert.match(source, /purple: \{\s*bg: \{ light: 'bg-zinc-100'/);
   assert.match(source, /rounded-2xl border p-6/);
   assert.match(source, /transition-transform active:scale-\[0\.98\]/);

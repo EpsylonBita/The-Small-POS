@@ -1260,17 +1260,17 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     }
   };
 
-  const drawerSummaryCardClass = 'rounded-3xl border border-slate-200/90 bg-white/80 p-3 shadow-[0_12px_30px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-neutral-700/60 dark:bg-black/50 dark:shadow-[0_18px_48px_rgba(0,0,0,0.34)]';
-  const drawerPanelClass = 'rounded-[28px] border border-slate-200/90 bg-white/90 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.10)] dark:border-neutral-700/60 dark:bg-neutral-950/80 dark:shadow-[0_18px_50px_rgba(0,0,0,0.24)]';
-  const drawerSidePanelClass = 'rounded-[28px] border border-slate-200/90 bg-white/90 p-3.5 shadow-[0_16px_36px_rgba(15,23,42,0.09)] dark:border-neutral-700/60 dark:bg-neutral-950/80 dark:shadow-[0_16px_42px_rgba(0,0,0,0.22)]';
+  const drawerSummaryCardClass = 'rounded-3xl border border-slate-200/90 bg-white/80 p-3 backdrop-blur-xl dark:border-neutral-700/60 dark:bg-black/50 dark:shadow-[0_18px_48px_rgba(0,0,0,0.34)]';
+  const drawerPanelClass = 'rounded-[28px] border border-slate-200/90 bg-white/90 p-5 dark:border-neutral-700/60 dark:bg-neutral-950/80 dark:shadow-[0_18px_50px_rgba(0,0,0,0.24)]';
+  const drawerSidePanelClass = 'rounded-[28px] border border-slate-200/90 bg-white/90 p-3.5 dark:border-neutral-700/60 dark:bg-neutral-950/80 dark:shadow-[0_16px_42px_rgba(0,0,0,0.22)]';
   const drawerListItemClass = 'rounded-2xl border border-slate-200/80 bg-slate-50/80 px-4 py-3 dark:border-neutral-700/60 dark:bg-black/35';
-  const drawerActivityItemClass = 'flex items-start justify-between gap-4 rounded-2xl border border-slate-200/80 bg-slate-50/80 px-4 py-3 shadow-[0_10px_24px_rgba(15,23,42,0.07)] dark:border-neutral-700/60 dark:bg-black/35 dark:shadow-[0_10px_26px_rgba(0,0,0,0.22)]';
+  const drawerActivityItemClass = 'flex items-start justify-between gap-4 rounded-2xl border border-slate-200/80 bg-slate-50/80 px-4 py-3 dark:border-neutral-700/60 dark:bg-black/35 dark:shadow-[0_10px_26px_rgba(0,0,0,0.22)]';
   const drawerEmptyStateClass = 'rounded-3xl border border-dashed border-slate-300/90 bg-slate-50/80 px-6 py-4 text-center dark:border-neutral-700/70 dark:bg-neutral-900/70';
-  const drawerEmptyIconClass = 'mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-white/90 text-slate-500 shadow-[0_10px_24px_rgba(15,23,42,0.09)] dark:bg-neutral-800 dark:text-neutral-400 dark:shadow-[0_10px_25px_rgba(0,0,0,0.24)]';
-  const drawerInputClass = 'w-full rounded-2xl border border-slate-300/90 bg-white/95 px-4 py-3 text-slate-900 shadow-inner outline-hidden transition-colors placeholder:text-slate-400 focus:border-yellow-400/70 focus:ring-2 focus:ring-yellow-400/15 disabled:cursor-not-allowed disabled:opacity-60 dark:border-neutral-700/80 dark:bg-black dark:text-white dark:placeholder:text-neutral-500';
-  const drawerExpenseSubmitClass = 'border-slate-300/80! bg-white/70! font-bold! text-emerald-700! shadow-[0_8px_20px_rgba(15,23,42,0.08)]! active:scale-[0.98]! disabled:text-emerald-500! disabled:opacity-100! dark:border-neutral-700/60! dark:bg-transparent! dark:text-emerald-400! dark:shadow-none!';
-  const drawerStaffPaymentSubmitClass = 'border-slate-300/80! bg-white/70! font-bold! text-amber-700! shadow-[0_8px_20px_rgba(15,23,42,0.08)]! active:scale-[0.98]! disabled:text-amber-500! disabled:opacity-100! dark:border-neutral-700/60! dark:bg-transparent! dark:text-yellow-400! dark:shadow-none!';
-  const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-2xl border border-slate-200/90 bg-white text-slate-900 shadow-[0_18px_38px_rgba(15,23,42,0.16)] dark:border-neutral-700/80 dark:bg-neutral-950 dark:text-white dark:shadow-[0_18px_44px_rgba(0,0,0,0.42)]';
+  const drawerEmptyIconClass = 'mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-white/90 text-slate-500 dark:bg-neutral-800 dark:text-neutral-400 dark:shadow-[0_10px_25px_rgba(0,0,0,0.24)]';
+  const drawerInputClass = 'w-full rounded-2xl border border-slate-300/90 bg-white/95 px-4 py-3 text-slate-900 shadow-inner outline-hidden transition-colors placeholder:text-slate-400 focus:border-(--pos-s-yellow) focus:ring-2 focus:ring-(--pos-s-fg) disabled:cursor-not-allowed disabled:opacity-60 dark:border-neutral-700/80 dark:bg-black dark:text-white dark:placeholder:text-neutral-500';
+  const drawerExpenseSubmitClass = 'border-slate-300/80! bg-white/70! font-bold! text-emerald-700! active:scale-[0.98]! disabled:text-emerald-500! disabled:opacity-100! dark:border-neutral-700/60! dark:bg-transparent! dark:text-emerald-400! dark:shadow-none!';
+  const drawerStaffPaymentSubmitClass = 'border-slate-300/80! bg-white/70! font-bold! text-amber-700! active:scale-[0.98]! disabled:text-amber-500! disabled:opacity-100! dark:border-neutral-700/60! dark:bg-transparent! dark:text-yellow-400! dark:shadow-none!';
+  const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-2xl border border-slate-200/90 bg-white text-slate-900 dark:border-neutral-700/80 dark:bg-neutral-950 dark:text-white dark:shadow-[0_18px_44px_rgba(0,0,0,0.42)]';
   const drawerDropdownOptionClass = 'flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-slate-800 transition-colors active:bg-slate-100 focus:bg-slate-100 focus:outline-hidden dark:text-white dark:active:bg-neutral-800 dark:focus:bg-neutral-800';
 
   const renderDrawerDropdown = ({
@@ -1311,7 +1311,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
             }
           }}
           className={`${drawerInputClass} flex items-center justify-between gap-3 text-left ${
-            isOpenDropdown ? 'border-yellow-400/80 ring-2 ring-yellow-400/15' : ''
+            isOpenDropdown ? 'border-(--pos-s-yellow) ring-2 ring-(--pos-s-border)' : ''
           }`}
         >
           <span className={selectedOption?.value ? 'truncate' : 'truncate text-slate-400 dark:text-neutral-500'}>
@@ -1424,7 +1424,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   description: item.title,
                 })
               }
-              className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200"
+              className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-rose-200"
             >
               <Trash2 className="h-3.5 w-3.5" />
               {t('modals.expense.deleteExpense', 'Delete expense')}
@@ -1440,7 +1440,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     beginEditStaffPayment(payment);
                   }
                 }}
-                className="inline-flex items-center gap-1 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-1.5 text-xs font-semibold text-amber-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200"
+                className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-amber-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-200"
               >
                 <Pencil className="h-3.5 w-3.5" />
                 {t('modals.expense.editStaffPayment', 'Edit payment')}
@@ -1454,7 +1454,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     description: item.title,
                   })
                 }
-                className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200"
+                className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-rose-200"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 {t('modals.expense.deleteStaffPayment', 'Delete payment')}
@@ -1485,7 +1485,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         <div
           className={`shrink-0 rounded-2xl border px-4 py-3 ${
             !cashierShift || cashierShiftSyncBanner?.variant === 'failed'
-              ? 'border-amber-300/70 bg-amber-50/90 text-amber-900 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-100'
+              ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-100'
               : 'border-neutral-300/70 bg-neutral-50/90 text-neutral-900 dark:border-neutral-500/20 dark:bg-neutral-500/10 dark:text-neutral-100'
           }`}
         >
@@ -1554,8 +1554,8 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               onClick={() => setActiveTab(tab.key)}
               className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition-all active:scale-[0.98] ${
                 active
-                  ? 'border-yellow-400 bg-yellow-400 text-black shadow-[0_14px_34px_rgba(250,204,21,0.24)]'
-                  : 'border-slate-200/90 bg-white/80 text-slate-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)] dark:border-neutral-700/60 dark:bg-neutral-950/55 dark:text-neutral-200 dark:shadow-none'
+                  ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
+                  : 'border-slate-200/90 bg-white/80 text-slate-700 dark:border-neutral-700/60 dark:bg-neutral-950/55 dark:text-neutral-200 dark:shadow-none'
               }`}
             >
               {tab.icon}
@@ -1749,7 +1749,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                                 description: expenseTitle,
                               })
                             }
-                            className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200"
+                            className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-rose-200"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                             {t('modals.expense.deleteExpense', 'Delete expense')}
@@ -1759,7 +1759,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     </div>
                   );
                 }) : renderEmptyState(
-                  <Banknote className="mx-auto block h-9 w-9 text-emerald-400" strokeWidth={2.2} />,
+                  <Banknote className="mx-auto block h-9 w-9 text-emerald-700 dark:text-emerald-400" strokeWidth={2.2} />,
                   t('modals.expense.noExpenses', 'No expenses recorded yet'),
                   t('modals.expense.noExpensesDetail', 'Recorded expenses will appear here immediately after saving.'),
                   { wrapIcon: false },
@@ -1855,7 +1855,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
             </div>
 
             {staffDirectoryWarning && (
-              <div className="mt-4 rounded-2xl border border-amber-300/70 bg-amber-50/85 px-4 py-3 text-sm text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
+              <div className="mt-4 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-sm text-amber-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-200">
                 {staffDirectoryWarning}
               </div>
             )}
@@ -1946,7 +1946,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                             type="button"
                             disabled={submittingPayment}
                             onClick={() => beginEditStaffPayment(payment)}
-                            className="inline-flex items-center gap-1 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-1.5 text-xs font-semibold text-amber-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200"
+                            className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-amber-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-200"
                           >
                             <Pencil className="h-3.5 w-3.5" />
                             {t('modals.expense.editStaffPayment', 'Edit payment')}
@@ -1960,7 +1960,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                                 description: payment.staff_name || t('common.unknown', 'Unknown'),
                               })
                             }
-                            className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200"
+                            className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-rose-200"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                             {t('modals.expense.deleteStaffPayment', 'Delete payment')}

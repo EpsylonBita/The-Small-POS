@@ -463,7 +463,7 @@ function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; e
           sentence: t('customerDisplay.sentences.ready', 'ready'),
           detail: t('customerDisplay.descriptions.ready', 'Ready for pickup'),
           color: 'text-emerald-400',
-          border: 'border-emerald-400/40',
+          border: 'border-(--pos-s-border)',
           Icon: CheckCircle2,
         };
       }
@@ -473,7 +473,7 @@ function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; e
           sentence: t('customerDisplay.sentences.preparing', 'preparing'),
           detail: t('customerDisplay.descriptions.preparing', 'Kitchen is working'),
           color: 'text-amber-400',
-          border: 'border-amber-400/40',
+          border: 'border-(--pos-s-border)',
           Icon: Clock3,
         };
       }
@@ -482,7 +482,7 @@ function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; e
         sentence: t('customerDisplay.sentences.received', 'received'),
         detail: t('customerDisplay.descriptions.received', 'Order received'),
         color: 'text-yellow-400',
-        border: 'border-yellow-400/40',
+        border: 'border-(--pos-s-border)',
         Icon: Clock3,
       };
     },
@@ -538,7 +538,7 @@ function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; e
                     type="button"
                     onClick={() => void closeExternalDisplay()}
                     disabled={isDisplayBusy}
-                    className="inline-flex items-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-300 transition-all active:scale-[0.98] active:bg-red-500/20 disabled:opacity-60 disabled:active:scale-100"
+                    className="inline-flex items-center gap-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-sm font-semibold text-red-800 dark:text-red-200 transition-all active:scale-[0.98] active:bg-(--pos-s-surface-2) disabled:opacity-60 disabled:active:scale-100"
                   >
                     <X className="h-4 w-4" />
                     {t('customerDisplay.actions.stopExternal', 'Stop External')}
@@ -550,8 +550,8 @@ function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; e
                     disabled={isDisplayBusy || !canOpenExternal}
                     className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition-all active:scale-[0.98] disabled:opacity-60 disabled:active:scale-100 ${
                       isDark
-                        ? 'border-amber-400/40 bg-amber-500/10 text-amber-200 active:bg-amber-500/20'
-                        : 'border-amber-300 bg-amber-50 text-amber-800 active:bg-amber-100'
+                        ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)'
+                        : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 active:bg-(--pos-s-surface-2)'
                     }`}
                   >
                     <ScreenShare className="h-4 w-4" />
@@ -646,7 +646,7 @@ function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; e
                       disabled={isDisplayBusy || !free}
                       className={`min-w-[210px] rounded-xl border px-3 py-3 text-left transition-all active:scale-[0.98] disabled:active:scale-100 ${
                         running
-                          ? 'border-emerald-500/40 bg-emerald-500/10'
+                          ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
                           : `${
                               isDark
                                 ? 'border-zinc-700 bg-zinc-900 active:bg-zinc-800'
@@ -686,8 +686,8 @@ function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; e
             variants={pageMotionItem}
             className={`rounded-xl border px-4 py-3 text-sm font-medium ${
               failure
-                ? 'border-red-500/40 bg-red-500/10 text-red-200'
-                : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200'
+                : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200'
             }`}
           >
             {failure || notice}

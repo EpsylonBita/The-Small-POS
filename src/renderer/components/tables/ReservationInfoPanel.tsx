@@ -196,10 +196,10 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
       {/* Late Warning */}
       {isLate && (
         <div className={`mb-4 flex items-center gap-2 rounded-2xl p-3 ${
-          isDark ? 'bg-red-500/20 border border-red-500/30' : 'bg-red-50 border border-red-200'
+          'bg-(--pos-s-bad-bg) border border-(--pos-s-bad)'
         }`}>
-          <AlertTriangle className="w-5 h-5 text-red-500 shrink-0" />
-          <span className="text-red-500 text-sm font-medium">
+          <AlertTriangle className="w-5 h-5 text-(--pos-s-bad) shrink-0" />
+          <span className="text-(--pos-s-bad) text-sm font-medium">
             {t('reservationInfoPanel.lateWarning', { 
               defaultValue: '{{minutes}} minutes late',
               minutes: lateMinutes 
@@ -210,7 +210,7 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
 
       {/* Reservation Number */}
       <div className={`mb-4 rounded-2xl border px-3 py-2 text-center ${
-        isDark ? 'border-yellow-400/30 bg-yellow-400/12' : 'border-yellow-500/25 bg-yellow-50'
+        isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
       }`}>
         <span className={`text-sm font-mono font-bold ${isDark ? 'text-yellow-200' : 'text-yellow-800'}`}>
           {reservation.reservationNumber}
@@ -286,10 +286,10 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
 
         {/* Special Requests */}
         {reservation.specialRequests && (
-          <div className={`p-3 rounded-2xl ${isDark ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-yellow-50 border border-yellow-200'}`}>
+          <div className={`p-3 rounded-2xl ${isDark ? 'bg-(--pos-s-surface-2) border border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border border-(--pos-s-border)'}`}>
             <div className="flex items-center gap-2">
-              <MessageSquare className="w-4 h-4 text-yellow-500" />
-              <span className={`text-sm text-yellow-600`}>
+              <MessageSquare className="w-4 h-4 text-yellow-700 dark:text-yellow-400" />
+              <span className={`text-sm text-yellow-800 dark:text-yellow-300`}>
                 {t('reservationInfoPanel.specialRequests', { defaultValue: 'Special Requests' })}
               </span>
             </div>
@@ -323,7 +323,7 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
             type="button"
             onClick={handleSeatGuest}
             disabled={isSeating}
-            className="flex w-full items-center justify-center gap-2 rounded-2xl bg-green-600 py-3 font-medium text-white transition-transform duration-150 active:scale-[0.98] active:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100"
+            className="flex w-full items-center justify-center gap-2 rounded-2xl bg-(--pos-s-yellow) py-3 font-medium text-black transition-transform duration-150 active:scale-[0.98] active:bg-yellow-500 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100"
           >
             {isSeating ? (
               <Loader2 className="w-5 h-5 animate-spin" />
@@ -340,8 +340,8 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
             type="button"
             className={`flex w-full items-center justify-center gap-2 rounded-2xl py-2.5 transition-transform duration-150 active:scale-[0.98] ${
               isDark 
-                ? 'border border-red-400/30 bg-red-500/12 text-red-300 active:bg-red-500/20'
-                : 'border border-red-500/25 bg-red-50 text-red-700 active:bg-red-100'
+                ? 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200 active:bg-(--pos-s-surface-2)'
+                : 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-700 active:bg-(--pos-s-surface-2)'
             }`}
           >
             <XCircle className="w-4 h-4" />

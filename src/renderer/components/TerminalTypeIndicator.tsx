@@ -85,9 +85,9 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
 
   const getBadgeColors = () => {
     if (isMobileWaiter) {
-      return 'bg-blue-500/20 text-blue-400 border-blue-500/30';
+      return 'bg-(--pos-s-surface-2) text-blue-800 dark:text-blue-300 border-(--pos-s-border)';
     }
-    return 'bg-green-500/20 text-green-400 border-green-500/30';
+    return 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 border-(--pos-s-border)';
   };
 
   const getFeatureLabel = (key: string): string => {
@@ -133,7 +133,7 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
             <div className="flex items-center justify-between pb-3 border-b border-white/10">
               <div className="flex items-center gap-3">
                 <div
-                  className={`p-2 rounded-lg ${isMobileWaiter ? 'bg-blue-500/20' : 'bg-green-500/20'
+                  className={`p-2 rounded-lg ${isMobileWaiter ? 'bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2)'
                     }`}
                 >
                   {getTypeIcon()}
@@ -175,7 +175,7 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
                   {t('terminal.labels.terminalType', 'Terminal Type')}
                 </span>
                 <span
-                  className={`text-sm font-semibold ${isMobileWaiter ? 'text-blue-400' : 'text-green-400'
+                  className={`text-sm font-semibold ${isMobileWaiter ? 'text-blue-400' : 'text-green-700 dark:text-green-400'
                     }`}
                 >
                   {getTypeLabel()}
@@ -212,8 +212,8 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
                   <div
                     key={key}
                     className={`flex items-center gap-2 px-2 py-1 rounded-lg text-xs ${enabled
-                        ? 'bg-green-500/10 text-green-400'
-                        : 'bg-red-500/10 text-red-400'
+                        ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300'
+                        : 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-300'
                       }`}
                   >
                     {enabled ? (
@@ -252,7 +252,7 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
 
             {/* Mobile Waiter Info Message */}
             {isMobileWaiter && (
-              <div className="bg-blue-500/10 border border-blue-500/30 rounded-2xl p-3">
+              <div className="bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl p-3">
                 <div className="flex items-start gap-2">
                   <svg
                     className="w-5 h-5 text-blue-400 shrink-0 mt-0.5"

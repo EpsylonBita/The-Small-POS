@@ -88,14 +88,14 @@ const getStatusInfo = (state?: DeviceState) => {
         label: 'Connected',
         icon: Wifi,
         color: 'text-green-400',
-        bg: 'bg-green-500/20',
+        bg: 'bg-green-50 dark:bg-green-950',
       }
     case 'connecting':
       return {
         label: 'Connecting',
         icon: Loader2,
         color: 'text-yellow-400',
-        bg: 'bg-yellow-500/20',
+        bg: 'bg-yellow-50 dark:bg-yellow-950',
         spin: true,
       }
     case 'error':
@@ -103,22 +103,22 @@ const getStatusInfo = (state?: DeviceState) => {
         label: 'Error',
         icon: AlertCircle,
         color: 'text-red-400',
-        bg: 'bg-red-500/20',
+        bg: 'bg-red-50 dark:bg-red-950',
       }
     case 'busy':
       return {
         label: 'Busy',
         icon: Loader2,
         color: 'text-amber-400',
-        bg: 'bg-amber-500/20',
+        bg: 'bg-amber-50 dark:bg-amber-950',
         spin: true,
       }
     default:
       return {
         label: 'Disconnected',
         icon: WifiOff,
-        color: 'text-gray-400',
-        bg: 'bg-gray-500/20',
+        color: 'text-zinc-500 dark:text-zinc-400',
+        bg: '',
       }
   }
 }
@@ -145,7 +145,7 @@ export const TerminalCardCompact: React.FC<Props> = memo(
     const bluetoothNoticeId = useId()
 
     return (
-      <div className="rounded-2xl p-3 bg-white/5 dark:bg-gray-800/20 border liquid-glass-modal-border transition-all">
+      <div className="rounded-2xl p-3 border liquid-glass-modal-border transition-all">
         <div className="flex items-center justify-between gap-3">
           {/* Left: Icon + Info */}
           <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -166,7 +166,7 @@ export const TerminalCardCompact: React.FC<Props> = memo(
                   </span>
                 )}
                 {!device.enabled && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-gray-500/20 text-gray-500 dark:text-gray-400 shrink-0">
+                  <span className="text-xs px-1.5 py-0.5 rounded-sm text-zinc-600 dark:text-zinc-400 shrink-0">
                     {t('ecr.admission.disabledBadge', { defaultValue: 'Disabled' })}
                   </span>
                 )}
@@ -198,7 +198,7 @@ export const TerminalCardCompact: React.FC<Props> = memo(
             {isConnected ? (
               <button
                 onClick={onDisconnect}
-                className="p-1.5 rounded-md text-red-400 active:bg-red-500/20 transition-colors"
+                className="pos-icon-btn pos-icon-btn--danger"
                 aria-label={t('ecr.actions.disconnect', 'Disconnect')}
               >
                 <WifiOff size={14} />
@@ -207,7 +207,7 @@ export const TerminalCardCompact: React.FC<Props> = memo(
               <button
                 onClick={onConnect}
                 disabled={isConnecting || bluetoothUnavailable}
-                className="p-1.5 rounded-md text-green-400 active:bg-green-500/20 transition-colors disabled:opacity-50"
+                className="pos-icon-btn"
                 aria-label={t('ecr.actions.connect', 'Connect')}
                 aria-describedby={bluetoothUnavailable ? bluetoothNoticeId : undefined}
               >
@@ -223,7 +223,7 @@ export const TerminalCardCompact: React.FC<Props> = memo(
             {!device.isDefault && (
               <button
                 onClick={onSetDefault}
-                className="p-1.5 rounded-md liquid-glass-modal-text-muted active:text-yellow-400 active:bg-yellow-500/20 transition-colors"
+                className="pos-icon-btn"
                 aria-label={t('ecr.actions.setDefault', 'Set as Default')}
               >
                 <Star size={14} />
@@ -233,7 +233,7 @@ export const TerminalCardCompact: React.FC<Props> = memo(
             {/* Edit Button */}
             <button
               onClick={onEdit}
-              className="p-1.5 rounded-md liquid-glass-modal-text-muted active:bg-white/10 transition-colors"
+              className="pos-icon-btn"
               aria-label={t('ecr.actions.edit', 'Edit')}
             >
               <Settings size={14} />
@@ -242,7 +242,7 @@ export const TerminalCardCompact: React.FC<Props> = memo(
             {/* Delete Button */}
             <button
               onClick={onDelete}
-              className="p-1.5 rounded-md text-red-400/60 active:text-red-400 active:bg-red-500/20 transition-colors"
+              className="pos-icon-btn pos-icon-btn--danger"
               aria-label={t('ecr.actions.delete', 'Delete')}
             >
               <Trash2 size={14} />
@@ -269,7 +269,7 @@ export const TerminalCardCompact: React.FC<Props> = memo(
             <button
               type="button"
               onClick={onDisable}
-              className="inline-flex min-h-[36px] items-center rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 text-xs font-medium text-amber-800 dark:text-amber-200 active:bg-amber-500/20"
+              className="pos-solid-btn pos-solid-btn--sm"
             >
               {t('ecr.admission.disable', { defaultValue: 'Disable' })}
             </button>

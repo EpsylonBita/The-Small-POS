@@ -102,7 +102,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
   };
 
   const fieldClass =
-    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-hidden focus:ring-2 focus:ring-yellow-400/40 dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
+    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg) dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
 
   return (
     <LiquidGlassModal
@@ -207,7 +207,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
                   name="is_default"
                   checked={formData.is_default}
                   onChange={handleChange}
-                  className="h-5 w-5 rounded-xl border-gray-300 bg-gray-100 text-amber-500 accent-yellow-500 focus:ring-2 focus:ring-yellow-400/40"
+                  className="h-5 w-5 rounded-xl border-gray-300 bg-gray-100 text-amber-500 accent-yellow-500 focus:ring-2 focus:ring-(--pos-s-fg)"
                 />
                 <label className="text-sm font-medium liquid-glass-modal-text">
                   {t('modals.editAddress.setDefault')}

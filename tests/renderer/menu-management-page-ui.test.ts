@@ -14,7 +14,7 @@ test('MenuManagementPage uses yellow selected tabs with strong black text', () =
 
   assert.match(source, /useState<'categories' \| 'subcategories' \| 'ingredients' \| 'offers'>\('categories'\)/);
   assert.match(source, /const getTabClass = \(tab: typeof activeTab\)/);
-  assert.match(source, /'bg-yellow-500 text-black font-semibold border border-yellow-400'/);
+  assert.match(source, /'bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) font-semibold border border-\(--pos-s-sel-bg\)'/);
   assert.match(source, /className=\{getTabClass\('categories'\)\}/);
   assert.match(source, /className=\{getTabClass\('subcategories'\)\}/);
   assert.match(source, /className=\{getTabClass\('ingredients'\)\}/);
@@ -87,8 +87,8 @@ test('MenuManagementPage places refresh as an icon-only header action like Order
   // themes -- NOT the old opaque dark-mode bg-white / light-mode bg-black inversion.
   assert.match(source, /inline-flex h-12 w-12 items-center justify-center rounded-2xl/);
   assert.match(source, /backdrop-blur-xl/);
-  assert.match(source, /border-amber-400\/30 bg-white\/10 text-amber-300 active:bg-white\/20/);
-  assert.match(source, /border-amber-400\/40 bg-black\/5 text-amber-600 active:bg-black\/10/);
+  assert.match(source, /border-\(--pos-s-border\) bg-white\/10 text-amber-300 active:bg-white\/20/);
+  assert.match(source, /border-\(--pos-s-border\) bg-black\/5 text-amber-600 active:bg-black\/10/);
   assert.doesNotMatch(source, /border border-white\/80 bg-white text-black/);
   assert.doesNotMatch(source, /border border-black bg-black text-white/);
   // No hover-only styling and no native title on the refresh control; touch active feedback only.

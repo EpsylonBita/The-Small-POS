@@ -35,7 +35,9 @@ describe('compact table workspace', () => {
     const labels = Object.fromEntries(['available', 'occupied', 'reserved', 'cleaning', 'maintenance', 'unavailable'].map(key => [key, { label: key }])) as any;
     render(<TableWorkspaceToolbar stats={{ total: 18, occupied: 0, available: 17, reserved: 0, cleaning: 1, due: 0, occupancyRate: 0 }} statusLabels={labels} statusFilter="all" onStatusFilter={status} floorFilter="all" floors={['1', '2']} floorLabel={value => value === 'all' ? 'All floors' : `Floor ${value}`} onFloorFilter={floor} onList={vi.fn()} onFloorPlan={map} floorPlanOpen={false} formatCurrency={money} />);
     fireEvent.click(screen.getByRole('button', { name: 'cleaning 1' })); expect(status).toHaveBeenCalledWith('cleaning');
-    fireEvent.click(screen.getByRole('button', { name: 'Floor 2' })); expect(floor).toHaveBeenCalledWith('2');
+    // Founder 31/10: more than one floor -> the app's dropdown.
+    fireEvent.click(screen.getByRole('button', { name: 'Floor: All floors' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Floor 2' })); expect(floor).toHaveBeenCalledWith('2');
     fireEvent.click(screen.getByRole('button', { name: '2D' })); expect(map).toHaveBeenCalledOnce();
     expect(screen.getByRole('button', { name: 'All 18' })).toHaveAttribute('aria-pressed', 'true');
   });

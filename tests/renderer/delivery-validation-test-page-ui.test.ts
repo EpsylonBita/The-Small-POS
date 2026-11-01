@@ -11,7 +11,7 @@ const source = readFileSync(
 test('DeliveryValidationTestPage uses the app palette and touch-first chrome', () => {
   assert.match(source, /className="min-h-screen bg-black p-6"/);
   assert.match(source, /bg-white\/10 backdrop-blur-sm rounded-2xl p-6/);
-  assert.match(source, /bg-amber-500\/15 active:bg-amber-500\/25 border border-amber-400\/30 rounded-2xl/);
+  assert.match(source, /bg-\(--pos-s-surface-2\) active:bg-\(--pos-s-surface-2\) border border-\(--pos-s-border\) rounded-2xl/);
   assert.match(source, /transition-transform active:scale-\[0\.98\]/);
   assert.doesNotMatch(source, /from-purple|via-blue|to-indigo/);
   assert.doesNotMatch(source, /hover:|group-hover:|dark:hover:/);

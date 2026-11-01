@@ -200,7 +200,7 @@ const KioskManagementPage: React.FC = () => {
           <h1 className="truncate text-3xl font-bold tracking-tight">
             {t('modules.kiosk.title', { defaultValue: 'Kiosk Management' })}
           </h1>
-          <p className={`mt-1 truncate text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+          <p className={`mt-1 truncate text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
             {t('modules.kiosk.description', { defaultValue: 'Manage self-service kiosk ordering' })}
           </p>
         </div>
@@ -208,8 +208,8 @@ const KioskManagementPage: React.FC = () => {
         <div className="flex items-center gap-3">
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-2xl ${
             isOnline
-              ? isDark ? 'bg-green-500/20 text-green-400' : 'bg-green-100 text-green-600'
-              : isDark ? 'bg-red-500/20 text-red-400' : 'bg-red-100 text-red-600'
+              ? isDark ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300' : 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300'
+              : isDark ? 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-300' : 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-300'
           }`}>
             {isOnline ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
             <span className="text-xs font-medium">
@@ -220,11 +220,7 @@ const KioskManagementPage: React.FC = () => {
             type="button"
             onClick={() => void fetchKioskData()}
             disabled={isLoading}
-            className={`h-12 w-12 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 shadow-xs ${
-              isDark
-                ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
-                : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
-            } ${isLoading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+            className={`h-12 w-12 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 shadow-xs border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) ${isLoading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
             aria-label={t('common.refresh', { defaultValue: 'Refresh' })}
           >
             <RefreshCw className="w-5 h-5" />
@@ -234,9 +230,9 @@ const KioskManagementPage: React.FC = () => {
 
       {error && (
         <motion.div variants={pageMotionItem} className={`mb-6 p-4 rounded-2xl flex items-center gap-3 ${
-          isDark ? 'bg-red-900/20 border border-red-800' : 'bg-red-50 border border-red-200'
+          isDark ? 'bg-(--pos-s-bad-bg) border border-(--pos-s-bad)' : 'bg-(--pos-s-bad-bg) border border-(--pos-s-bad)'
         }`}>
-          <AlertCircle className="w-5 h-5 text-red-500" />
+          <AlertCircle className="w-5 h-5 text-(--pos-s-bad)" />
           <p className={isDark ? 'text-red-400' : 'text-red-700'}>{error}</p>
         </motion.div>
       )}
@@ -249,20 +245,20 @@ const KioskManagementPage: React.FC = () => {
           <div className="flex items-center gap-4">
             <div className={`flex h-14 w-14 items-center justify-center rounded-2xl ${
               isKioskEnabled
-                ? isDark ? 'bg-green-900/30' : 'bg-green-100'
+                ? isDark ? 'bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2)'
                 : isDark ? 'bg-gray-700' : 'bg-gray-100'
             }`}>
               <Monitor className={`w-8 h-8 ${
                 isKioskEnabled
-                  ? isDark ? 'text-green-400' : 'text-green-600'
-                  : isDark ? 'text-gray-400' : 'text-gray-500'
+                  ? isDark ? 'text-green-400' : 'text-green-700'
+                  : isDark ? 'text-gray-400' : 'text-gray-600'
               }`} />
             </div>
             <div>
               <h2 className="text-lg font-semibold">
                 {t('modules.kiosk.status', { defaultValue: 'Kiosk Status' })}
               </h2>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                 {isKioskEnabled
                   ? t('modules.kiosk.enabled', { defaultValue: 'Kiosk ordering is enabled' })
                   : t('modules.kiosk.disabled', { defaultValue: 'Kiosk ordering is disabled' })
@@ -278,8 +274,8 @@ const KioskManagementPage: React.FC = () => {
                 disabled={openAction.disabled || !branchId}
                 className={`inline-flex items-center gap-2 px-4 py-2 rounded-2xl font-semibold transition-transform duration-150 active:scale-[0.98] ${
                   isDark
-                    ? 'border border-yellow-400/40 bg-yellow-400/12 text-yellow-100 active:bg-yellow-400/20'
-                    : 'border border-yellow-400/60 bg-yellow-50 text-yellow-700 active:bg-yellow-100'
+                    ? 'border border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200 active:bg-(--pos-s-surface-2)'
+                    : 'border border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-yellow-700 active:bg-(--pos-s-surface-2)'
                 } disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100`}
               >
                 <ExternalLink className="w-4 h-4" />
@@ -344,14 +340,14 @@ const KioskManagementPage: React.FC = () => {
         isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-xs'
       }`}>
         <div className="flex items-center gap-4 mb-4">
-          <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${isDark ? 'bg-yellow-400/15' : 'bg-yellow-100'}`}>
+          <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${isDark ? 'bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2)'}`}>
             <QrCode className={`w-6 h-6 ${isDark ? 'text-yellow-300' : 'text-yellow-600'}`} />
           </div>
           <div>
             <h2 className="text-lg font-semibold">
               {t('modules.kiosk.qrCodes', { defaultValue: 'QR Codes' })}
             </h2>
-            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
               {t('modules.kiosk.qrCodesDescription', { defaultValue: 'Manage QR codes in the admin dashboard' })}
             </p>
           </div>
@@ -376,7 +372,7 @@ const KioskManagementPage: React.FC = () => {
         {recentOrders.length === 0 ? (
           <div className="p-8 text-center">
             <ShoppingBag className={`w-12 h-12 mx-auto mb-3 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
-            <p className={isDark ? 'text-gray-400' : 'text-gray-500'}>
+            <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>
               {t('modules.kiosk.noOrders', { defaultValue: 'No kiosk orders yet' })}
             </p>
           </div>
@@ -406,7 +402,7 @@ const KioskManagementPage: React.FC = () => {
                       {t('modules.kiosk.orderNumber', { defaultValue: 'Order' })}{' '}
                       {formatCompactOrderNumberForDisplay(order.order_number || '') || `#${order.order_number}`}
                     </p>
-                    <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                    <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                       {order.items_count} {t('common.items', { defaultValue: 'items' })} • {formatTime(order.created_at)}
                     </p>
                   </div>
@@ -414,9 +410,9 @@ const KioskManagementPage: React.FC = () => {
                 <div className="flex items-center gap-4">
                   <span className={`px-2 py-1 rounded-2xl text-xs font-medium ${
                     order.status === 'completed' || order.status === 'delivered'
-                      ? isDark ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-700'
+                      ? isDark ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300' : 'bg-(--pos-s-surface-2) text-green-700'
                       : order.status === 'pending'
-                      ? isDark ? 'bg-amber-900/30 text-amber-400' : 'bg-amber-100 text-amber-700'
+                      ? isDark ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300' : 'bg-(--pos-s-surface-2) text-amber-700'
                       : isDark ? 'bg-zinc-800 text-zinc-300' : 'bg-zinc-100 text-zinc-700'
                   }`}>
                     {order.status}
@@ -443,9 +439,9 @@ interface StatCardProps {
 
 function StatCard({ icon, label, value, color, isDark }: StatCardProps) {
   const colorClasses = {
-    yellow: isDark ? 'bg-yellow-400/15 text-yellow-300' : 'bg-yellow-100 text-yellow-700',
-    green: isDark ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-600',
-    amber: isDark ? 'bg-amber-900/30 text-amber-400' : 'bg-amber-100 text-amber-600',
+    yellow: isDark ? 'bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200' : 'bg-(--pos-s-surface-2) text-yellow-700',
+    green: isDark ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300' : 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300',
+    amber: isDark ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300' : 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300',
   };
 
   return (
@@ -456,7 +452,7 @@ function StatCard({ icon, label, value, color, isDark }: StatCardProps) {
         {icon}
       </div>
       <div className="text-2xl font-bold">{value}</div>
-      <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{label}</div>
+      <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{label}</div>
     </motion.div>
   );
 }

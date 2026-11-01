@@ -40,7 +40,7 @@ test('navigation sidebar logout button uses transparent red outline without hove
   const source = readFileSync(sidebarPath, 'utf8');
   const logoutBlock = getLogoutBlock(source);
 
-  assert.match(logoutBlock, /border border-red-500\/70 bg-transparent text-red-500/);
+  assert.match(logoutBlock, /border border-red-600 bg-transparent text-red-500/);
   assert.match(logoutBlock, /<LogOut className="w-5 h-5 text-red-500" strokeWidth=\{2\} \/>/);
   assert.doesNotMatch(logoutBlock, /hover:bg-red/);
   assert.doesNotMatch(logoutBlock, /hover:border-red/);
@@ -124,9 +124,9 @@ test('navigation sidebar inactive unlocked icons are neutral, only the active ro
   assert.doesNotMatch(source, /if \(!isActive\) \{[\s\S]*?return theme === 'dark' \? 'text-black'/);
   assert.doesNotMatch(source, /if \(!isActive\) \{[\s\S]*?return theme === 'dark' \? 'text-white'/);
 
-  // Active route uses the per-module neon color + glow (green/orange/purple/... with drop-shadow).
-  assert.match(source, /case 'green':\s*return 'text-green-500 drop-shadow-\[0_0_10px_rgba\(34,197,94,0\.9\)\]'/);
-  assert.match(source, /case 'orange':\s*return 'text-\[#f97316\] drop-shadow-/);
+  // Active route uses the per-module colour; wave ΣΤ1 removed the coloured glow (no glows at all).
+  assert.match(source, /case 'green':\s*return 'text-green-500'/);
+  assert.match(source, /case 'orange':\s*return 'text-\[#f97316\]'/);
 
   // Active is the current route, and the module icon is tinted via getNeonClass(color, isActive, theme).
   assert.match(source, /const isActive = currentView === module\.id;/);
@@ -138,7 +138,7 @@ test('navigation sidebar inactive unlocked icons are neutral, only the active ro
   assert.match(source, /data-testid="check-in-btn"[\s\S]*?getNeonClass\('yellow', false, resolvedTheme\)/);
   assert.match(source, /<Settings className="w-5 h-5" \/>/);
   assert.doesNotMatch(source, /text-zinc-100|text-zinc-900/);
-  assert.match(source, /border border-red-500\/70 bg-transparent text-red-500/);
+  assert.match(source, /border border-red-600 bg-transparent text-red-500/);
 });
 
 // Round 201 (dashboard shell selected-state semantics, live QA): module nav buttons were plain
@@ -256,7 +256,7 @@ test('navigation sidebar pins Z Report / Settings / Logout in a persistent utili
 
   // Logout keeps its red outline inside the cluster; Settings stays neutral (getNeonClass inactive),
   // not always-on neon.
-  assert.match(utilityCluster, /border border-red-500\/70 bg-transparent text-red-500/);
+  assert.match(utilityCluster, /border border-red-600 bg-transparent text-red-500/);
   assert.match(utilityCluster, /<Settings className="w-5 h-5" \/>[\s\S]*?<\/button>/);
   assert.match(utilityCluster, /getNeonClass\('yellow', false, resolvedTheme\)/);
 });
@@ -353,7 +353,7 @@ test('Round 302: sidebar focus ring is gated by an input-modality guard (pointer
   assert.match(source, /const SIDEBAR_FOCUS_BASE = 'rounded-xl focus:outline-hidden';/);
   assert.match(
     source,
-    /const SIDEBAR_FOCUS_RING_KEYBOARD = `\$\{SIDEBAR_FOCUS_BASE\} focus-visible:ring-2 focus-visible:ring-yellow-400\/70`;/,
+    /const SIDEBAR_FOCUS_RING_KEYBOARD = `\$\{SIDEBAR_FOCUS_BASE\} focus-visible:ring-2 focus-visible:ring-\(--pos-s-fg\)`;/,
   );
 
   // Input-modality state + window-level capture listeners: keydown -> keyboard mode, pointerdown -> pointer
@@ -370,7 +370,7 @@ test('Round 302: sidebar focus ring is gated by an input-modality guard (pointer
   // No plain focus:ring- (it would show after a pointer/touch tap); only focus-visible:ring, and only in the
   // keyboard variant.
   assert.doesNotMatch(source, /focus:ring-/);
-  assert.match(source, /focus-visible:ring-2 focus-visible:ring-yellow-400\/70/);
+  assert.match(source, /focus-visible:ring-2 focus-visible:ring-\(--pos-s-fg\)/);
 
   // The gated value is applied to the 5 sidebar icon buttons (Check In / modules / Z Report / Settings /
   // Logout).
@@ -408,7 +408,7 @@ test('Round 348: sidebar inactive icons have no glow, active-only neon, no hover
   assert.doesNotMatch(inactiveBranch, /drop-shadow/, 'inactive icons must not carry a neon glow');
 
   // Exactly the per-module active colors carry the neon glow (green/purple/orange/amber/blue = 5).
-  assert.equal((source.match(/drop-shadow-\[0_0_10px/g) ?? []).length, 5, 'five active per-module neon glows');
+  assert.equal((source.match(/drop-shadow-\[/g) ?? []).length, 0, 'wave ΣΤ1: no neon glows; the active route keeps its module colour');
 
   // Touch-first: the sidebar uses no hover/group-hover utilities anywhere.
   assert.doesNotMatch(source, /hover:/);

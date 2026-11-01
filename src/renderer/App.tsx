@@ -3,6 +3,7 @@ import { KitchenDisplayProvider } from './pages/KitchenDisplayPage';
 import { LocalPreparationScopeSync } from './hooks/useLocalPreparation';
 import React, { lazy, Suspense, useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { HashRouter } from "react-router-dom";
+import { MotionConfig, motion } from "framer-motion";
 import { Toaster, toast } from "react-hot-toast";
 import { AlertTriangle } from "lucide-react";
 import { ThemeProvider } from "./contexts/theme-context";
@@ -12,7 +13,13 @@ import { I18nextProvider } from 'react-i18next';
 import displayI18n from '../lib/i18n';
 import { ModuleProvider } from "./contexts/module-context";
 import { BarcodeScannerProvider } from "./contexts/barcode-scanner-context";
-import LoginPage from "./pages/LoginPage";
+import LoginPage, {
+  LOGIN_RETURN_COVER_S,
+  LOGIN_RETURN_TOTAL_S,
+  LOGIN_TILL_REVEAL_DELAY_S,
+  LOGIN_TILL_REVEAL_S,
+} from "./pages/LoginPage";
+import { resolveExternalDisplayKind } from "./utils/externalDisplayKind";
 import { ErrorBoundary } from "./components/error/ErrorBoundary";
 import { SyncNotificationManager } from "./components/SyncNotificationManager";
 import { CaptureNotificationManager } from "./components/CaptureNotificationManager";
@@ -23,7 +30,7 @@ import { IncomingOrderAlertManager } from "./components/notices/IncomingOrderAle
 import { AppRoutes } from "./AppRoutes";
 import { GlobalCashierGate } from './components/GlobalCashierGate';
 import { CashierRecovery } from './contexts/cashier-gate-context';
-import { SyncStatusIndicator } from "./components/SyncStatusIndicator";
+import { UtilityRail } from "./components/UtilityRail";
 import { CallerIdCustomerSearchModalHost } from "./components/callerid/CallerIdCustomerSearchModalHost";
 import { DeferredModal } from "./components/ui/DeferredModal";
 import SyncRecoveryModal, {
@@ -93,6 +100,7 @@ import {
   resolveTerminalAuthPausePresentation,
   resolveTerminalResetPresentation,
 } from "./utils/terminal-lifecycle";
+import { loginPinSlotForRole, rememberLoginPinLength } from "./utils/loginPinLength";
 
 // Route code stays local in the Tauri bundle but is evaluated only when used.
 // Background listeners remain outside these Suspense boundaries.
@@ -117,47 +125,13 @@ const INVALID_SESSION_IDENTITY_VALUES = new Set([
 const STARTUP_IPC_TIMEOUT_MS = 4000;
 const STARTUP_CONFIG_SYNC_TIMEOUT_MS = 2500;
 const AUTH_LOGIN_TIMEOUT_MS = 30_000;
+// The sign-in screen's exit (card fades, logo glides to the middle) never holds the till longer than this.
+const LOGIN_LEAVE_MAX_MS = 1600;
 const CONFIGURED_TERMINAL_HINT_KEY = 'pos-terminal-configured';
 const PARITY_QUEUE_REFRESH_INTERVAL_MS = 15_000;
 const TOAST_CONTAINER_STYLE: React.CSSProperties = { zIndex: 2147483647 };
 
 type ConnectionSettingsSection = 'recovery' | 'printing' | null;
-type ExternalDisplayKind = 'customer_display' | 'kitchen_display';
-
-function resolveExternalDisplayKind(hash: string): ExternalDisplayKind | null {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  const candidates: string[] = [];
-  try {
-    const searchValue = new URLSearchParams(window.location.search).get('externalDisplay');
-    if (searchValue) candidates.push(searchValue);
-  } catch {
-    // Ignore malformed URLs; fall through to hash parsing.
-  }
-
-  const hashValue = hash || window.location.hash || '';
-  const hashQuery = hashValue.includes('?') ? hashValue.slice(hashValue.indexOf('?') + 1) : '';
-  if (hashQuery) {
-    try {
-      const hashParam = new URLSearchParams(hashQuery).get('externalDisplay');
-      if (hashParam) candidates.push(hashParam);
-    } catch {
-      // Ignore malformed hashes.
-    }
-  }
-
-  const normalized = candidates[0]?.trim().toLowerCase();
-  if (normalized === 'kitchen_display' || normalized === 'kds' || normalized === 'kitchen') {
-    return 'kitchen_display';
-  }
-  if (normalized === 'customer_display' || normalized === 'customer') {
-    return 'customer_display';
-  }
-  return null;
-}
-
 function normalizeSessionIdentityValue(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -520,7 +494,7 @@ export function ConfigGuard({ children }: { children: React.ReactNode }) {
 
       toast.custom(
         (toastInstance) => (
-          <div className="max-w-md rounded-2xl border border-yellow-500/30 bg-slate-950/95 p-4 text-sm text-slate-100 shadow-2xl">
+          <div className="max-w-md rounded-2xl border border-(--pos-s-border) bg-slate-950/95 p-4 text-sm text-slate-100 shadow-2xl">
             <div className="flex items-start gap-3">
               <AlertTriangle className="mt-0.5 h-4 w-4 text-yellow-400" />
               <div className="space-y-3">
@@ -768,6 +742,30 @@ function AppContent() {
   const { t } = useI18n();
   const bridge = getBridge();
   const [user, setUser] = useState<any>(null);
+  // Founder 31/10 («να κατεβαίνει από εκεί που είναι στο κέντρο και μετά να κάνει zoom ... σβήνοντας και το
+  // modal του login»): the sign-in screen starts leaving the moment the PIN is accepted (the card fades while
+  // its logo glides down to the middle), the session is completed meanwhile, then the whole sign-in layer
+  // zooms towards the cashier over the till. A session restored at start-up does not play it.
+  const [loginExit, setLoginExit] = useState<'leaving' | 'opening' | 'returning' | null>(null);
+  const loginLeftRef = useRef<(() => void) | null>(null);
+  /** This till's own sign-out is running (its slow gold fade over the till). */
+  const signingOutRef = useRef(false);
+  // The sign-in layer leaves on a timer once the till has shown through, never on the animation's end
+  // (the motion rule: nothing waits for an animation).
+  // Signing out plays it backwards (founder 31/10); the screen is a plain sign-in screen again after it.
+  useEffect(() => {
+    if (loginExit !== 'returning') return;
+    const home = window.setTimeout(() => setLoginExit(null), LOGIN_RETURN_TOTAL_S * 1000 + 60);
+    return () => window.clearTimeout(home);
+  }, [loginExit]);
+  useEffect(() => {
+    if (!user || loginExit !== 'opening') return;
+    const gone = window.setTimeout(
+      () => setLoginExit(null),
+      (LOGIN_TILL_REVEAL_DELAY_S + LOGIN_TILL_REVEAL_S) * 1000 + 60,
+    );
+    return () => window.clearTimeout(gone);
+  }, [user, loginExit]);
   const [isLoading, setIsLoading] = useState(true);
   const [showConnectionSettings, setShowConnectionSettings] = useState(false);
   const [connectionSettingsInitialSection, setConnectionSettingsInitialSection] =
@@ -1017,7 +1015,10 @@ function AppContent() {
 
   // Use custom hook for app events
   const { isShuttingDown, shutdownState } = useAppEvents({
-    onLogout: () => {
+    onLogout: (reason) => {
+      // Founder 31/10 («κίτρινο όλο σιγά σιγά»): the native sign-out announces itself as a session end;
+      // while this till's own sign-out runs, that must not drop the till and cut the slow gold fade short.
+      if (reason === 'logout' && signingOutRef.current) return;
       invalidateFinancialOpening();
       stopRealtimeAuthRef.current();
       void clearSecureSession();
@@ -1460,6 +1461,17 @@ function AppContent() {
       if (result && result.success && userData) {
         console.log('[App.tsx handleLogin] Login successful, setting user state...');
 
+        // The PIN screen signs in by itself at the PIN's length: keep the digit count (never the PIN) of
+        // the slot this PIN matched (founder 31/10, no sign-in button).
+        void rememberLoginPinLength(bridge, [loginPinSlotForRole(userData.role)], pin.length);
+
+        // The sign-in screen starts leaving now; the session is completed while it does.
+        const loginScreenLeft = new Promise<void>((resolve) => {
+          loginLeftRef.current = resolve;
+          window.setTimeout(resolve, LOGIN_LEAVE_MAX_MS);
+        });
+        setLoginExit('leaving');
+
         const enrichedUser = await withStartupTimeout(
           enrichSessionUserWithOrganization(userData),
           'enrichSessionUserWithOrganization(login)',
@@ -1474,6 +1486,12 @@ function AppContent() {
         // first (so sync readers see the new session immediately) and
         // then writes through to the keyring.
         await setSecureSession(enrichedUser);
+
+        // The logo has reached the middle (or the ceiling passed): the till mounts under the sign-in layer,
+        // and two frames later, once that heavy first render is done, the layer zooms away.
+        await loginScreenLeft;
+        loginLeftRef.current = null;
+        window.requestAnimationFrame(() => window.requestAnimationFrame(() => setLoginExit('opening')));
 
         // Update React state
         setUser(enrichedUser);
@@ -1506,23 +1524,37 @@ function AppContent() {
       return false;
     } catch (err) {
       console.error('[App.tsx handleLogin] Exception caught:', err);
+      // A failure after the PIN was accepted brings the sign-in card back.
+      loginLeftRef.current = null;
+      setLoginExit(null);
       throw err;
     }
   };
 
   // Logout function
   const handleLogout = async () => {
-    // Fence dedicated financial authority before any await; shift/EOD state stays.
-    invalidateFinancialOpening();
-    stopRealtimeAuthRef.current();
+    if (signingOutRef.current) return;
+    signingOutRef.current = true;
     try {
-      await bridge.auth.logout();
-    } catch (e) {
-      console.error('auth:logout failed', e);
+      // Fence dedicated financial authority before any await; shift/EOD state stays.
+      invalidateFinancialOpening();
+      stopRealtimeAuthRef.current();
+      // Founder 31/10 («και στο Logout το ίδιο animation σε reverse»): the sign-in layer fades in over the
+      // till as the gold pearl; the till leaves once it is covered (a bounded timer, never the animation's end).
+      setLoginExit('returning');
+      const covered = new Promise<void>((resolve) => window.setTimeout(resolve, LOGIN_RETURN_COVER_S * 1000));
+      try {
+        await bridge.auth.logout();
+      } catch (e) {
+        console.error('auth:logout failed', e);
+      }
+      await covered;
+      void clearSecureSession();
+      setUser(null);
+      // Do NOT clear shift context on explicit logout; EOD Z Report will clear shifts
+    } finally {
+      signingOutRef.current = false;
     }
-    void clearSecureSession();
-    setUser(null);
-    // Do NOT clear shift context on explicit logout; EOD Z Report will clear shifts
   };
 
   if (externalDisplayKind) {
@@ -1583,35 +1615,70 @@ function AppContent() {
     />
   );
 
-  // Show login when no user
-  if (!user) {
-    return (
+  // The sign-in layer: the whole window before a sign-in; after it, the same mounted layer stays above the
+  // till while it zooms away (founder 31/10), so the logo keeps its place instead of jumping.
+  const isOpeningTill = !!user && loginExit === 'opening';
+  const loginLayer = !user || loginExit !== null ? (
+    <motion.div
+      key="login-layer"
+      data-testid="login-layer"
+      className={user ? 'fixed inset-0 z-[10000]' : 'contents'}
+      style={{ transformOrigin: '50% 50%' }}
+      // Signing out mounts it transparent over the till and fades it in as the gold pearl.
+      initial={loginExit === 'returning' && user ? { opacity: 0 } : false}
+      // The logo dives into its pearl (LoginPage); the till shows through the gold as the layer fades.
+      animate={{ opacity: isOpeningTill ? 0 : 1 }}
+      transition={
+        isOpeningTill
+          ? { delay: LOGIN_TILL_REVEAL_DELAY_S, duration: LOGIN_TILL_REVEAL_S, ease: 'easeInOut' }
+          : loginExit === 'returning'
+          ? { duration: LOGIN_RETURN_COVER_S, ease: 'easeInOut' }
+          : { duration: 0 }
+      }
+    >
       <ErrorBoundary>
         <ThemeProvider>
           <FullscreenAwareLayout update={frameUpdate} windowState={windowState}>
             <PageLoadMotion animationKey="login" className="h-full min-h-0">
-              <LoginPage onLogin={handleLogin} />
+              <LoginPage
+                onLogin={handleLogin}
+                exitPhase={loginExit}
+                onLeft={() => loginLeftRef.current?.()}
+              />
             </PageLoadMotion>
           </FullscreenAwareLayout>
-          {updateDialog}
-          <Toaster
-            position="top-center"
-            containerStyle={TOAST_CONTAINER_STYLE}
-            toastOptions={{
-              duration: 3000,
-              style: { background: '#111827', color: '#fff' },
-              success: { iconTheme: { primary: '#10B981', secondary: 'white' } },
-              error: { iconTheme: { primary: '#EF4444', secondary: 'white' } },
-            }}
-          />
+          {!user && updateDialog}
+          {!user && (
+            <Toaster
+              position="top-center"
+              containerStyle={TOAST_CONTAINER_STYLE}
+              toastOptions={{
+                duration: 3000,
+                style: { background: '#111827', color: '#fff' },
+                success: { iconTheme: { primary: '#10B981', secondary: 'white' } },
+                error: { iconTheme: { primary: '#EF4444', secondary: 'white' } },
+              }}
+            />
+          )}
         </ThemeProvider>
       </ErrorBoundary>
+    </motion.div>
+  ) : null;
+
+  // Show login when no user
+  if (!user) {
+    return (
+      <>
+        {null}
+        {loginLayer}
+      </>
     );
   }
 
   // Show main POS interface if logged in
   return (
-    <ErrorBoundary>
+    <>
+    <ErrorBoundary key="main-layer">
       <ThemeProvider>
         <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
           <FullscreenAwareLayout update={frameUpdate} windowState={windowState}>
@@ -1630,10 +1697,9 @@ function AppContent() {
               </div>
             )}
 
-            {/* Sync Status Indicator - Heart Icon in Top-Left (after navbar) */}
-            <div data-cashier-recovery="true" className="fixed top-12 left-38 z-40">
-              <SyncStatusIndicator onOpenRecovery={openSyncRecovery} />
-            </div>
+            {/* Founder 31/10: health, expenses and theme in a small fixed rail on the right (health used
+                to float top-left of the page, expenses top-right). */}
+            <UtilityRail onOpenRecovery={openSyncRecovery} />
 
 
 
@@ -1742,6 +1808,8 @@ function AppContent() {
         </HashRouter>
       </ThemeProvider>
     </ErrorBoundary>
+    {loginLayer}
+    </>
   );
 }
 
@@ -1750,11 +1818,14 @@ function App() {
   // POS bootstrap/providers (and their independent sync services) in this window.
   const connectedDisplay = resolveExternalDisplayKind(window.location.hash);
   if (connectedDisplay) {
-    return <I18nextProvider i18n={displayI18n}><ErrorBoundary><ThemeProvider>
+    return <MotionConfig reducedMotion="user"><I18nextProvider i18n={displayI18n}><ErrorBoundary><ThemeProvider>
       <Suspense fallback={<PageLoading />}>{connectedDisplay === 'kitchen_display' ? <KitchenDisplayPage /> : <CustomerDisplayPage />}</Suspense>
-    </ThemeProvider></ErrorBoundary></I18nextProvider>;
+    </ThemeProvider></ErrorBoundary></I18nextProvider></MotionConfig>;
   }
+  // One motion policy for every screen: framer-motion follows the Windows
+  // "reduce motion" setting (transforms become instant, opacity fades stay).
   return (
+    <MotionConfig reducedMotion="user">
     <I18nProvider>
       <ConfigGuard>
         <ShiftProvider>
@@ -1766,6 +1837,7 @@ function App() {
         </ShiftProvider>
       </ConfigGuard>
     </I18nProvider>
+    </MotionConfig>
   );
 }
 

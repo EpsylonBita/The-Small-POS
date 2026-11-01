@@ -24,7 +24,7 @@ test('upgrade prompt uses amber glass styling without old blue-purple lock visua
   assert.doesNotMatch(source, /\bLock\b/, 'the old lock visual stays gone');
 
   // The returned offer sits on one translucent amber glass card that reads on both themes.
-  assert.match(source, /<section className="rounded-2xl border border-amber-400\/40 bg-amber-400\/10 p-4 space-y-3">/);
+  assert.match(source, /<section className="rounded-2xl border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) p-4 space-y-3">/);
   // The billing cycle is a labelled toggle group on the shared yellow/neutral glass buttons.
   assert.match(source, /role="group" aria-label=\{t\('modules\.launchPurchase\.cycle'\)\}/);
   assert.match(source, /aria-pressed=\{cycle === value\}/);

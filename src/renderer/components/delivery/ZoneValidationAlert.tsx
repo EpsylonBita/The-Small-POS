@@ -58,31 +58,32 @@ export const ZoneValidationAlert: React.FC<ZoneValidationAlertProps> = ({
   const getColors = () => {
     switch (alertState) {
       case 'success':
+        // Wave ΣΤ2: the kit notice tints (solid, AA in both themes).
         return {
-          bg: 'rgba(34, 197, 94, 0.1)',
-          border: '#22c55e',
-          text: '#22c55e',
+          bg: 'var(--pos-s-ok-bg)',
+          border: 'var(--pos-s-ok)',
+          text: 'var(--pos-s-ok)',
           icon: CheckCircle
         };
       case 'warning':
         return {
-          bg: 'rgba(251, 191, 36, 0.1)',
-          border: '#fbbf24',
-          text: '#fbbf24',
+          bg: 'var(--pos-s-warn-bg)',
+          border: 'var(--pos-s-warn)',
+          text: 'var(--pos-s-warn)',
           icon: AlertTriangle
         };
       case 'error':
         return {
-          bg: 'rgba(239, 68, 68, 0.1)',
-          border: '#ef4444',
-          text: '#ef4444',
+          bg: 'var(--pos-s-bad-bg)',
+          border: 'var(--pos-s-bad)',
+          text: 'var(--pos-s-bad)',
           icon: XCircle
         };
       default:
         return {
-          bg: 'rgba(113, 113, 122, 0.1)',
-          border: '#71717a',
-          text: '#52525b',
+          bg: 'var(--pos-s-surface-2)',
+          border: 'var(--pos-s-border)',
+          text: 'var(--pos-s-muted)',
           icon: Info
         };
     }
@@ -283,8 +284,6 @@ export const ZoneValidationAlert: React.FC<ZoneValidationAlertProps> = ({
                   cursor: 'pointer',
                   transition: 'opacity 0.2s'
                 }}
-                onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.8')}
-                onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
               >
                 Request Override
               </button>
@@ -430,7 +429,7 @@ export const ZoneValidationAlert: React.FC<ZoneValidationAlertProps> = ({
           style={{
             marginTop: '12px',
             padding: '8px 12px',
-            backgroundColor: 'rgba(251, 191, 36, 0.1)',
+            backgroundColor: 'var(--pos-s-warn-bg)',
             borderRadius: '6px',
             fontSize: '12px',
             color: themeColors.warning

@@ -41,6 +41,7 @@ vi.mock('../../contexts/i18n-context', () => ({
         'login.errors.timeout': 'Login took too long. Please try again.',
         'login.errors.lockedOut': 'Too many wrong PIN attempts. Try again in {{minutes}} minutes.',
         'login.createPin': 'Create PIN',
+        'common.retry': 'Retry',
         'login.newPin': 'New PIN (6 digits)',
         'login.confirmPin': 'Confirm PIN',
         'login.savePin': 'Save PIN',
@@ -71,6 +72,12 @@ vi.mock('framer-motion', () => ({
     ),
     button: ({ children, variants: _variants, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & Record<string, unknown>) => (
       <button {...props}>{children}</button>
+    ),
+    img: ({ variants: _variants, initial: _initial, animate: _animate, onAnimationComplete: _done, ...props }: React.ImgHTMLAttributes<HTMLImageElement> & Record<string, unknown>) => (
+      <img {...props} />
+    ),
+    span: ({ children, variants: _variants, initial: _initial, animate: _animate, ...props }: React.HTMLAttributes<HTMLSpanElement> & Record<string, unknown>) => (
+      <span {...props}>{children}</span>
     ),
   },
 }));
@@ -113,17 +120,20 @@ describe('LoginPage login deadlines', () => {
     });
 
     expect(screen.queryByText('Wrong code')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Logging in…' })).toBeDisabled();
+    // No sign-in button (founder 31/10): the check shows in the live region and the keypad rests.
+    expect(screen.getByText('Logging in…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '1' })).toBeDisabled();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000);
     });
 
     expect(screen.queryByText('Wrong code')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Login' })).toBeEnabled();
+    expect(screen.queryByText('Logging in…')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Login' })).not.toBeInTheDocument();
   });
 
-  it('shows a timeout message instead of reporting a wrong PIN', async () => {
+  it('shows a timeout message instead of reporting a wrong PIN, and «Retry» sends the PIN again', async () => {
     const onLogin = vi.fn().mockRejectedValue(
       new Error('auth.login timed out after 30000ms'),
     );
@@ -136,6 +146,13 @@ describe('LoginPage login deadlines', () => {
 
     expect(screen.getByText('Login took too long. Please try again.')).toBeInTheDocument();
     expect(screen.queryByText('Wrong code')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('login-retry'));
+      await Promise.resolve();
+    });
+    expect(onLogin).toHaveBeenCalledTimes(2);
+    expect(onLogin).toHaveBeenLastCalledWith('123456');
   });
 
   it.each([
@@ -147,6 +164,17 @@ describe('LoginPage login deadlines', () => {
     await enterSixDigitPin();
     expect(screen.getByText('Too many wrong PIN attempts. Try again in 15 minutes.')).toBeInTheDocument();
     expect(screen.queryByText('Login failed. Please try again.')).not.toBeInTheDocument();
+    // The keypad rests until the lockout ends, and the minutes count down.
+    expect(screen.getByRole('button', { name: '1' })).toBeDisabled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+    });
+    expect(screen.getByText('Too many wrong PIN attempts. Try again in 10 minutes.')).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+    });
+    expect(screen.queryByText(/Too many wrong PIN attempts/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '1' })).toBeEnabled();
   });
 
   it('enforces one six-digit PIN rule and keeps the setup actions readable', async () => {
@@ -168,15 +196,128 @@ describe('LoginPage login deadlines', () => {
     expect(newPin).toHaveValue('123456');
 
     const saveButton = screen.getByRole('button', { name: 'Save PIN' });
-    expect(saveButton).toHaveClass(
-      'whitespace-nowrap',
-      'text-green-700',
-      'dark:text-green-200',
-    );
+    // Wave ΣΤ7: «Save PIN» is the kit glass-modal primary (yellow in both themes, readable label).
+    expect(saveButton).toHaveClass('whitespace-nowrap', 'liquid-glass-modal-button', 'pos-modal-primary');
 
     const lockIcon = document.querySelector('.lucide-lock');
     expect(lockIcon).not.toBeNull();
     expect(lockIcon).toHaveClass('text-yellow-600', 'dark:text-yellow-300');
     expect(lockIcon?.parentElement).not.toHaveClass('rounded-full', 'bg-yellow-500/10');
+  });
+});
+
+// Founder 31/10 («με το που βάλεις το σωστό PIN κάνει login μόνο του ... μήπως έβγαζα τελείως το κουμπί»):
+// no sign-in button; the screen signs in by itself at the PIN's known length, a shorter PIN gets a small
+// enter key, and no PIN is ever sent on a guess (a wrong attempt counts towards the lockout).
+describe('LoginPage without a sign-in button', () => {
+  const press = (digits: string) => {
+    for (const digit of digits) fireEvent.click(screen.getByRole('button', { name: digit }));
+  };
+  const filledDots = () => screen.getByTestId('login-pin-dots').querySelectorAll('.bg-current').length;
+  const renderWith = async (settings: Record<string, unknown>, onLogin = vi.fn().mockResolvedValue(true)) => {
+    bridge.settings.getLocal.mockResolvedValue({ 'terminal.legacy_pin_migrated': true, ...settings });
+    render(<LoginPage onLogin={onLogin} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    return onLogin;
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it('has no sign-in button and signs in by itself at six digits', async () => {
+    const onLogin = await renderWith({ 'staff.admin_pin_hash': 'h', 'staff.staff_pin_hash': 'h' });
+    expect(screen.queryByRole('button', { name: 'Login' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('login-pin-dots').children).toHaveLength(6);
+
+    press('12345');
+    expect(onLogin).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('login-enter-key')).not.toBeInTheDocument();
+    press('6');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onLogin).toHaveBeenCalledWith('123456');
+  });
+
+  it('a wrong PIN empties the field, keeps the message and shakes the field', async () => {
+    await renderWith({ 'staff.admin_pin_hash': 'h' }, vi.fn().mockResolvedValue(false));
+    press('123456');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText('Wrong code')).toBeInTheDocument();
+    expect(filledDots()).toBe(0);
+    expect(screen.getByTestId('login-pin-field')).toHaveClass('pos-login-shake');
+  });
+
+  it('signs in by itself at four when every PIN the till knows has four digits', async () => {
+    const onLogin = await renderWith({
+      'staff.admin_pin_hash': 'h',
+      'staff.staff_pin_hash': 'h',
+      'terminal.login_pin_length_admin': 4,
+      'terminal.login_pin_length_staff': 4,
+    });
+    expect(screen.getByTestId('login-pin-dots').children).toHaveLength(4);
+    press('1234');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onLogin).toHaveBeenCalledWith('1234');
+  });
+
+  it('a four-digit staff PIN beside a six-digit admin PIN gets the enter key at once, never a guess', async () => {
+    const onLogin = await renderWith({
+      'staff.admin_pin_hash': 'h',
+      'staff.staff_pin_hash': 'h',
+      'terminal.login_pin_length_admin': 6,
+      'terminal.login_pin_length_staff': 4,
+    });
+    press('1234');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onLogin).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('login-enter-key'));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onLogin).toHaveBeenCalledWith('1234');
+  });
+
+  it('leaving after an accepted PIN rests the keypad and reports when the logo is in the middle', async () => {
+    // jsdom has no layout, so the logo cannot fly: the screen reports at once instead of holding the till.
+    bridge.settings.getLocal.mockResolvedValue({ 'terminal.legacy_pin_migrated': true, 'staff.admin_pin_hash': 'h' });
+    const onLeft = vi.fn();
+    render(<LoginPage onLogin={vi.fn()} exitPhase="leaving" onLeft={onLeft} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onLeft).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: '1' })).toBeDisabled();
+    expect(screen.getByTestId('login-card')).toHaveClass('pointer-events-none');
+  });
+
+  it('a shorter PIN the till does not know gets the enter key after a pause', async () => {
+    const onLogin = await renderWith({ 'staff.admin_pin_hash': 'h', 'staff.staff_pin_hash': 'h' });
+    press('1234');
+    expect(screen.queryByTestId('login-enter-key')).not.toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(onLogin).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('login-enter-key'));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onLogin).toHaveBeenCalledWith('1234');
   });
 });

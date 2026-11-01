@@ -69,7 +69,8 @@ test('PaymentModal renders every money value via the shared formatCurrency, not 
   assert.match(modalSource, /-\{formatCurrency\(discountAmount\)\}/);
   assert.match(modalSource, /\{formatCurrency\(deliveryFee\)\}/);
   assert.match(modalSource, /\{formatCurrency\(tipAmount\)\}/);
-  assert.match(modalSource, /\{formatCurrency\(cashAmount\)\}/);
+  // Founder 31/10: the received amount is the field itself; the summary says only the change.
+  assert.doesNotMatch(modalSource, /\{formatCurrency\(cashAmount\)\}/);
   assert.match(modalSource, /hasEnoughCash \? formatCurrency\(changeAmount\)/);
   // Below-minimum interpolation passes the formatted amount (the symbol comes from the
   // formatter, not a hardcoded € in the message).

@@ -61,9 +61,9 @@ test('printer settings expose the after_edit toggle (default on)', () => {
   assert.match(printerSettingsSource, /'after_order', 'after_edit',/);
   assert.match(printerSettingsSource, /after_edit: true,/);
   assert.match(printerSettingsSource, /case 'after_edit':/);
-  // The default-true grid grew to 8 entries; the "new triggers" grid follows.
-  assert.match(printerSettingsSource, /RECEIPT_ACTION_KEYS\.slice\(0, 8\)/);
-  assert.match(printerSettingsSource, /RECEIPT_ACTION_KEYS\.slice\(8\)/);
+  // Audit 30/10: the toggles are grouped by moment; after_edit sits with the customer receipt.
+  assert.match(printerSettingsSource, /id: 'customer'[^\n]*keys: \['after_order', 'after_edit',/);
+  assert.match(printerSettingsSource, /RECEIPT_ACTION_GROUPS\.map\(group =>/);
 });
 
 test('every POS locale carries the afterEdit receipt-action label', () => {

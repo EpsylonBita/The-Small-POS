@@ -212,9 +212,9 @@ describe('selected coordinate persistence at every customer entry point', () => 
     fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.streetPlaceholder), { target: { value: 'Synthetic New Street' } });
     fireEvent.click(await screen.findByText('Thessaloniki', { selector: 'p' }));
     await waitFor(() => expect(mock.validateAddressForDelivery).toHaveBeenCalled());
-    if (mode === 'new') fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.namePlaceholder), { target: { value: customer.name } });
+    if (mode === 'new') fireEvent.change(screen.getByLabelText(en.modals.addCustomer.nameLabel.replace(' *', ''), { exact: false }), { target: { value: customer.name } });
     fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.floorPlaceholder), { target: { value: '3' } });
-    fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.nameOnRingerPlaceholder), { target: { value: 'Synthetic' } });
+    fireEvent.change(screen.getByLabelText(en.modals.addCustomer.nameOnRingerLabel.replace(' *', ''), { exact: false }), { target: { value: 'Synthetic' } });
     submit(container);
     await waitFor(() => expect(onCustomerAdded).toHaveBeenCalledTimes(1));
     const write = mode === 'new' ? mock.createCustomer.mock.calls[0][0]

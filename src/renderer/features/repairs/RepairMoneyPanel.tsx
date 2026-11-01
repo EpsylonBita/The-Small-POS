@@ -340,17 +340,17 @@ export function RepairMoneyPanel({
   return (
     <section className="space-y-5" aria-label={t('repairs.money.title', { defaultValue: 'Repair payments' })}>
       {connectivity !== 'online' && (
-        <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+        <p className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 text-sm">
           {t('repairs.money.onlineRequired', { defaultValue: 'Payments require an online connection.' })}
         </p>
       )}
       {connectivity === 'online' && !hasActiveShift && (
-        <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+        <p className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 text-sm">
           {t('repairs.money.activeShiftRequired', { defaultValue: 'Open a shift to perform repair money actions.' })}
         </p>
       )}
       {isLoading && <p role="status">{t('repairs.money.loading', { defaultValue: 'Loading settlement…' })}</p>}
-      {error && <p role="alert" className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-800 dark:text-red-200">{error}</p>}
+      {error && <p role="alert" className="rounded-xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-3 text-sm text-red-800 dark:text-red-200">{error}</p>}
 
       {activeProjection && (
         <dl className="grid gap-3 sm:grid-cols-3">
@@ -387,7 +387,7 @@ export function RepairMoneyPanel({
         <p role="status">{t('repairs.money.readiness.loading', { defaultValue: 'Checking fiscal readiness…' })}</p>
       )}
       {!isReadinessLoading && readinessError && (
-        <p role="alert" className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-800 dark:text-red-200">
+        <p role="alert" className="rounded-xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-3 text-sm text-red-800 dark:text-red-200">
           {t('repairs.money.readiness.statusUnavailable', { defaultValue: 'Fiscal readiness could not be determined.' })}
           {' '}
           <button type="button" onClick={() => void loadReadiness()} className="font-semibold underline">
@@ -396,7 +396,7 @@ export function RepairMoneyPanel({
         </p>
       )}
       {!isReadinessLoading && !readinessError && readinessBlocked && (
-        <p role="alert" className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-800 dark:text-red-200">
+        <p role="alert" className="rounded-xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-3 text-sm text-red-800 dark:text-red-200">
           {t(readinessBlocked.key, { defaultValue: readinessBlocked.defaultValue })}
           {' '}
           <button type="button" onClick={() => void loadReadiness()} className="font-semibold underline">
@@ -480,7 +480,7 @@ export function RepairMoneyPanel({
               payload: { reason: deliveryReason.trim() || null },
             }),
           )}
-          className="min-h-11 rounded-xl bg-emerald-600 px-4 font-semibold text-white disabled:opacity-45"
+          className="min-h-11 rounded-xl bg-(--pos-s-yellow) px-4 font-semibold text-black disabled:opacity-45"
         >
           {t('repairs.money.deliver', { defaultValue: 'Deliver repair' })}
         </button>

@@ -1,9 +1,8 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
 import { useTheme } from "../contexts/theme-context";
-import { Truck } from "lucide-react";
 import TableOrderIcon from "./icons/TableOrderIcon";
-import PickupOrderIcon from "./icons/PickupOrderIcon";
+import { DeliveryScooterIcon, PickupHandBagIcon } from "./icons/OrderTypeGlyphs";
 
 interface CustomerInfo {
   name: string;
@@ -52,18 +51,18 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
   const isDark = resolvedTheme === 'dark';
   const inputClass = `w-full rounded-2xl border px-3 py-3 transition-colors duration-150 backdrop-blur-sm ${
     isDark
-      ? 'border-white/12 bg-black/25 text-white placeholder-white/45 focus:border-yellow-400/80 focus:bg-black/35'
+      ? 'border-white/12 bg-black/25 text-white placeholder-white/45 focus:border-(--pos-s-yellow) focus:bg-black/35'
       : 'border-black/12 bg-white/65 text-gray-950 placeholder-gray-500 focus:border-yellow-500 focus:bg-white/90'
-  } focus:outline-hidden focus:ring-2 focus:ring-yellow-400/40`;
+  } focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg)`;
   const orderTypeCardClass = (type: "dine-in" | "pickup" | "delivery") => `rounded-2xl border p-4 text-center backdrop-blur-sm transition-transform duration-150 ${
     orderType === type
       ? isDark
-        ? 'border-yellow-400 bg-yellow-400/16 text-yellow-200'
-        : 'border-yellow-500 bg-yellow-50 text-yellow-800'
+        ? 'border-yellow-400 bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200'
+        : 'border-yellow-500 bg-(--pos-s-surface-2) text-yellow-800'
       : isDark
         ? 'border-white/12 bg-black/25 text-gray-300 active:border-white/20 active:bg-black/35'
         : 'border-black/10 bg-white/55 text-gray-700 active:border-black/15 active:bg-white/75'
-  } active:scale-[0.98] focus:outline-hidden focus:ring-2 focus:ring-yellow-400/40`;
+  } active:scale-[0.98] focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg)`;
 
   const handleAddressChange = (field: string, value: string) => {
     setCustomerInfo((prev) => ({
@@ -106,8 +105,8 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
             >
               <div className="text-2xl mb-2 flex items-center justify-center">
                 {type === "dine-in" && <TableOrderIcon className="w-6 h-6" />}
-                {type === "pickup" && <PickupOrderIcon className="w-6 h-6" />}
-                {type === "delivery" && <Truck className="w-6 h-6" />}
+                {type === "pickup" && <PickupHandBagIcon className="h-7 w-7" />}
+                {type === "delivery" && <DeliveryScooterIcon className="h-7 w-7" />}
               </div>
               <div className="font-medium capitalize">
                 {type === "dine-in"
@@ -281,7 +280,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
                     ? resolvedTheme === 'dark'
                       ? "bg-gray-500/20 border border-gray-500/30 text-gray-400 cursor-not-allowed"
                       : "bg-gray-400/20 border border-gray-400/30 text-gray-500 cursor-not-allowed"
-                    : "bg-yellow-400 text-black active:bg-yellow-500 border border-yellow-500/50 active:border-yellow-400/70"
+                    : "bg-yellow-400 text-black active:bg-yellow-500 border border-(--pos-s-yellow) active:border-(--pos-s-yellow)"
                 }`}
               >
                 {isValidatingAddress ? (
@@ -317,8 +316,8 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
             {/* Delivery Zone Warning */}
             <div className={`border rounded-2xl p-4 backdrop-blur-sm ${
               resolvedTheme === 'dark'
-                ? 'bg-yellow-900/20 border-yellow-700/50'
-                : 'bg-yellow-50/80 border-yellow-200/70'
+                ? 'bg-(--pos-s-surface-2) border-(--pos-s-yellow)'
+                : 'bg-(--pos-s-surface-2) border-(--pos-s-yellow)'
             }`}>
               <div className="flex">
                 <svg

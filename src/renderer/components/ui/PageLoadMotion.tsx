@@ -9,22 +9,30 @@ import {
   type Variants,
 } from 'framer-motion';
 import { cn } from '../../utils/cn';
+import {
+  pageMotionEase,
+  POS_MOTION_BASE_S,
+  POS_MOTION_FAST_S,
+  POS_MOTION_SLOW_S,
+  POS_MOTION_STAGGER_S,
+} from './page-motion';
 
 type PageLoadMotionProps = HTMLMotionProps<'div'> & {
   children: React.ReactNode;
   animationKey?: string;
 };
 
+// The shared till timings (page-motion.ts): a page enters in 240 ms and leaves in 150 ms.
 const pageTransition: Transition = {
-  duration: 0.36,
-  ease: [0.22, 1, 0.36, 1],
+  duration: POS_MOTION_SLOW_S,
+  ease: pageMotionEase,
 };
 
 const pageVariants: Variants = {
   initial: {
     opacity: 0,
-    y: 18,
-    scale: 0.985,
+    y: 8,
+    scale: 0.99,
   },
   animate: {
     opacity: 1,
@@ -33,25 +41,25 @@ const pageVariants: Variants = {
     transition: {
       ...pageTransition,
       when: 'beforeChildren',
-      staggerChildren: 0.035,
-      delayChildren: 0.04,
+      staggerChildren: POS_MOTION_STAGGER_S,
     },
   },
   exit: {
     opacity: 0,
-    y: -10,
+    y: -4,
     scale: 0.99,
     transition: {
-      duration: 0.16,
-      ease: 'easeOut',
+      duration: POS_MOTION_FAST_S,
+      ease: pageMotionEase,
     },
   },
 };
 
+// "Reduce motion": the page swaps at once (no fade, no wait for an exit).
 const reducedMotionVariants: Variants = {
-  initial: { opacity: 0 },
-  animate: { opacity: 1, transition: { duration: 0.16 } },
-  exit: { opacity: 0, transition: { duration: 0.1 } },
+  initial: { opacity: 1 },
+  animate: { opacity: 1, transition: { duration: 0 } },
+  exit: { opacity: 0, transition: { duration: 0 } },
 };
 
 const ELEMENT_SKIP_SELECTOR = '.fixed, [role="dialog"], [data-page-motion-skip="true"]';
@@ -73,7 +81,8 @@ const getPageLoadTargets = (root: HTMLElement): HTMLElement[] => {
     )
   );
 
-  return (nestedChildren.length > 1 ? nestedChildren : topLevelChildren).slice(0, 18);
+  // At most 8 steps: the rest of the page is already there.
+  return (nestedChildren.length > 1 ? nestedChildren : topLevelChildren).slice(0, 8);
 };
 
 export const PageLoadMotion = memo<PageLoadMotionProps>(({ children, className, animationKey, ...props }) => {
@@ -94,12 +103,12 @@ export const PageLoadMotion = memo<PageLoadMotionProps>(({ children, className, 
       targets,
       {
         opacity: [0, 1],
-        y: [12, 0],
+        y: [6, 0],
       },
       {
-        duration: 0.34,
-        ease: [0.22, 1, 0.36, 1],
-        delay: stagger(0.035, { startDelay: 0.06 }),
+        duration: POS_MOTION_BASE_S,
+        ease: pageMotionEase,
+        delay: stagger(POS_MOTION_STAGGER_S),
       }
     );
 

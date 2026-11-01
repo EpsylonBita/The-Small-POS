@@ -31,17 +31,17 @@ export const FOLIO_STATUS_PRESENTATION: Record<FolioStatus, FolioStatusPresentat
   active: {
     labelKey: 'guestBilling.status.active',
     defaultLabel: 'Active',
-    badgeClass: 'bg-blue-500/10 text-blue-500',
+    badgeClass: 'bg-(--pos-s-surface-2) text-blue-800 dark:text-blue-300',
   },
   closed: {
     labelKey: 'guestBilling.status.closed',
     defaultLabel: 'Closed',
-    badgeClass: 'bg-green-500/10 text-green-500',
+    badgeClass: 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300',
   },
   disputed: {
     labelKey: 'guestBilling.status.disputed',
     defaultLabel: 'Disputed',
-    badgeClass: 'bg-red-500/10 text-red-500',
+    badgeClass: 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-300',
   },
 };
 

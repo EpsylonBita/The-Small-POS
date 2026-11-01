@@ -115,22 +115,22 @@ export const PaymentDialog: React.FC<Props> = ({
 
   const statusIcons: Record<TransactionStatus, React.ReactNode> = {
     pending: <CreditCard className="w-16 h-16 text-gray-400" />,
-    processing: <Loader2 className="w-16 h-16 text-amber-400 animate-spin" />,
-    approved: <CheckCircle className="w-16 h-16 text-green-400" />,
-    declined: <XCircle className="w-16 h-16 text-red-400" />,
-    error: <AlertTriangle className="w-16 h-16 text-red-400" />,
-    timeout: <AlertTriangle className="w-16 h-16 text-yellow-400" />,
+    processing: <Loader2 className="w-16 h-16 text-amber-700 dark:text-amber-400 animate-spin" />,
+    approved: <CheckCircle className="w-16 h-16 text-green-700 dark:text-green-400" />,
+    declined: <XCircle className="w-16 h-16 text-red-700 dark:text-red-400" />,
+    error: <AlertTriangle className="w-16 h-16 text-red-700 dark:text-red-400" />,
+    timeout: <AlertTriangle className="w-16 h-16 text-yellow-700 dark:text-yellow-400" />,
     cancelled: <XCircle className="w-16 h-16 text-gray-400" />,
   }
 
   const statusColors: Record<TransactionStatus, string> = {
-    pending: 'text-gray-300',
-    processing: 'text-amber-400',
-    approved: 'text-green-400',
-    declined: 'text-red-400',
-    error: 'text-red-400',
-    timeout: 'text-yellow-400',
-    cancelled: 'text-gray-400',
+    pending: 'text-gray-600 dark:text-gray-300',
+    processing: 'text-amber-700 dark:text-amber-400',
+    approved: 'text-green-700 dark:text-green-400',
+    declined: 'text-red-700 dark:text-red-400',
+    error: 'text-red-700 dark:text-red-400',
+    timeout: 'text-yellow-700 dark:text-yellow-400',
+    cancelled: 'text-gray-600 dark:text-gray-400',
   }
 
   return renderModalPortal(
@@ -194,14 +194,14 @@ export const PaymentDialog: React.FC<Props> = ({
           {status === 'processing' ? (
             <button
               onClick={handleCancel}
-              className="w-full py-3 rounded-lg bg-red-500/20 text-red-400 active:bg-red-500/30 transition-colors font-medium"
+              className="w-full py-3 rounded-lg bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 active:bg-(--pos-s-surface-2) transition-colors font-medium"
             >
               {t('ecr.payment.cancel', 'Cancel')}
             </button>
           ) : status === 'approved' ? (
             <button
               onClick={() => onComplete(response!)}
-              className="w-full py-3 rounded-lg bg-green-500/20 text-green-400 active:bg-green-500/30 transition-colors font-medium"
+              className="w-full py-3 rounded-lg bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 active:bg-(--pos-s-surface-2) transition-colors font-medium"
             >
               {t('common.done', 'Done')}
             </button>

@@ -83,6 +83,6 @@ test('Round 309: touch-first + on-palette (no hover, no native title tooltip, no
   assert.match(source, /title=\{t\('modals\.editCustomer\.title'\)\}/);
   // On-palette only: the pre-existing blue address spinner + "validating" text were moved to amber.
   assert.doesNotMatch(source, /\b(?:bg|text|border|from|to|ring)-(?:blue|cyan|sky|purple|violet|indigo)-/);
-  assert.match(source, /border-amber-500\/30 border-t-amber-500/);
+  assert.match(source, /border-\(--pos-s-border\) border-t-amber-500/);
   assert.match(source, /text-amber-500 text-sm/);
 });

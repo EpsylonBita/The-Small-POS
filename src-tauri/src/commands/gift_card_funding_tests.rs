@@ -2360,6 +2360,9 @@ fn availability_consumes_no_grant_writes_nothing_and_keeps_begin_single() {
 #[test]
 fn availability_refuses_missing_or_expired_authority_before_any_transport() {
     let _serial = opening::hosted_auth_test_serial();
+    // An unscoped database must stay unscoped even when the OS keyring holds
+    // a terminal from an earlier run.
+    let _keyring = crate::tests::fake_keyring::install_empty();
     opening::clear_authorizations();
     let now = Utc::now();
     let code = |conn: &Connection, staff: &str, authority: &str, at: DateTime<Utc>| {

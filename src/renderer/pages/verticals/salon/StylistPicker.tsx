@@ -66,7 +66,7 @@ interface StylistPickerProps {
 }
 
 const choiceClass =
-  'flex min-h-12 w-full items-center gap-3 rounded-xl border border-slate-200/90 bg-white/90 px-3 py-2 text-left font-semibold liquid-glass-modal-text shadow-[0_8px_20px_rgba(15,23,42,0.10)] transition-all active:translate-y-px dark:border-white/10 dark:bg-white/5';
+  'flex min-h-12 w-full items-center gap-3 rounded-xl border border-slate-200/90 bg-white/90 px-3 py-2 text-left font-semibold liquid-glass-modal-text transition-all active:translate-y-px dark:border-white/10 dark:bg-white/5';
 
 export function StylistPicker({ isOpen, serviceName, stylists, loading = false, onPick, onClose }: StylistPickerProps) {
   const { t } = useTranslation();

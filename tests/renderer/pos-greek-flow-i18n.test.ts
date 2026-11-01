@@ -271,10 +271,9 @@ test('Round 200: OrderDashboard chooser buttons expose explicit aria-labels via 
     /className="group relative p-6 rounded-2xl border-2/,
     'chooser buttons must not keep the leftover "group" class',
   );
-  for (const accent of ['border-[#facc15]/45', 'border-[#34d399]/45', 'border-[#60a5fa]/45']) {
-    assert.match(orderDashboardSource, new RegExp(`active:scale-95`));
-    assert.match(orderDashboardSource, new RegExp(accent.replace(/[\/\[\]#]/g, '\\$&')));
-  }
+  // Wave ΣΤ2: the chooser cards are solid kit cards (no coloured alpha accent border).
+  assert.match(orderDashboardSource, /border-2 border-\(--pos-s-border\) bg-\(--pos-s-surface\) transition-transform duration-150 active:scale-95/);
+  assert.doesNotMatch(orderDashboardSource, /border-\[#(?:facc15|34d399|60a5fa)\]\/45/);
 });
 
 // Finding 5 (2026-06-21 live QA): the Z-report Orders audit rows printed raw backend

@@ -1,5 +1,6 @@
 import React from 'react';
-import { Banknote, CreditCard, Truck, Wallet, Wallet2 } from 'lucide-react';
+import { Banknote, CreditCard, Wallet, Wallet2 } from 'lucide-react';
+import { DeliveryScooterIcon } from '../icons/OrderTypeGlyphs';
 import { useTranslation } from 'react-i18next';
 
 /** The tender a refund names (shared rule R5): cash, card, or any other. */
@@ -92,7 +93,7 @@ export const RefundAttributionFields: React.FC<RefundAttributionFieldsProps> = (
             onClick={() => onRefundMethodChange('cash')}
             className={`liquid-glass-modal-button justify-center gap-2 text-sm ${
               refundMethod === 'cash'
-                ? 'bg-green-600/20 text-green-300 border-green-500/30'
+                ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-200 border-(--pos-s-yellow)'
                 : ''
             } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
           >
@@ -106,7 +107,7 @@ export const RefundAttributionFields: React.FC<RefundAttributionFieldsProps> = (
             onClick={() => onRefundMethodChange('card')}
             className={`liquid-glass-modal-button justify-center gap-2 text-sm ${
               refundMethod === 'card'
-                ? 'bg-amber-600/20 text-amber-300 border-amber-500/30'
+                ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border-(--pos-s-yellow)'
                 : ''
             } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
           >
@@ -121,7 +122,7 @@ export const RefundAttributionFields: React.FC<RefundAttributionFieldsProps> = (
               onClick={() => onRefundMethodChange('other')}
               className={`liquid-glass-modal-button justify-center gap-2 text-sm ${
                 refundMethod === 'other'
-                  ? 'bg-emerald-600/20 text-emerald-300 border-emerald-500/30'
+                  ? 'bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200 border-(--pos-s-yellow)'
                   : ''
               } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
@@ -140,13 +141,13 @@ export const RefundAttributionFields: React.FC<RefundAttributionFieldsProps> = (
           <div
             className={`liquid-glass-modal-inset flex items-center justify-center gap-2 rounded-2xl px-3 py-2 text-sm ${
               cashHandler === 'driver_shift'
-                ? 'text-emerald-300'
-                : 'text-amber-300'
+                ? 'text-emerald-800 dark:text-emerald-300'
+                : 'text-amber-800 dark:text-amber-300'
             }`}
           >
             {cashHandler === 'driver_shift' ? (
               <>
-                <Truck className="w-4 h-4" />
+                <DeliveryScooterIcon className="h-5 w-5" />
                 {t('modals.refund.driverCash', { defaultValue: 'Driver Cash' })}
               </>
             ) : (

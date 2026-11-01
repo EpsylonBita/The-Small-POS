@@ -29,8 +29,7 @@ test('SuppliersPage is a hidden-scrollbar supplier workbench', () => {
   assert.match(source, /aria-label=\{t\('common.refresh'/);
   assert.match(source, /h-12 w-12/);
   // Round 257: the refresh button is amber glass (was a stark black/white square).
-  assert.match(source, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(source, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  assert.match(source, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
   assert.match(source, /active:scale-95/);
   assert.match(source, /<RefreshCw className=\{`w-5 h-5 \$\{loading \? 'animate-spin' : ''\}`\} \/>/);
 });
@@ -103,10 +102,10 @@ test('SuppliersPage uses unwrapped icons and yellow transparent selection chrome
   assert.match(source, /<Icon className=\{`h-5 w-5 shrink-0 \$\{stat\.iconClass\}`\}/);
   // Round 180: stats are icon-only now (Wallet etc.); the old currency-symbol span is gone.
   assert.doesNotMatch(source, /w-5 shrink-0 text-center text-lg font-bold leading-none/);
-  assert.match(source, /border-yellow-400\/70 text-white active:bg-yellow-400\/10/);
-  assert.match(source, /border-yellow-400 bg-transparent text-white/);
+  assert.match(source, /border-\(--pos-s-yellow\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)/);
+  assert.match(source, /border-\(--pos-s-sel-bg\) ring-1 ring-\(--pos-s-sel-bg\) bg-transparent text-white/); // founder 31/10: selection = the yellow kit sel
   assert.match(source, /shrink-0 text-xs font-semibold \$\{supplier\.is_active/);
-  assert.match(source, /<div className="text-yellow-400">\{icon\}<\/div>/);
+  assert.match(source, /<div className="text-yellow-(?:700|800) dark:text-yellow-400">\{icon\}<\/div>/);
   assert.doesNotMatch(source, /<Truck className/);
   assert.doesNotMatch(source, /flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border[\s\S]*<Truck/);
   assert.doesNotMatch(source, /flex h-9 w-9 items-center justify-center rounded-lg \$\{stat\.iconClass\}/);
@@ -478,8 +477,7 @@ test('SuppliersPage supervisor polish keeps supplier/import controls rounded and
 test('Round 257: the header refresh button is amber glass, not a stark black/white square', () => {
   const source = suppliersPageSource();
   // Amber glass in both themes.
-  assert.match(source, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(source, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  assert.match(source, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
   // The stark black/white refresh treatment is gone.
   assert.doesNotMatch(source, /border border-white\/80 bg-white text-black/);
   assert.doesNotMatch(source, /border border-black bg-black text-white/);

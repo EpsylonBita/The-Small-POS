@@ -177,19 +177,19 @@ export const TrialModulePrompt: React.FC<TrialModulePromptProps> = ({
   // Color classes based on urgency
   const colorClasses = {
     success: {
-      border: 'border-green-500/30',
-      icon: 'text-green-400',
-      bg: 'from-green-500/10 to-transparent',
+      border: 'border-(--pos-s-border)',
+      icon: 'text-green-700 dark:text-green-400',
+      bg: '',
     },
     warning: {
-      border: 'border-amber-500/30',
-      icon: 'text-amber-400',
-      bg: 'from-amber-500/10 to-transparent',
+      border: 'border-(--pos-s-border)',
+      icon: 'text-amber-700 dark:text-amber-400',
+      bg: '',
     },
     error: {
-      border: 'border-red-500/30',
-      icon: 'text-red-400',
-      bg: 'from-red-500/10 to-transparent',
+      border: 'border-(--pos-s-border)',
+      icon: 'text-red-700 dark:text-red-400',
+      bg: '',
     },
   }
 

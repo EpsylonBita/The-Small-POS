@@ -50,7 +50,7 @@ export function MyDataCashierDiscovery({ scopeKey, onSelect, disabled }: {
       if (isCurrent()) inFlight.current = false;
     }
   };
-  return <div className="md:col-span-2 rounded-2xl border border-purple-500/20 p-3" data-testid="mydata-cashier-discovery">
+  return <div className="md:col-span-2 rounded-2xl border border-(--pos-s-border) p-3" data-testid="mydata-cashier-discovery">
     <POSGlassButton variant="secondary" disabled={disabled || phase === 'searching'} onClick={find}>
       {phase === 'searching' ? t('integrations.mydata.discovery.searching', 'Finding cashiers on this LAN…') : t('integrations.mydata.discovery.find', 'Find cashier')}
     </POSGlassButton>

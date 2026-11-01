@@ -2989,7 +2989,7 @@ fn format_drawer_equation_amount(
 }
 
 /// Integer cents formatted with a gift-card close's own currency code
-/// ("143.45 EUR"). Gift close amounts never pass through `f64` and never borrow
+/// ("143.45 €"). Gift close amounts never pass through `f64` and never borrow
 /// the terminal's configured currency symbol.
 fn gift_close_amount(cents: i64, currency: &str, comma: bool) -> String {
     let sign = if cents < 0 { "-" } else { "" };
@@ -2997,7 +2997,7 @@ fn gift_close_amount(cents: i64, currency: &str, comma: bool) -> String {
     let separator = if comma { ',' } else { '.' };
     let amount = format!("{sign}{}{separator}{:02}", magnitude / 100, magnitude % 100);
     match non_empty_receipt_value(currency) {
-        Some(code) => format!("{amount} {code}"),
+        Some(code) => format!("{amount}{}", printed_currency_suffix(code)),
         None => amount,
     }
 }
@@ -3013,7 +3013,7 @@ fn gift_close_movement(cents: i64, currency: &str, comma: bool) -> String {
     }
 }
 
-/// A gift-close variance: "+3.45 EUR" over, "-3.45 EUR" short, "0.00 EUR"
+/// A gift-close variance: "+3.45 €" over, "-3.45 €" short, "0.00 €"
 /// balanced (founder, 13/10/2026; same rule as Android).
 fn gift_close_variance(cents: i64, currency: &str, comma: bool) -> String {
     let amount = gift_close_amount(cents, currency, comma);
@@ -3250,6 +3250,19 @@ fn is_known_euro_character_set(character_set: &str) -> bool {
             | "PC851_GREEK"
             | "PC869_GREEK"
     )
+}
+
+/// Display-only currency suffix. Stored and transported currencies stay ISO codes.
+pub(crate) fn printed_currency_suffix(code: &str) -> String {
+    let code = code.trim().to_ascii_uppercase();
+    if code.len() != 3 || !code.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        return " ?".to_string();
+    }
+    if code == "EUR" {
+        " €".to_string()
+    } else {
+        format!(" {code}")
+    }
 }
 
 /// Normalize currency symbol rendering for ESC/POS compatibility.
@@ -4743,16 +4756,17 @@ fn status_label_text(lang: &str, label: &str) -> String {
 /// Checkout amounts belong to the frozen shift, never to a later store setting.
 pub(crate) fn apply_document_currency(document: &ReceiptDocument, cfg: &mut LayoutConfig) {
     let currency = match document {
-        ReceiptDocument::OrderReceipt(doc) if doc.currency.is_some() => doc.currency.as_deref(),
+        ReceiptDocument::OrderReceipt(doc) | ReceiptDocument::DeliverySlip(doc)
+            if doc.currency.is_some() =>
+        {
+            doc.currency.as_deref()
+        }
         ReceiptDocument::ShiftCheckout(doc) => doc.currency.as_deref(),
         ReceiptDocument::ZReport(doc) => doc.currency.as_deref(),
         _ => return,
     };
     cfg.currency_symbol = currency
-        .filter(|currency| {
-            currency.len() == 3 && currency.bytes().all(|byte| byte.is_ascii_uppercase())
-        })
-        .map(|currency| format!(" {currency}"))
+        .map(printed_currency_suffix)
         .unwrap_or_else(|| " ?".to_string());
 }
 
@@ -4765,6 +4779,10 @@ fn document_layout<'a>(
         ReceiptDocument::ShiftCheckout(_)
             | ReceiptDocument::ZReport(_)
             | ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+                currency: Some(_),
+                ..
+            })
+            | ReceiptDocument::DeliverySlip(OrderReceiptDoc {
                 currency: Some(_),
                 ..
             })
@@ -11135,6 +11153,20 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             }),
         }
     }
+    // Frozen document currency is applied above. Raster uses embedded fonts;
+    // text output of any template depends on the printer's code-page support.
+    let mut text_layout = cfg.clone();
+    let euro_supported = normalize_currency_symbol_for_layout(
+        " €",
+        &cfg.character_set,
+        cfg.escpos_code_page,
+        cfg.detected_brand,
+    )
+    .contains('€');
+    if !euro_supported {
+        text_layout.currency_symbol = text_layout.currency_symbol.replace('€', "EUR");
+    }
+    let cfg = &text_layout;
     let use_star_commands = is_star_line_mode(cfg);
     let mut builder = if use_star_commands {
         EscPosBuilder::new()
@@ -11143,6 +11175,8 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
     } else {
         EscPosBuilder::new().with_paper(cfg.paper_width)
     };
+    // Banners and gift-close rows carry their own currency text too.
+    builder = builder.with_euro_fallback(!euro_supported);
     builder.init();
     warnings.extend(apply_character_set(
         &mut builder,
@@ -11206,17 +11240,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
         ReceiptDocument::OrderReceipt(doc) => {
             let render_delivery_block = should_render_delivery_block(doc);
             let order_type_display = translate_order_type(lang, &doc.order_type);
-            let resolved_currency = if classic_customer_layout {
-                normalize_currency_symbol_for_layout(
-                    &cfg.currency_symbol,
-                    &cfg.character_set,
-                    cfg.escpos_code_page,
-                    cfg.detected_brand,
-                )
-            } else {
-                cfg.currency_symbol.clone()
-            };
-            let cur = resolved_currency.as_str();
+            let cur = cfg.currency_symbol.as_str();
             {
                 let order_label = receipt_label(lang, "Order");
                 let type_label = receipt_label(lang, "Type");
@@ -12042,17 +12066,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             }
         }
         ReceiptDocument::DeliverySlip(doc) => {
-            let resolved_currency = if classic_customer_layout {
-                normalize_currency_symbol_for_layout(
-                    &cfg.currency_symbol,
-                    &cfg.character_set,
-                    cfg.escpos_code_page,
-                    cfg.detected_brand,
-                )
-            } else {
-                cfg.currency_symbol.clone()
-            };
-            let cur = resolved_currency.as_str();
+            let cur = cfg.currency_symbol.as_str();
             let display_date = format_datetime_human(&doc.created_at, cfg.store_time_zone);
             let slip_title = receipt_label(lang, "DELIVERY SLIP");
             let order_type_display = translate_order_type(lang, &doc.order_type);
@@ -14106,6 +14120,175 @@ mod tests {
     }
 
     #[test]
+    fn printed_currency_suffix_formats_codes_without_changing_iso_data() {
+        for code in ["EUR", "eur", " EuR "] {
+            assert_eq!(printed_currency_suffix(code), " \u{20AC}");
+        }
+        assert_eq!(printed_currency_suffix(" chf "), " CHF");
+        assert_eq!(printed_currency_suffix("USD"), " USD");
+        for code in ["", "EU", "EURO", "12A", "?"] {
+            assert_eq!(printed_currency_suffix(code), " ?");
+        }
+    }
+
+    fn euro_order_document() -> ReceiptDocument {
+        ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            currency: Some("EUR".into()),
+            order_number: "1".into(),
+            totals: vec![TotalsLine {
+                label: "TOTAL".into(),
+                amount: 1.2,
+                emphasize: true,
+                discount_percent: None,
+            }],
+            ..OrderReceiptDoc::default()
+        })
+    }
+
+    #[test]
+    fn euro_order_preview_and_supported_classic_text_use_euro() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            decimal_comma: true,
+            detected_brand: crate::printers::PrinterBrand::Epson,
+            escpos_code_page: Some(0),
+            currency_symbol: " CHF".into(),
+            ..LayoutConfig::default()
+        };
+        let document = euro_order_document();
+        let preview_cfg = LayoutConfig {
+            template: ReceiptTemplate::Modern,
+            ..cfg.clone()
+        };
+        assert!(render_html(&document, &preview_cfg).contains("1.20 \u{20AC}"));
+        assert!(escpos_text(&document, &cfg).contains("1,20 \u{20AC}"));
+        let out = render_escpos(&document, &cfg);
+        assert!(contains_bytes(
+            &out.bytes,
+            &[0x1B, 0x74, 19, 0xD5, 0x1B, 0x74, 0]
+        ));
+        assert!(!String::from_utf8_lossy(&out.bytes).contains("EUR"));
+        if let ReceiptDocument::OrderReceipt(doc) = document {
+            assert_eq!(doc.currency.as_deref(), Some("EUR"));
+        }
+    }
+
+    #[test]
+    fn classic_text_normalizes_frozen_currency_for_all_money_documents() {
+        for currency in ["EUR", "CHF"] {
+            let mut order = match euro_order_document() {
+                ReceiptDocument::OrderReceipt(doc) => doc,
+                _ => unreachable!(),
+            };
+            order.currency = Some(currency.into());
+            let documents = [
+                ReceiptDocument::OrderReceipt(order.clone()),
+                ReceiptDocument::DeliverySlip(order),
+                ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+                    currency: Some(currency.into()),
+                    role_type: "cashier".into(),
+                    opening_amount: 1.2,
+                    gift_close: Some(sample_gift_close_line()),
+                    ..ShiftCheckoutDoc::default()
+                }),
+                ReceiptDocument::ZReport(ZReportDoc {
+                    currency: Some(currency.into()),
+                    gross_sales: 1.2,
+                    gift_close_lines: vec![sample_gift_close_line()],
+                    ..ZReportDoc::default()
+                }),
+            ];
+            for document in documents {
+                for brand in [
+                    crate::printers::PrinterBrand::Unknown,
+                    crate::printers::PrinterBrand::Epson,
+                ] {
+                    let cfg = LayoutConfig {
+                        template: ReceiptTemplate::Classic,
+                        detected_brand: brand,
+                        currency_symbol: printed_currency_suffix(currency),
+                        ..LayoutConfig::default()
+                    };
+                    let out = render_escpos(&document, &cfg);
+                    let text = escpos_text(&document, &cfg);
+                    if currency == "CHF" {
+                        assert!(text.contains(" CHF"), "{document:?}: {text}");
+                    } else if brand == crate::printers::PrinterBrand::Unknown {
+                        assert!(text.contains("EUR"), "{document:?}: {text}");
+                    } else {
+                        assert!(text.contains('\u{20AC}'), "{document:?}: {text}");
+                    }
+                    if brand == crate::printers::PrinterBrand::Unknown {
+                        assert!(!out.bytes.contains(&0xD5), "unknown printer must use ASCII");
+                    }
+                }
+                assert!(render_html(&document, &LayoutConfig::default())
+                    .contains(if currency == "EUR" { "\u{20AC}" } else { "CHF" }));
+            }
+        }
+    }
+
+    #[test]
+    fn classic_unsupported_code_page_and_platform_banner_fall_back_to_eur() {
+        let mut order = match euro_order_document() {
+            ReceiptDocument::OrderReceipt(doc) => doc,
+            _ => unreachable!(),
+        };
+        order.status_label = Some("WOLT collect 1,20 \u{20AC}".into());
+        let document = ReceiptDocument::OrderReceipt(order);
+        for (brand, charset, page) in [
+            (crate::printers::PrinterBrand::Unknown, "PC437_USA", None),
+            (crate::printers::PrinterBrand::Epson, "UNKNOWN", None),
+            (crate::printers::PrinterBrand::Epson, "PC437_USA", Some(66)),
+        ] {
+            let cfg = LayoutConfig {
+                template: ReceiptTemplate::Classic,
+                detected_brand: brand,
+                character_set: charset.into(),
+                escpos_code_page: page,
+                decimal_comma: true,
+                ..LayoutConfig::default()
+            };
+            let out = render_escpos(&document, &cfg);
+            assert!(String::from_utf8_lossy(&out.bytes).contains("WOLT collect 1,20 EUR"));
+            assert!(!out.bytes.contains(&0xD5));
+        }
+    }
+
+    #[test]
+    fn raster_euro_suffix_draws_ink_in_regular_and_bold_fonts() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+        let fonts = cached_raster_fonts();
+        assert!(fonts.supports_char('\u{20AC}'));
+        for weight in [RasterTextWeight::Regular, RasterTextWeight::Bold] {
+            let mut canvas = TtfReceiptComposer::try_new(&cfg).unwrap();
+            let style = RasterTextStyle {
+                weight,
+                ..canvas.preset.item_style
+            };
+            let prefix = "1,20 ";
+            let euro_x = canvas.text_width(prefix, style) + 10;
+            let y = canvas.y;
+            canvas.draw_text_at_position(prefix, 10, style, y);
+            let before = canvas.image.clone();
+            canvas.draw_text_at_position("\u{20AC}", euro_x, style, y);
+            assert!(canvas.image.enumerate_pixels().any(|(x, y, pixel)|
+                x >= euro_x as u32 && pixel[0] < before.get_pixel(x, y)[0]
+            ), "euro glyph must add ink after the amount");
+        }
+        let out = render_escpos(&euro_order_document(), &cfg);
+        assert_eq!(out.body_mode, EscPosBodyMode::RasterExact);
+        assert!(out
+            .warnings
+            .iter()
+            .all(|warning| warning.code != "raster_exact_fallback"));
+    }
+
+    #[test]
     fn euro_symbol_kept_for_supported_layout_combo() {
         let symbol = normalize_currency_symbol_for_layout(
             " \u{20AC}",
@@ -14165,8 +14348,8 @@ mod tests {
 
         // Everything the receipt normally carries passes through untouched.
         let (text, touched) =
-            fonts.sanitize_for_font("Club sandwich 6,80 EUR", RasterTextWeight::Regular);
-        assert_eq!(text, "Club sandwich 6,80 EUR");
+            fonts.sanitize_for_font("Club sandwich 6,80 €", RasterTextWeight::Regular);
+        assert_eq!(text, "Club sandwich 6,80 €");
         assert_eq!(touched, 0);
     }
 
@@ -17211,6 +17394,7 @@ mod tests {
     /// print the close's own code.
     fn gift_close_text_cfg() -> LayoutConfig {
         LayoutConfig {
+            detected_brand: crate::printers::PrinterBrand::Epson,
             template: ReceiptTemplate::Classic,
             language: "en".to_string(),
             classic_customer_render_mode: ClassicCustomerRenderMode::Text,
@@ -17222,7 +17406,33 @@ mod tests {
     }
 
     fn escpos_text(doc: &ReceiptDocument, cfg: &LayoutConfig) -> String {
-        String::from_utf8_lossy(&render_escpos(doc, cfg).bytes).to_string()
+        let bytes = render_escpos(doc, cfg).bytes;
+        let mut text = Vec::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            let remaining = &bytes[index..];
+            // Decode the inline euro switch and its restore so amounts are
+            // contiguous in assertions. Dedicated tests check the raw bytes.
+            let euro_sequence_len = if remaining.len() >= 7
+                && remaining.starts_with(&[0x1B, 0x74, 19, 0xD5, 0x1B, 0x74])
+            {
+                7
+            } else if remaining.len() >= 9
+                && remaining.starts_with(&[0x1B, 0x1D, 0x74, 4, 0xD5, 0x1B, 0x1D, 0x74])
+            {
+                9
+            } else {
+                0
+            };
+            if euro_sequence_len > 0 {
+                text.extend_from_slice("\u{20AC}".as_bytes());
+                index += euro_sequence_len;
+            } else {
+                text.push(bytes[index]);
+                index += 1;
+            }
+        }
+        String::from_utf8_lossy(&text).to_string()
     }
 
     fn slice_between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
@@ -17256,16 +17466,16 @@ mod tests {
 
     #[test]
     fn gift_close_amounts_format_integer_cents_with_the_close_currency_code() {
-        assert_eq!(gift_close_amount(14_345, "EUR", false), "143.45 EUR");
-        assert_eq!(gift_close_amount(-345, "EUR", false), "-3.45 EUR");
-        assert_eq!(gift_close_amount(-5, " EUR ", true), "-0,05 EUR");
-        assert_eq!(gift_close_amount(0, "EUR", false), "0.00 EUR");
+        assert_eq!(gift_close_amount(14_345, "EUR", false), "143.45 €");
+        assert_eq!(gift_close_amount(-345, "EUR", false), "-3.45 €");
+        assert_eq!(gift_close_amount(-5, " EUR ", true), "-0,05 €");
+        assert_eq!(gift_close_amount(0, "EUR", false), "0.00 €");
         assert_eq!(gift_close_amount(2_000, "", false), "20.00");
-        assert_eq!(gift_close_movement(2_000, "EUR", false), "+20.00 EUR");
-        assert_eq!(gift_close_movement(-50, "EUR", true), "-0,50 EUR");
+        assert_eq!(gift_close_movement(2_000, "EUR", false), "+20.00 €");
+        assert_eq!(gift_close_movement(-50, "EUR", true), "-0,50 €");
         assert_eq!(
             gift_close_amount(i64::MIN, "EUR", false),
-            "-92233720368547758.08 EUR"
+            "-92233720368547758.08 €"
         );
 
         let euro = sample_gift_close_line();
@@ -17297,15 +17507,15 @@ mod tests {
         let drawer = slice_between(&text, "Ordinary expected", "Tips Received");
         for expected in [
             "Ordinary expected",
-            "123.45 EUR",
+            "123.45 €",
             "Gift card liability cash",
-            "+20.00 EUR",
+            "+20.00 €",
             "Expected",
-            "143.45 EUR",
+            "143.45 €",
             "Counted Cash",
-            "140.00 EUR",
+            "140.00 €",
             "Variance",
-            "-3.45 EUR",
+            "-3.45 €",
             "Currency",
             "Close confirmed",
             closed_at,
@@ -17342,7 +17552,7 @@ mod tests {
             &cfg,
         );
         assert!(generic.contains("Gift card liability cash"));
-        assert!(generic.contains("143.45 EUR"));
+        assert!(generic.contains("143.45 €"));
         assert!(!generic.contains("Closing"));
         assert!(!generic.contains("Expected In Drawer"));
     }
@@ -17361,11 +17571,11 @@ mod tests {
         );
 
         for expected in [
-            "<span>Ordinary expected</span><span>123.45 EUR</span>",
-            "<span>Gift card liability cash</span><span>+20.00 EUR</span>",
-            "<strong>Expected</strong><strong>143.45 EUR</strong>",
-            "<span>Counted Cash</span><span>140.00 EUR</span>",
-            "<span>Variance</span><span>-3.45 EUR</span>",
+            "<span>Ordinary expected</span><span>123.45 €</span>",
+            "<span>Gift card liability cash</span><span>+20.00 €</span>",
+            "<strong>Expected</strong><strong>143.45 €</strong>",
+            "<span>Counted Cash</span><span>140.00 €</span>",
+            "<span>Variance</span><span>-3.45 €</span>",
             "<span>Currency</span><span>EUR</span>",
             close_row.as_str(),
         ] {
@@ -17445,8 +17655,8 @@ mod tests {
         let gift_row = drawer.find("Gift card liability cash").expect("gift row");
         let adjustment_row = drawer.find("Ordinary adjustment").expect("adjustment row");
         assert!(all_cash_out < gift_row && gift_row < adjustment_row);
-        assert!(drawer.contains("+20.00 EUR"));
-        assert!(drawer.contains("+0.50 EUR"));
+        assert!(drawer.contains("+20.00 €"));
+        assert!(drawer.contains("+0.50 €"));
         assert!(!drawer.contains('$'));
         assert!(text.contains("605.50"));
 
@@ -17460,13 +17670,13 @@ mod tests {
             "Staff",
             "Maria Gift",
             "Ordinary expected",
-            "123.45 EUR",
+            "123.45 €",
             "Gift card liability cash",
-            "+20.00 EUR",
-            "143.45 EUR",
+            "+20.00 €",
+            "143.45 €",
             "Counted Cash",
-            "140.00 EUR",
-            "-3.45 EUR",
+            "140.00 €",
+            "-3.45 €",
             "Currency",
             "Close confirmed",
             closed_at,
@@ -17510,17 +17720,17 @@ mod tests {
         assert!(!html.contains("520.00"));
 
         let drawer = slice_between(&html, "CASH DRAWER", "Expected In Drawer");
-        assert!(drawer.contains("<span>Gift card liability cash</span><span>+20.00 EUR</span>"));
-        assert!(drawer.contains("<span>Ordinary adjustment</span><span>+0.50 EUR</span>"));
+        assert!(drawer.contains("<span>Gift card liability cash</span><span>+20.00 €</span>"));
+        assert!(drawer.contains("<span>Ordinary adjustment</span><span>+0.50 €</span>"));
 
         let section = slice_between(&html, "Gift card drawer closes (confirmed)", totals);
         for expected in [
             "<span>Staff</span><span>Maria Gift</span>",
-            "<span>Ordinary expected</span><span>123.45 EUR</span>",
-            "<span>Gift card liability cash</span><span>+20.00 EUR</span>",
-            "<strong>Expected</strong><strong>143.45 EUR</strong>",
-            "<span>Counted Cash</span><span>140.00 EUR</span>",
-            "<span>Variance</span><span>-3.45 EUR</span>",
+            "<span>Ordinary expected</span><span>123.45 €</span>",
+            "<span>Gift card liability cash</span><span>+20.00 €</span>",
+            "<strong>Expected</strong><strong>143.45 €</strong>",
+            "<span>Counted Cash</span><span>140.00 €</span>",
+            "<span>Variance</span><span>-3.45 €</span>",
             "<span>Currency</span><span>EUR</span>",
             close_row.as_str(),
         ] {
@@ -17728,7 +17938,7 @@ mod tests {
             }
             assert!(rendered.contains("Currency"));
             assert!(
-                rendered.contains("EUR"),
+                rendered.contains('€'),
                 "ordinary financial receipt shows its original unit"
             );
         }
@@ -18862,9 +19072,9 @@ mod tests {
             )),
             "0,00 CHF"
         );
-        assert_eq!(gift_close_variance(345, "EUR", false), "+3.45 EUR");
-        assert_eq!(gift_close_variance(-345, "EUR", false), "-3.45 EUR");
-        assert_eq!(gift_close_variance(0, "EUR", false), "0.00 EUR");
+        assert_eq!(gift_close_variance(345, "EUR", false), "+3.45 €");
+        assert_eq!(gift_close_variance(-345, "EUR", false), "-3.45 €");
+        assert_eq!(gift_close_variance(0, "EUR", false), "0.00 €");
     }
 
     #[test]

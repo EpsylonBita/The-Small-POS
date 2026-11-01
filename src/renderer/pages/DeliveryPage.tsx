@@ -47,6 +47,7 @@ import {
   Search,
   X,
 } from 'lucide-react';
+import { DeliveryScooterIcon } from '../components/icons/OrderTypeGlyphs';
 
 // ============================================================
 // TYPES
@@ -342,7 +343,7 @@ const DeliveryCard = memo<DeliveryCardProps>(({
               </span>
             )}
             {delivery.isTest && (
-              <span className="rounded-full border border-amber-400/60 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-amber-400">
+              <span className="rounded-full border border-(--pos-s-yellow) px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-amber-400">
                 TEST
               </span>
             )}
@@ -416,7 +417,7 @@ const DeliveryCard = memo<DeliveryCardProps>(({
         {/* Driver Info (if assigned) */}
         {delivery.driverName && (
           <div className={`flex items-center gap-2 mb-3 px-3 py-2 rounded-2xl ${isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
-            <Truck className={`w-4 h-4 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`} />
+            <DeliveryScooterIcon className={`h-5 w-5 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`} />
             <span className={`text-sm font-medium ${isDark ? 'text-zinc-200' : 'text-gray-800'}`}>{delivery.driverName}</span>
           </div>
         )}
@@ -902,11 +903,7 @@ const DeliveryPage: React.FC = () => {
             onClick={handleRefresh}
             disabled={isRefreshing}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
-              isDark
-                ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
-                : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
-            } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
           >
             <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
@@ -959,7 +956,7 @@ const DeliveryPage: React.FC = () => {
 
       {/* Error Banner */}
       {error && (
-        <motion.div variants={pageMotionItem} className="mx-6 mb-4 px-4 py-3 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center gap-3">
+        <motion.div variants={pageMotionItem} className="mx-6 mb-4 px-4 py-3 rounded-2xl bg-(--pos-s-surface-2) border border-(--pos-s-border) flex items-center gap-3">
           <AlertTriangle className="w-5 h-5 text-red-500" />
           <p className="text-red-500 text-sm">{error}</p>
         </motion.div>
@@ -969,7 +966,7 @@ const DeliveryPage: React.FC = () => {
       <motion.div variants={pageMotionItem} className="flex-1 overflow-auto px-6 pb-6">
         {filteredDeliveries.length === 0 ? (
           <motion.div variants={pageMotionItem} className="flex flex-col items-center justify-center py-16">
-            <Truck className={`w-16 h-16 mb-4 ${isDark ? 'text-zinc-600' : 'text-gray-300'}`} />
+            <DeliveryScooterIcon className={`w-16 h-16 mb-4 ${isDark ? 'text-zinc-600' : 'text-gray-300'}`} />
             <p className={`text-lg font-medium mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t('delivery.noDeliveries', 'No deliveries found')}
             </p>

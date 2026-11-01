@@ -2,6 +2,7 @@ import { formatCurrency } from '../../utils/format';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LoadingSpinner } from '../common/LoadingSpinner';
+import { ChangingValue } from '../ui/ChangingValue';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { previewOrderVat } from '../../utils/printedVat';
 import type { GreeceOrderVatSettings } from '../../../../../shared/services/GreeceOrderVat';
@@ -156,7 +157,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
           <h3 className="font-medium text-gray-900">{t('menu.summary.customer')}</h3>
           <button
             onClick={onEditCustomer}
-            className="text-blue-600 hover:text-blue-700 text-sm font-medium"
+            className="text-blue-600 text-sm font-medium"
           >
             {t('menu.summary.edit')}
           </button>
@@ -201,7 +202,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
               </div>
               <button
                 onClick={() => onRemoveItem(item.id)}
-                className="text-red-500 hover:text-red-700 ml-2"
+                className="text-red-500 ml-2"
               >
                 ×
               </button>
@@ -211,14 +212,14 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
               <div className="flex items-center space-x-2">
                 <button
                   onClick={() => onUpdateQuantity(item.id, Math.max(1, item.quantity - 1))}
-                  className="w-8 h-8 rounded-full border border-gray-300 flex items-center justify-center hover:bg-gray-50"
+                  className="w-8 h-8 rounded-full border border-gray-300 flex items-center justify-center "
                 >
                   -
                 </button>
                 <span className="w-8 text-center font-medium">{item.quantity}</span>
                 <button
                   onClick={() => onUpdateQuantity(item.id, item.quantity + 1)}
-                  className="w-8 h-8 rounded-full border border-gray-300 flex items-center justify-center hover:bg-gray-50"
+                  className="w-8 h-8 rounded-full border border-gray-300 flex items-center justify-center "
                 >
                   +
                 </button>
@@ -294,7 +295,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
         <div className="border-t pt-2">
           <div className="flex justify-between text-lg font-bold">
             <span className="text-gray-900">{t('menu.cart.total')}</span>
-            <span className="text-gray-900">{formatCurrency(total)}</span>
+            <ChangingValue className="text-gray-900" value={formatCurrency(total)} />
           </div>
         </div>
       </div>
@@ -309,7 +310,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
           (orderType === 'delivery' && !customerInfo.address) ||
           !isDiscountValid
         }
-        className="w-full bg-green-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+        className="w-full bg-(--pos-s-yellow) text-black py-3 px-4 rounded-lg font-semibold disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
       >
         {isPlacingOrder && <LoadingSpinner size="small" />}
         {t(isPlacingOrder ? 'menu.summary.placingOrder' : 'menu.summary.placeOrder')}

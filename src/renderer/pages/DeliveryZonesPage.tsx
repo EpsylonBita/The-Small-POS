@@ -6,13 +6,13 @@ import {
   RefreshCw,
   Clock,
   DollarSign,
-  Truck,
   CheckCircle,
   Info,
   Activity,
   AlertTriangle,
   Flame,
 } from 'lucide-react';
+import { DeliveryScooterIcon } from '../components/icons/OrderTypeGlyphs';
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
 import { formatCurrency } from '../utils/format';
@@ -142,7 +142,7 @@ const DeliveryZonesPage: React.FC = () => {
             type="button"
             onClick={() => void fetchData()}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${isDark ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25' : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -188,7 +188,7 @@ const DeliveryZonesPage: React.FC = () => {
           >
             <div className="flex items-center gap-3">
               <div className={`p-2 rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
-                <Truck className="w-5 h-5 text-emerald-500" />
+                <DeliveryScooterIcon className="h-6 w-6 text-emerald-500" />
               </div>
               <div>
                 <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('deliveryZones.successRate', 'Success Rate')}</p>

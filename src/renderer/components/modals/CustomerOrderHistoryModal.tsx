@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
-import { History, X, Package, Truck, ShoppingBag, Store, ChevronRight, RefreshCw } from 'lucide-react';
+import { History, X, Package, Store, ChevronRight, RefreshCw } from 'lucide-react';
+import { DeliveryScooterIcon, PickupHandBagIcon } from '../icons/OrderTypeGlyphs';
 import { toast } from 'react-hot-toast';
 import { formatCurrency, formatDateTime } from '../../utils/format';
 import { getBridge } from '../../../lib';
@@ -79,20 +80,20 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
 
     const getStatusColor = (status: string) => {
         switch (status?.toLowerCase()) {
-            case 'pending': return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30';
-            case 'preparing': return 'bg-amber-500/20 text-amber-300 border-amber-500/30';
-            case 'ready': return 'bg-green-500/20 text-green-300 border-green-500/30';
+            case 'pending': return 'bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-300 border-(--pos-s-border)';
+            case 'preparing': return 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border-(--pos-s-border)';
+            case 'ready': return 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-200 border-(--pos-s-border)';
             case 'completed':
-            case 'delivered': return 'bg-green-500/20 text-green-400 border-green-500/30';
-            case 'cancelled': return 'bg-red-500/20 text-red-400 border-red-500/30';
+            case 'delivered': return 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 border-(--pos-s-border)';
+            case 'cancelled': return 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 border-(--pos-s-border)';
             default: return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
         }
     };
 
     const getOrderTypeIcon = (type: string) => {
         switch (type?.toLowerCase()) {
-            case 'delivery': return <Truck className="w-4 h-4" />;
-            case 'pickup': return <ShoppingBag className="w-4 h-4" />;
+            case 'delivery': return <DeliveryScooterIcon className="h-5 w-5" />;
+            case 'pickup': return <PickupHandBagIcon className="h-5 w-5" />;
             case 'dine-in': return <Store className="w-4 h-4" />;
             default: return <Package className="w-4 h-4" />;
         }
@@ -197,7 +198,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                                     <div className="flex items-center justify-between">
                                         <div className="flex items-center gap-4">
                                             {/* Order Type Icon */}
-                                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-yellow-400/20 bg-white/5 text-yellow-300">
+                                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-(--pos-s-border) bg-white/5 text-yellow-300">
                                                 {getOrderTypeIcon(order.order_type)}
                                             </div>
 
@@ -243,7 +244,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                 <div className="shrink-0 px-6 py-4 border-t liquid-glass-modal-border">
                     <button
                         onClick={onClose}
-                        className="liquid-glass-modal-button w-full border-yellow-400/40 bg-yellow-400/15 text-yellow-200 active:bg-yellow-400/25"
+                        className="liquid-glass-modal-button w-full border-(--pos-s-border) bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200 active:bg-(--pos-s-surface-2)"
                     >
                         {t('common.actions.close') || 'Close'}
                     </button>

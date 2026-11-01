@@ -15,15 +15,21 @@ test('EditOptionsModal uses the touch POS palette: glass modal, rounded-2xl card
   assert.match(source, /<LiquidGlassModal/);
   assert.match(source, /title=\{t\('modals\.editOptions\.title'\)\}/);
 
-  // rounded-2xl option cards and icon chips; the old rounded-lg modal chrome is gone.
+  // rounded-2xl option cards; the old rounded-lg modal chrome is gone.
   const rounded2xl = source.match(/rounded-2xl/g) ?? [];
-  assert.ok(rounded2xl.length >= 8, `expected rounded-2xl cards and icon chips, found ${rounded2xl.length}`);
+  assert.ok(rounded2xl.length >= 5, `expected rounded-2xl option cards, found ${rounded2xl.length}`);
+  // Founder 31/10: the icons stand without chips, a little bigger (28 px), and never shrink, so every
+  // option's icon sits on the same vertical line.
+  assert.doesNotMatch(source, /w-12 h-12|backdrop-blur-sm/, 'no icon chip remains');
+  // The change-driver icon is the founder's scooter rider (31/10), the same bare 28 px treatment.
+  const icons = source.match(/<(?:svg aria-hidden="true"|DeliveryScooterIcon) className=\{?[`"]h-7 w-7 shrink-0/g) ?? [];
+  assert.equal(icons.length, 5, 'every option icon is a bare 28 px svg that does not shrink');
   assert.doesNotMatch(source, /rounded-lg|rounded-md/);
 
   // Theme-specific active feedback and visible keyboard focus; no hover-era classes anywhere.
   assert.match(source, /active:bg-slate-100[^"']*dark:active:bg-slate-800/);
-  assert.match(source, /active:bg-emerald-100[^"']*dark:active:bg-emerald-500\/20/);
-  assert.match(source, /active:bg-amber-100[^"']*dark:active:bg-amber-500\/20/);
+  assert.match(source, /active:bg-emerald-100[^"']*dark:active:bg-zinc-800/);
+  assert.match(source, /active:bg-\(--pos-s-surface-2\)/);
   assert.match(source, /focus-visible:outline-hidden focus-visible:ring-2/);
   assert.doesNotMatch(source, /hover:/);
   assert.doesNotMatch(source, /group-hover:/);
@@ -38,27 +44,24 @@ test('EditOptionsModal accents are semantic (neutral customer, green items, ambe
 
   // Customer info: the shared neutral tone supplies an opaque light card and a dark counterpart.
   assert.match(source, /onClick=\{onEditInfo\}[\s\S]*?liquidGlassModalTone\('neutral'\)/);
-  assert.match(source, /border-slate-300 bg-white\/80 dark:border-white\/10 dark:bg-slate-800\/80/);
-  assert.match(source, /w-6 h-6 text-slate-600 dark:text-slate-300/);
+  assert.match(source, /h-7 w-7 shrink-0 text-slate-600 dark:text-slate-300/);
 
   // Edit order items: semantic success surface and matching high-contrast icon chip.
   assert.match(source, /onClick=\{onEditOrder\}[\s\S]*?liquidGlassModalTone\('success'\)/);
-  assert.match(source, /border-emerald-200 bg-emerald-100\/80 dark:border-emerald-400\/30 dark:bg-emerald-500\/15/);
-  assert.match(source, /w-6 h-6 text-emerald-700 dark:text-emerald-300/);
+  assert.match(source, /h-7 w-7 shrink-0 text-emerald-700 dark:text-emerald-300/);
 
   // Payment: shared warning tone when editable; neutral readable surface when disabled.
   assert.match(source, /canEditPayment\s*\? `[\s\S]*?liquidGlassModalTone\('warning'\)/);
   assert.match(source, /: `[^`]*liquidGlassModalTone\('neutral'\)[^`]*cursor-not-allowed/);
   assert.doesNotMatch(source, /liquidGlassModalTone\('neutral'\)[^`]*opacity-/);
-  assert.match(source, /border-amber-200 bg-amber-100\/80 dark:border-amber-400\/30 dark:bg-amber-500\/15/);
   assert.match(source, /text-amber-700 dark:text-amber-300/);
   assert.match(source, /text-slate-500 dark:text-slate-400/);
 
-  // Change order type: warning surface + amber chip; selected stays yellow and inactive choices own
-  // explicit light/dark surfaces instead of white-on-white glass.
+  // Change order type: warning surface + amber icon; selected = the kit selection, inactive choices are
+  // solid kit controls (never glass on glass).
   assert.match(source, /orderCount === 1[\s\S]*?liquidGlassModalTone\('warning'\)/);
-  assert.match(source, /border-yellow-400 bg-yellow-400 text-black cursor-default/);
-  assert.match(source, /border-slate-300 bg-white\/80 text-slate-900[^`]*dark:border-white\/20 dark:bg-white\/10 dark:text-slate-100/);
+  assert.match(source, /border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) cursor-default/);
+  assert.match(source, /: 'border-\(--pos-s-border\) bg-\(--pos-s-surface\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)/);
 });
 
 test('EditOptionsModal descriptions remain fully opaque and no light-theme content falls back to white text', () => {

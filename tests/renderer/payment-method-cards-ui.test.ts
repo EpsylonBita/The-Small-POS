@@ -35,11 +35,13 @@ test('cash, card, and split options share the same raised visual contract with d
   }
 });
 
-test('tip action renders the colored icon directly without a square icon wrapper', () => {
+test('tip action renders the icon directly without a square icon wrapper', () => {
+  // Founder 31/10: the green icon stays; the «+» is a real button shape (it was a bare character).
   assert.match(
     source,
-    /<span className="flex items-center gap-3">\s*<HandCoins className="h-6 w-6 shrink-0 text-emerald-500 dark:text-emerald-300" \/>/,
+    /<span className="flex items-center gap-3">\s*<HandCoins className="h-6 w-6 shrink-0 text-emerald-500 dark:text-emerald-300" aria-hidden="true" \/>/,
   );
+  assert.match(source, /<Plus className="h-5 w-5" \/>/);
   assert.doesNotMatch(
     source,
     /<span className="rounded-xl bg-emerald-500\/15 p-2">\s*<HandCoins/,
@@ -50,7 +52,8 @@ test('payment method labels fit without clipping or per-letter Greek breaks', ()
   // Long single-token labels such as the Greek split label need fixed compact text.
   assert.match(
     source,
-    /const paymentMethodLabelBaseClass =\s*\n\s*'w-full text-center text-sm font-bold uppercase leading-tight tracking-normal hyphens-none whitespace-normal transition-colors duration-300';/,
+    // Founder 31/10: sentence case (Greek capitals drop the accents), one size up.
+    /const paymentMethodLabelBaseClass =\s*\n\s*'w-full text-center text-base font-bold leading-tight tracking-normal hyphens-none whitespace-normal transition-colors duration-300';/,
     'payment labels should use compact, centered, non-breaking styling',
   );
 
@@ -132,9 +135,9 @@ test('cash input keeps the light-theme surface neutral and reserves color for hi
   assert.match(enoughCash.quickAmountsPanel, /bg-slate-50\/70/);
   assert.doesNotMatch(enoughCash.quickAmountsPanel, /green|emerald/);
 
-  assert.match(enoughCash.quickAmountSelected, /bg-yellow-400/);
-  assert.match(enoughCash.quickAmountSelected, /text-slate-950/);
-  assert.match(enoughCash.quickAmountSelected, /dark:bg-yellow-400\/20/);
+  // Wave ΣΤ7: the chosen quick amount is the kit selection (dark in light, white in dark), not yellow.
+  assert.match(enoughCash.quickAmountSelected, /bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)/);
+  assert.doesNotMatch(enoughCash.quickAmountSelected, /yellow/);
 
   assert.match(enoughCash.cashInput, /border-slate-300\/90/);
   assert.match(enoughCash.cashInput, /bg-white\/90/);
@@ -144,11 +147,12 @@ test('cash input keeps the light-theme surface neutral and reserves color for hi
   assert.match(enoughCash.summary, /border-slate-200\/90/);
   assert.match(enoughCash.summary, /bg-white\/80/);
   assert.doesNotMatch(enoughCash.summary, /bg-green|bg-emerald/);
+  // Founder 31/10 («δε μου αρέσει που έβγαλες τα χρώματα»): the change keeps its green.
   assert.match(enoughCash.changeTone, /text-emerald-700/);
-  assert.match(enoughCash.completeButton, /(?:^|\s)bg-emerald-700!(?:\s|$)/);
-  assert.doesNotMatch(enoughCash.completeButton, /(?:^|\s)bg-emerald-600!(?:\s|$)/);
-  assert.match(enoughCash.completeButton, /text-white!/);
-  assert.match(shortCash.summary, /bg-red-50\/80/);
+  // Wave ΣΤ7: «Ολοκλήρωση» is the kit modal primary (yellow), never a green fill.
+  assert.equal(enoughCash.completeButton, 'pos-modal-primary');
+  assert.doesNotMatch(enoughCash.completeButton, /emerald|green/);
+  assert.match(shortCash.summary, /bg-\(--pos-s-surface-2\)/);
   assert.match(shortCash.changeTone, /text-red-700/);
 });
 

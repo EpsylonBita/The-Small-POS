@@ -804,7 +804,7 @@ export const ReservationsView: React.FC = memo(() => {
 
   if (!branchId || !effectiveOrgId) {
     return (
-      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
         {t('reservationsView.noBranch', { defaultValue: 'Please select a branch to view reservations' })}
       </motion.div>
     );
@@ -813,7 +813,7 @@ export const ReservationsView: React.FC = memo(() => {
   // Show message if neither module is acquired
   if (availableReservationTabs.length === 0) {
     return (
-      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
         <Calendar className="w-16 h-16 mb-4 opacity-50" />
         <p className="text-lg font-medium mb-2">
           {t('reservationsView.noModules', { defaultValue: 'No reservation modules available' })}
@@ -830,7 +830,7 @@ export const ReservationsView: React.FC = memo(() => {
       <motion.section
         variants={pageMotionItem}
         data-vertical-hero="reservations"
-        className={`mb-4 rounded-3xl border p-4 backdrop-blur-xl ${isDark ? 'border-white/10 bg-zinc-950/70 shadow-[0_18px_46px_rgba(0,0,0,0.35)]' : 'border-yellow-200/80 bg-white/74 shadow-[0_18px_44px_rgba(15,23,42,0.10)]'}`}
+        className={`mb-4 rounded-3xl border p-4 backdrop-blur-xl ${isDark ? 'border-white/10 bg-zinc-950/70 shadow-[0_18px_46px_rgba(0,0,0,0.35)]' : 'border-(--pos-s-border) bg-white/74'}`}
       >
       <div className="mb-4 min-w-0">
         <h1 className={`truncate text-3xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
@@ -907,13 +907,13 @@ export const ReservationsView: React.FC = memo(() => {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <motion.div variants={pageMotionContainer} className="flex flex-wrap gap-3">
           <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
               {t('reservationsView.stats.total', { defaultValue: 'Total' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.total}</div>
           </motion.div>
           <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
-            <div className={`text-sm text-yellow-500`}>
+            <div className={`text-sm text-yellow-700 dark:text-yellow-500`}>
               {t('reservationsView.stats.pending', { defaultValue: 'Pending' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.pending}</div>
@@ -925,7 +925,7 @@ export const ReservationsView: React.FC = memo(() => {
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.confirmed}</div>
           </motion.div>
           <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
-            <div className={`text-sm text-green-500`}>
+            <div className={`text-sm text-green-700 dark:text-green-500`}>
               {activeTab === 'rooms' ? t('roomWorkflow.staying') : t('reservationsView.stats.seated', { defaultValue: 'Seated' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.seated}</div>
@@ -955,7 +955,7 @@ export const ReservationsView: React.FC = memo(() => {
             disabled={activeTab === 'services' && !hasServiceReservations}
             className={`inline-flex items-center justify-center text-center gap-2 min-h-[40px] px-3 py-2 rounded-xl transition-transform active:scale-95 ${
               activeTab === 'services' && !hasServiceReservations
-                ? isDark ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                ? isDark ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-gray-200 text-gray-600 cursor-not-allowed'
                 : 'bg-yellow-400 text-black'
             }`}
             aria-label={activeTab === 'services' && !hasServiceReservations
@@ -1039,14 +1039,14 @@ export const ReservationsView: React.FC = memo(() => {
         <div className={`flex rounded-xl overflow-hidden ${isDark ? 'bg-gray-800' : 'bg-gray-100'}`}>
           <button
             onClick={() => setViewMode('list')}
-            className={`px-3 py-2 inline-flex items-center justify-center text-center gap-1 transition-transform active:scale-95 ${viewMode === 'list' ? 'bg-yellow-400 text-black' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
+            className={`px-3 py-2 inline-flex items-center justify-center text-center gap-1 transition-transform active:scale-95 ${viewMode === 'list' ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
           >
             <List className="w-4 h-4 shrink-0" />
             {t('reservationsView.view.list', { defaultValue: 'List' })}
           </button>
           <button
             onClick={() => setViewMode('timeline')}
-            className={`px-3 py-2 inline-flex items-center justify-center text-center gap-1 transition-transform active:scale-95 ${viewMode === 'timeline' ? 'bg-yellow-400 text-black' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
+            className={`px-3 py-2 inline-flex items-center justify-center text-center gap-1 transition-transform active:scale-95 ${viewMode === 'timeline' ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
           >
             <LayoutGrid className="w-4 h-4 shrink-0" />
             {t('reservationsView.view.timeline', { defaultValue: 'Timeline' })}
@@ -1056,8 +1056,8 @@ export const ReservationsView: React.FC = memo(() => {
 
       {/* Pending Alert */}
       {visibleStats.pending > 0 && (
-        <motion.div variants={pageMotionItem} className={`mb-4 p-3 rounded-2xl flex items-center gap-2 ${isDark ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-yellow-50 border border-yellow-200'}`}>
-          <AlertTriangle className="w-5 h-5 shrink-0 text-yellow-500" />
+        <motion.div variants={pageMotionItem} className={`mb-4 p-3 rounded-2xl flex items-center gap-2 ${isDark ? 'bg-(--pos-s-warn-bg) border border-(--pos-s-warn)' : 'bg-(--pos-s-warn-bg) border border-(--pos-s-warn)'}`}>
+          <AlertTriangle className="w-5 h-5 shrink-0 text-(--pos-s-warn)" />
           <span className="text-yellow-600 font-medium">
             {visibleStats.pending} {t('reservationsView.pendingAlert', { defaultValue: 'reservation(s) pending confirmation' })}
           </span>
@@ -1066,7 +1066,7 @@ export const ReservationsView: React.FC = memo(() => {
 
       {/* Loading State */}
       {isActiveLoading && (activeTab === 'services' ? appointments.length === 0 : reservations.length === 0) && (
-        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
           <RefreshCw className="w-6 h-6 animate-spin mr-2" />
           {t('reservationsView.loading', { defaultValue: 'Loading reservations...' })}
         </motion.div>
@@ -1124,7 +1124,7 @@ export const ReservationsView: React.FC = memo(() => {
                           onClick={() => void updateAppointmentStatus(appointment.id, action.status)}
                           className={`inline-flex items-center justify-center text-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-transform active:scale-95 ${
                             action.variant === 'primary' ? 'bg-yellow-400 text-black' :
-                            action.variant === 'success' ? 'bg-green-600 text-white' :
+                            action.variant === 'success' ? 'bg-(--pos-s-yellow) text-black' :
                             action.variant === 'danger' ? 'bg-red-600 text-white' :
                             isDark ? 'bg-gray-700 text-white' : 'bg-gray-200 text-gray-800'
                           }`}
@@ -1207,7 +1207,7 @@ export const ReservationsView: React.FC = memo(() => {
                           }}
                           className={`inline-flex items-center justify-center text-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-transform active:scale-95 ${
                             action.variant === 'primary' ? 'bg-yellow-400 text-black' :
-                            action.variant === 'success' ? 'bg-green-600 text-white' :
+                            action.variant === 'success' ? 'bg-(--pos-s-yellow) text-black' :
                             action.variant === 'danger' ? 'bg-red-600 text-white' :
                             isDark ? 'bg-gray-700 text-white' : 'bg-gray-200 text-gray-800'
                           }`}
@@ -1227,7 +1227,7 @@ export const ReservationsView: React.FC = memo(() => {
                 const hourReservations = reservationsByHour[hour] || [];
                 return (
                   <React.Fragment key={hour}>
-                    <div className={`text-sm font-medium py-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                    <div className={`text-sm font-medium py-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                       {hour}:00
                     </div>
                     <div className={`min-h-[60px] p-2 rounded-2xl ${isDark ? 'bg-gray-800/50' : 'bg-gray-50'}`}>
@@ -1248,7 +1248,7 @@ export const ReservationsView: React.FC = memo(() => {
                                 {statusLabels[res.status]}
                               </span>
                             </div>
-                            <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                            <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                               {res.tableId
                                 ? `${t('reservationsView.table', { defaultValue: 'Table' })} ${resolveTableLabel(res.tableId, res.tableNumber)}`
                                 : res.roomId
@@ -1266,7 +1266,7 @@ export const ReservationsView: React.FC = memo(() => {
                                   }}
                                   className={`inline-flex items-center justify-center text-center px-2 py-1 rounded-2xl text-xs font-medium transition-transform active:scale-95 ${
                                     action.variant === 'primary' ? 'bg-yellow-400 text-black' :
-                                    action.variant === 'success' ? 'bg-green-600 text-white' :
+                                    action.variant === 'success' ? 'bg-(--pos-s-yellow) text-black' :
                                     action.variant === 'danger' ? 'bg-red-600 text-white' :
                                     isDark ? 'bg-gray-600 text-white' : 'bg-gray-200 text-gray-800'
                                   }`}
@@ -1286,7 +1286,7 @@ export const ReservationsView: React.FC = memo(() => {
           )}
 
           {(activeTab === 'services' ? appointments.length === 0 : filteredReservations.length === 0) && !isActiveLoading && (
-            <motion.div variants={pageMotionItem} className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+            <motion.div variants={pageMotionItem} className={`text-center py-12 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
               {activeTab === 'services'
                 ? <Scissors className="w-12 h-12 mx-auto mb-4 opacity-50" />
                 : <Calendar className="w-12 h-12 mx-auto mb-4 opacity-50" />}
@@ -1490,14 +1490,14 @@ export const ReservationsView: React.FC = memo(() => {
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={() => setShowCreateModal(false)}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border ${isDark ? 'bg-red-500/25 text-red-200 border-red-400/40 active:bg-red-500/35' : 'bg-red-500/20 text-red-900 border-red-500/50 active:bg-red-500/30'}`}
+                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border ${isDark ? 'bg-(--pos-s-surface-2) text-(--pos-s-fg) border-(--pos-s-border) active:bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2) text-(--pos-s-fg) border-(--pos-s-border) active:bg-(--pos-s-surface-2)'}`}
               >
                 {t('common.cancel', { defaultValue: 'Cancel' })}
               </button>
               <button
                 onClick={() => void handleCreateReservation()}
                 disabled={isCreating || !isCreateReservationReady}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border disabled:active:scale-100 disabled:cursor-not-allowed ${isDark ? 'bg-green-500/25 text-green-200 border-green-500/45 active:bg-green-500/35 disabled:bg-white/5 disabled:text-gray-500 disabled:border-white/10' : 'bg-green-500/25 text-green-900 border-green-600/50 active:bg-green-500/35 disabled:bg-gray-200/70 disabled:text-gray-500 disabled:border-gray-300/80'}`}
+                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border disabled:active:scale-100 disabled:cursor-not-allowed ${isDark ? 'bg-(--pos-s-yellow) text-black border-(--pos-s-yellow) active:bg-yellow-500 disabled:bg-white/5 disabled:text-gray-500 disabled:border-white/10' : 'bg-(--pos-s-yellow) text-black border-(--pos-s-yellow) active:bg-yellow-500 disabled:bg-gray-200/70 disabled:text-gray-500 disabled:border-gray-300/80'}`}
               >
                 {isCreating
                   ? t('common.creating', { defaultValue: 'Creating...' })
@@ -1614,14 +1614,14 @@ export const ReservationsView: React.FC = memo(() => {
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={closeServiceModal}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border ${isDark ? 'bg-red-500/25 text-red-200 border-red-400/40 active:bg-red-500/35' : 'bg-red-500/20 text-red-900 border-red-500/50 active:bg-red-500/30'}`}
+                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border ${isDark ? 'bg-(--pos-s-surface-2) text-(--pos-s-fg) border-(--pos-s-border) active:bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2) text-(--pos-s-fg) border-(--pos-s-border) active:bg-(--pos-s-surface-2)'}`}
               >
                 {t('common.cancel', { defaultValue: 'Cancel' })}
               </button>
               <button
                 onClick={() => void handleCreateServiceBooking()}
                 disabled={isCreatingService}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border disabled:opacity-60 ${isDark ? 'bg-green-500/25 text-green-200 border-green-500/45 active:bg-green-500/35' : 'bg-green-500/25 text-green-900 border-green-600/50 active:bg-green-500/35'}`}
+                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border disabled:opacity-60 ${isDark ? 'bg-(--pos-s-yellow) text-black border-(--pos-s-yellow) active:bg-yellow-500' : 'bg-(--pos-s-yellow) text-black border-(--pos-s-yellow) active:bg-yellow-500'}`}
               >
                 {isCreatingService
                   ? t('common.creating', { defaultValue: 'Creating...' })
@@ -1658,7 +1658,7 @@ export const ReservationsView: React.FC = memo(() => {
             {!isDetailsLoading && selectedReservation && (
               <div className="space-y-4">
                 <div className={`p-3 rounded-2xl ${isDark ? 'bg-gray-800/70' : 'bg-gray-50/80'}`}>
-                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                     {t('reservationsView.customer', { defaultValue: 'Customer' })}
                   </div>
                   <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedReservation.customerName}</div>
@@ -1669,7 +1669,7 @@ export const ReservationsView: React.FC = memo(() => {
                 </div>
 
                 <div className={`p-3 rounded-2xl ${isDark ? 'bg-gray-800/70' : 'bg-gray-50/80'}`}>
-                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                     {t('reservationsView.when', { defaultValue: 'Date & Time' })}
                   </div>
                   <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
@@ -1683,7 +1683,7 @@ export const ReservationsView: React.FC = memo(() => {
 
                 {selectedReservation.specialRequests && (
                   <div className={`p-3 rounded-2xl ${isDark ? 'bg-gray-800/70' : 'bg-gray-50/80'}`}>
-                    <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                    <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                       {t('reservationsView.specialRequests', { defaultValue: 'Special Requests' })}
                     </div>
                     <div className={`${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedReservation.specialRequests}</div>
@@ -1691,7 +1691,7 @@ export const ReservationsView: React.FC = memo(() => {
                 )}
 
                 <div className="space-y-2">
-                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                     {t('reservationsView.quickActions', { defaultValue: 'Quick Actions' })}
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -1705,7 +1705,7 @@ export const ReservationsView: React.FC = memo(() => {
                         onClick={() => void handleStatusChange(selectedReservation.id, action.status)}
                         className={`inline-flex items-center justify-center text-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-transform active:scale-95 ${
                           action.variant === 'primary' ? 'bg-yellow-400 text-black' :
-                          action.variant === 'success' ? 'bg-green-600 text-white' :
+                          action.variant === 'success' ? 'bg-(--pos-s-yellow) text-black' :
                           action.variant === 'danger' ? 'bg-red-600 text-white' :
                           isDark ? 'bg-gray-700 text-white' : 'bg-gray-200 text-gray-800'
                         }`}
@@ -1718,7 +1718,7 @@ export const ReservationsView: React.FC = memo(() => {
 
                 {!selectedReservation.roomId && (
                 <div className={`p-3 rounded-2xl ${isDark ? 'bg-gray-800/70' : 'bg-gray-50/80'}`}>
-                  <div className={`text-sm mb-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                  <div className={`text-sm mb-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                     {t('reservationsView.assignTable', { defaultValue: 'Assign Table' })}
                   </div>
                   <div className="flex gap-2">

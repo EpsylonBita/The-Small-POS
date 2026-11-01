@@ -99,7 +99,7 @@ export const DriveThruView: React.FC = memo(() => {
   const isDark = resolvedTheme === 'dark';
   const panelSurface = isDark
     ? 'border border-white/10 bg-zinc-900/78 text-zinc-100 shadow-[0_18px_45px_rgba(0,0,0,0.28)]'
-    : 'border border-yellow-300/45 bg-white/78 text-zinc-950 shadow-[0_18px_45px_rgba(24,24,27,0.08)]';
+    : 'border border-(--pos-s-border) bg-white/78 text-zinc-950 shadow-[0_18px_45px_rgba(24,24,27,0.08)]';
   const subtleSurface = isDark
     ? 'border border-white/10 bg-white/6'
     : 'border border-zinc-200 bg-white/80 shadow-xs';
@@ -107,8 +107,8 @@ export const DriveThruView: React.FC = memo(() => {
     ? 'border border-white/10 bg-white/8 text-zinc-200 active:bg-white/12'
     : 'border border-zinc-200 bg-zinc-100 text-zinc-700 active:bg-zinc-200';
   const primaryButtonSurface = isDark
-    ? 'border border-yellow-400/45 bg-yellow-400/18 text-yellow-100 active:bg-yellow-400/26'
-    : 'border border-yellow-500/50 bg-yellow-300 text-zinc-950 active:bg-yellow-400';
+    ? 'border border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200 active:bg-(--pos-s-surface-2)'
+    : 'border border-(--pos-s-yellow) bg-yellow-300 text-zinc-950 active:bg-yellow-400';
 
   const {
     orders,
@@ -143,14 +143,14 @@ export const DriveThruView: React.FC = memo(() => {
 
   const getTimerColorClass = (arrivedAt: string): string => {
     const color = getTimerColor(arrivedAt);
-    if (color === 'green') return 'text-green-500 bg-green-500/10';
-    if (color === 'yellow') return 'text-yellow-500 bg-yellow-500/10';
-    return 'text-red-500 bg-red-500/10';
+    if (color === 'green') return 'text-green-800 dark:text-green-300 bg-(--pos-s-surface-2)';
+    if (color === 'yellow') return 'text-yellow-800 dark:text-yellow-300 bg-(--pos-s-surface-2)';
+    return 'text-red-800 dark:text-red-300 bg-(--pos-s-surface-2)';
   };
 
   if (!branchId || !organizationId) {
     return (
-      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
         {t('driveThru.selectBranch', 'Please select a branch to view drive-through')}
       </motion.div>
     );
@@ -162,19 +162,19 @@ export const DriveThruView: React.FC = memo(() => {
       <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-6">
         <motion.div variants={pageMotionContainer} className="flex gap-6">
           <motion.div variants={pageMotionItem} className={`rounded-2xl px-4 py-2 ${panelSurface}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('driveThru.activeOrders', 'Active Orders')}</div>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('driveThru.activeOrders', 'Active Orders')}</div>
             <div className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {stats.ordersInQueue}
             </div>
           </motion.div>
           <motion.div variants={pageMotionItem} className={`rounded-2xl px-4 py-2 ${panelSurface}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('driveThru.avgWaitTime', 'Avg Wait Time')}</div>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('driveThru.avgWaitTime', 'Avg Wait Time')}</div>
             <div className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {Math.round(stats.averageWaitTimeSeconds / 60)} {t('common.time.min', 'min')}
             </div>
           </motion.div>
           <motion.div variants={pageMotionItem} className={`rounded-2xl px-4 py-2 ${panelSurface}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('driveThru.activeLanes', 'Active Lanes')}</div>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('driveThru.activeLanes', 'Active Lanes')}</div>
             <div className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {stats.activeLanes}/{stats.totalLanes}
             </div>
@@ -210,7 +210,7 @@ export const DriveThruView: React.FC = memo(() => {
 
       {/* Loading State */}
       {isLoading && orders.length === 0 && (
-        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
           <RefreshCw className="w-6 h-6 animate-spin mr-2" />
           {t('driveThru.loading', 'Loading drive-through data...')}
         </motion.div>
@@ -255,7 +255,7 @@ export const DriveThruView: React.FC = memo(() => {
                           {getElapsedTime(order.arrivedAt)}
                         </span>
                       </div>
-                      <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                      <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                         {order.customerName || t('common.customer', 'Customer')}
                       </div>
                       <div className={`text-sm ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>

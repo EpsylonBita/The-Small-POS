@@ -69,6 +69,18 @@ i18n.addResourceBundle('fr', 'translation', localeBundles.fr, true, true);
 i18n.addResourceBundle('it', 'translation', localeBundles.it, true, true);
 i18n.addResourceBundle('sq', 'translation', localeBundles.sq, true, true);
 
+// Keep <html lang> on the app language. Without it the WebView treats Greek text
+// as English: CSS uppercase keeps the tonos ("ΑΥΤΌΜΑΤΕΣ") and screen readers
+// use the wrong voice.
+export function syncDocumentLanguage(language: string | undefined): void {
+  if (typeof document === 'undefined' || !language) return;
+  const primary = language.split('-')[0];
+  if (document.documentElement.lang !== primary) document.documentElement.lang = primary;
+}
+syncDocumentLanguage(i18n.language);
+i18n.off('languageChanged', syncDocumentLanguage);
+i18n.on('languageChanged', syncDocumentLanguage);
+
 /**
  * Update i18n language from database
  * Called after SettingsService is initialized in main process

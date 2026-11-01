@@ -600,12 +600,12 @@ const GiftCardFundingPanel: React.FC<GiftCardFundingPanelProps> = ({
   const mutedClass = isDark ? 'text-zinc-400' : 'text-gray-500';
   const noticeClass: Record<Tone, string> = {
     success: isDark
-      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
-      : 'border-emerald-200 bg-emerald-50 text-emerald-800',
-    error: isDark ? 'border-red-500/40 bg-red-500/10 text-red-200' : 'border-red-200 bg-red-50 text-red-800',
+      ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200'
+      : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800',
+    error: isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800',
     warning: isDark
-      ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
-      : 'border-amber-200 bg-amber-50 text-amber-900',
+      ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200'
+      : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-900',
   };
   const toneText: Record<Tone, string> = {
     success: isDark ? 'text-emerald-300' : 'text-emerald-700',
@@ -619,7 +619,7 @@ const GiftCardFundingPanel: React.FC<GiftCardFundingPanelProps> = ({
   const optionClass = (selected: boolean) =>
     `min-h-12 w-full rounded-2xl border px-3 py-2 text-left text-sm font-medium transition-colors disabled:opacity-50 ${
       selected
-        ? 'border-yellow-400 bg-yellow-400 text-black'
+        ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
         : isDark
           ? 'border-zinc-800 bg-zinc-900 text-zinc-100'
           : 'border-gray-200 bg-white text-gray-800'

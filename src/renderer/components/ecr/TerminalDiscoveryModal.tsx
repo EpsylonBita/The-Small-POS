@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { solidButton } from '../settings/SettingsKit'
 import { useTranslation } from 'react-i18next'
 import {
   Search,
@@ -144,33 +145,21 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
         <div className="flex flex-wrap gap-3">
           <button
             onClick={() => toggleSearchType('serial_usb')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-              searchTypes.includes('serial_usb')
-                ? 'bg-amber-500/30 text-amber-200 border border-amber-500/50'
-                : 'bg-gray-700/50 text-gray-400 border border-gray-700'
-            }`}
+            className={`pos-choice${searchTypes.includes('serial_usb') ? ' is-selected' : ''}`}
           >
             <Usb className="w-4 h-4" />
             {t('ecr.connection.usb', 'USB/Serial')}
           </button>
           <button
             onClick={() => toggleSearchType('bluetooth')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-              searchTypes.includes('bluetooth')
-                ? 'bg-amber-500/30 text-amber-200 border border-amber-500/50'
-                : 'bg-gray-700/50 text-gray-400 border border-gray-700'
-            }`}
+            className={`pos-choice${searchTypes.includes('bluetooth') ? ' is-selected' : ''}`}
           >
             <Bluetooth className="w-4 h-4" />
             {t('ecr.connection.bluetooth', 'Bluetooth')}
           </button>
           <button
             onClick={() => toggleSearchType('network')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-              searchTypes.includes('network')
-                ? 'bg-amber-500/30 text-amber-200 border border-amber-500/50'
-                : 'bg-gray-700/50 text-gray-400 border border-gray-700'
-            }`}
+            className={`pos-choice${searchTypes.includes('network') ? ' is-selected' : ''}`}
           >
             <Wifi className="w-4 h-4" />
             {t('ecr.connection.network', 'Network')}
@@ -181,7 +170,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
         <button
           onClick={handleSearch}
           disabled={isSearching || searchTypes.length === 0}
-          className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-amber-500/20 text-amber-300 active:bg-amber-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          className={solidButton('primary', 'md') + ' w-full'}
         >
           {isSearching ? (
             <>
@@ -198,7 +187,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
 
         {/* Error message */}
         {error && !isSearching && (
-          <div className="flex items-center gap-3 p-4 rounded-2xl bg-red-500/10 border border-red-500/30">
+          <div className="flex items-center gap-3 p-4 rounded-2xl bg-red-50 dark:bg-red-950 border border-red-300 dark:border-red-800">
             <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
             <p className="text-red-400 text-sm">{error}</p>
           </div>
@@ -210,27 +199,27 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
             {warnings.map((warning) => (
               <div
                 key={warning}
-                className="flex items-center gap-3 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30"
+                className="flex items-center gap-3 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950 border border-amber-300 dark:border-amber-800"
               >
                 <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
-                <p className="text-amber-300 text-sm">{t(warning, warning)}</p>
+                <p className="text-amber-800 dark:text-amber-300 text-sm">{t(warning, warning)}</p>
               </div>
             ))}
           </div>
         )}
 
         {showFiscalHint && (
-          <div className="space-y-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
+          <div className="space-y-3 rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950 p-4">
             <div className="flex items-start gap-3">
               <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
               <div className="space-y-1">
-                <p className="text-sm font-medium text-amber-200">
+                <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
                   {t(
                     'ecr.discovery.fiscalDeviceTitle',
                     'Looking for an RBS or fiscal register?'
                   )}
                 </p>
-                <p className="text-sm text-amber-300">
+                <p className="text-sm text-amber-800 dark:text-amber-300">
                   {t(
                     'ecr.discovery.fiscalDeviceHelp',
                     'RBS, Datecs, Casio, and similar fiscal printers are configured under Cash Register / Fiscal Printer, not Payment Terminals.'
@@ -241,7 +230,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
             {onOpenCashRegisterSetup && (
               <button
                 onClick={onOpenCashRegisterSetup}
-                className="w-full rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-2 text-sm font-medium text-amber-200 transition-colors active:bg-amber-500/25"
+                className={solidButton('secondary', 'md') + ' w-full'}
               >
                 {t('ecr.discovery.configureCashRegister', 'Configure Cash Register')}
               </button>
@@ -252,7 +241,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
         {/* Device list */}
         {devices.length > 0 && (
           <div className="space-y-3">
-            <h3 className="text-sm font-medium text-gray-400">
+            <h3 className="text-sm font-medium text-slate-600 dark:text-gray-400">
               {t('ecr.discovery.found', 'Found Devices')} ({devices.length})
             </h3>
             <div className="space-y-2 max-h-64 overflow-y-auto scrollbar-hide">
@@ -265,10 +254,10 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                   key={`${device.connectionType}-${device.name}-${index}`}
                   className={`flex items-center justify-between p-4 rounded-2xl border transition-colors ${
                     device.isConfigured
-                      ? 'bg-gray-700/30 border-gray-700/50 opacity-60'
+                      ? 'border-zinc-200 dark:border-zinc-700 opacity-60'
                       : device.isSupported && !isFiscalRegister
-                        ? 'bg-gray-700/50 border-gray-700 active:bg-gray-700/70 cursor-pointer'
-                        : 'bg-amber-500/5 border-amber-500/20 opacity-90'
+                        ? 'bg-zinc-100 border-zinc-300 active:bg-zinc-200 dark:bg-zinc-800 dark:border-zinc-700 dark:active:bg-zinc-700 cursor-pointer'
+                        : 'bg-amber-50 dark:bg-amber-950 border-amber-300 dark:border-amber-800 opacity-90'
                   }`}
                   onClick={() => {
                     if (!device.isConfigured && device.isSupported && !isFiscalRegister) {
@@ -277,20 +266,20 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                   }}
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="p-2 rounded-lg bg-gray-600/50">
+                    <div className="p-2 rounded-lg bg-zinc-100 dark:bg-zinc-700">
                       <ConnectionIcon
                         type={device.connectionType}
-                        className="w-5 h-5 text-gray-300"
+                        className="w-5 h-5 text-slate-700 dark:text-gray-300"
                       />
                     </div>
                     <div className="min-w-0">
                       <p className="liquid-glass-modal-text font-medium">{device.name}</p>
-                      <p className="text-sm text-gray-400">
+                      <p className="text-sm text-slate-600 dark:text-gray-400">
                         {device.manufacturer && `${device.manufacturer} `}
                         {device.model}
                       </p>
                       {isFiscalRegister && (
-                        <p className="text-xs text-amber-300 mt-1">
+                        <p className="text-xs text-amber-800 dark:text-amber-300 mt-1">
                           {t('ecr.admission.fiscalNotCardTerminal', {
                             defaultValue:
                               'A fiscal cash register (such as RBS or ELIO) is not a card terminal. Set it up under Cash Register / Fiscal Printer.',
@@ -298,7 +287,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                         </p>
                       )}
                       {!device.isSupported && (
-                        <p className="text-xs text-amber-300 mt-1">
+                        <p className="text-xs text-amber-800 dark:text-amber-300 mt-1">
                           {t(
                             device.unsupportedReason || 'ecr.discovery.unsupportedBluetooth',
                             device.unsupportedReason ||
@@ -309,7 +298,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                     </div>
                   </div>
                   {device.isConfigured ? (
-                    <div className="flex items-center gap-2 text-green-400">
+                    <div className="flex items-center gap-2 text-green-700 dark:text-green-400">
                       <CheckCircle className="w-4 h-4" />
                       <span className="text-sm">
                         {t('ecr.discovery.configured', 'Configured')}
@@ -322,26 +311,26 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                           e.stopPropagation()
                           onOpenCashRegisterSetup()
                         }}
-                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 active:bg-amber-500/30 transition-colors"
+                        className={solidButton('secondary', 'sm')}
                       >
                         {t('ecr.discovery.configureCashRegister', 'Configure Cash Register')}
                       </button>
                     ) : (
                       <button
                         disabled
-                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-700/60 text-gray-500 cursor-not-allowed"
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400 cursor-not-allowed"
                       >
                         {t('ecr.discovery.unavailable', 'Unavailable')}
                       </button>
                     )
                   ) : !device.isSupported ? (
                     <div className="flex flex-col items-end gap-2">
-                      <span className="text-xs px-2 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                      <span className="text-xs px-2 py-1 rounded-full bg-amber-50 text-amber-900 border border-amber-300 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300">
                         {t('ecr.discovery.discoveryOnly', 'Discovery only')}
                       </span>
                       <button
                         disabled
-                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-700/60 text-gray-500 cursor-not-allowed"
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400 cursor-not-allowed"
                       >
                         <Plus className="w-4 h-4" />
                         {t('ecr.discovery.unavailable', 'Unavailable')}
@@ -353,7 +342,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                         e.stopPropagation()
                         onSelect(device)
                       }}
-                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 active:bg-amber-500/30 transition-colors"
+                      className={solidButton('secondary', 'sm')}
                     >
                       <Plus className="w-4 h-4" />
                       {t('common.actions.add', 'Add')}
@@ -367,8 +356,8 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
         )}
 
         {/* Manual add option */}
-        <div className="pt-4 border-t border-gray-700">
-          <p className="text-sm text-gray-400 mb-3">
+        <div className="pt-4 border-t liquid-glass-modal-border">
+          <p className="text-sm text-slate-600 dark:text-gray-400 mb-3">
             {t('ecr.discovery.manual', "Can't find your terminal?")}
           </p>
           <button
@@ -383,7 +372,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
               isSupported: true,
             })
           }
-            className="w-full py-3 rounded-lg bg-gray-700/50 text-gray-300 active:bg-gray-700 transition-colors"
+            className="w-full py-3 rounded-lg bg-slate-100 text-slate-800 active:bg-slate-200 dark:bg-gray-700 dark:text-gray-300 dark:active:bg-gray-700 transition-colors"
           >
             {t('ecr.discovery.addManually', 'Add Terminal Manually')}
           </button>

@@ -41,8 +41,7 @@ test('InventoryPage renders header and stat icons without wrapper boxes', () => 
   assert.match(source, /aria-label=\{t\('common\.refresh', 'Refresh'\)\}/);
   // Round 261: the header refresh button is amber glass (was a stark black/white inversion square),
   // touch-first with active press feedback and no hover/native title.
-  assert.match(source, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(source, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  assert.match(source, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
   assert.match(source, /active:scale-95/);
   // The old stark black/white refresh square is gone (refresh-scoped: the `border border-...` prefix
   // distinguishes it from the status-filter pills, which intentionally keep their selected styling).

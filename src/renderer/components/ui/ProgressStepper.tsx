@@ -36,21 +36,21 @@ const STEP_TONES: Record<StepStatus, {
     },
     active: {
         shell: 'bg-transparent dark:bg-transparent',
-        border: 'border-yellow-400/80 dark:border-yellow-400/55',
+        border: 'border-(--pos-s-yellow)',
         icon: 'text-yellow-700 dark:text-yellow-300',
         halo: 'bg-transparent dark:bg-transparent',
         label: 'text-slate-900 dark:text-white',
     },
     complete: {
         shell: 'bg-transparent dark:bg-transparent',
-        border: 'border-emerald-300/80 dark:border-emerald-400/40',
+        border: 'border-(--pos-s-border)',
         icon: 'text-emerald-600 dark:text-emerald-200',
         halo: 'bg-transparent dark:bg-transparent',
         label: 'text-slate-800 dark:text-slate-100',
     },
     error: {
         shell: 'bg-transparent dark:bg-transparent',
-        border: 'border-rose-300/80 dark:border-rose-400/40',
+        border: 'border-(--pos-s-border)',
         icon: 'text-rose-600 dark:text-rose-200',
         halo: 'bg-transparent dark:bg-transparent',
         label: 'text-slate-800 dark:text-slate-100',
@@ -111,7 +111,7 @@ export const ProgressStepper: React.FC<ProgressStepperProps> = ({
                         {!isLast && orientation === 'horizontal' && (
                             <div className="absolute left-[calc(50%+1.7rem)] right-[calc(-50%+1.7rem)] top-[1.35rem] h-[2px] rounded-full bg-slate-200/90 dark:bg-white/10">
                                 <motion.div
-                                    className="h-full origin-left rounded-full bg-linear-to-r from-emerald-400 via-emerald-400 to-yellow-400/90"
+                                    className="h-full origin-left rounded-full bg-emerald-500"
                                     initial={false}
                                     animate={connectorFilled ? 'visible' : 'hidden'}
                                     variants={connectorFillVariants}
@@ -127,7 +127,7 @@ export const ProgressStepper: React.FC<ProgressStepperProps> = ({
                         {!isLast && orientation === 'vertical' && (
                             <div className="absolute -bottom-4 left-[1.35rem] top-12 w-[2px] rounded-full bg-slate-200/90 dark:bg-white/10">
                                 <motion.div
-                                    className="w-full origin-top rounded-full bg-linear-to-b from-emerald-400 via-emerald-400 to-yellow-400/90"
+                                    className="w-full origin-top rounded-full bg-emerald-500"
                                     initial={false}
                                     animate={connectorFilled ? 'visible' : 'hidden'}
                                     variants={connectorFillVariants}
@@ -160,7 +160,7 @@ export const ProgressStepper: React.FC<ProgressStepperProps> = ({
 
                             <motion.div
                                 className={cn(
-                                    'relative z-10 flex h-10 w-10 items-center justify-center rounded-full border shadow-[0_10px_24px_rgba(15,23,42,0.08)] backdrop-blur-sm dark:shadow-none',
+                                    'relative z-10 flex h-10 w-10 items-center justify-center rounded-full border dark:shadow-none',
                                     tones.shell,
                                     tones.border
                                 )}

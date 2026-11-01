@@ -73,9 +73,10 @@ test('Round 228: TerminalConfigModal has red-cancel/green-add footer, a green gl
   assert.doesNotMatch(config, /bg-gray-500\/10 active:bg-gray-500\/20/);
 
   // Cancel = red semantic; Add/Save = green semantic primary (centered, active feedback, disabled kept).
-  assert.match(config, /onClick=\{onClose\}[\s\S]*?bg-red-500\/10 active:bg-red-500\/20[\s\S]*?text-red-600/);
-  assert.match(config, /type="submit"[\s\S]*?bg-green-600 active:bg-green-700 text-white[\s\S]*?disabled:opacity-50/);
-  assert.match(config, /inline-flex items-center justify-center/);
+  // UI audit wave 7A2: Cancel is the neutral kit button, Add/Save the one yellow kit button.
+  assert.match(config, /onClick=\{onClose\}[\s\S]*?className=\{solidButton\('secondary', 'md'\)\}/);
+  assert.match(config, /type="submit"[\s\S]*?className=\{solidButton\('primary', 'md'\)\}/);
+  assert.match(config, /import \{ solidButton \} from '\.\.\/settings\/SettingsKit'/);
 
   // Touch-first: no hover utilities anywhere in the modal.
   assert.doesNotMatch(config, /hover:/);
@@ -111,10 +112,9 @@ test('Round 228: TerminalConfigModal has red-cancel/green-add footer, a green gl
   const footerShelf = config.match(/className="px-8 py-4 border-t[^"]*"/);
   assert.ok(footerShelf, 'footer shelf wrapper not found');
   assert.match(footerShelf[0], /\bborder-t\b/);
-  assert.match(footerShelf[0], /bg-white\/85/);
-  assert.match(footerShelf[0], /dark:bg-black\/55/);
-  assert.match(footerShelf[0], /backdrop-blur-xl/);
-  assert.match(footerShelf[0], /shadow-\[0_-8px_24px_/);
+  // The modal's frosted footer (founder 30/10 glass): blurred, so scrolled fields never read through.
+  assert.match(footerShelf[0], /pos-glass-footer/);
+  assert.doesNotMatch(footerShelf[0], /backdrop-blur|\/\d{2}\b/);
   assert.doesNotMatch(footerShelf[0], /blue|purple|hover:/);
   assert.match(config, /<div className="flex justify-end gap-3">/, 'Cancel/Add live in an inner justify-end row');
 
@@ -136,21 +136,26 @@ test('Round 229: PaymentTerminalsSection refresh button is named + 44px, and Add
 
   // Refresh button: sliced precisely via the handleRefresh anchor -- a localized accessible name, 44x44
   // centred glass sizing, preserved handler + spinner icon. No longer an unnamed icon-only button.
-  const rIdx = section.indexOf('onClick={handleRefresh}');
-  assert.notEqual(rIdx, -1, 'refresh button must wire handleRefresh');
-  const refreshBtn = section.slice(section.lastIndexOf('<button', rIdx), section.indexOf('</button>', rIdx) + '</button>'.length);
-  assert.match(refreshBtn, /aria-label=\{t\('ecr\.refreshStatus', 'Refresh connection status'\)\}/);
-  assert.match(refreshBtn, /h-11 w-11 items-center justify-center/);
-  assert.match(refreshBtn, /<RefreshCw/);
-  assert.match(refreshBtn, /active:scale-95/);
+  // Wave 7Δ: the Settings embed and the full page each have one; both are named and 44 px
+  // (the embed uses the kit's 44 px pos-icon-btn).
+  const refreshButtons: string[] = [];
+  for (let rIdx = section.indexOf('onClick={handleRefresh}'); rIdx !== -1; rIdx = section.indexOf('onClick={handleRefresh}', rIdx + 1)) {
+    refreshButtons.push(section.slice(section.lastIndexOf('<button', rIdx), section.indexOf('</button>', rIdx) + '</button>'.length));
+  }
+  assert.equal(refreshButtons.length, 2, 'refresh button must wire handleRefresh in the embed and the full page');
+  for (const refreshBtn of refreshButtons) {
+    assert.match(refreshBtn, /aria-label=\{t\('ecr\.refreshStatus', 'Refresh connection status'\)\}/);
+    assert.match(refreshBtn, /h-11 w-11 items-center justify-center|className="pos-icon-btn"/);
+    assert.match(refreshBtn, /<RefreshCw/);
+  }
 
   // Add Terminal CTA: semantic green (not yellow/amber), centred icon+text, touch-safe min height.
   const aIdx = section.indexOf("t('ecr.addManual'");
   assert.notEqual(aIdx, -1, 'Add Terminal CTA must exist');
   const addBtn = section.slice(section.lastIndexOf('<button', aIdx), section.indexOf('</button>', aIdx) + '</button>'.length);
-  assert.match(addBtn, /bg-green-600/);
-  assert.match(addBtn, /active:bg-green-700/);
-  assert.match(addBtn, /min-h-touch items-center justify-center/);
+  // UI audit wave 7A2: the yellow kit primary (48 px), not a green fill.
+  assert.match(addBtn, /className=\{solidButton\('primary', 'md'\) \+ ' flex-1'\}/);
+  assert.doesNotMatch(addBtn, /bg-green/);
   assert.match(addBtn, /<Plus size=\{16\} \/>/);
   assert.doesNotMatch(addBtn, /bg-yellow|border-yellow|bg-amber/);
 

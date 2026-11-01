@@ -4060,6 +4060,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn explicit_order_cancel_uses_staff_pin_once_even_with_active_cashier() {
+        // The real OS keyring can hold a branch from an earlier run; the
+        // identity here must come from this test's database alone.
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
         let auth = AuthState::new();
         login_as_admin(&db_state, &auth);

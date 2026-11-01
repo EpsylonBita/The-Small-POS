@@ -9,10 +9,12 @@ const sourcePath = path.join(projectRoot, 'src', 'renderer', 'components', 'moda
 test('RefundAttributionFields uses semantic refund-route colors without blue drift', () => {
   const source = readFileSync(sourcePath, 'utf8');
 
-  assert.match(source, /refundMethod === 'cash'[\s\S]*?bg-green-600\/20 text-green-300 border-green-500\/30/);
-  assert.match(source, /refundMethod === 'card'[\s\S]*?bg-amber-600\/20 text-amber-300 border-amber-500\/30/);
-  assert.match(source, /refundMethod === 'other'[\s\S]*?bg-emerald-600\/20 text-emerald-300 border-emerald-500\/30/);
-  assert.match(source, /cashHandler === 'driver_shift'[\s\S]*?text-emerald-300[\s\S]*?text-amber-300/);
+  // Wave ΣΤ4: the selected route is the POS yellow selection outline on the kit surface; its words keep
+  // the route colour at AA in both themes.
+  assert.match(source, /refundMethod === 'cash'[\s\S]*?bg-\(--pos-s-surface-2\) text-green-800 dark:text-green-200 border-\(--pos-s-yellow\)/);
+  assert.match(source, /refundMethod === 'card'[\s\S]*?bg-\(--pos-s-surface-2\) text-amber-800 dark:text-amber-200 border-\(--pos-s-yellow\)/);
+  assert.match(source, /refundMethod === 'other'[\s\S]*?bg-\(--pos-s-surface-2\) text-emerald-800 dark:text-emerald-200 border-\(--pos-s-yellow\)/);
+  assert.match(source, /cashHandler === 'driver_shift'[\s\S]*?text-emerald-800 dark:text-emerald-300[\s\S]*?text-amber-800 dark:text-amber-300/);
   assert.doesNotMatch(source, /bg-blue-|text-blue-|border-blue-|focus:ring-blue|focus:border-blue/);
 });
 

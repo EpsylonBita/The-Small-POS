@@ -726,7 +726,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
         initial={false}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.9 }}
-        className={`p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} ${order.priority === 'rush' ? 'ring-2 ring-red-500' : isReady ? 'ring-2 ring-emerald-500/70' : ''}`}
+        className={`p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} ${order.priority === 'rush' ? 'ring-2 ring-red-500' : isReady ? 'ring-2 ring-(--pos-s-fg)' : ''}`}
       >
         <div className="mb-3 flex items-start justify-between gap-3">
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
@@ -734,7 +734,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
               {orderLabel}
             </span>
             {isReady && (
-              <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${isDark ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300' : 'border-emerald-300 bg-emerald-50 text-emerald-700'}`}>
+              <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${isDark ? 'border-emerald-600 bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700'}`}>
                 <BellRing className="h-3.5 w-3.5" />
                 {t('kitchen.ready', 'Ready')}
               </span>
@@ -772,7 +772,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
           ))}
         </div>
         {order.notes && (
-          <div className={`mb-3 p-2 rounded-xl ${isDark ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-yellow-50 border border-yellow-200'}`}>
+          <div className={`mb-3 p-2 rounded-xl ${isDark ? 'bg-(--pos-s-surface-2) border border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border border-(--pos-s-border)'}`}>
             <p className="text-sm text-yellow-600">{order.notes}</p>
           </div>
         )}
@@ -784,7 +784,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
           <button
             type="button"
             onClick={() => void handleBumpOrder(order.id, order.status)}
-            className={`w-full py-3 rounded-xl font-medium transition-all active:scale-[0.98] ${order.status === 'pending' ? 'bg-yellow-400 text-black active:bg-yellow-300' : order.status === 'preparing' ? 'bg-green-500 text-white active:bg-green-600' : isDark ? 'border border-zinc-600 bg-zinc-800 text-zinc-100 active:bg-zinc-700' : 'border border-gray-300 bg-gray-100 text-gray-900 active:bg-gray-200'}`}
+            className={`w-full py-3 rounded-xl font-medium transition-all active:scale-[0.98] ${order.status === 'pending' ? 'bg-yellow-400 text-black active:bg-yellow-300' : order.status === 'preparing' ? 'bg-yellow-400 text-black active:bg-yellow-300' : isDark ? 'border border-zinc-600 bg-zinc-800 text-zinc-100 active:bg-zinc-700' : 'border border-gray-300 bg-gray-100 text-gray-900 active:bg-gray-200'}`}
           >
             {order.status === 'pending' ? (
               <><Play className="w-4 h-4 inline mr-2" />{t('kitchen.startPreparing', 'Start Preparing')}</>
@@ -821,7 +821,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
                   type="button"
                   onClick={() => void closeExternalDisplay()}
                   disabled={isDisplayBusy}
-                  className="p-3 rounded-xl border border-red-500/40 bg-red-500/10 text-red-300 transition-all active:scale-95 active:bg-red-500/20 disabled:opacity-60 disabled:active:scale-100"
+                  className="p-3 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200 transition-all active:scale-95 active:bg-(--pos-s-surface-2) disabled:opacity-60 disabled:active:scale-100"
                   aria-label={t('kitchen.externalDisplay.stop', 'Stop external display')}
                 >
                   <X className="w-5 h-5" />
@@ -831,7 +831,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
                   type="button"
                   onClick={() => void openExternalDisplay()}
                   disabled={isDisplayBusy || !displayCapabilities?.supported || freeExternalDisplays.length === 0}
-                  className={`p-3 rounded-xl border transition-all active:scale-95 disabled:opacity-60 disabled:active:scale-100 ${isDark ? 'border-amber-400/40 bg-amber-500/10 text-amber-200 active:bg-amber-500/20' : 'border-amber-300 bg-amber-50 text-amber-800 active:bg-amber-100'}`}
+                  className={`p-3 rounded-xl border transition-all active:scale-95 disabled:opacity-60 disabled:active:scale-100 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 active:bg-(--pos-s-surface-2)'}`}
                   aria-label={t('kitchen.externalDisplay.open', 'Open on connected display')}
                 >
                   <ScreenShare className="w-5 h-5" />
@@ -949,7 +949,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
                 <div
                   key={display.id}
                   aria-current="true"
-                  className={`min-w-[210px] rounded-xl border px-3 py-3 text-left ${isDark ? 'border-amber-400/40 bg-amber-500/10' : 'border-amber-300 bg-amber-50'}`}
+                  className={`min-w-[210px] rounded-xl border px-3 py-3 text-left ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2)'}`}
                 >
                   <div className="font-semibold">{display.name}</div>
                   <div className={isDark ? 'text-sm text-zinc-400' : 'text-sm text-gray-600'}>
@@ -998,8 +998,8 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
         <div
           className={`mb-5 rounded-xl border px-4 py-3 text-sm font-medium ${
             displayError || displayCapabilities?.error
-              ? 'border-red-500/40 bg-red-500/10 text-red-200'
-              : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+              ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200'
+              : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200'
           }`}
         >
           {displayError || displayCapabilities?.error || displayNotice}
@@ -1012,7 +1012,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
           <button
             key={station.id}
             onClick={() => setStationFilter(station.id === 'all' ? 'all' : station.id)}
-            className={`px-4 py-2 rounded-xl font-medium whitespace-nowrap transition-all border active:scale-[0.98] ${stationFilter === (station.id === 'all' ? 'all' : station.id) ? 'bg-yellow-400 text-black border-yellow-400' : isDark ? 'bg-zinc-950 text-zinc-300 border-zinc-800 active:bg-zinc-900' : 'bg-white text-gray-600 border-gray-200 active:bg-gray-100'}`}
+            className={`px-4 py-2 rounded-xl font-medium whitespace-nowrap transition-all border active:scale-[0.98] ${stationFilter === (station.id === 'all' ? 'all' : station.id) ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)' : isDark ? 'bg-zinc-950 text-zinc-300 border-zinc-800 active:bg-zinc-900' : 'bg-white text-gray-600 border-gray-200 active:bg-gray-100'}`}
           >
             {station.id === 'all' ? t('kitchen.allStations', 'All') : station.name}
           </button>

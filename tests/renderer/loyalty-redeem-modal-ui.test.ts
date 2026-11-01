@@ -23,12 +23,13 @@ test('LoyaltyRedeemModal uses yellow loyalty accents and green commit action', (
   const source = readFileSync(sourcePath, 'utf8');
   const buttonTypes = source.match(/type="button"/g) ?? [];
 
-  assert.match(source, /rounded-2xl border border-yellow-300\/50 bg-yellow-400 text-black/);
-  assert.match(source, /bg-yellow-400\/20 text-yellow-700 dark:text-yellow-200/);
-  assert.match(source, /border-yellow-400\/70 bg-yellow-400\/25 text-yellow-900/);
+  assert.match(source, /rounded-2xl border border-\(--pos-s-border\) bg-yellow-400 text-black/);
+  assert.match(source, /bg-\(--pos-s-surface-2\) text-yellow-700 dark:text-yellow-200/);
+  assert.match(source, /border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\) text-yellow-900/);
   assert.match(source, /font-bold text-yellow-700 dark:text-yellow-300/);
-  assert.match(source, /border-green-500\/50 bg-green-600 text-white/);
-  assert.match(source, /active:scale-\[0\.98\] active:bg-green-700/);
+  // Wave ΣΤ7: the redeem confirm is the kit glass-modal primary (yellow in both themes).
+  assert.match(source, /liquid-glass-modal-button pos-modal-primary/);
+  assert.doesNotMatch(source, /active:bg-green-800/);
   assert.ok(buttonTypes.length >= 5, 'all modal buttons should be explicit button controls');
 });
 

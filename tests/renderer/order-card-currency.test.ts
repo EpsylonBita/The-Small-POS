@@ -42,29 +42,28 @@ test('order-card amount formats locale-aware: Greek "18,50 €", not "€18.50"'
   assert.equal(eur(18.5, 'en-US'), '€18.50');
 });
 
-// Round 213 → 218 (founder screenshot, supervisor review): the live Dashboard pickup order-row icon was
-// boxed in a green badge by round 213, but the supervisor confirmed on the running POS that the filled
-// green chip still reads as a separate boxed treatment. It must now match the standalone OrdersPage row
-// (round 218): the shared PickupOrderIcon rendered as a PLAIN bag at row scale (w-6 h-6) with a
-// theme-aware semantic green stroke and no holder. The shared glyph is preserved (never a raw
-// ShoppingBag, never a Store/Package/storefront), and delivery + table icons stay unchanged.
-test('OrderCard pickup row icon is the shared plain bag at row scale, no green badge (matches OrdersPage)', () => {
-  // Shared component (not a storefront / inline glyph) -- same source the chooser uses.
-  assert.match(cardSource, /import PickupOrderIcon from '\.\.\/icons\/PickupOrderIcon';/);
+// Founder 31/10 («για διανομή το πρώτο και για παραλαβή το δεύτερο»): the order row's delivery and
+// pickup icons are his two drawings (OrderTypeGlyphs) -- the scooter rider in the truck's orange and the
+// hand holding the bag in the theme-aware green (light text-green-600 / dark text-green-400) -- at 28px,
+// matching the OrdersPage row. Rounds 213 → 218 still hold: no green badge/holder, never a raw
+// ShoppingBag or a Store/Package/storefront glyph, and the table icon stays unchanged.
+test('OrderCard delivery and pickup row icons are the founder scooter and bag, no green badge (matches OrdersPage)', () => {
+  assert.match(cardSource, /import \{ DeliveryScooterIcon, PickupHandBagIcon \} from '\.\.\/icons\/OrderTypeGlyphs';/);
   assert.match(cardSource, /import TableOrderIcon from '\.\.\/icons\/TableOrderIcon';/);
 
-  // Pickup branch: the shared PickupOrderIcon as a PLAIN bag at row scale (w-6 h-6, matching the sibling
-  // delivery/table icons) with a theme-aware semantic green stroke (light text-green-600 / dark
-  // text-green-400) and stroke weight 2 -- no wrapper.
+  assert.match(cardSource, /<DeliveryScooterIcon className="h-7 w-7 text-\[#d97706\]" \/>/);
   assert.match(
     cardSource,
-    /<PickupOrderIcon\s+className=\{`w-6 h-6 \$\{resolvedTheme === 'light' \? 'text-green-600' : 'text-green-400'\}`\}\s+strokeWidth=\{2\}\s*\/>/,
+    /<PickupHandBagIcon\s+className=\{`h-7 w-7 \$\{resolvedTheme === 'light' \? 'text-green-600' : 'text-green-400'\}`\}\s*\/>/,
   );
+  // The lucide bag and the inline truck are gone from the type icon (the 12px driver chip keeps its truck).
+  assert.doesNotMatch(cardSource, /PickupOrderIcon/);
+  const iconStart = cardSource.indexOf('const OrderTypeIcon = ({ orderType }');
+  assert.notEqual(iconStart, -1, 'OrderTypeIcon must exist');
+  assert.doesNotMatch(cardSource.slice(iconStart, cardSource.indexOf('\n  };', iconStart)), /<svg|M14 18V6/);
 
-  // The boxed green badge/holder treatment (round 213) must be gone: no green chip, no rounded chip, and
-  // the bag is never forced white-on-green any more.
+  // The boxed green badge/holder treatment (round 213) must be gone: no green chip, no rounded chip.
   assert.doesNotMatch(cardSource, /<span className="inline-flex h-7 w-7 items-center justify-center rounded-\[10px\] bg-green-600">/);
-  assert.doesNotMatch(cardSource, /<PickupOrderIcon className="w-4 h-4 text-white" strokeWidth=\{2\} \/>/);
   // The row must not render a Store/Package/storefront glyph or a raw ShoppingBag anywhere.
   assert.doesNotMatch(cardSource, /<Store|<Package|<Storefront/);
   assert.doesNotMatch(cardSource, /<ShoppingBag/);
@@ -148,7 +147,7 @@ test('Round 343: terminal rows do not use the age-based left edge; active rows s
     'getLeftEdgeColor (age-based) must only be the ACTIVE branch of leftEdgeColorClass',
   );
   // Cancelled keeps a calm semantic red edge (status-based), completed/delivered a neutral edge -- not age-based.
-  assert.match(cardSource, /isCancelledTerminal \? 'border-l-red-400\/50' : 'border-l-white\/30'/);
+  assert.match(cardSource, /isCancelledTerminal \? 'border-l-red-600' : 'border-l-white\/30'/);
 
   // The row className uses the guarded class, not a direct age-based getLeftEdgeColor call anymore.
   assert.match(cardSource, /border-l-4 \$\{deliveryOlderThan40 \? 'border-l-red-500' : leftEdgeColorClass\}/);

@@ -48,7 +48,7 @@ export const HousekeepingView: React.FC = memo(() => {
   const isDark = resolvedTheme === 'dark';
   const today = toLocalDateString(now);
   const bridge = getBridge();
-  const lightGlassSurface = 'bg-white/72 border-zinc-300/80 shadow-[0_12px_30px_rgba(15,23,42,0.10)]';
+  const lightGlassSurface = 'bg-white/72 border-zinc-300/80';
   const lightControlSurface = 'bg-white/90 text-gray-950 border-zinc-300 shadow-xs shadow-black/5';
 
   // Resolve identity + current rooms so rooms sitting in `cleaning` status surface
@@ -449,7 +449,7 @@ export const HousekeepingView: React.FC = memo(() => {
 
   if (isLoading) {
     return (
-      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
         <RefreshCw className="w-5 h-5 animate-spin mr-2" />
         {t('housekeepingView.loading', { defaultValue: 'Loading housekeeping tasks...' })}
       </motion.div>
@@ -461,11 +461,11 @@ export const HousekeepingView: React.FC = memo(() => {
       <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
         <WifiOff className="w-10 h-10 mb-3" />
         <p className="font-semibold mb-2">{t('housekeepingView.errorTitle', { defaultValue: 'Unable to load housekeeping tasks' })}</p>
-        <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{error}</p>
+        <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{error}</p>
         <button
           type="button"
           onClick={() => fetchTasks()}
-          className={`mt-4 px-4 py-2 rounded-xl border font-medium transition-transform active:scale-95 ${isDark ? 'border-amber-400/30 bg-amber-500/15 text-amber-200 active:bg-amber-500/25' : 'border-amber-400/40 bg-amber-50 text-amber-700 active:bg-amber-100'}`}
+          className={`mt-4 px-4 py-2 rounded-xl border font-medium transition-transform active:scale-95 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700 active:bg-(--pos-s-surface-2)'}`}
         >
           {t('common.retry', { defaultValue: 'Retry' })}
         </button>
@@ -478,7 +478,7 @@ export const HousekeepingView: React.FC = memo(() => {
       <motion.section
         variants={pageMotionItem}
         data-vertical-hero="housekeeping"
-        className={`mb-4 rounded-3xl border p-4 backdrop-blur-xl ${isDark ? 'bg-zinc-950/70 border-white/10 shadow-[0_18px_46px_rgba(0,0,0,0.35)]' : 'bg-white/74 border-yellow-200/80 shadow-[0_18px_44px_rgba(15,23,42,0.10)]'}`}
+        className={`mb-4 rounded-3xl border p-4 backdrop-blur-xl ${isDark ? 'bg-zinc-950/70 border-white/10 shadow-[0_18px_46px_rgba(0,0,0,0.35)]' : 'bg-white/74 border-(--pos-s-border)'}`}
       >
         <div className="mb-4 min-w-0">
           <h1 className={`truncate text-3xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
@@ -512,7 +512,7 @@ export const HousekeepingView: React.FC = memo(() => {
             onClick={handleRefresh}
             disabled={isRefreshing}
             aria-label={t('common.refresh', { defaultValue: 'Refresh' })}
-            className={`inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition-transform active:scale-95 disabled:opacity-60 ${isDark ? 'border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25' : 'border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'}`}
+            className={`inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition-transform active:scale-95 disabled:opacity-60 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300 active:bg-(--pos-s-surface-2)'}`}
           >
             <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
@@ -573,7 +573,7 @@ export const HousekeepingView: React.FC = memo(() => {
           className="flex-1 flex items-center justify-center px-6"
         >
           <div className={`flex flex-col items-center justify-center text-center max-w-md rounded-3xl border px-8 py-10 backdrop-blur-md ${isDark ? 'bg-zinc-900/60 border-white/10' : lightGlassSurface}`}>
-            <Sparkles className="w-12 h-12 mb-3 text-amber-400" />
+            <Sparkles className="w-12 h-12 mb-3 text-amber-700 dark:text-amber-400" />
             <p className={`text-lg font-semibold mb-1 ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>
               {t('housekeepingView.empty.title', { defaultValue: 'No housekeeping tasks' })}
             </p>
@@ -585,7 +585,7 @@ export const HousekeepingView: React.FC = memo(() => {
               onClick={handleRefresh}
               disabled={isRefreshing}
               aria-label={t('common.refresh', { defaultValue: 'Refresh' })}
-              className={`mt-5 inline-flex items-center gap-2 px-4 py-2 rounded-xl border font-medium transition-transform active:scale-95 disabled:opacity-60 ${isDark ? 'border-amber-400/30 bg-amber-500/15 text-amber-200 active:bg-amber-500/25' : 'border-amber-400/40 bg-amber-50 text-amber-700 active:bg-amber-100'}`}
+              className={`mt-5 inline-flex items-center gap-2 px-4 py-2 rounded-xl border font-medium transition-transform active:scale-95 disabled:opacity-60 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700 active:bg-(--pos-s-surface-2)'}`}
             >
               <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
               {t('common.refresh', { defaultValue: 'Refresh' })}
@@ -650,7 +650,7 @@ export const HousekeepingView: React.FC = memo(() => {
                             type="button"
                             disabled={isUpdating}
                             onClick={() => handleCreateTask(task)}
-                            className={`w-full py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-amber-400/40 bg-amber-500/20 text-amber-200 active:bg-amber-500/30' : 'border-amber-500/60 bg-amber-100 text-amber-900 active:bg-amber-200'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
+                            className={`w-full py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 active:bg-(--pos-s-surface-2)'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
                           >
                             {t('housekeepingView.action.createTask', { defaultValue: 'Create task' })}
                           </button>
@@ -676,7 +676,7 @@ export const HousekeepingView: React.FC = memo(() => {
                               type="button"
                               disabled={isUpdating}
                               onClick={() => handleStatusChange(task.id, 'in_progress')}
-                              className={`w-full mt-2 py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-amber-400/40 bg-amber-500/20 text-amber-200 active:bg-amber-500/30' : 'border-amber-500/60 bg-amber-100 text-amber-900 active:bg-amber-200'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
+                              className={`w-full mt-2 py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 active:bg-(--pos-s-surface-2)'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
                             >
                               {t('housekeepingView.action.start', { defaultValue: 'Start' })}
                             </button>
@@ -687,7 +687,7 @@ export const HousekeepingView: React.FC = memo(() => {
                               type="button"
                               disabled={isUpdating}
                               onClick={() => handleStatusChange(task.id, 'completed')}
-                              className={`w-full mt-2 py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-emerald-500/40 bg-emerald-500/20 text-emerald-300 active:bg-emerald-500/30' : 'border-emerald-500/60 bg-emerald-100 text-emerald-900 active:bg-emerald-200'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
+                              className={`w-full mt-2 py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500' : 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
                             >
                               {t('housekeepingView.action.complete', { defaultValue: 'Complete' })}
                             </button>
@@ -698,7 +698,7 @@ export const HousekeepingView: React.FC = memo(() => {
                               type="button"
                               disabled={isUpdating}
                               onClick={() => handleStatusChange(task.id, 'verified')}
-                              className={`w-full mt-2 py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-amber-400/40 bg-amber-500/20 text-amber-200 active:bg-amber-500/30' : 'border-amber-500/60 bg-amber-100 text-amber-900 active:bg-amber-200'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
+                              className={`w-full mt-2 py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 active:bg-(--pos-s-surface-2)'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
                             >
                               {t('housekeepingView.action.verify', { defaultValue: 'Verify' })}
                             </button>

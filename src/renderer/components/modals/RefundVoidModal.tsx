@@ -1,3 +1,4 @@
+import { refundFinishesCompletedOrder } from '../../services/OrderRefundCancellation';
 import React, {
   useState,
   useEffect,
@@ -69,6 +70,9 @@ interface RefundVoidModalProps {
   onClose: () => void;
   orderId: string;
   orderTotal: number;
+  orderStatus?: string;
+  /** false only when the original requires the existing provider return path. */
+  onRequestCancellation?: (orderId: string) => Promise<boolean>;
   /**
    * For a confirmed gift return the panel awaits this: `false` (or a rejection)
    * means the host could not reread the order, so fresh gift returns stay blocked.
@@ -100,6 +104,7 @@ interface PaymentRecord {
 }
 
 interface PaymentBalance {
+  verified?: boolean;
   originalAmount: number;
   totalRefunds: number;
   remaining: number;
@@ -942,7 +947,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
             disabled={busy}
             className={`flex-1 liquid-glass-modal-button text-sm py-2 disabled:opacity-50 ${
               action === value
-                ? "bg-purple-600/20 text-purple-300 border-purple-500/40"
+                ? "bg-(--pos-s-surface-2) text-purple-800 dark:text-purple-200 border-(--pos-s-border)"
                 : ""
             }`}
           >
@@ -1004,7 +1009,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
         data-testid="gift-return-review"
         onClick={startReview}
         disabled={busy}
-        className="w-full liquid-glass-modal-button bg-purple-600/20 active:bg-purple-600/30 text-purple-300 border-purple-500/30 gap-2 disabled:opacity-50"
+        className="w-full liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-purple-800 dark:text-purple-200 border-(--pos-s-border) gap-2 disabled:opacity-50"
       >
         {t("modals.refund.gift.review")}
       </button>
@@ -1014,7 +1019,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
   const renderReview = (original: UsableGiftOriginal, request: FrozenGiftRequest) => (
     <div
       data-testid="gift-return-review-panel"
-      className="space-y-3 rounded-lg border border-purple-500/30 bg-purple-500/5 p-3"
+      className="space-y-3 rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3"
     >
       <div className="text-sm font-semibold liquid-glass-modal-text">
         {t("modals.refund.gift.reviewTitle")}
@@ -1026,7 +1031,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
           data-testid="gift-return-confirm"
           onClick={submit}
           disabled={busy}
-          className="flex-1 liquid-glass-modal-button bg-purple-600/20 active:bg-purple-600/30 text-purple-300 border-purple-500/30 gap-2 disabled:opacity-50"
+          className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-purple-800 dark:text-purple-200 border-(--pos-s-border) gap-2 disabled:opacity-50"
         >
           <Gift className="w-4 h-4" />
           {t("modals.refund.gift.confirm")}
@@ -1049,9 +1054,9 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
     return (
       <div
         data-testid="gift-return-retained"
-        className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3"
+        className="space-y-2 rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3"
       >
-        <div className="text-sm font-semibold text-amber-400">
+        <div className="text-sm font-semibold text-amber-700 dark:text-amber-400">
           {view.state === "pending"
             ? t("modals.refund.gift.pendingTitle")
             : t("modals.refund.gift.foundTitle")}
@@ -1070,7 +1075,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
             data-testid="gift-return-recover"
             onClick={recover}
             disabled={busy}
-            className="w-full liquid-glass-modal-button bg-amber-600/20 active:bg-amber-600/30 text-amber-300 border-amber-500/30 gap-2 disabled:opacity-50"
+            className="w-full liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border-(--pos-s-border) gap-2 disabled:opacity-50"
           >
             {t("modals.refund.gift.recover")}
           </button>
@@ -1082,9 +1087,9 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
   const renderUnknown = (request: FrozenGiftRequest | null, returnKey: string | null) => (
     <div
       data-testid="gift-return-unknown"
-      className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3"
+      className="space-y-2 rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3"
     >
-      <div className="text-sm font-semibold text-amber-400">
+      <div className="text-sm font-semibold text-amber-700 dark:text-amber-400">
         {t("modals.refund.gift.unknownTitle")}
       </div>
       <p className="text-xs liquid-glass-modal-text-muted">
@@ -1099,7 +1104,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
               data-testid="gift-return-recover"
               onClick={recover}
               disabled={busy}
-              className="flex-1 liquid-glass-modal-button bg-amber-600/20 active:bg-amber-600/30 text-amber-300 border-amber-500/30 gap-2 disabled:opacity-50"
+              className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border-(--pos-s-border) gap-2 disabled:opacity-50"
             >
               {t("modals.refund.gift.recover")}
             </button>
@@ -1120,16 +1125,16 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
 
   const noticeClass =
     notice?.tone === "error"
-      ? "border-red-500/30 bg-red-500/10 text-red-400"
+      ? "border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-300"
       : notice?.tone === "success"
-        ? "border-green-500/30 bg-green-500/10 text-green-400"
+        ? "border-(--pos-s-border) bg-(--pos-s-surface-2) text-green-800 dark:text-green-300"
         : "border-slate-500/30 bg-slate-500/10 liquid-glass-modal-text";
 
   return (
     <section
       data-testid="gift-return-panel"
       aria-label={t("modals.refund.gift.title")}
-      className="liquid-glass-modal-card space-y-3 border border-purple-500/30"
+      className="liquid-glass-modal-card space-y-3 border border-(--pos-s-border)"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2">
@@ -1196,7 +1201,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
               data-testid="gift-return-authorize"
               onClick={authorize}
               disabled={busy || !identity.ready}
-              className="liquid-glass-modal-button bg-purple-600/20 active:bg-purple-600/30 text-purple-300 border-purple-500/30 disabled:opacity-50"
+              className="liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-purple-800 dark:text-purple-200 border-(--pos-s-border) disabled:opacity-50"
             >
               {busy
                 ? t("modals.refund.gift.authorizing")
@@ -1255,7 +1260,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
             </p>
           ) : (
             <>
-              <p role="alert" className="text-sm text-red-400">
+              <p role="alert" className="text-sm text-red-700 dark:text-red-400">
                 {t("modals.refund.gift.rereadFailed")}
               </p>
               <button
@@ -1318,6 +1323,8 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
   onClose,
   orderId,
   orderTotal,
+  orderStatus,
+  onRequestCancellation,
   onRefundComplete,
   giftReturnOnly = false,
 }) => {
@@ -1441,6 +1448,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
               const bal = await bridge.refunds.getPaymentBalance(p.id);
               if (bal) {
                 balanceMap[p.id] = {
+                  verified: true,
                   originalAmount: bal.originalAmount ?? p.amount,
                   totalRefunds: bal.totalRefunds ?? 0,
                   remaining: bal.remaining ?? p.amount - (bal.totalRefunds ?? 0),
@@ -1507,6 +1515,23 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
     return rowsRead && settlementRead && orderIdRef.current === requestedOrderId;
   }, [bridge, loadData, orderId]);
 
+  // The refund, void or gift return has committed: a cancellation offer that fails (a snapshot
+  // read, a table preflight offline) must never report the confirmed return as failed. The
+  // order's own Cancel stays available. Android parity: PaymentsBridge.refund.
+  const offerCancellationAfterReturn = async () => {
+    if (!onRequestCancellation || !['completed', 'delivered'].includes(String(orderStatus).toLowerCase())) return;
+    const requestedOrderId = orderId;
+    try {
+      const snapshot = await bridge.payments.getSettlementSnapshot(requestedOrderId);
+      if (orderIdRef.current === requestedOrderId && giftSessionRef.current.open &&
+          snapshot?.success === true && snapshot.orderId === requestedOrderId && snapshot.netPaid === 0) {
+        await onRequestCancellation(requestedOrderId);
+      }
+    } catch (error) {
+      console.warn('Returned order cancellation offer unavailable', error);
+    }
+  };
+
   const handleGiftReturnCompleted = useCallback(
     async (view: GiftReturnView): Promise<boolean> => {
       // Only for the order this modal still shows; the panel fenced the reply already.
@@ -1519,9 +1544,10 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
           returnKey: view.returnKey,
         },
       });
+      if (refreshed !== false) await offerCancellationAfterReturn();
       return refreshed !== false;
     },
-    [onRefundComplete],
+    [onRefundComplete, onRequestCancellation, orderId, orderStatus],
   );
 
   useEffect(() => {
@@ -1584,6 +1610,9 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
 
     setProcessing(true);
     try {
+      if (onRequestCancellation && refundFinishesCompletedOrder({
+        status: orderStatus, payments, balances, paymentId, amount,
+      }) && await onRequestCancellation(orderId)) return;
       const attribution = resolveAdjustmentAttribution({
         databaseStaffId: staff?.databaseStaffId,
         shiftStaffOwnerId: activeShift?.staff_id,
@@ -1614,7 +1643,8 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
         setRefundAmount("");
         setRefundReason("");
         await loadData();
-        onRefundComplete?.();
+        await onRefundComplete?.();
+        await offerCancellationAfterReturn();
       } else {
         toast.error(
           refundVoidErrorMessage(
@@ -1673,7 +1703,8 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
         setActiveVoidId(null);
         setVoidReason("");
         await loadData();
-        onRefundComplete?.();
+        await onRefundComplete?.();
+        await offerCancellationAfterReturn();
       } else {
         toast.error(
           refundVoidErrorMessage(
@@ -1702,7 +1733,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
     }
     switch (method?.toLowerCase()) {
       case "cash":
-        return <Banknote className="w-5 h-5 text-green-400" />;
+        return <Banknote className="w-5 h-5 text-green-700 dark:text-green-400" />;
       case "card":
         return <CreditCard className="w-5 h-5 text-slate-300" />;
       default:
@@ -1719,19 +1750,19 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
     switch (status?.toLowerCase()) {
       case "completed":
         return (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-400 border border-green-500/30">
+          <span className="text-xs px-2 py-0.5 rounded-full bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 border border-(--pos-s-border)">
             {t("modals.refund.statusCompleted", { defaultValue: "Completed" })}
           </span>
         );
       case "voided":
         return (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 border border-red-500/30">
+          <span className="text-xs px-2 py-0.5 rounded-full bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 border border-(--pos-s-border)">
             {t("modals.refund.statusVoided", { defaultValue: "Voided" })}
           </span>
         );
       case "refunded":
         return (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">
+          <span className="text-xs px-2 py-0.5 rounded-full bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-300 border border-(--pos-s-border)">
             {t("modals.refund.statusRefunded", { defaultValue: "Refunded" })}
           </span>
         );
@@ -1740,7 +1771,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       // it was given back.
       case "duplicate_review":
         return (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+          <span className="text-xs px-2 py-0.5 rounded-full bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border border-(--pos-s-border)">
             {t("modals.refund.statusSetAside", { defaultValue: "Set aside for review" })}
           </span>
         );
@@ -1895,7 +1926,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                             {formatCurrency(payment.amount)}
                           </div>
                           {balance && balance.totalRefunds > 0 && (
-                            <div className="text-xs text-yellow-400">
+                            <div className="text-xs text-yellow-700 dark:text-yellow-400">
                               {t("modals.refund.statusRefunded", {
                                 defaultValue: "Refunded",
                               })}
@@ -1922,7 +1953,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                               (activeGift?.orderId === orderId &&
                                 activeGift.payment.id === payment.id)
                             }
-                            className="flex-1 liquid-glass-modal-button bg-purple-600/10 active:bg-purple-600/20 text-purple-300 border-purple-500/20 gap-2 text-sm py-2 disabled:opacity-50"
+                            className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-purple-800 dark:text-purple-200 border-(--pos-s-border) gap-2 text-sm py-2 disabled:opacity-50"
                           >
                             <Gift className="w-4 h-4" />
                             {t("modals.refund.gift.action")}
@@ -1953,7 +1984,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                               setVoidReason("");
                             }}
                             disabled={processing || !balance || balance.remaining <= 0 || balance.totalRefunds > 0}
-                            className="flex-1 liquid-glass-modal-button bg-red-600/10 active:bg-red-600/20 text-red-400 border-red-500/20 gap-2 text-sm py-2 disabled:opacity-50"
+                            className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 border-(--pos-s-border) gap-2 text-sm py-2 disabled:opacity-50"
                           >
                             <XCircle className="w-4 h-4" />
                             {t("modals.refund.voidButton", {
@@ -1980,7 +2011,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                             disabled={
                               processing || (balance && balance.remaining <= 0)
                             }
-                            className="flex-1 liquid-glass-modal-button bg-orange-600/10 active:bg-orange-600/20 text-orange-400 border-orange-500/20 gap-2 text-sm py-2 disabled:opacity-50"
+                            className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-orange-800 dark:text-orange-300 border-(--pos-s-border) gap-2 text-sm py-2 disabled:opacity-50"
                           >
                             <RotateCcw className="w-4 h-4" />
                             {t("modals.refund.refundButton", {
@@ -1992,8 +2023,8 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
 
                       {/* Void form */}
                       {isVoiding && !isGift && (
-                        <div className="space-y-3 pt-2 border-t border-red-500/20 animate-in fade-in slide-in-from-top-2 duration-200">
-                          <div className="flex items-center gap-2 text-sm text-red-400">
+                        <div className="space-y-3 pt-2 border-t border-(--pos-s-border) animate-in fade-in slide-in-from-top-2 duration-200">
+                          <div className="flex items-center gap-2 text-sm text-red-700 dark:text-red-400">
                             <AlertTriangle className="w-4 h-4" />
                             <span className="font-medium">
                               {t("modals.refund.voidWarning", {
@@ -2016,7 +2047,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                             <button
                               onClick={() => handleVoid(payment.id)}
                               disabled={processing || !voidReason.trim()}
-                              className="flex-1 liquid-glass-modal-button bg-red-600/20 active:bg-red-600/30 text-red-400 border-red-500/30 gap-2 disabled:opacity-50"
+                              className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 border-(--pos-s-border) gap-2 disabled:opacity-50"
                             >
                               <XCircle className="w-4 h-4" />
                               {processing
@@ -2045,7 +2076,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
 
                       {/* Refund form */}
                       {isRefunding && !isGift && (
-                        <div className="space-y-3 pt-2 border-t border-orange-500/20 animate-in fade-in slide-in-from-top-2 duration-200">
+                        <div className="space-y-3 pt-2 border-t border-(--pos-s-border) animate-in fade-in slide-in-from-top-2 duration-200">
                           <div>
                             <label className="block text-sm font-medium liquid-glass-modal-text-muted mb-2">
                               <Banknote className="w-4 h-4 inline mr-1" />
@@ -2114,7 +2145,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                                 !refundAmount ||
                                 parseFloat(refundAmount) <= 0
                               }
-                              className="flex-1 liquid-glass-modal-button bg-orange-600/20 active:bg-orange-600/30 text-orange-400 border-orange-500/30 gap-2 disabled:opacity-50"
+                              className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-orange-800 dark:text-orange-300 border-(--pos-s-border) gap-2 disabled:opacity-50"
                             >
                               <RotateCcw className="w-4 h-4" />
                               {processing
@@ -2214,22 +2245,22 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                         data-testid={`refund-adjustment-${adj.id}`}
                         className={`p-3 rounded-lg border ${
                           adj.adjustment_type === "void"
-                            ? "bg-red-500/5 border-red-500/20"
-                            : "bg-orange-500/5 border-orange-500/20"
+                            ? "bg-(--pos-s-surface-2) border-(--pos-s-border)"
+                            : "bg-(--pos-s-surface-2) border-(--pos-s-border)"
                         }`}
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
                             {adj.adjustment_type === "void" ? (
-                              <XCircle className="w-4 h-4 text-red-400" />
+                              <XCircle className="w-4 h-4 text-red-700 dark:text-red-400" />
                             ) : (
-                              <RotateCcw className="w-4 h-4 text-orange-400" />
+                              <RotateCcw className="w-4 h-4 text-orange-700 dark:text-orange-400" />
                             )}
                             <span
                               className={`text-sm font-medium ${
                                 adj.adjustment_type === "void"
-                                  ? "text-red-400"
-                                  : "text-orange-400"
+                                  ? "text-red-700 dark:text-red-400"
+                                  : "text-orange-700 dark:text-orange-400"
                               }`}
                             >
                               {adj.adjustment_type === "void"
@@ -2244,8 +2275,8 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                           <span
                             className={`font-bold ${
                               adj.adjustment_type === "void"
-                                ? "text-red-400"
-                                : "text-orange-400"
+                                ? "text-red-700 dark:text-red-400"
+                                : "text-orange-700 dark:text-orange-400"
                             }`}
                           >
                             -{formatCurrency(adj.amount)}

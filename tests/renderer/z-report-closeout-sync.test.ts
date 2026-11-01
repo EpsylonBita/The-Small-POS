@@ -173,13 +173,17 @@ test('ZReportModal renders the closeout workbench with localized labels', () => 
   const glassCss = source(glassCssPath);
   assert.match(glassCss, /\.liquid-glass-modal-shell\.z-report-glass-shell/);
   assert.match(glassCss, /\.liquid-glass-modal-content\.z-report-glass-content/);
-  assert.match(glassCss, /backdrop-filter:\s*blur\(42px\)\s*saturate\(145%\)\s*!important/);
   const zReportGlassCss = glassCss.slice(
     glassCss.indexOf('.liquid-glass-modal-shell.z-report-glass-shell'),
     glassCss.indexOf('/* Ultra crisp text class', glassCss.indexOf('.liquid-glass-modal-shell.z-report-glass-shell')),
   );
-  assert.match(zReportGlassCss, /rgba\(8, 8, 8, 0\.72\)/);
-  assert.match(zReportGlassCss, /rgba\(250, 204, 21, 0\.26\)/);
+  // Founder 31/10: the shared modal glass (frost, light rim, the 40px blur), one theme-aware token set;
+  // the content layer adds no second frost.
+  assert.match(zReportGlassCss, /background: var\(--modal-glass\) !important;/);
+  assert.match(zReportGlassCss, /backdrop-filter: blur\(40px\) saturate\(1\.15\) !important;/);
+  assert.match(zReportGlassCss, /border-color: var\(--modal-glass-border\);/);
+  assert.match(zReportGlassCss, /\.liquid-glass-modal-content\.z-report-glass-content \{[\s\S]*?background: transparent !important;/);
+  assert.doesNotMatch(zReportGlassCss, /rgba\(250, 204, 21/);
   assert.doesNotMatch(zReportGlassCss, /rgba\(2, 6, 23/);
   assert.doesNotMatch(zReportGlassCss, /#f8fafc/);
 

@@ -190,7 +190,7 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
         : t('settings.peripherals.callerId.networkAccess.permissionNeeded', 'Permission needed')
 
   return (
-    <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-3 dark:bg-black/10">
+    <div className="rounded-2xl border liquid-glass-modal-border px-4 py-3 space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
           <div className="flex items-center gap-2">
@@ -209,8 +209,8 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
               <span
                 className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
                   ready
-                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-200'
-                    : 'bg-yellow-400/15 text-yellow-900 dark:text-yellow-200'
+                    ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-200'
+                    : 'bg-yellow-50 dark:bg-yellow-950 text-yellow-900 dark:text-yellow-200'
                 }`}
               >
                 {badgeText}
@@ -235,7 +235,7 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
       {lastFailure && (
         <div
           role="alert"
-          className="rounded-xl border border-red-500/35 bg-red-500/10 px-3 py-2 text-xs text-red-800 dark:text-red-100"
+          className="rounded-xl border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 px-3 py-2 text-xs text-red-800 dark:text-red-100"
         >
           <p>{lastFailure.message}</p>
           <p className="mt-1 font-mono text-[11px] font-semibold">
@@ -250,8 +250,8 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
       <div
         className={`flex items-start gap-2 rounded-xl border px-3 py-2 text-xs ${
           ready
-            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-100'
-            : 'border-yellow-500/35 bg-yellow-400/10 text-yellow-900 dark:text-yellow-100'
+            ? 'border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-100'
+            : 'border-yellow-300 dark:border-yellow-800 bg-yellow-50 dark:bg-yellow-950 text-yellow-900 dark:text-yellow-100'
         }`}
       >
         {busy ? (
@@ -266,13 +266,13 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
           type="button"
           onClick={() => void refreshStatus()}
           disabled={busy}
-          className="inline-flex min-h-[32px] min-w-[32px] shrink-0 items-center justify-center rounded-lg border border-current/20 disabled:opacity-50"
+          className="inline-flex min-h-touch min-w-touch shrink-0 items-center justify-center rounded-xl border border-current/20 transition-transform duration-150 active:scale-95 disabled:opacity-50"
           aria-label={t(
             'settings.peripherals.callerId.networkAccess.checkAgain',
             'Check permission again',
           )}
         >
-          <RefreshCw className="h-3.5 w-3.5" />
+          <RefreshCw className="h-4 w-4" />
         </button>
       </div>
     </div>

@@ -14,7 +14,12 @@ vi.mock('../../../../lib', () => ({ getBridge: () => bridge, onEvent: vi.fn(), o
 vi.mock('react-i18next', () => ({ useTranslation: () => translation }));
 vi.mock('react-hot-toast', () => ({ toast: notices }));
 vi.mock('../../ui/pos-glass-components', () => ({
-  POSGlassSwitch: ({ checked, onChange, ...props }: any) => <input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} {...props} />,
+  // Wave 7Δ: the delete confirmation is the shared ConfirmDialog (a LiquidGlassModal above Settings).
+  LiquidGlassModal: ({ isOpen, title, ariaLabel, header, children, footer }: any) => isOpen
+    ? <div role="dialog" aria-label={title ?? ariaLabel}>{header}{children}{footer}</div> : null,
+  POSGlassButton: ({ children, variant, loading, ...props }: any) => <button type="button" {...props}>{children}</button>,
+  POSGlassInput: (props: any) => <input {...props} />,
+  POSGlassSwitch:({ checked, onChange, ...props }: any) => <input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} {...props} />,
 }));
 
 import { CashRegisterSection } from '../CashRegisterSection';
@@ -148,10 +153,22 @@ describe('cash register device actions', () => {
     bridge.ecr.removeDevice.mockResolvedValue({ success: false });
     await open();
     fireEvent.click(screen.getByRole('button', { name: 'Delete', exact: true }));
+    const confirm = screen.getByRole('dialog', { name: 'Delete Device' });
+    expect(confirm).toHaveTextContent('Register A');
     fireEvent.click(screen.getAllByRole('button', { name: 'Delete', exact: true }).at(-1)!);
     await waitFor(() => expect(notices.error).toHaveBeenCalled());
     expect(screen.getByText('Register A')).toBeInTheDocument();
     expect(notices.success).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete Device' })).toBeNull());
+  });
+
+  it('cancels a delete from the shared confirmation without removing the register (wave 7Δ)', async () => {
+    await open();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel', exact: true }));
+    expect(screen.queryByRole('dialog', { name: 'Delete Device' })).toBeNull();
+    expect(bridge.ecr.removeDevice).not.toHaveBeenCalled();
+    expect(screen.getByText('Register A')).toBeInTheDocument();
   });
 
   it('shows a failed load with retry instead of a false empty device list', async () => {
@@ -177,6 +194,18 @@ describe('cash register device actions', () => {
     await waitFor(() => expect(notices.success).toHaveBeenCalledWith('Device disabled'));
     expect(screen.getByText('Disabled')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Disable', exact: true })).toBeNull();
+  });
+
+  it('shows automatic fiscal printing only once a register exists, without touching the stored value (wave 7Δ2)', async () => {
+    bridge.ecr.getDevices.mockResolvedValueOnce({ success: true, devices: [] });
+    const { unmount } = render(<CashRegisterSection />);
+    await screen.findByText('No cash register devices configured');
+    expect(screen.queryByRole('checkbox', { name: 'Auto Fiscal Print' })).toBeNull();
+    unmount();
+
+    await open();
+    expect(screen.getByRole('checkbox', { name: 'Auto Fiscal Print' })).toBeChecked();
+    expect(bridge.settings.set).not.toHaveBeenCalledWith('terminal', 'fiscal_print_enabled', expect.anything());
   });
 
   it('shows no plugin warning for an admitted register', async () => {

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { Clock3, Download, FolderOpen, RefreshCw, RotateCcw, Save } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { solidButton } from '../settings/SettingsKit';
 
 import { getBridge, type RecoveryPoint } from '../../../lib';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
@@ -54,17 +55,12 @@ const RECOVERY_PANEL_MAX_HEIGHT =
 const RECOVERY_PANEL_MAX_HEIGHT_STYLE =
   `clamp(240px, calc(100vh - 520px), ${RECOVERY_PANEL_MAX_HEIGHT}px)`;
 
-// Shared action-button recipe: full-width within its grid cell, centred icon+label,
-// consistent touch height, active/tap feedback only (no hover). Variants add semantic
-// colour — green for the safe "create snapshot" action, amber for the cautious restore.
-const ACTION_BTN_BASE =
-  'inline-flex w-full items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm font-medium transition-transform duration-150 active:scale-[0.98] disabled:opacity-60';
-const ACTION_BTN_NEUTRAL =
-  `${ACTION_BTN_BASE} liquid-glass-modal-border liquid-glass-modal-text active:bg-white/10`;
-const ACTION_BTN_GREEN =
-  `${ACTION_BTN_BASE} border-green-500 bg-green-500/15 text-green-700 dark:text-green-300 active:bg-green-500/25`;
-const ACTION_BTN_AMBER =
-  `${ACTION_BTN_BASE} border-amber-400/50 bg-amber-500/10 text-amber-700 dark:text-amber-100 active:bg-amber-500/20`;
+// Shared action-button recipe (wave 7Ε): the kit's solid secondary button, full width in its grid
+// cell, so the actions read as buttons on the frosted card (they were borderless ghosts).
+const ACTION_BTN_NEUTRAL = `${solidButton('secondary', 'md')} pos-solid-btn--wrap w-full`;
+// Wave 7A2: recovery actions are neutral solid buttons; the copy, not a tint, says what they do.
+const ACTION_BTN_GREEN = ACTION_BTN_NEUTRAL;
+const ACTION_BTN_AMBER = ACTION_BTN_NEUTRAL;
 
 export function RecoveryPanel({ className = '', compact = false }: RecoveryPanelProps) {
   const { t } = useTranslation();
@@ -238,42 +234,43 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
   return (
     <>
       <div className={className}>
-        <div className="space-y-3 rounded-2xl border liquid-glass-modal-border bg-white/5 px-3 py-3">
+        <section className="pos-group" data-recovery-panel>
           {/* Header: what this surface does, in plain language */}
-          <div className="space-y-1">
-            <div className="font-medium liquid-glass-modal-text">
+          <header className="pos-group__head">
+            <h3 className="pos-group__title">
               {t('settings.recovery.title', 'Local Recovery')}
-            </div>
-            <div className="text-xs liquid-glass-modal-text-muted">
+            </h3>
+            <p className="pos-group__desc">
               {t(
                 'settings.recovery.help',
                 'Keeps local SQLite recovery points and export bundles for up to 7 days.',
               )}
-            </div>
-          </div>
+            </p>
+          </header>
+          <div className="space-y-3 px-5 pb-4 pt-2">
 
           {/* Latest snapshot status */}
           <div className={`grid gap-2 ${compact ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
-            <div className="rounded-2xl border liquid-glass-modal-border bg-black/10 px-3 py-2">
-              <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">
+            <div className="pos-card px-3 py-2">
+              <div className="text-sm liquid-glass-modal-text-muted">
                 {t('settings.recovery.latestAutomatic', 'Latest automatic snapshot')}
               </div>
-              <div className="mt-1 text-sm liquid-glass-modal-text">
+              <div className="mt-1 text-base font-semibold liquid-glass-modal-text">
                 {latestAutomatic ? formatWhen(latestAutomatic.createdAt, t('settings.recovery.unknown', 'Unknown')) : t('common.none', 'None')}
               </div>
             </div>
-            <div className="rounded-2xl border liquid-glass-modal-border bg-black/10 px-3 py-2">
-              <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">
+            <div className="pos-card px-3 py-2">
+              <div className="text-sm liquid-glass-modal-text-muted">
                 {t('settings.recovery.latestDestructive', 'Latest protective snapshot')}
               </div>
-              <div className="mt-1 text-sm liquid-glass-modal-text">
+              <div className="mt-1 text-base font-semibold liquid-glass-modal-text">
                 {latestDestructive ? formatWhen(latestDestructive.createdAt, t('settings.recovery.unknown', 'Unknown')) : t('common.none', 'None')}
               </div>
             </div>
           </div>
 
           {/* Top actions: refresh / create (green) / export / open folder */}
-          <div className={`grid gap-2 ${compact ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-4'}`}>
+          <div className={`grid gap-2 ${compact ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'}`}>
             <button
               onClick={() => void loadPoints()}
               disabled={loading}
@@ -314,7 +311,7 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
                 style={{ maxHeight: RECOVERY_PANEL_MAX_HEIGHT_STYLE }}
               >
                 {points.length === 0 ? (
-                  <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-5 text-sm liquid-glass-modal-text-muted">
+                  <div className="pos-card px-4 py-5 text-sm liquid-glass-modal-text-muted">
                     {t('settings.recovery.noPoints', 'No local recovery points are available yet.')}
                   </div>
                 ) : (
@@ -325,27 +322,23 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
                         key={point.id}
                         onClick={() => setSelectedPointId(point.id)}
                         aria-pressed={isSelected}
-                        className={`w-full rounded-2xl border px-4 py-3 text-left transition-colors ${
-                          isSelected
-                            ? 'border-yellow-400/60 bg-yellow-400/10'
-                            : 'liquid-glass-modal-border bg-white/5 active:bg-white/10'
-                        }`}
+                        className={`pos-choice-card${isSelected ? ' is-selected' : ''}`}
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <div className="font-medium liquid-glass-modal-text">
                               {localizedKind(point.kind)}
                             </div>
-                            <div className="mt-1 flex items-center gap-2 text-xs liquid-glass-modal-text-muted">
+                            <div className="mt-1 flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
                               <Clock3 className="h-3.5 w-3.5" />
                               {formatWhen(point.createdAt, t('settings.recovery.unknown', 'Unknown'))}
                             </div>
                           </div>
-                          <div className="text-xs liquid-glass-modal-text-muted">
+                          <div className="text-sm liquid-glass-modal-text-muted">
                             {formatBytes(point.snapshotSizeBytes)}
                           </div>
                         </div>
-                        <div className="mt-2 text-xs liquid-glass-modal-text-muted">
+                        <div className="mt-2 text-sm liquid-glass-modal-text-muted">
                           {t('settings.recovery.countsSummary', {
                             orders: point.tableCounts.orders ?? 0,
                             shifts: point.tableCounts.staff_shifts ?? 0,
@@ -361,7 +354,7 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
 
               <div
                 data-recovery-detail-scroll
-                className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-4 overflow-y-auto scrollbar-hide recovery-detail-scrollbar-hidden"
+                className="pos-card px-4 py-4 overflow-y-auto scrollbar-hide recovery-detail-scrollbar-hidden"
                 style={{ maxHeight: RECOVERY_PANEL_MAX_HEIGHT_STYLE }}
               >
                 {selectedPoint ? (
@@ -373,39 +366,39 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
                     </div>
 
                     <div className="grid grid-cols-2 gap-2 text-sm">
-                      <div className="rounded-2xl border liquid-glass-modal-border bg-black/10 px-3 py-2">
-                        <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">{t('settings.recovery.orders', 'Orders')}</div>
-                        <div className="mt-1 liquid-glass-modal-text">{selectedPoint.tableCounts.orders ?? 0}</div>
+                      <div className="pos-card px-3 py-2">
+                        <div className="text-sm liquid-glass-modal-text-muted">{t('settings.recovery.orders', 'Orders')}</div>
+                        <div className="mt-1 text-base font-semibold liquid-glass-modal-text">{selectedPoint.tableCounts.orders ?? 0}</div>
                       </div>
-                      <div className="rounded-2xl border liquid-glass-modal-border bg-black/10 px-3 py-2">
-                        <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">{t('settings.recovery.shifts', 'Shifts')}</div>
-                        <div className="mt-1 liquid-glass-modal-text">{selectedPoint.tableCounts.staff_shifts ?? 0}</div>
+                      <div className="pos-card px-3 py-2">
+                        <div className="text-sm liquid-glass-modal-text-muted">{t('settings.recovery.shifts', 'Shifts')}</div>
+                        <div className="mt-1 text-base font-semibold liquid-glass-modal-text">{selectedPoint.tableCounts.staff_shifts ?? 0}</div>
                       </div>
-                      <div className="rounded-2xl border liquid-glass-modal-border bg-black/10 px-3 py-2">
-                        <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">{t('settings.recovery.drawers', 'Drawers')}</div>
-                        <div className="mt-1 liquid-glass-modal-text">{selectedPoint.tableCounts.cash_drawer_sessions ?? 0}</div>
+                      <div className="pos-card px-3 py-2">
+                        <div className="text-sm liquid-glass-modal-text-muted">{t('settings.recovery.drawers', 'Drawers')}</div>
+                        <div className="mt-1 text-base font-semibold liquid-glass-modal-text">{selectedPoint.tableCounts.cash_drawer_sessions ?? 0}</div>
                       </div>
-                      <div className="rounded-2xl border liquid-glass-modal-border bg-black/10 px-3 py-2">
-                        <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">{t('settings.recovery.snapshot', 'Snapshot')}</div>
-                        <div className="mt-1 liquid-glass-modal-text">{formatBytes(selectedPoint.snapshotSizeBytes)}</div>
+                      <div className="pos-card px-3 py-2">
+                        <div className="text-sm liquid-glass-modal-text-muted">{t('settings.recovery.snapshot', 'Snapshot')}</div>
+                        <div className="mt-1 text-base font-semibold liquid-glass-modal-text">{formatBytes(selectedPoint.snapshotSizeBytes)}</div>
                       </div>
                     </div>
 
-                    <div className="space-y-1 text-xs liquid-glass-modal-text-muted">
+                    <div className="space-y-1 text-sm liquid-glass-modal-text-muted">
                       <div>{t('settings.recovery.businessDay', 'Business day')}: {selectedPoint.activeReportDate || selectedPoint.latestZReportDate || t('settings.recovery.unknown', 'Unknown')}</div>
                     </div>
 
                     {selectedPoint.error ? (
-                      <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                      <div role="status" className="pos-notice pos-notice--warn text-sm">
                         {selectedPoint.error}
                       </div>
                     ) : null}
 
-                    <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-3 py-2 text-xs liquid-glass-modal-text-muted">
+                    <div className="pos-card px-3 py-2 text-sm liquid-glass-modal-text-muted">
                       {t('settings.recovery.restoreNote', 'Restored print jobs in pending or printing state will be cancelled during recovery so the POS does not replay historical tickets after restart.')}
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2 pt-1">
+                    <div className="grid grid-cols-1 gap-2 pt-1">
                       <button
                         onClick={handleExportPoint}
                         disabled={!selectedPoint || busyAction !== null}
@@ -428,9 +421,9 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
                         even behind a disclosure. The IDs stay internal to the export/restore handlers; here we
                         render only a calm, non-interactive support note. If support needs the exact snapshot,
                         the operator exports the selected point. */}
-                    <div data-recovery-support-note className="rounded-2xl border liquid-glass-modal-border bg-black/10 px-3 py-2">
-                      <div className="text-xs font-semibold liquid-glass-modal-text">{t('settings.recovery.supportNoteTitle', 'Support reference saved')}</div>
-                      <div className="mt-0.5 text-[11px] liquid-glass-modal-text-muted">{t('settings.recovery.supportNoteHelp', 'Export this snapshot if support asks for it.')}</div>
+                    <div data-recovery-support-note className="pos-card px-3 py-2">
+                      <div className="text-sm font-semibold liquid-glass-modal-text">{t('settings.recovery.supportNoteTitle', 'Support reference saved')}</div>
+                      <div className="mt-0.5 text-sm liquid-glass-modal-text-muted">{t('settings.recovery.supportNoteHelp', 'Export this snapshot if support asks for it.')}</div>
                     </div>
                   </div>
                 ) : (
@@ -441,7 +434,8 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
               </div>
             </div>
           </div>
-        </div>
+          </div>
+        </section>
       </div>
       {confirmationModal}
     </>

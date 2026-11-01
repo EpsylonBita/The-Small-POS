@@ -122,9 +122,9 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
       className="max-w-[400px]! max-h-[calc(100dvh-1.5rem)]"
       contentClassName="space-y-3"
     >
-      {!blockedMessage && <div className="rounded-2xl border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-emerald-950 shadow-xs shadow-emerald-950/5 dark:text-emerald-50">
+      {!blockedMessage && <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2.5 text-emerald-950 shadow-xs dark:text-emerald-50">
         <div className="flex items-start gap-3">
-          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white">
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-700 text-white">
             <ShieldCheck size={16} aria-hidden="true" />
           </div>
           <div className="min-w-0">
@@ -139,7 +139,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
       </div>}
 
       {blockedMessage ? (
-        <p role="status" className="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm text-slate-900 dark:text-slate-100">
+        <p role="status" className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-3 text-sm text-slate-900 dark:text-slate-100">
           {blockedMessage}
         </p>
       ) : <>
@@ -161,7 +161,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
                 className={[
                   'flex h-9 items-center justify-center rounded-md border text-lg font-semibold',
                   filled
-                    ? 'border-emerald-500 bg-emerald-500 text-white shadow-xs'
+                    ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-xs'
                     : 'border-slate-300 bg-slate-100 text-slate-400 dark:border-white/15 dark:bg-slate-900 dark:text-slate-500',
                 ].join(' ')}
               >
@@ -175,7 +175,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
       {(errorMessage || error) && (
         <div
           role="alert"
-          className="rounded-2xl border border-red-400/50 bg-red-500/10 px-3 py-2 text-center text-sm font-semibold text-red-700 dark:text-red-200"
+          className="rounded-2xl border border-red-600 bg-(--pos-s-surface-2) px-3 py-2 text-center text-sm font-semibold text-red-700 dark:text-red-200"
         >
           {errorMessage || error}
         </div>
@@ -224,7 +224,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
         type="button"
         onClick={handleSubmit}
         disabled={!pin || loading}
-        className="inline-flex min-h-[48px] w-full items-center justify-center rounded-xl bg-emerald-600 px-4 py-2.5 text-center text-base font-semibold text-white shadow-xs transition active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 dark:disabled:bg-slate-700 dark:disabled:text-slate-300"
+        className="inline-flex min-h-[48px] w-full items-center justify-center rounded-xl bg-(--pos-s-yellow) px-4 py-2.5 text-center text-base font-semibold text-black shadow-xs transition active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 dark:disabled:bg-slate-700 dark:disabled:text-slate-300"
       >
         {loading
           ? t('auth.login.loading')

@@ -188,7 +188,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
             disabled={!canConfirm}
             className={`liquid-glass-modal-button flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed ${
               canConfirm
-                ? 'bg-red-600! text-white! border-red-600! active:bg-red-700! shadow-md shadow-red-600/30'
+                ? 'bg-red-600! text-white! border-red-600! active:bg-red-700! shadow-md'
                 : 'liquid-glass-modal-error'
             }`}
           >
@@ -205,7 +205,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
         <div
           data-testid="order-cancellation-saved-attempt"
           role={savedAttempt.refused ? 'alert' : 'status'}
-          className="mb-6 rounded-xl border border-amber-400/40 bg-amber-500/10 p-3 text-sm liquid-glass-modal-text"
+          className="mb-6 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 text-sm liquid-glass-modal-text"
         >
           <p className="mb-3">
             {t(savedAttempt.refused
@@ -258,7 +258,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
                   aria-pressed={selected}
                   className={`rounded-xl border px-3 py-2 text-left text-sm transition active:scale-[0.98] ${
                     selected
-                      ? 'border-amber-400 bg-amber-400 text-black shadow-md shadow-amber-400/30'
+                      ? 'border-amber-400 bg-amber-400 text-black shadow-md'
                       : 'border-white/20 bg-white/6 liquid-glass-modal-text active:bg-white/12'
                   }`}
                 >

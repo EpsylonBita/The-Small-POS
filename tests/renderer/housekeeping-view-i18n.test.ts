@@ -314,13 +314,13 @@ test('Round 256: stats / filters / headers / cards use the POS glass system, not
   assert.ok(glass.length >= 4, `expected >=4 glass surfaces (stats/header/card/section), found ${glass.length}`);
   assert.match(viewSource, /backdrop-blur-md/);
   // The refresh control is an amber glass icon button.
-  assert.match(viewSource, /bg-amber-500\/15 text-amber-300/);
+  assert.match(viewSource, /bg-\(--pos-s-surface-2\) text-amber-(?:700|800) dark:text-amber-300/);
 });
 
 test('Round 256/428: action buttons are non-blue semantic glass with a neutral disabled state', () => {
   // Start/Create/Verify = amber glass, Complete = green glass (dark accents).
-  assert.match(viewSource, /border-amber-400\/40 bg-amber-500\/20 text-amber-200/);
-  assert.match(viewSource, /border-emerald-500\/40 bg-emerald-500\/20 text-emerald-300/);
+  assert.match(viewSource, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-amber-(?:700|800) dark:text-amber-200/);
+  assert.match(viewSource, /border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\) text-black/);
   assert.doesNotMatch(viewSource, /purple-/);
   assert.doesNotMatch(viewSource, /rounded-lg/);
   assert.match(viewSource, /w-full py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95/);
@@ -338,7 +338,7 @@ test('Round 256/428: action buttons are non-blue semantic glass with a neutral d
 test('Round 359: Housekeeping light theme keeps cards, controls, and action buttons readable', () => {
   assert.match(
     viewSource,
-    /const lightGlassSurface = 'bg-white\/72 border-zinc-300\/80 shadow-\[0_12px_30px_rgba\(15,23,42,0\.10\)\]'/,
+    /const lightGlassSurface = 'bg-white\/72 border-zinc-300\/80'/,
   );
   assert.match(
     viewSource,
@@ -351,7 +351,7 @@ test('Round 359: Housekeeping light theme keeps cards, controls, and action butt
   assert.match(viewSource, /isDark \? 'text-gray-400' : 'text-gray-600'/);
 
   // Light action buttons are visibly active surfaces, not pale disabled-looking bg-*-50 buttons.
-  assert.match(viewSource, /border-amber-500\/60 bg-amber-100 text-amber-900 active:bg-amber-200/);
-  assert.match(viewSource, /border-emerald-500\/60 bg-emerald-100 text-emerald-900 active:bg-emerald-200/);
+  assert.match(viewSource, /border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\) text-amber-900 active:bg-\(--pos-s-surface-2\)/);
+  assert.match(viewSource, /border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\) text-black active:bg-yellow-500/);
   assert.doesNotMatch(viewSource, /border-purple-500\/60 bg-purple-100 text-purple-900 active:bg-purple-200/);
 });

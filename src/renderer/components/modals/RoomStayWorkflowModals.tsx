@@ -91,7 +91,7 @@ export const RoomFloorChips: React.FC<RoomFloorChipsProps> = ({ floors, value, o
 
   const chipClass = (active: boolean): string =>
     `shrink-0 rounded-full px-3.5 py-2 text-sm font-medium transition-transform duration-150 active:scale-95 ${
-      active ? 'bg-yellow-400 text-black' : 'liquid-glass-modal-button liquid-glass-modal-text'
+      active ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)' : 'liquid-glass-modal-button liquid-glass-modal-text'
     }`;
 
   return (
@@ -151,8 +151,8 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
       })
     : null;
   const accentClass = isCheckin
-    ? 'border-green-400/30 bg-linear-to-br from-green-500/10 to-green-600/5'
-    : 'border-purple-400/30 bg-linear-to-br from-purple-500/10 to-purple-600/5';
+    ? 'border-(--pos-s-border)'
+    : 'border-(--pos-s-border)';
   const EmptyIcon = isCheckin ? UserCheck : CalendarPlus;
 
   // Floor filter narrows the displayed room cards. Reset to "all" each time the picker reopens
@@ -246,7 +246,7 @@ const GlassInput: React.FC<{
 }> = ({ icon, label, value, onChange, type = 'text', required, readOnly }) => (
   <div>
     <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
-      {label} {required && <span className="text-red-400">*</span>}
+      {label} {required && <span className="text-red-700 dark:text-red-400">*</span>}
     </label>
     <div className="relative">
       {icon && (
@@ -476,7 +476,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
         <RoomChip room={room} subtitle={translateRoomType(t, room.roomType)} />
         {loadingBooking && <p role="status">{t('roomWorkflow.loadingBooking')}</p>}
         {booking && <p className="text-sm">{t('roomWorkflow.resumeBooking', { number: booking.reservationNumber })} · {booking.checkInDate} – {booking.checkOutDate}</p>}
-        {failure && <p role="alert" className="rounded-xl border border-red-500/40 p-3 text-red-500">{failure}</p>}
+        {failure && <p role="alert" className="rounded-xl border border-(--pos-s-border) p-3 text-red-500">{failure}</p>}
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <GlassInput
@@ -541,7 +541,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
           />
         </div>
 
-        {!hasGuestBilling && <p className="rounded-xl border border-amber-500/40 p-3 text-sm">{t('roomWorkflow.noBillingNotice')}</p>}
+        {!hasGuestBilling && <p className="rounded-xl border border-(--pos-s-border) p-3 text-sm">{t('roomWorkflow.noBillingNotice')}</p>}
 
         <div className="liquid-glass-modal-inset flex items-center justify-between rounded-2xl p-4">
           <span className="liquid-glass-modal-text-muted text-sm">
@@ -555,7 +555,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
             type="button"
             onClick={onClose}
             disabled={submitting}
-            className="flex-1 rounded-xl border border-red-400/40 bg-red-500/15 py-3 font-medium text-red-300 transition-transform duration-150 active:scale-95 active:bg-red-500/25 disabled:opacity-50"
+            className="flex-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) py-3 font-medium text-(--pos-s-fg) transition-transform duration-150 active:scale-95 active:bg-(--pos-s-surface-2) disabled:opacity-50"
           >
             {t('common.actions.cancel', { defaultValue: 'Cancel' })}
           </button>
@@ -563,7 +563,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
             type="button"
             onClick={handleCheckin}
             disabled={!name.trim() || (requiresPhone && !phone.trim()) || submitting || loadingBooking}
-            className="flex-1 rounded-xl border border-emerald-500 bg-emerald-600 py-3 font-medium text-white transition-transform duration-150 active:scale-95 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
+            className="flex-1 rounded-xl border border-(--pos-s-yellow) bg-(--pos-s-yellow) py-3 font-medium text-black transition-transform duration-150 active:scale-95 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
           >
             {t('roomsView.completeCheckin', { defaultValue: 'Complete Check-in' })}
           </button>
@@ -674,7 +674,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
       <div className="space-y-4 p-1">
         <RoomChip room={selectedRoom} subtitle={translateRoomType(t, selectedRoom.roomType)} />
         {rooms && <label className="block text-sm">{t('roomsView.selectRoom')}<select className={fieldClass} value={selectedRoomId} onChange={(event) => setSelectedRoomId(event.target.value)}>{rooms.map((option) => <option key={option.id} value={option.id}>{option.roomNumber}</option>)}</select></label>}
-        {failure && <p role="alert" className="rounded-xl border border-red-500/40 p-3 text-red-500">{failure}</p>}
+        {failure && <p role="alert" className="rounded-xl border border-(--pos-s-border) p-3 text-red-500">{failure}</p>}
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <GlassInput
@@ -751,7 +751,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
             type="button"
             onClick={onClose}
             disabled={submitting}
-            className="flex-1 rounded-xl border border-red-400/40 bg-red-500/15 py-3 font-medium text-red-300 transition-transform duration-150 active:scale-95 active:bg-red-500/25 disabled:opacity-50"
+            className="flex-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) py-3 font-medium text-(--pos-s-fg) transition-transform duration-150 active:scale-95 active:bg-(--pos-s-surface-2) disabled:opacity-50"
           >
             {t('common.actions.cancel', { defaultValue: 'Cancel' })}
           </button>
@@ -759,7 +759,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
             type="button"
             onClick={handleReservation}
             disabled={!name.trim() || !phone.trim() || !nights || submitting}
-            className="flex-1 rounded-xl border border-emerald-500 bg-emerald-600 py-3 font-medium text-white transition-transform duration-150 active:scale-95 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
+            className="flex-1 rounded-xl border border-(--pos-s-yellow) bg-(--pos-s-yellow) py-3 font-medium text-black transition-transform duration-150 active:scale-95 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
           >
             {reservation ? t('common.actions.save', { defaultValue: 'Save' }) : t('roomsView.createReservation', { defaultValue: 'Create Reservation' })}
           </button>

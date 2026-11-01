@@ -87,7 +87,7 @@ test('OrderDetailsModal gives cancelled pickup orders a clear three-card layout'
     // Compact restyle: the scroll body uses px-6 pt-16 pb-24 (was px-6 pb-6 pt-16).
     assert.match(html, /px-6 pt-16 pb-24/);
     assert.doesNotMatch(html, /overflow-hidden p-6 pr-24/);
-    assert.match(html, /border-red-500\/70[\s\S]*bg-black[\s\S]*text-center[\s\S]*text-red-400[\s\S]*Cancellation Reason[\s\S]*text-2xl[\s\S]*text-white[\s\S]*deleted/);
+    assert.match(html, /border-red-600[\s\S]*bg-black[\s\S]*text-center[\s\S]*text-red-400[\s\S]*Cancellation Reason[\s\S]*text-2xl[\s\S]*text-white[\s\S]*deleted/);
   } finally {
     resetBridge();
   }

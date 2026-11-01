@@ -119,8 +119,8 @@ test('MenuCart centers the manual-item plus inside its enlarged touch target', (
   );
   assert.match(
     buttonBlock,
-    /bg-yellow-400 text-black/,
-    'the active manual-item toggle should use the POS yellow accent',
+    /bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)/,
+    'the active manual-item toggle is the kit selection (Wave ΣΤ8b)',
   );
   assert.doesNotMatch(
     buttonBlock,
@@ -150,8 +150,9 @@ test('MenuCart uses the yellow POS accent for its quick-action icons', () => {
     assert.ok(iconIdx > 0 && buttonIdx > 0, `${icon} cart action should exist`);
 
     const buttonBlock = menuCart.slice(buttonIdx, iconIdx);
-    assert.match(buttonBlock, /text-yellow-/, `${icon} should use the yellow POS accent`);
-    assert.doesNotMatch(buttonBlock, /text-amber-|focus:ring-amber-/, `${icon} should not render orange/amber`);
+    // Wave ΣΤ8b: dark amber ink on light (>= 3:1 on the cart surface), yellow only in dark.
+    assert.match(buttonBlock, /text-amber-800 focus:ring-yellow-400 dark:text-yellow-300|text-zinc-500 dark:text-zinc-400/, `${icon} reaches 3:1 in both themes`);
+    assert.doesNotMatch(buttonBlock, /(?<![:\w-])text-yellow-(?:500|600|700)\b|focus:ring-amber-/, `${icon} should not use light yellow ink`);
   }
 });
 

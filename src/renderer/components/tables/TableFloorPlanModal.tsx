@@ -155,7 +155,7 @@ export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
 
           <div
             className={`flex flex-1 flex-wrap items-center gap-1 rounded-xl border p-1 ${
-              isDark ? 'border-white/10 bg-white/6' : 'border-amber-100/80 bg-white'
+              isDark ? 'border-white/10 bg-white/6' : 'border-(--pos-s-border) bg-white'
             }`}
           >
             <button

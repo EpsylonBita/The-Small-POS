@@ -63,8 +63,12 @@ test('the native titlebar owns visible space and top shell actions stay below it
     layoutSource,
     /data-app-window-content[\s\S]*?className="relative flex min-h-0 flex-1 transform-gpu flex-col overflow-hidden"/,
   );
-  assert.match(mainLayoutSource, /fixed top-12 right-24 sm:right-28/);
-  assert.match(appSource, /fixed top-12 left-38(?![\w.-])/);
+  // Founder 31/10: health, expenses and theme live in the right utility rail, centred on the right edge
+  // of the framed content (below the titlebar drag surface).
+  assert.match(mainLayoutSource, /<UtilityRailExpensesSlot>/);
+  assert.match(appSource, /<UtilityRail onOpenRecovery=\{openSyncRecovery\} \/>/);
+  const utilityRailSource = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'components', 'UtilityRail.tsx'), 'utf8');
+  assert.match(utilityRailSource, /className="pointer-events-none fixed right-0 top-1\/2 z-50 -translate-y-1\/2"/);
   assert.doesNotMatch(mainLayoutSource, /fixed top-28 right-24 sm:right-28/);
   assert.doesNotMatch(appSource, /fixed top-28 left-38(?![\w.-])/);
   assert.equal(
@@ -247,15 +251,16 @@ test('App wires updater state into the frame on login and main POS routes', () =
   const framedLayoutCount = (source.match(/<FullscreenAwareLayout update=\{frameUpdate\} windowState=\{windowState\}>/g) || []).length;
   assert.equal(framedLayoutCount, 2, 'login and main POS shell should both expose the update frame');
   assert.match(source, /<PageLoadMotion animationKey="login" className="h-full min-h-0">/);
-  assert.match(source, /<LoginPage onLogin=\{handleLogin\} \/>/);
-  assert.doesNotMatch(source, /<LoginPage onLogin=\{handleLogin\} onOpenSettings=/);
+  // Founder 31/10: the sign-in screen also takes its exit phase (the logo glides, then dives into its pearl).
+  assert.match(source, /<LoginPage\s+onLogin=\{handleLogin\}\s+exitPhase=\{loginExit\}\s+onLeft=\{\(\) => loginLeftRef\.current\?\.\(\)\}\s*\/>/);
+  assert.doesNotMatch(source, /<LoginPage[^>]*onOpenSettings=/);
   assert.match(source, /onCheckForUpdates=\{openUpdateCheck\}/);
   // The logged-in routes live in AppRoutes.tsx, rendered by App.tsx.
   assert.match(source, /<AppRoutes\s+onLogout=\{handleLogout\}\s+onOpenConnectionSettings=\{openConnectionSettings\}\s*\/>/);
   assert.match(readFileSync(appRoutesPath, 'utf8'), /<PageLoadMotion animationKey="new-order" className="h-full min-h-0">/);
   assert.match(source, /if \(!user\) \{\s*setShowConnectionSettings\(false\);/);
-  assert.match(source, /className="fixed top-12 left-38 z-40"/);
-  assert.match(source, /<SyncStatusIndicator onOpenRecovery=\{openSyncRecovery\} \/>/);
+  // Founder 31/10: the heart sits in the right utility rail (health stays reachable in cashier recovery).
+  assert.match(source, /<UtilityRail onOpenRecovery=\{openSyncRecovery\} \/>/);
   const unauthenticatedBranch = source.slice(
     source.indexOf('// Show login when no user'),
     source.indexOf('// Show main POS interface if logged in'),

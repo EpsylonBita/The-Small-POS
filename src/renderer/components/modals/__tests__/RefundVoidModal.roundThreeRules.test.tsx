@@ -15,6 +15,7 @@
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import toast from 'react-hot-toast';
 
 const mocks = vi.hoisted(() => ({
   // Stable across renders, as the real hooks are: the modal's loaders depend
@@ -83,7 +84,7 @@ const payment = (id: string, method: string, extra: Record<string, unknown> = {}
   ...extra,
 });
 
-const openModal = async (rows: unknown[], balance: Record<string, unknown>, balanceError?: Error) => {
+const openModal = async (rows: unknown[], balance: Record<string, unknown>, balanceError?: Error, props: Partial<React.ComponentProps<typeof RefundVoidModal>> = {}) => {
   mocks.bridge.payments.getOrderPayments.mockResolvedValue(rows);
   mocks.bridge.orders.getById.mockResolvedValue({ id: 'ord-1', order_type: 'delivery' });
   mocks.bridge.refunds.getPaymentBalance.mockResolvedValue({
@@ -96,7 +97,7 @@ const openModal = async (rows: unknown[], balance: Record<string, unknown>, bala
   mocks.bridge.refunds.listOrderAdjustments.mockResolvedValue([]);
   mocks.bridge.refunds.refundPayment.mockResolvedValue({ success: true });
   await act(async () => {
-    render(<RefundVoidModal isOpen onClose={() => undefined} orderId="ord-1" orderTotal={12} />);
+    render(<RefundVoidModal isOpen onClose={() => undefined} orderId="ord-1" orderTotal={12} {...props} />);
   });
   await waitFor(() => expect(mocks.bridge.payments.getOrderPayments).toHaveBeenCalled());
 };
@@ -216,5 +217,66 @@ describe('the refund screen follows the shared rules (round 3 review)', () => {
     const sent = mocks.bridge.refunds.refundPayment.mock.calls[0][0] as Record<string, unknown>;
     expect(sent.refundMethod).toBe('cash');
     expect('cashHandler' in sent).toBe(false);
+  });
+});
+
+
+describe('completed order full returns hand off to cancellation', () => {
+  it.each(['completed', 'delivered'])('opens the existing cancel flow before returning money on %s', async orderStatus => {
+    const onRequestCancellation = vi.fn(async () => true);
+    await openModal([payment('cash', 'cash')], {}, undefined, { orderStatus, onRequestCancellation });
+    await openRefundForm();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Confirm Refund/ })); });
+    expect(onRequestCancellation).toHaveBeenCalledExactlyOnceWith('ord-1');
+    expect(mocks.bridge.refunds.refundPayment).not.toHaveBeenCalled();
+  });
+  it('hands off the final remaining portion after earlier partial refunds', async () => {
+    const onRequestCancellation = vi.fn(async () => true);
+    await openModal([payment('cash', 'cash')], { totalRefunds: 8, remaining: 4 }, undefined,
+      { orderStatus: 'completed', onRequestCancellation });
+    await openRefundForm();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Confirm Refund/ })); });
+    expect(onRequestCancellation).toHaveBeenCalledOnce();
+    expect(mocks.bridge.refunds.refundPayment).not.toHaveBeenCalled();
+  });
+  it('keeps provider returns on their existing path, then promptly offers zero-money cancellation', async () => {
+    const onRequestCancellation = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    mocks.bridge.payments.getSettlementSnapshot.mockResolvedValue({ success: true, orderId: 'ord-1', netPaid: 0 });
+    await openModal([payment('provider-card', 'card')], {}, undefined,
+      { orderStatus: 'completed', onRequestCancellation });
+    await openRefundForm();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Confirm Refund/ })); });
+    expect(mocks.bridge.refunds.refundPayment).toHaveBeenCalledOnce();
+    expect(onRequestCancellation).toHaveBeenCalledTimes(2);
+  });
+  it('keeps a committed refund successful when the cancellation offer after it fails', async () => {
+    // Codex review on #398: an offline table preflight after the money returned showed «Refund failed».
+    const onRequestCancellation = vi.fn().mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('TABLE_PREFLIGHT_OFFLINE'));
+    mocks.bridge.payments.getSettlementSnapshot.mockResolvedValue({ success: true, orderId: 'ord-1', netPaid: 0 });
+    await openModal([payment('provider-card', 'card')], {}, undefined,
+      { orderStatus: 'completed', onRequestCancellation });
+    await openRefundForm();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Confirm Refund/ })); });
+    await waitFor(() => expect(onRequestCancellation).toHaveBeenCalledTimes(2));
+    expect(mocks.bridge.refunds.refundPayment).toHaveBeenCalledOnce();
+    expect(toast.success).toHaveBeenCalledWith('Refund recorded successfully');
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+  it('does not fall through to refund when cancellation preflight fails', async () => {
+    const onRequestCancellation = vi.fn().mockRejectedValue(new Error('PAYMENT_SYNC_REQUIRED'));
+    await openModal([payment('cash', 'cash')], {}, undefined, { orderStatus: 'completed', onRequestCancellation });
+    await openRefundForm();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Confirm Refund/ })); });
+    expect(mocks.bridge.refunds.refundPayment).not.toHaveBeenCalled();
+  });
+  it('keeps a partial refund on the ordinary refund path', async () => {
+    const onRequestCancellation = vi.fn(async () => true);
+    mocks.bridge.payments.getSettlementSnapshot.mockResolvedValue({ success: true, orderId: 'ord-1', netPaid: 8 });
+    await openModal([payment('cash', 'cash')], {}, undefined, { orderStatus: 'completed', onRequestCancellation });
+    await openRefundForm();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Refund Amount' }), { target: { value: '400' } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Confirm Refund/ })); });
+    expect(mocks.bridge.refunds.refundPayment).toHaveBeenCalledOnce();
+    expect(onRequestCancellation).not.toHaveBeenCalled();
   });
 });

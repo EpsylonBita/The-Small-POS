@@ -26,10 +26,10 @@ test('ReservationInfoPanel is touch-first with labelled close and semantic actio
   assert.match(source, /aria-label=\{t\('common\.actions\.close', \{ defaultValue: 'Close' \}\)\}/);
   assert.match(source, /onClick=\{onClose\}/);
   assert.match(source, /onClick=\{handleSeatGuest\}/);
-  assert.match(source, /bg-green-600 py-3/);
-  assert.match(source, /active:scale-\[0\.98\] active:bg-green-700/);
-  assert.match(source, /border-red-400\/30 bg-red-500\/12 text-red-300/);
-  assert.match(source, /border-red-500\/25 bg-red-50 text-red-700/);
+  assert.match(source, /bg-\(--pos-s-yellow\) py-3/);
+  assert.match(source, /active:scale-\[0\.98\] active:bg-yellow-500/);
+  assert.match(source, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-red-800 dark:text-red-200/);
+  assert.match(source, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-red-700 active:/);
   assert.match(source, /type="button"/);
 });
 

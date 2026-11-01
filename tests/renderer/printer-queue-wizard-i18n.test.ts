@@ -37,6 +37,13 @@ const staticSourceKeys = (sourcePath: string, prefix: string): string[] => {
 
 const queueNoVariable = [
   'actionResultLabel',
+  'emptyFailed',
+  'failedTitle',
+  'filterAll',
+  'filterFailed',
+  'filterLabel',
+  'queuePausedNotice',
+  'techniciansHelp',
   'cancel',
   'cancelJobAria',
   'confirmBulkAction',

@@ -27,9 +27,11 @@ test('empty by-items people stay compact while assigned portions retain their de
 });
 
 test('selected split and receipt segments keep the shared contrast override', () => {
-  assert.equal((modalSource.match(/bg-yellow-400 text-black shadow-xs split-payment-segment-selected/g) ?? []).length, 2);
-  assert.equal((modalSource.match(/bg-yellow-400 text-black split-payment-segment-selected/g) ?? []).length, 2);
-  assert.match(glassCss, /button\.split-payment-segment-selected[\s\S]*?color:\s*#000\s*!important/);
+  // Wave ΣΤ7: selected segments use the kit selection; yellow stays on the confirm action.
+  assert.equal((modalSource.match(/bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) shadow-xs split-payment-segment-selected/g) ?? []).length, 2);
+  assert.equal((modalSource.match(/border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) split-payment-segment-selected/g) ?? []).length, 2);
+  assert.doesNotMatch(modalSource, /bg-yellow-400 text-black[^"]*split-payment-segment-selected/);
+  assert.match(glassCss, /button\.split-payment-segment-selected[\s\S]*?color:\s*var\(--pos-s-sel-fg\)\s*!important/);
   assert.doesNotMatch(modalSource, /<[a-z][^>]*\stitle=/);
   assert.doesNotMatch(modalSource, /hover:/);
 });

@@ -95,7 +95,7 @@ export function MyDataCapSetupAssistant({ scopeKey, onDetected, onStatus, disabl
     stopped: t('integrations.mydata.capSetup.stopped', 'RBS support is installed. Open its connection setup and start the vendor service, then refresh.'),
     missing: t('integrations.mydata.capSetup.missing', 'RBS support is not installed. Open the official installer and complete its setup.'),
   };
-  return <div className="md:col-span-2 rounded-2xl border border-purple-500/20 bg-purple-500/10 p-3" data-testid="mydata-cap-setup">
+  return <div className="md:col-span-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3" data-testid="mydata-cap-setup">
     <p role="status" className="text-sm">{messages[phase]}</p>
     {status?.success && status.target && <p className="mt-2 text-xs">
       {t('integrations.mydata.capServiceTarget', 'Vendor service target')}: {status.target.type === 'network' ? status.target.host : status.target.serial_port}

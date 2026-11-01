@@ -55,6 +55,6 @@ it('lays the six language cards out in equal-sized pairs — the last card never
   expect(cards).toHaveLength(6);
   for (const card of cards) expect(card.className).not.toContain('col-span-2');
   // Every card carries the same layout classes, so none renders wider than its neighbours.
-  const layout = (el: HTMLElement) => el.className.split(/\s+/).filter((c) => !/^(border-|bg-|text-|active:)/.test(c)).sort().join(' ');
+  const layout = (el: HTMLElement) => el.className.split(/\s+/).filter((c) => !/^(?:dark:)?(border-|bg-|text-|active:)/.test(c)).sort().join(' ');
   for (const card of cards) expect(layout(card)).toBe(layout(cards[0]));
 });

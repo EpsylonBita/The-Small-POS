@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { getBridge } from '../../../lib'
 import { posApiGet } from '../../utils/api-helpers'
-import { liquidGlassModalButton } from '../../styles/designSystem'
+import { solidButton } from './SettingsKit'
 import { ConfirmDialog } from '../ui/ConfirmDialog'
 
 type Child = { terminal_id: string; name: string | null; terminal_type: string }
@@ -59,14 +59,15 @@ export function CafeLanSettings({ isMain }: { isMain: boolean }) {
       }
     })
   }
-  return <section className="rounded-2xl border liquid-glass-modal-border p-4 space-y-3" aria-labelledby="cafe-lan-title">
+  return <section className="pos-card p-4 space-y-3" aria-labelledby="cafe-lan-title">
     <h3 id="cafe-lan-title" className="font-semibold liquid-glass-modal-text">{t(key('title'))}</h3>
     <p className="text-sm liquid-glass-modal-text-muted">{t(key('internetRequired'))}</p>
     {!isMain ? <p className="text-sm liquid-glass-modal-text">{t(key('desktopMainOnly'))}</p> : <>
       <p className="text-sm liquid-glass-modal-text">{t(key(status.running ? 'listening' : 'stopped'))} · {t(key('port'))}: {status.port}</p>
       <div className="flex gap-2 flex-wrap">
-        <button type="button" disabled={busy} className={liquidGlassModalButton('secondary', 'sm')} onClick={() => void refresh()}>{t(key('refresh'))}</button>
-        <button type="button" disabled={busy} className={liquidGlassModalButton('primary', 'sm')} onClick={() => void run(async () => {
+        <button type="button" disabled={busy} className={solidButton('secondary', 'sm')} onClick={() => void refresh()}>{t(key('refresh'))}</button>
+        {/* Wave 7Δ2b: start / stop listening is neutral; «Δημιουργία ή αλλαγή κωδικού» is this group's one primary. */}
+        <button type="button" disabled={busy} className={solidButton('secondary', 'sm')} onClick={() => void run(async () => {
           await getBridge().invoke(status.running ? 'lan_transport_stop' : 'lan_transport_start')
           setStatus(await getBridge().invoke('lan_transport_status'))
         })}>{t(key(status.running ? 'stop' : 'start'))}</button>
@@ -82,14 +83,14 @@ export function CafeLanSettings({ isMain }: { isMain: boolean }) {
         <input value={host} onChange={event => setHost(event.target.value)} disabled={busy} placeholder="192.168.1.10" spellCheck={false} autoComplete="off" className="liquid-glass-modal-input mt-1 w-full" />
       </label>
       <div className="flex gap-2 flex-wrap">
-        <button type="button" disabled={busy || !childId || !host.trim()} className={liquidGlassModalButton('primary', 'sm')} onClick={() => setConfirmation('pair')}>{t(key('generate'))}</button>
-        <button type="button" disabled={busy || !childId} className={liquidGlassModalButton('secondary', 'sm')} onClick={() => setConfirmation('revoke')}>{t(key('revoke'))}</button>
+        <button type="button" disabled={busy || !childId || !host.trim()} className={solidButton('primary', 'sm')} onClick={() => setConfirmation('pair')}>{t(key('generate'))}</button>
+        <button type="button" disabled={busy || !childId} className={solidButton('secondary', 'sm')} onClick={() => setConfirmation('revoke')}>{t(key('revoke'))}</button>
       </div>
       {code && <div className="space-y-2">
         <p className="text-sm liquid-glass-modal-text-muted">{t(key('codeHelp'))}</p>
         <textarea aria-label={t(key('code'))} value={code} readOnly spellCheck={false} autoComplete="off" className="liquid-glass-modal-input w-full font-mono text-xs" rows={5} />
-        <button type="button" className={liquidGlassModalButton('secondary', 'sm')} onClick={() => void run(async () => { await getBridge().clipboard.writeText(code) })}>{t(key('copy'))}</button>
-        <button type="button" className={liquidGlassModalButton('secondary', 'sm')} onClick={() => setCode('')}>{t(key('hide'))}</button>
+        <button type="button" className={solidButton('secondary', 'sm')} onClick={() => void run(async () => { await getBridge().clipboard.writeText(code) })}>{t(key('copy'))}</button>
+        <button type="button" className={solidButton('secondary', 'sm')} onClick={() => setCode('')}>{t(key('hide'))}</button>
       </div>}
     </>}
     {error && <p role="alert" className="text-sm text-red-600 dark:text-red-300">{t(key('failed'))}</p>}

@@ -2856,6 +2856,9 @@ pub(crate) fn get_all_orders_since_utc(
     // by substituting a derive subquery that matches
     // `payments::derive_payment_method` semantics. Renderer contracts
     // don't change — the JSON field is still populated, just computed.
+    let financial_status = payments::financial_payment_status_sql(&conn, "op")?;
+    let platform_payment = payments::platform_settlement_row_sql("op");
+    let placeholder_payment = payments::placeholder_payment_sql("op");
     let mut stmt = conn
         .prepare(
             &format!("SELECT id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
@@ -2892,15 +2895,31 @@ pub(crate) fn get_all_orders_since_utc(
                           AND op.status = 'completed'
                     ), 0),
                     integration_environment, is_test, currency,
-                    COALESCE((
-                        SELECT json_group_array(json_object('id',op.id,'order_id',op.order_id,
-                            'amount',op.amount,'currency',op.currency,'status',op.status))
-                        FROM order_payments op
-                        WHERE op.order_id = orders.id
-                          AND orders.status IN ('completed','delivered')
-                          AND NULLIF(TRIM(orders.table_session_id),'') IS NOT NULL
-                    ), '[]')
+                    CASE WHEN orders.status IN ('completed','delivered')
+                              AND NULLIF(TRIM(orders.table_session_id),'') IS NOT NULL
+                         THEN COALESCE(receipt_totals.receipts, '[]') ELSE '[]' END,
+                    COALESCE(receipt_totals.received_cents, 0),
+                    COALESCE(refund_totals.refunded_cents, 0)
              FROM orders
+             LEFT JOIN (
+                 SELECT op.order_id AS receipt_order_id,
+                        SUM(CASE WHEN ({financial_status}) IN ('completed','refunded')
+                                      AND NOT {platform_payment} AND NOT {placeholder_payment}
+                                 THEN COALESCE(op.amount_cents,CAST(ROUND(op.amount*100) AS INTEGER),0)
+                                 ELSE 0 END) AS received_cents,
+                        json_group_array(json_object('id',op.id,'order_id',op.order_id,
+                            'amount',op.amount,'currency',op.currency,'status',op.status,
+                            'canonical_return_status',CASE WHEN json_valid(op.metadata)
+                                THEN json_extract(op.metadata,'$.canonical_return_status') END)) AS receipts
+                 FROM order_payments op GROUP BY op.order_id
+             ) receipt_totals ON receipt_totals.receipt_order_id = orders.id
+             LEFT JOIN (
+                 SELECT order_id AS refund_order_id,
+                        SUM(COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER),0)) AS refunded_cents
+                 FROM payment_adjustments WHERE adjustment_type = 'refund'
+                   AND COALESCE(adjustment_context, 'manual') <> 'edit_settlement'
+                 GROUP BY order_id
+             ) refund_totals ON refund_totals.refund_order_id = orders.id
              WHERE COALESCE(is_ghost, 0) = 0
                AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'
                AND server_deleted_at IS NULL
@@ -3024,6 +3043,10 @@ pub(crate) fn get_all_orders_since_utc(
                 "isTest": row.get::<_, Option<i64>>(63)?.unwrap_or(0) != 0,
                 "is_test": row.get::<_, Option<i64>>(63)?.unwrap_or(0) != 0,
                 "currency": row.get::<_, Option<String>>(64)?,
+                "received_amount_cents": row.get::<_, i64>(66)?,
+                "receivedAmountCents": row.get::<_, i64>(66)?,
+                "refunded_amount_cents": row.get::<_, i64>(67)?,
+                "refundedAmountCents": row.get::<_, i64>(67)?,
                 "payment_receipts": serde_json::from_str::<Value>(&row.get::<_, String>(65)?)
                     .unwrap_or_else(|_| serde_json::json!([])),
             }))
@@ -29796,6 +29819,73 @@ mod tests {
     }
 
     #[test]
+    fn get_all_orders_projects_refund_cents_for_every_status() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (id, status, receipt_status, origin, metadata) in [
+                ("partial", "completed", "completed", "manual", "{}"),
+                (
+                    "full",
+                    "delivered",
+                    "completed",
+                    "manual",
+                    r#"{"canonical_return_status":"refunded"}"#,
+                ),
+                ("edit", "cancelled", "completed", "manual", "{}"),
+                ("void", "pending", "voided", "manual", "{}"),
+                (
+                    "platform",
+                    "completed",
+                    "completed",
+                    "manual",
+                    r#"{"payment_origin":"platform_settlement"}"#,
+                ),
+                (
+                    "remote-void",
+                    "completed",
+                    "completed",
+                    "manual",
+                    r#"{"canonical_return_status":"voided"}"#,
+                ),
+            ] {
+                conn.execute("INSERT INTO orders(id,items,total_amount,status,order_type,table_session_id,payment_status,sync_status,created_at,updated_at) VALUES(?1,'[]',10,?2,'dine-in',?1,'paid','synced','2099-10-10T12:00:00Z','2099-10-10T12:00:00Z')", params![id,status]).unwrap();
+                conn.execute("INSERT INTO order_payments(id,order_id,amount,amount_cents,currency,method,status,payment_origin,metadata,created_at,updated_at) VALUES(?1,?1,10,1000,'EUR',?2,?3,?4,?5,'now','now')", params![id,if id == "platform" { "other" } else { "cash" },receipt_status,origin,metadata]).unwrap();
+            }
+            for (id, payment, kind, context, cents) in [
+                ("partial-refund", "partial", "refund", "manual", 250),
+                ("partial-void", "partial", "void", "manual", 100),
+                ("full-refund", "full", "refund", "manual", 1000),
+                ("edit-refund", "edit", "refund", "edit_settlement", 300),
+                ("void-adjustment", "void", "void", "manual", 1000),
+            ] {
+                conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,adjustment_context,amount,amount_cents,reason,sync_state,created_at,updated_at) VALUES(?1,?2,?2,?3,?4,?5/100.0,?5,'Test','applied','now','now')", params![id,payment,kind,context,cents]).unwrap();
+            }
+        }
+        let orders = get_all_orders_since_utc(&db, None).unwrap();
+        for (id, received, refunded) in [
+            ("partial", 1000, 250),
+            ("full", 1000, 1000),
+            ("edit", 1000, 0),
+            ("void", 0, 0),
+            ("platform", 0, 0),
+            ("remote-void", 0, 0),
+        ] {
+            let order = orders.iter().find(|o| o["id"] == id).unwrap();
+            assert_eq!(order["received_amount_cents"], received, "{id}");
+            assert_eq!(order["receivedAmountCents"], received, "{id}");
+            assert_eq!(order["refunded_amount_cents"], refunded, "{id}");
+            assert_eq!(order["refundedAmountCents"], refunded, "{id}");
+        }
+        let full = orders.iter().find(|o| o["id"] == "full").unwrap();
+        assert_eq!(full["payment_receipts"][0]["status"], "completed");
+        assert_eq!(
+            full["payment_receipts"][0]["canonical_return_status"],
+            "refunded"
+        );
+    }
+
+    #[test]
     fn get_all_orders_projects_original_return_receipts_without_changing_payment_status() {
         let db = test_db();
         {
@@ -29813,7 +29903,7 @@ mod tests {
         assert_eq!(returned["paymentStatus"], "pending");
         assert_eq!(
             returned["payment_receipts"],
-            serde_json::json!([{"id":"returned-receipt","order_id":"returned-check","amount":9.0,"currency":"CHF","status":"refunded"}])
+            serde_json::json!([{"id":"returned-receipt","order_id":"returned-check","amount":9.0,"currency":"CHF","status":"refunded","canonical_return_status":null}])
         );
         let unpaid = orders
             .iter()

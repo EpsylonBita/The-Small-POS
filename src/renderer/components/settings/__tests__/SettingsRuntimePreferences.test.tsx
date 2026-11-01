@@ -8,6 +8,7 @@ const { bridge, state } = vi.hoisted(() => ({
 }));
 vi.mock('../../../../lib', () => ({ getBridge: () => bridge, onEvent: vi.fn(), offEvent: vi.fn() }));
 vi.mock('react-i18next', () => ({
+  initReactI18next: { type: '3rdParty', init: () => {} },
   useTranslation: () => ({ t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? key }),
 }));
 
@@ -93,13 +94,10 @@ describe('SettingsRuntimePreferences', () => {
     expect(screen.getByRole('button', { name: 'Display and brightness' })).toBeEnabled();
   });
 
-  it('offers navigation to actual receipt and security settings', async () => {
-    const onOpenPrinterSettings = vi.fn();
-    const onOpenSecurity = vi.fn();
-    await renderReady({ onOpenPrinterSettings, onOpenSecurity });
-    fireEvent.click(screen.getByRole('button', { name: 'Receipt and printer settings' }));
-    fireEvent.click(screen.getByRole('button', { name: 'PIN and security settings' }));
-    expect(onOpenPrinterSettings).toHaveBeenCalledOnce();
-    expect(onOpenSecurity).toHaveBeenCalledOnce();
+  it('offers no second navigation: the settings rail is the only way between sections', async () => {
+    await renderReady();
+    expect(screen.queryByRole('button', { name: 'Receipt and printer settings' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'PIN and security settings' })).toBeNull();
   });
+
 });

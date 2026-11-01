@@ -2,10 +2,10 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { posApiGet } from '../../utils/api-helpers'
-import { resolveNavigationLabel } from '../../utils/i18nLabels'
 import { useTheme } from '../../contexts/theme-context'
 import { useI18n } from '../../contexts/i18n-context'
-import { Wifi, Lock, Palette, Globe, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings, Info, Copy, Check, Wrench, AlertTriangle, ChevronDown, RefreshCw, Smartphone, Store } from 'lucide-react'
+import type { SupportedLanguage } from '../../contexts/i18n-state'
+import { Wifi, Lock, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, CreditCard, Cable, Copy, Check, AlertTriangle, ChevronDown, RefreshCw, Smartphone, Store } from 'lucide-react'
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
@@ -19,9 +19,12 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useHardwareManager } from '../../hooks/useHardwareManager';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import { useFeatures } from '../../hooks/useFeatures';
-import { useModules } from '../../contexts/module-context';
 import RecoveryPanel from '../recovery/RecoveryPanel';
 import PrintQueuePanel from '../printing/PrintQueuePanel';
+import { DirtyFooter, SegmentedControl, SettingsDirtyProvider, SettingsGroup, SettingsRow, StatusLine, TechDisclosure, solidButton, useSettingsDirtyRegistry, type StatusTone } from '../settings/SettingsKit';
+import { buildSettingsNavGroups, resolveSettingsDeepLink, type SettingsDeepLink, type SettingsNavGroupId, type SettingsSectionId } from '../settings/settings-sections';
+import { PlatformNotificationSoundSettings } from '../settings/PlatformNotificationSoundSettings';
+import { useEfoodPartner } from '../../hooks/useEfoodPartner';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -30,6 +33,7 @@ import {
 import { getBridge, offEvent, onEvent, type DiagnosticsAboutInfo } from '../../../lib';
 import { resolveTerminalConfigHealth } from '../../utils/terminal-config-health';
 import { requireSettingsSuccess } from '../../utils/settings-operation';
+import { rememberLoginPinLength } from '../../utils/loginPinLength';
 import { SettingsRuntimePreferences } from '../settings/SettingsRuntimePreferences';
 import {
   decodeConnectionString,
@@ -42,41 +46,21 @@ import {
   startResetAction,
 } from '../../utils/reset-actions';
 
-// Semantic form-action buttons (round 158): solid-green Save, soft-red Cancel — sized to
-// match liquidGlassModalButton('*','md'). Tap/focus feedback only, no hover. Soft red (not
-// solid) so Cancel is not confused with a destructive Delete.
-const SAVE_BTN_MD =
-  'inline-flex items-center justify-center gap-2 rounded-xl border border-green-500 bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-green-600/30 transition-transform duration-150 active:scale-[0.98] active:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed';
-const CANCEL_BTN_MD =
-  'inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-700 dark:text-red-300 transition-transform duration-150 active:scale-[0.98] active:bg-red-500/20 disabled:opacity-50';
-// Round 325: Data/Database section buttons share one touch geometry so safe-repair and danger actions line
-// up consistently (44px+, centered icon/text, tap feedback only — no hover). They differ ONLY in semantic
-// color: safe repair is calm green ("keeps your data"), danger is red and lives behind a collapsed
-// disclosure so it is never openly mixed with normal maintenance.
-const DB_ACTION_GEOMETRY =
-  'inline-flex min-h-touch items-center justify-center shrink-0 px-4 py-2 rounded-xl transition-transform duration-150 active:scale-[0.98] font-medium text-sm whitespace-nowrap';
-const DB_REPAIR_BTN_MD = `${DB_ACTION_GEOMETRY} border-2 border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200 active:bg-emerald-500/25`;
-const DB_DANGER_BTN_MD = `${DB_ACTION_GEOMETRY} border-2 border-red-500 bg-red-600/15 text-red-700 active:bg-red-600/25 dark:bg-red-600/30 dark:text-red-200 dark:active:bg-red-600/50`;
+// UI audit wave 7A2: the kit buttons. Save is the one yellow button; Cancel is neutral (not red).
+const SAVE_BTN_MD = solidButton('primary', 'md');
+const CANCEL_BTN_MD = solidButton('secondary', 'md');
+// Round 325 / wave 7A2: Data section buttons share the kit geometry (48 px). Safe repairs are
+// neutral; destructive tools are red text on the neutral button and stay behind a collapsed
+// disclosure, so they are never openly mixed with normal maintenance.
+const DB_REPAIR_BTN_MD = solidButton('secondary', 'md');
+const DB_DANGER_BTN_MD = solidButton('danger', 'md');
 
 interface Props {
   isOpen: boolean
   onClose: () => void
-  initialSection?: 'recovery' | 'printing' | null
+  initialSection?: SettingsDeepLink
   onCheckForUpdates?: () => void
 }
-
-type SettingsSectionId =
-  | 'admin'
-  | 'connection'
-  | 'terminal'
-  | 'security'
-  | 'database'
-  | 'hardware'
-  | 'printing'
-  | 'payments'
-  | 'waiter_devices'
-  | 'platforms'
-  | 'about'
 
 const parseBooleanSetting = (value: unknown): boolean => {
   if (value === true || value === 1) return true
@@ -126,19 +110,16 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const { language: currentLanguage, setLanguage } = useI18n()
   const bridge = getBridge()
   const allowManualCredentials = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV)
-  const { features, terminalType, ownerTerminalId, posOperatingMode } = useFeatures()
-  const { enabledModules } = useModules()
+  const { terminalType, ownerTerminalId, posOperatingMode } = useFeatures()
   const [connectionCode, setConnectionCode] = useState('')
+  // The last code saved in this session, so a saved code no longer counts as an unsaved draft.
+  const [savedConnectionCode, setSavedConnectionCode] = useState('')
   const [terminalId, setTerminalId] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [adminDashboardUrl, setAdminDashboardUrl] = useState('')
   const [pin, setPin] = useState('')
   const [confirmPin, setConfirmPin] = useState('')
   const [editingPin, setEditingPin] = useState(false)
-  const [showPrinterSettingsModal, setShowPrinterSettingsModal] = useState(false)
-  const [printerSettingsInitialMode, setPrinterSettingsInitialMode] = useState<'quick' | 'expert'>('quick')
-  const [printerSettingsAutoStartWizard, setPrinterSettingsAutoStartWizard] = useState(false)
-  const [showPaymentTerminalsSection, setShowPaymentTerminalsSection] = useState(false)
   const [cashRegisterSetupIntent, setCashRegisterSetupIntent] = useState<CashRegisterSetupIntent | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
   const [showClearOperationalConfirm, setShowClearOperationalConfirm] = useState(false)
@@ -150,14 +131,12 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const [isResetting, setIsResetting] = useState(false)
 
   // Session timeout settings
-  const [ghostModeFeatureEnabled, setGhostModeFeatureEnabled] = useState(false)
   const [receiptPrintPromptEnabled, setReceiptPrintPromptEnabled] = useState(false)
   const [pinResetRequired, setPinResetRequired] = useState(false)
   const [runtimeTerminalId, setRuntimeTerminalId] = useState('')
   const [runtimeAdminUrl, setRuntimeAdminUrl] = useState('')
   const [runtimeSyncHealth, setRuntimeSyncHealth] = useState('unknown')
   const [isSyncingSettings, setIsSyncingSettings] = useState(false)
-  const [showAllModules, setShowAllModules] = useState(false)
   const [hardwareAction, setHardwareAction] = useState<string | null>(null)
   const [hardwareActionError, setHardwareActionError] = useState('')
   const [settingsLoaded, setSettingsLoaded] = useState(false)
@@ -166,7 +145,12 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const [hardwareBaseline, setHardwareBaseline] = useState<string | null>(null)
   const [showDiscardChanges, setShowDiscardChanges] = useState(false)
   const [savingLanguage, setSavingLanguage] = useState(false)
-  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSectionId>('admin')
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSectionId>('status')
+  // A register setup request is for this visit to Cards & cash register only; coming back later must
+  // not reopen the register form by itself (the register remounts with the section).
+  useEffect(() => {
+    if (activeSettingsSection !== 'payments') setCashRegisterSetupIntent(null)
+  }, [activeSettingsSection])
   // Right detail pane: reset its scroll to the top whenever the active section
   // changes so a new section always starts at its header, instead of inheriting
   // the previous section's scroll offset. useLayoutEffect runs before paint so
@@ -205,9 +189,29 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     if (settingsLoaded && hardwareBaseline === null) setHardwareBaseline(hardwareSignature)
   }, [settingsLoaded, hardwareBaseline, hardwareSignature])
 
+  // Every settings form asks before its unsaved changes are dropped (UI audit wave 7):
+  // devices (above), the connection code, the PIN editor, and the drafts sections report
+  // through SettingsDirtyProvider (waiter permissions, efood weekly hours).
+  const dirtyRegistry = useSettingsDirtyRegistry()
+  const connectionDirty = connectionCode.trim() !== '' && connectionCode !== savedConnectionCode
+  const pinDirty = editingPin && (pin !== '' || confirmPin !== '')
+  const otherDirty = connectionDirty || pinDirty || dirtyRegistry.anyDirty
+  const [pendingSection, setPendingSection] = useState<SettingsSectionId | null>(null)
+
+  const discardDrafts = () => {
+    setConnectionCode(savedConnectionCode)
+    setPin('')
+    setConfirmPin('')
+    setEditingPin(false)
+    dirtyRegistry.clear()
+  }
+
   const handleClose = () => {
     if (hardwareAction || savingLanguage) return
-    if (hardwareDirty) setShowDiscardChanges(true)
+    if (hardwareDirty || otherDirty) {
+      setPendingSection(null)
+      setShowDiscardChanges(true)
+    }
     else onClose()
   }
 
@@ -226,6 +230,138 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       setHardwareAction(null)
     }
   }
+
+  // Detected serial ports, offered as suggestions next to every "Port" field.
+  const [serialPorts, setSerialPorts] = useState<string[]>([])
+  useEffect(() => {
+    if (!isOpen || activeSettingsSection !== 'hardware') return
+    let cancelled = false
+    void Promise.resolve(bridge.hardware?.listSerialPorts?.())
+      .then((result: unknown) => {
+        const list = Array.isArray(result) ? result : (result as { ports?: unknown })?.ports
+        if (!cancelled && Array.isArray(list)) {
+          setSerialPorts(list.map((port: any) => String(port?.name ?? port)).filter(Boolean))
+        }
+      })
+      .catch(() => { /* suggestions only; typing a port still works */ })
+    return () => { cancelled = true }
+  }, [activeSettingsSection, bridge, isOpen])
+
+  const saveHardwareSettings = async (options?: { quiet?: boolean }): Promise<boolean> => {
+    if (hardwareAction) return false
+    setHardwareAction('save')
+    setHardwareActionError('')
+    try {
+      const results = await Promise.allSettled([
+        bridge.settings.updateLocal({
+          settingType: 'scale',
+          settings: {
+            enabled: scaleEnabled,
+            port: scalePort,
+            baud_rate: Number(scaleBaudRate),
+            protocol: scaleProtocol,
+          }
+        }),
+        bridge.settings.updateLocal({
+          settingType: 'display',
+          settings: {
+            enabled: displayEnabled,
+            connection_type: displayConnectionType,
+            port: displayPort,
+            baud_rate: Number(displayBaudRate),
+            tcp_port: displayConnectionType === 'network' ? Number(displayTcpPort) : null,
+          }
+        }),
+        bridge.settings.updateLocal({
+          settingType: 'scanner',
+          settings: {
+            enabled: scannerEnabled,
+            port: scannerPort,
+            baud_rate: Number(scannerBaudRate),
+          }
+        }),
+        bridge.settings.updateLocal({
+          settingType: 'peripherals',
+          settings: {
+            card_reader_enabled: cardReaderEnabled,
+            loyalty_card_reader: loyaltyEnabled,
+          }
+        }),
+      ])
+      for (const result of results) {
+        if (result.status === 'rejected') throw result.reason
+        requireSettingsSuccess(result.value)
+      }
+      setHardwareBaseline(hardwareSignature)
+      if (!options?.quiet) toast.success(t('settings.workflow.hardwareSavedPlain', { defaultValue: 'Device settings saved.' }))
+      return true
+    } catch (e) {
+      console.error('Failed to save hardware settings:', e)
+      setHardwareActionError(getErrorMessage(e, t('settings.peripherals.saveFailed', 'Failed to save peripheral settings')))
+      toast.error(t('settings.peripherals.saveFailed', 'Failed to save peripheral settings'))
+      return false
+    } finally {
+      setHardwareAction(null)
+    }
+  }
+
+  // Connect saves the device details first when they changed: one step for the cashier.
+  const connectWithSave = async (action: string, operation: () => Promise<unknown>) => {
+    if (hardwareAction) return
+    if (hardwareDirty && !(await saveHardwareSettings({ quiet: true }))) return
+    await runHardwareAction(action, operation)
+  }
+
+  // One plain status line per device (wave 7Δ2), not a tinted chip.
+  const deviceStatusLine = (connected: boolean, enabled: boolean) => {
+    const [tone, label] = connected
+      ? ['ok', t('settings.peripherals.state.connected', 'Connected')] as const
+      : enabled
+        ? ['warn', t('settings.peripherals.state.notConnected', 'Not connected yet')] as const
+        : ['idle', t('settings.peripherals.state.off', 'Off')] as const
+    return <StatusLine tone={tone}>{label}</StatusLine>
+  }
+
+  // Cancel in the devices footer: back to what is saved (the baseline the dirty check compares with).
+  const restoreHardwareDraft = () => {
+    if (!hardwareBaseline) return
+    const saved = JSON.parse(hardwareBaseline) as Record<string, any>
+    setScaleEnabled(saved.scaleEnabled); setScalePort(saved.scalePort); setScaleBaudRate(saved.scaleBaudRate); setScaleProtocol(saved.scaleProtocol)
+    setDisplayEnabled(saved.displayEnabled); setDisplayConnectionType(saved.displayConnectionType); setDisplayPort(saved.displayPort)
+    setDisplayBaudRate(saved.displayBaudRate); setDisplayTcpPort(saved.displayTcpPort)
+    setScannerEnabled(saved.scannerEnabled); setScannerPort(saved.scannerPort); setScannerBaudRate(saved.scannerBaudRate)
+    setCardReaderEnabled(saved.cardReaderEnabled); setLoyaltyEnabled(saved.loyaltyEnabled)
+  }
+
+  const renderPortField = (id: string, label: string, value: string, onChange: (next: string) => void, placeholder: string) => (
+    <div>
+      <label htmlFor={id} className="block text-sm font-medium mb-1 liquid-glass-modal-text">{label}</label>
+      <input id={id} list="settings-serial-port-options" value={value} onChange={e => onChange(e.target.value)} className="liquid-glass-modal-input w-full max-w-sm" placeholder={placeholder} />
+      <p className="mt-1 text-xs liquid-glass-modal-text-muted">
+        {serialPorts.length
+          ? t('settings.peripherals.portsFound', { defaultValue: 'Found on this computer: {{ports}}', ports: serialPorts.join(', ') })
+          : t('settings.peripherals.portsNoneFound', { defaultValue: 'No ports found. Check the cable, then reopen this page.' })}
+      </p>
+    </div>
+  )
+
+  const renderConnectButton = (
+    action: string,
+    connected: boolean,
+    connectLabel: string,
+    disconnectLabel: string,
+    connect: () => Promise<unknown>,
+    disconnect: () => Promise<unknown>,
+  ) => (
+    <button
+      type="button"
+      disabled={Boolean(hardwareAction) || hardwareLoading || !settingsLoaded}
+      onClick={() => void (connected ? runHardwareAction(action, disconnect) : connectWithSave(action, connect))}
+      className={solidButton(connected ? 'danger' : 'primary', 'md') + ' self-start'}
+    >
+      {connected ? disconnectLabel : connectLabel}
+    </button>
+  )
 
   const handleLanguageChange = async (language: 'en' | 'el' | 'de' | 'fr' | 'it' | 'sq') => {
     if (savingLanguage || language === currentLanguage) return
@@ -264,6 +400,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     setHardwareBaseline(null)
     setShowDiscardChanges(false)
     setConnectionCode('')
+    setSavedConnectionCode('')
     const lsTerminal = getCachedTerminalCredentials().terminalId || ''
     setTerminalId(lsTerminal)
     setApiKey('')
@@ -306,7 +443,6 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         setRuntimeAdminUrl(parseStringSetting(runtime.admin_dashboard_url, parseStringSetting(settingsMap?.terminal?.admin_dashboard_url, '')))
         setRuntimeSyncHealth(parseStringSetting(runtime.sync_health, 'unknown'))
 
-        setGhostModeFeatureEnabled(parseBooleanSetting(getNestedSetting(settingsMap, 'terminal', 'ghost_mode_feature_enabled')))
         setReceiptPrintPromptEnabled(parseBooleanSetting(
           getNestedSetting(settingsMap, 'receipt', 'ask_before_print') ??
           getNestedSetting(settingsMap, 'ui', 'receipt_ask_before_print') ??
@@ -384,12 +520,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
 
   useEffect(() => {
     if (!isOpen) return
-    if (initialSection === 'recovery') {
-      setActiveSettingsSection('database')
-    } else if (initialSection === 'printing') {
-      // Health > "Check the printer": the printer settings and the print queue.
-      setActiveSettingsSection('printing')
-    }
+    // Health > recovery opens Backups & recovery; Health > "Check the printer" opens Printers &
+    // receipts; the old Connection / Info / This register names open Status & connection.
+    const target = resolveSettingsDeepLink(initialSection)
+    if (target) setActiveSettingsSection(target)
   }, [initialSection, isOpen])
 
   // Whenever the shown section changes (left-rail openSection, the recovery deep
@@ -405,13 +539,15 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   // auto-launched PrinterSettingsModal on open when no receipt printer existed,
   // which made Settings "get lost" in a submodal; it was removed.
 
-  // Lazy-load about info when the Info section becomes active
+  // Lazy-load the version and build details when Status & connection is shown.
   useEffect(() => {
-    if (!isOpen || activeSettingsSection !== 'about' || aboutData) return
+    if (!isOpen || activeSettingsSection !== 'status' || aboutData) return
     let cancelled = false
     setAboutError(false)
-    bridge.diagnostics
-      .getAbout()
+    // Settings opens on this section, so a missing or failing diagnostics bridge must only
+    // show the retry line, never break the screen.
+    Promise.resolve()
+      .then(() => bridge.diagnostics.getAbout())
       .then((data) => { if (!cancelled) setAboutData(requireSettingsSuccess(data)) })
       .catch((err: unknown) => { if (!cancelled) setAboutError(true); console.error('Failed to load about info:', err) })
     return () => { cancelled = true }
@@ -437,7 +573,21 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   // Navigation: the left rail selects which section is shown. Each section now
   // renders its content directly (no inner accordion), so selecting is all we do.
   const openSection = (section: SettingsSectionId) => {
+    // Drafts that live inside a section (waiter permissions, efood hours) are lost when it
+    // closes, so leaving that section asks first.
+    if (section !== activeSettingsSection && dirtyRegistry.anyDirty) {
+      setPendingSection(section)
+      setShowDiscardChanges(true)
+      return
+    }
     setActiveSettingsSection(section)
+  }
+
+  // A short pulse on a Save button that just succeeded (CSS .pos-saved; off under reduce motion).
+  const [savedPulse, setSavedPulse] = useState<string | null>(null)
+  const pulseSaved = (id: string) => {
+    setSavedPulse(id)
+    window.setTimeout(() => setSavedPulse(current => (current === id ? null : current)), 400)
   }
 
   const handleSaveConnection = async () => {
@@ -522,9 +672,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
 
       toast.success(
         hasChanged || hasAdminUrlChanged
-          ? t('modals.connectionSettings.connectionSaved') + ' - Syncing data...'
+          ? t('modals.connectionSettings.connectionSavedSyncing', 'Connection saved. Syncing data…')
           : t('modals.connectionSettings.connectionSaved')
       )
+      setSavedConnectionCode(connectionCode)
+      pulseSaved('connection')
     } catch (e: any) {
       console.warn('Failed to update credentials or trigger sync:', e)
       toast.error(e?.message || t('modals.connectionSettings.networkError'))
@@ -573,6 +725,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       return
     }
 
+    // The PIN screen signs in by itself at the PIN's length: keep the new staff PIN's digit count.
+    void rememberLoginPinLength(bridge, ['staff'], pin.length)
     toast.success(t('modals.connectionSettings.pinSaved'))
     setPinResetRequired(false)
     setEditingPin(false)
@@ -773,49 +927,22 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     }
   }
 
-  // Overview chip cap: render the first N localized labels as soft chips, then a calm "+N more"
-  // summary chip. No data is dropped from the model -- enabledFeatureLabels / enabledModuleNames keep
-  // every entry; this only condenses the on-screen display so staff can scan it (round 222).
-  const OVERVIEW_CHIP_LIMIT = 8
-
-  const enabledFeatureLabels = Object.entries({
-    [t('settings.features.orderCreation', 'Order creation')]: features.orderCreation,
-    [t('settings.features.orderModification', 'Order editing')]: features.orderModification,
-    [t('settings.features.cashPayments', 'Cash payments')]: features.cashPayments,
-    [t('settings.features.cardPayments', 'Card payments')]: features.cardPayments,
-    [t('settings.features.discounts', 'Discounts')]: features.discounts,
-    [t('settings.features.refunds', 'Refunds')]: features.refunds,
-    [t('settings.features.reports', 'Reports')]: features.reports,
-    [t('settings.features.settings', 'Settings')]: features.settings,
-    [t('settings.features.ghostMode', 'Ghost mode')]: ghostModeFeatureEnabled,
-  })
-    .filter(([, enabled]) => enabled)
-    .map(([label]) => label)
-
-  const enabledModuleNames = enabledModules.map((module) =>
-    resolveNavigationLabel(t, module.module.id, module.module.name),
-  )
   const resolvedTerminalTypeLabel =
     terminalType === 'mobile_waiter'
       ? t('settings.terminal.type.mobile_waiter', 'Mobile POS')
       : t('settings.terminal.type.main', 'Main Terminal')
-  const managedTerminalSummary = [
-    resolvedTerminalTypeLabel,
-    ownerTerminalId
-      ? t('settings.managedByAdmin.ownerLabel', {
-          owner: ownerTerminalId,
-          defaultValue: 'Owner {{owner}}',
-        })
-      : null,
-  ]
-    .filter(Boolean)
-    .join(' - ')
+  // The till's own name on the main till; on any other till, the main till it belongs to.
+  const terminalOwnerLabel = ownerTerminalId
+    ? terminalType === 'main'
+      ? t('settings.status.tillName', { name: ownerTerminalId, defaultValue: 'Till name: {{name}}' })
+      : t('settings.status.mainTill', { name: ownerTerminalId, defaultValue: 'Main till: {{name}}' })
+    : null
   const syncHealth = resolveTerminalConfigHealth(runtimeSyncHealth)
   const syncHealthLabel = syncHealth.isHealthy ? t('settings.workflow.configHealthyLabel', 'Settings up to date') : t(`settings.managedByAdmin.syncHealth.${runtimeSyncHealth}`, {
     defaultValue: runtimeSyncHealth,
   })
   const isSyncHealthy = syncHealth.isHealthy
-  const syncToneClass = ({ success: 'bg-green-500', warning: 'bg-amber-500', danger: 'bg-red-500', neutral: 'bg-gray-400' })[syncHealth.tone]
+  const syncStatusTone = ({ success: 'ok', warning: 'warn', danger: 'bad', neutral: 'idle' } as const satisfies Record<string, StatusTone>)[syncHealth.tone]
   const syncStatusTitle = isSyncHealthy
     ? t('settings.workflow.configHealthyTitle', 'Settings are up to date')
     : syncHealth.state === 'stale'
@@ -828,105 +955,54 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     : syncHealth.state === 'unknown'
       ? t('settings.workflow.configUnknownHelp', 'The settings status is not available yet. You can refresh it below.')
       : t('settings.workflow.configProblemHelp', 'Refresh settings below. If this fails, open Connection and check the connection details with your administrator.')
-  // Plain-language title + one-line description for each area. Reused by the
-  // right-column row list and by the detail header. 'admin' is surfaced as the
-  // left "This register" card rather than a row.
-  const sectionMeta: Record<SettingsSectionId, { label: string; detail: string }> = {
-    admin: {
-      label: t('settings.settingsHub.status.register', 'This register'),
-      detail: t('settings.deviceSetup.title', 'Device setup'),
-    },
-    connection: {
-      label: t('settings.settingsHub.sections.connection.label', 'Connection'),
-      detail: t('settings.settingsHub.sections.connection.detail', 'Link this POS'),
-    },
-    terminal: {
-      label: t('settings.settingsHub.sections.terminal.label', 'Screen & Sound'),
-      detail: t('settings.settingsHub.sections.terminal.detail', 'Display, sound and language'),
-    },
-    security: {
-      label: t('settings.settingsHub.sections.security.label', 'PIN & Lock'),
-      detail: t('settings.settingsHub.sections.security.detail', 'Staff PIN and auto lock'),
-    },
-    database: {
-      label: t('settings.settingsHub.sections.database.label', 'Data'),
-      detail: t('settings.settingsHub.sections.database.detail', 'Sync and local data'),
-    },
-    hardware: {
-      label: t('settings.settingsHub.sections.hardware.label', 'Devices'),
-      detail: t('settings.settingsHub.sections.hardware.detail', 'Scale, scanner and hardware'),
-    },
-    printing: {
-      label: t('settings.settingsHub.sections.printing.label', 'Printer'),
-      detail: t('settings.settingsHub.sections.printing.detail', 'Receipt setup'),
-    },
-    payments: {
-      label: t('settings.settingsHub.sections.payments.label', 'Card Machines'),
-      detail: t('settings.settingsHub.sections.payments.detail', 'Card payment devices'),
-    },
-    waiter_devices: {
-      label: t('settings.settingsHub.sections.waiter_devices.label', 'Waiter Devices'),
-      detail: t('settings.settingsHub.sections.waiter_devices.detail', 'Mobile waiter access'),
-    },
-    platforms: {
-      label: t('settings.settingsHub.sections.platforms.label', 'Platforms'),
-      detail: t('settings.settingsHub.sections.platforms.detail', 'Delivery platform status'),
-    },
-    about: {
-      label: t('settings.settingsHub.sections.about.label', 'Info'),
-      detail: t('settings.settingsHub.sections.about.detail', 'App version'),
-    },
+  // Rail labels are also the section titles (one name per place).
+  const sectionLabels: Record<SettingsSectionId, string> = {
+    status: t('settings.settingsHub.nav.status', 'Status & connection'),
+    platforms: t('settings.settingsHub.nav.platforms', 'Platforms'),
+    printing: t('settings.settingsHub.nav.printing', 'Printers & receipts'),
+    payments: t('settings.settingsHub.nav.payments', 'Cards & cash register'),
+    hardware: t('settings.settingsHub.nav.hardware', 'Scale, display, scanner'),
+    waiter_devices: t('settings.settingsHub.nav.waiter_devices', 'Waiter phones'),
+    terminal: t('settings.settingsHub.nav.terminal', 'Display & sound'),
+    security: t('settings.settingsHub.nav.security', 'PIN & lock'),
+    database: t('settings.settingsHub.nav.database', 'Backups & recovery'),
+  }
+  const sectionIntros: Partial<Record<SettingsSectionId, string>> = {
+    status: t('settings.settingsHub.intro.status', 'What this till does and whether it is connected.'),
+    terminal: t('settings.settingsHub.intro.terminal', 'Changes here apply immediately.'),
+    hardware: t('settings.peripherals.helpText', 'Configure external hardware devices'),
+    printing: t('settings.settingsHub.intro.printing', 'The printers of this till and how receipts print.'),
+    payments: t('settings.settingsHub.intro.payments', 'The card machines (bank POS) and the cash register of this till.'),
+  }
+  const navGroupLabels: Record<SettingsNavGroupId, string> = {
+    register: t('settings.settingsHub.navGroups.register', 'This till'),
+    devices: t('settings.settingsHub.navGroups.devices', 'Devices'),
+    appearance: t('settings.settingsHub.navGroups.appearance', 'Appearance & security'),
   }
 
-  // Left-rail navigation. Icons are standalone yellow line icons; the active row
-  // owns the selection surface so decorative icon tiles do not compete with it.
+  // Neutral line icons: the open row's fill and bar are the only accent in the rail.
   const settingsNav: Array<{ id: SettingsSectionId; icon: React.ReactNode }> = [
-    { id: 'admin', icon: <Settings className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
-    { id: 'connection', icon: <Wifi className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
-    { id: 'platforms', icon: <Store className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
-    { id: 'printing', icon: <Printer className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
-    { id: 'payments', icon: <CreditCard className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
-    { id: 'waiter_devices', icon: <Smartphone className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
-    { id: 'terminal', icon: <Monitor className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
-    { id: 'security', icon: <Lock className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
-    { id: 'hardware', icon: <Cable className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
-    { id: 'database', icon: <Database className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
-    { id: 'about', icon: <Info className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
+    { id: 'status', icon: <Wifi className="pos-rail-item__icon" aria-hidden="true" /> },
+    { id: 'platforms', icon: <Store className="pos-rail-item__icon" aria-hidden="true" /> },
+    { id: 'printing', icon: <Printer className="pos-rail-item__icon" aria-hidden="true" /> },
+    { id: 'payments', icon: <CreditCard className="pos-rail-item__icon" aria-hidden="true" /> },
+    { id: 'hardware', icon: <Cable className="pos-rail-item__icon" aria-hidden="true" /> },
+    { id: 'waiter_devices', icon: <Smartphone className="pos-rail-item__icon" aria-hidden="true" /> },
+    { id: 'terminal', icon: <Monitor className="pos-rail-item__icon" aria-hidden="true" /> },
+    { id: 'security', icon: <Lock className="pos-rail-item__icon" aria-hidden="true" /> },
+    { id: 'database', icon: <Database className="pos-rail-item__icon" aria-hidden="true" /> },
   ]
 
-  // Grouped left-rail navigation: three calm groups (daily / device / system) instead
-  // of nine equal-weight rows, to lower cognitive load. Labels, details, and icons are
-  // unchanged (sectionMeta + settingsNav); only the grouping and the small uppercase
-  // group headers are new. Group strings come from settings.settingsHub.groups.*.
-  // 'waiter_devices' is main-terminal-only management of the unit's mobile_waiter
-  // devices, so it is stripped from the rail for every other terminal type
-  // (the server enforces the same rule with 403 WAITER_MGMT_MAIN_ONLY).
+  // Nine sections in three groups; waiter phones only on the main till (the server enforces
+  // the same rule with 403 WAITER_MGMT_MAIN_ONLY).
   const isMainTerminal = terminalType === 'main'
-  const settingsNavGroups: Array<{ id: 'daily' | 'device' | 'system'; items: SettingsSectionId[] }> = [
-    { id: 'daily', items: ['admin', 'connection', 'platforms'] },
-    {
-      id: 'device',
-      items: (['printing', 'payments', 'waiter_devices', 'hardware', 'terminal'] as SettingsSectionId[]).filter(
-        (id) => id !== 'waiter_devices' || isMainTerminal,
-      ),
-    },
-    { id: 'system', items: ['security', 'database', 'about'] },
-  ]
+  const settingsNavGroups = buildSettingsNavGroups(isMainTerminal)
+  const efoodPartner = useEfoodPartner()
 
   // Calm, non-clickable header for a detail section: a standalone line icon beside
   // a plain title (and optional one-line help).
-  const sectionHeader = (icon: React.ReactNode, title: string, help?: string) => (
-    <div className="flex items-center gap-3">
-      {icon}
-      <div className="min-w-0">
-        <span className="block font-semibold liquid-glass-modal-text">{title}</span>
-        {help ? <span className="block text-xs liquid-glass-modal-text-muted">{help}</span> : null}
-      </div>
-    </div>
-  )
-
   return (
-    <>
+    <SettingsDirtyProvider report={dirtyRegistry.report}>
     <LiquidGlassModal
       recoveryAccess
       isOpen={isOpen}
@@ -960,19 +1036,6 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       closeOnBackdrop={true}
       closeOnEscape={true}
     >
-      {showPaymentTerminalsSection ? (
-        <PaymentTerminalsSection
-          onBack={() => setShowPaymentTerminalsSection(false)}
-          onOpenCashRegisterSetup={() => {
-            setShowPaymentTerminalsSection(false)
-            setActiveSettingsSection('hardware')
-            setCashRegisterSetupIntent({
-              mode: 'rbs_network',
-              token: Date.now(),
-            })
-          }}
-        />
-      ) : (
       <div
         data-settings-hub
         className="settings-hub flex min-h-0 flex-1 flex-col overflow-hidden"
@@ -986,9 +1049,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           >
             {settingsNavGroups.map((group) => (
               <div key={group.id} className="space-y-1">
-                <div className="px-2 pb-1 text-[11px] font-semibold liquid-glass-modal-text-muted">
-                  {t(`settings.settingsHub.groups.${group.id}`, group.id)}
-                </div>
+                <div className="pos-rail-group">{navGroupLabels[group.id]}</div>
                 {group.items.map((id) => {
                   const isActive = activeSettingsSection === id
                   const navItem = settingsNav.find((entry) => entry.id === id)
@@ -998,22 +1059,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                       type="button"
                       onClick={() => openSection(id)}
                       aria-current={isActive ? 'page' : undefined}
-                      className={
-                        'flex w-full items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors duration-150 ' +
-                        (isActive
-                          ? 'border-yellow-400/40 bg-yellow-400/15 liquid-glass-modal-text'
-                          : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text active:bg-white/10 dark:bg-black/10 dark:active:bg-white/5')
-                      }
+                      className={'pos-rail-item' + (isActive ? ' is-active' : '')}
                     >
                       {navItem?.icon}
-                      <span className="min-w-0">
-                        <span className="block wrap-break-word text-sm font-semibold leading-tight">
-                          {sectionMeta[id].label}
-                        </span>
-                        <span className="block wrap-break-word text-xs leading-snug liquid-glass-modal-text-muted">
-                          {sectionMeta[id].detail}
-                        </span>
-                      </span>
+                      <span className="pos-rail-item__label">{sectionLabels[id]}</span>
                     </button>
                   )
                 })}
@@ -1022,372 +1071,251 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           </nav>
 
           {/* Right column — the active section body. */}
-          <div ref={detailScrollRef} className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1 scrollbar-thin lg:pr-2">
-          {settingsLoadFailed && <div role="alert" className="rounded-xl border border-amber-500/40 p-3 space-y-2">
+          <div ref={detailScrollRef} key={activeSettingsSection} className="pos-enter min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1 scrollbar-thin lg:pr-2">
+          <header className="pos-pane-head">
+            <h3 className="pos-pane-title">{sectionLabels[activeSettingsSection]}</h3>
+            {sectionIntros[activeSettingsSection] && <p className="pos-pane-intro">{sectionIntros[activeSettingsSection]}</p>}
+          </header>
+          {settingsLoadFailed && <div role="alert" className="pos-notice pos-notice--warn pos-notice--stack">
             <p className="text-sm liquid-glass-modal-text">{t('settings.workflow.deviceLoadFailed', { defaultValue: 'Could not read saved device settings. Retry before changing device connections.' })}</p>
             <button type="button" onClick={() => setSettingsLoadAttempt(value => value + 1)} className={liquidGlassModalButton('secondary', 'md')}>{t('common.retry', 'Retry')}</button>
           </div>}
-        {activeSettingsSection === 'admin' && (
-        <div
-          id="settings-section-admin"
-          data-settings-register-overview
-          className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all"
-        >
-          {sectionHeader(
-            <Settings className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
-            t('settings.deviceSetup.title', 'Device setup'),
-            t('settings.deviceSetup.help', 'Link this register and see what it can do.'),
-          )}
-
-          {/* 1. Plain-language status card with the sync-health tone dot AND the primary Sync
-              action. The button lives here (not at the bottom) so the main action is visible in the
-              first viewport at 1280x800 without scrolling. */}
-          <div
-            data-register-status-card
-            className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3.5 dark:bg-black/10"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="flex min-w-0 items-start gap-3">
-                <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border liquid-glass-modal-border bg-white/5 dark:bg-black/10">
-                  <span className={`h-2.5 w-2.5 rounded-full ${syncToneClass}`} />
-                </span>
-                <div className="min-w-0">
-                  <div className="font-semibold liquid-glass-modal-text">
-                    {syncStatusTitle}
-                  </div>
-                  <div className="text-xs liquid-glass-modal-text-muted">
-                    {syncStatusHelp}
-                  </div>
-                  <div className="mt-1.5 inline-flex items-center gap-1.5 text-xs liquid-glass-modal-text-muted">
-                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${syncToneClass}`} />
-                    {t('settings.deviceSetup.syncStatus', 'Sync')}: {syncHealthLabel}
-                  </div>
-                </div>
+        {/* Status & connection (UI audit wave 7B): the former This register, Connection and Info
+            sections in one place. One status, one Sync now, the connection code, and the version at
+            the bottom. Technical fields and build details stay behind a "for technicians" row. */}
+        {activeSettingsSection === 'status' && (
+        <div id="settings-section-status" data-settings-status className="space-y-4">
+          <SettingsGroup id="settings-status-register" title={t('settings.settingsHub.status.register', 'This register')}>
+            <SettingsRow title={resolvedTerminalTypeLabel} help={terminalOwnerLabel ?? undefined} />
+            <div data-register-status-card className="pos-row">
+              <div className="pos-row__label">
+                <span className="pos-row__title">{syncStatusTitle}</span>
+                <span className="pos-row__help">{syncStatusHelp}</span>
+                <StatusLine tone={syncStatusTone}>{syncHealthLabel}</StatusLine>
               </div>
-              <button
-                data-register-sync-action
-                onClick={handleManualPolicySync}
-                disabled={isSyncingSettings}
-                className={liquidGlassModalButton('primary', 'sm') + ' inline-flex shrink-0 items-center justify-center gap-2'}
-              >
-                <Wifi className="h-4 w-4 shrink-0" />
-                {isSyncingSettings ? t('settings.workflow.syncing', 'Syncing…') : t('settings.deviceSetup.syncButton', 'Sync settings')}
-              </button>
-            </div>
-          </div>
-
-          {/* 2. Large readable summary tiles: register type, sync state, PIN status. */}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div
-              data-register-summary-tile
-              className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-3.5 py-3 dark:bg-black/10"
-            >
-              <div className="flex items-center gap-2">
-                <Monitor className="h-4 w-4 shrink-0 liquid-glass-modal-text-muted" />
-                <div className="text-xs font-semibold liquid-glass-modal-text-muted">
-                  {t('settings.deviceSetup.overview.registerType', 'Register type')}
-                </div>
-              </div>
-              <div className="mt-1.5 text-base font-semibold liquid-glass-modal-text">{managedTerminalSummary}</div>
-            </div>
-
-            <div
-              data-register-summary-tile
-              className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-3.5 py-3 dark:bg-black/10"
-            >
-              <div className="flex items-center gap-2">
-                <Wifi className="h-4 w-4 shrink-0 liquid-glass-modal-text-muted" />
-                <div className="text-xs font-semibold liquid-glass-modal-text-muted">
-                  {t('settings.deviceSetup.overview.syncState', 'Sync')}
-                </div>
-              </div>
-              <div className="mt-1.5 inline-flex items-center gap-2 text-base font-semibold liquid-glass-modal-text">
-                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${syncToneClass}`} />
-                {syncHealthLabel}
+              <div className="pos-row__control">
+                <button
+                  type="button"
+                  data-register-sync-action
+                  onClick={handleManualPolicySync}
+                  disabled={isSyncingSettings}
+                  className={solidButton('secondary', 'sm')}
+                >
+                  <RefreshCw className={`h-4 w-4 shrink-0${isSyncingSettings ? ' animate-spin' : ''}`} aria-hidden="true" />
+                  {isSyncingSettings ? t('settings.workflow.syncing', 'Syncing…') : t('sync.syncNow', 'Sync now')}
+                </button>
               </div>
             </div>
-
-            <div
-              data-register-summary-tile
-              className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-3.5 py-3 dark:bg-black/10"
-            >
-              <div className="flex items-center gap-2">
-                <Lock className="h-4 w-4 shrink-0 liquid-glass-modal-text-muted" />
-                <div className="text-xs font-semibold liquid-glass-modal-text-muted">
-                  {t('settings.deviceSetup.overview.pinStatus', 'PIN')}
-                </div>
-              </div>
-              <div className="mt-1.5 inline-flex items-center gap-2 text-base font-semibold liquid-glass-modal-text">
-                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${pinResetRequired ? 'bg-yellow-400' : 'bg-green-500'}`} />
-                {pinResetRequired
-                  ? t('settings.deviceSetup.overview.pinResetShort', 'New PIN needed')
-                  : t('settings.deviceSetup.overview.pinOkShort', 'PIN ready')}
-              </div>
-              <div className="mt-1 text-xs liquid-glass-modal-text-muted">
-                {pinResetRequired
-                  ? t('settings.deviceSetup.pinResetRequired', 'A new PIN is required at next sign-in.')
-                  : t('settings.deviceSetup.pinResetClear', 'No PIN reset pending.')}
-              </div>
-            </div>
-          </div>
-
-          {/* 4. Allowed actions + Active areas — calm, scannable chips: a count badge plus the first
-              OVERVIEW_CHIP_LIMIT localized labels as soft rounded chips, then a "+N more" summary chip
-              (no unlimited wall of pills, no paragraph dump). enabledModuleNames is still built via
-              resolveNavigationLabel; no data is dropped, only the display is condensed. */}
-          <p className="text-xs liquid-glass-modal-text-muted">{t('settings.workflow.capabilitiesHelp', { defaultValue: 'Permissions and available areas are managed by your administrator.' })}</p>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <div
-              data-register-allowed-actions
-              className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-3.5 py-3 dark:bg-black/10"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Settings className="h-4 w-4 shrink-0 liquid-glass-modal-text-muted" />
-                  <div className="text-xs font-semibold liquid-glass-modal-text-muted">
-                    {t('settings.deviceSetup.allowedActions', 'Allowed actions')}
-                  </div>
-                </div>
-                <span className="rounded-full bg-yellow-400/15 px-2 py-0.5 text-xs font-semibold text-yellow-900 dark:text-yellow-200">
-                  {enabledFeatureLabels.length}
-                </span>
-              </div>
-              {enabledFeatureLabels.length ? (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {enabledFeatureLabels.slice(0, OVERVIEW_CHIP_LIMIT).map((label, index) => (
-                    <span
-                      key={`${label}-${index}`}
-                      className="inline-flex items-center rounded-full border border-yellow-400/30 bg-yellow-400/10 px-2.5 py-1 text-xs font-medium text-yellow-900 dark:text-yellow-100"
-                    >
-                      {label}
-                    </span>
-                  ))}
-                  {enabledFeatureLabels.length > OVERVIEW_CHIP_LIMIT ? (
-                    <span className="inline-flex items-center rounded-full border liquid-glass-modal-border bg-white/5 px-2.5 py-1 text-xs font-semibold liquid-glass-modal-text-muted dark:bg-black/20">
-                      {t('settings.deviceSetup.overview.moreCount', '+{{count}} more', {
-                        count: enabledFeatureLabels.length - OVERVIEW_CHIP_LIMIT,
-                      })}
-                    </span>
-                  ) : null}
-                </div>
-              ) : (
-                <div className="mt-1.5 text-sm liquid-glass-modal-text">
-                  {t('settings.deviceSetup.noAllowedActions', 'No allowed actions yet')}
-                </div>
+            <SettingsRow
+              title={t('settings.status.staffPin', 'Staff PIN')}
+              help={pinResetRequired
+                ? t('settings.deviceSetup.pinResetRequired', 'A new PIN is required at next sign-in.')
+                : t('settings.deviceSetup.pinResetClear', 'No PIN reset pending.')}
+              control={(
+                <StatusLine tone={pinResetRequired ? 'warn' : 'ok'}>
+                  {pinResetRequired
+                    ? t('settings.deviceSetup.overview.pinResetShort', 'New PIN needed')
+                    : t('settings.deviceSetup.overview.pinOkShort', 'PIN ready')}
+                </StatusLine>
               )}
-            </div>
-
-            <div
-              data-register-active-areas
-              className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-3.5 py-3 dark:bg-black/10"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Database className="h-4 w-4 shrink-0 liquid-glass-modal-text-muted" />
-                  <div className="text-xs font-semibold liquid-glass-modal-text-muted">
-                    {t('settings.deviceSetup.activeAreas', 'Active areas')}
-                  </div>
-                </div>
-                <span className="rounded-full bg-white/10 px-2 py-0.5 text-xs font-semibold liquid-glass-modal-text dark:bg-black/20">
-                  {enabledModuleNames.length}
-                </span>
-              </div>
-              {enabledModuleNames.length ? (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {(showAllModules ? enabledModuleNames : enabledModuleNames.slice(0, OVERVIEW_CHIP_LIMIT)).map((label, index) => (
-                    <span
-                      key={`${label}-${index}`}
-                      className="inline-flex items-center rounded-full border border-green-500/30 bg-green-500/10 px-2.5 py-1 text-xs font-medium text-green-900 dark:text-green-100"
-                    >
-                      {label}
-                    </span>
-                  ))}
-                  {enabledModuleNames.length > OVERVIEW_CHIP_LIMIT ? (
-                    <button type="button" aria-expanded={showAllModules} onClick={() => setShowAllModules(value => !value)} className="inline-flex min-h-touch items-center rounded-full border liquid-glass-modal-border bg-white/5 px-2.5 py-1 text-xs font-semibold liquid-glass-modal-text-muted dark:bg-black/20">
-                      {showAllModules ? t('settings.workflow.showLess', { defaultValue: 'Show fewer' }) : t('settings.deviceSetup.overview.moreCount', '+{{count}} more', {
-                        count: enabledModuleNames.length - OVERVIEW_CHIP_LIMIT,
-                      })}
-                    </button>
-                  ) : null}
-                </div>
-              ) : (
-                <div className="mt-1.5 text-sm liquid-glass-modal-text">
-                  {t('settings.deviceSetup.coreAreasOnly', 'Core areas only')}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Round 347: the raw register ID / dashboard address disclosure is removed entirely. A cashier
-              never needs these and they are a raw-ID leak surface; the editable terminal-id / admin-url
-              credential fields live in the Connection section. The runtime values stay internal (used only by
-              the credential/auth logic), never rendered in this overview. */}
-        </div>
-        )}
-
-        {/* Connection Settings */}
-        {activeSettingsSection === 'connection' && (
-        <div id="settings-section-connection" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 pt-4 pb-5 space-y-2.5 transition-all">
-          {sectionHeader(
-            <Wifi className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
-            t('modals.connectionSettings.connectionSettings'),
-          )}
-          <div>
-            <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
-              {t('onboarding.connectionString', { defaultValue: 'Connection Code' })}
-            </label>
-            <p className="text-xs liquid-glass-modal-text-muted mb-2">
-              {t('settings.deviceSetup.connectionCodeHelp', { defaultValue: 'Paste the connection code from your dashboard.' })}
-            </p>
-            <textarea
-              aria-label={t('onboarding.connectionString', { defaultValue: 'Connection Code' })}
-              value={connectionCode}
-              onChange={e => setConnectionCode(e.target.value)}
-              className="liquid-glass-modal-input w-full min-h-[72px] font-mono text-xs"
-              placeholder={t('onboarding.connectionStringPlaceholder', { defaultValue: 'Paste connection code here...' })}
             />
-          </div>
-          {allowManualCredentials && (
-            <>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">{t('settings.deviceSetup.registerId', 'Register ID')}</label>
-                  <input
-                    value={terminalId}
-                    aria-label={t('settings.deviceSetup.registerId', 'Register ID')}
-                    onChange={e => setTerminalId(e.target.value)}
-                    className="liquid-glass-modal-input w-full"
-                    placeholder={t('modals.connectionSettings.terminalPlaceholder')}
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
-                    {t('settings.deviceSetup.dashboardAddress', 'Dashboard address')}
-                  </label>
-                  <input
-                    value={adminDashboardUrl}
-                    aria-label={t('settings.deviceSetup.dashboardAddress', 'Dashboard address')}
-                    onChange={e => setAdminDashboardUrl(e.target.value)}
-                    className="liquid-glass-modal-input w-full"
-                    placeholder={t('settings.deviceSetup.dashboardAddressPlaceholder', { defaultValue: 'https://your-dashboard.example.com' })}
-                  />
-                </div>
+            <p className="pos-row pos-row__help">{t('settings.workflow.capabilitiesHelp', { defaultValue: 'Permissions and available areas are managed by your administrator.' })}</p>
+          </SettingsGroup>
+
+          <SettingsGroup id="settings-section-connection" title={t('settings.status.account', 'Link to your account')}>
+            <div className="pos-row pos-row--stack">
+              <label htmlFor="settings-connection-code" className="pos-row__title">
+                {t('onboarding.connectionString', { defaultValue: 'Connection Code' })}
+              </label>
+              <span className="pos-row__help">
+                {t('settings.deviceSetup.connectionCodeHelp', { defaultValue: 'Paste the connection code from your dashboard.' })}
+              </span>
+              <textarea
+                id="settings-connection-code"
+                aria-label={t('onboarding.connectionString', { defaultValue: 'Connection Code' })}
+                value={connectionCode}
+                onChange={e => setConnectionCode(e.target.value)}
+                className="liquid-glass-modal-input w-full min-h-[72px] font-mono text-xs"
+                placeholder={t('onboarding.connectionStringPlaceholder', { defaultValue: 'Paste connection code here...' })}
+              />
+              <div data-connection-action-bar className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={handlePasteBoth}
+                  aria-label={t('modals.connectionSettings.pasteBothTooltip')}
+                  className={solidButton('secondary', 'md')}
+                >
+                  <Clipboard className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  {t('modals.connectionSettings.pasteBoth')}
+                </button>
+                <button
+                  type="button"
+                  data-connection-primary-action
+                  onClick={handleSaveConnection}
+                  className={solidButton('primary', 'md') + (savedPulse === 'connection' ? ' pos-saved' : '')}
+                >
+                  <Check className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  {t('modals.connectionSettings.save')}
+                </button>
               </div>
-              <div>
-                <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">{t('settings.deviceSetup.posKey', 'POS key')}</label>
-                <div className="relative">
-                  <input
-                    value={apiKey}
-                    aria-label={t('settings.deviceSetup.posKey', 'POS key')}
-                    onChange={e => setApiKey(e.target.value)}
-                    type={showApiKey ? 'text' : 'password'}
-                    className="liquid-glass-modal-input w-full pr-12"
-                    placeholder={t('modals.connectionSettings.apiKeyPlaceholder')}
-                  />
-                  <button
-                    type="button"
-                    aria-label={showApiKey ? t('common.hide') : t('common.show')}
-                    onClick={() => setShowApiKey(v => !v)}
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 inline-flex h-10 w-10 items-center justify-center rounded-lg transition-transform active:scale-95 active:bg-white/15 dark:active:bg-white/10"
-                  >
-                    {showApiKey ? (
-                      <EyeOff className="w-5 h-5 text-gray-400" />
-                    ) : (
-                      <Eye className="w-5 h-5 text-gray-400" />
-                    )}
+            </div>
+            {allowManualCredentials && (
+              <TechDisclosure title={t('settings.printer.forTechnicians', 'Settings for technicians')}>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <label className="block text-sm font-medium liquid-glass-modal-text">
+                    {t('settings.deviceSetup.registerId', 'Register ID')}
+                    <input
+                      value={terminalId}
+                      aria-label={t('settings.deviceSetup.registerId', 'Register ID')}
+                      onChange={e => setTerminalId(e.target.value)}
+                      className="liquid-glass-modal-input mt-1 w-full"
+                      placeholder={t('modals.connectionSettings.terminalPlaceholder')}
+                    />
+                  </label>
+                  <label className="block text-sm font-medium liquid-glass-modal-text">
+                    {t('settings.deviceSetup.dashboardAddress', 'Dashboard address')}
+                    <input
+                      value={adminDashboardUrl}
+                      aria-label={t('settings.deviceSetup.dashboardAddress', 'Dashboard address')}
+                      onChange={e => setAdminDashboardUrl(e.target.value)}
+                      className="liquid-glass-modal-input mt-1 w-full"
+                      placeholder={t('settings.deviceSetup.dashboardAddressPlaceholder', { defaultValue: 'https://your-dashboard.example.com' })}
+                    />
+                  </label>
+                </div>
+                <label className="block text-sm font-medium liquid-glass-modal-text">
+                  {t('settings.deviceSetup.posKey', 'POS key')}
+                  <span className="relative mt-1 block">
+                    <input
+                      value={apiKey}
+                      aria-label={t('settings.deviceSetup.posKey', 'POS key')}
+                      onChange={e => setApiKey(e.target.value)}
+                      type={showApiKey ? 'text' : 'password'}
+                      className="liquid-glass-modal-input w-full pr-12"
+                      placeholder={t('modals.connectionSettings.apiKeyPlaceholder')}
+                    />
+                    <button
+                      type="button"
+                      aria-label={showApiKey ? t('common.hide') : t('common.show')}
+                      onClick={() => setShowApiKey(v => !v)}
+                      className="absolute right-1 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-lg liquid-glass-modal-text-muted active:scale-95"
+                    >
+                      {showApiKey ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                    </button>
+                  </span>
+                </label>
+                <div>
+                  <button type="button" onClick={handleTest} className={solidButton('secondary', 'md')}>
+                    {t('modals.connectionSettings.test')}
                   </button>
                 </div>
-              </div>
-            </>
-          )}
-          {/* Connection actions: balanced secondary group plus primary Save slot. */}
-          <div data-connection-action-bar className="flex flex-col gap-3 pt-2">
-            <div data-connection-secondary-actions className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
-              <button
-                onClick={handlePasteBoth}
-                aria-label={t('modals.connectionSettings.pasteBothTooltip')}
-                className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-touch flex-1 items-center justify-center gap-2 text-center leading-tight'}
-              >
-                <Clipboard className="w-4 h-4 shrink-0" />
-                {t('modals.connectionSettings.pasteBoth')}
-              </button>
-              {allowManualCredentials && (
-                <button
-                  onClick={handleTest}
-                  className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-touch flex-1 items-center justify-center text-center leading-tight'}
-                >
-                  {t('modals.connectionSettings.test')}
+              </TechDisclosure>
+            )}
+          </SettingsGroup>
+
+          <SettingsGroup id="settings-status-version">
+            <SettingsRow
+              title={aboutData
+                ? t('updates.available.version', { version: aboutData.version, defaultValue: 'Version {{version}}' })
+                : t('modals.connectionSettings.aboutVersion', 'Version')}
+              help={aboutData?.buildTimestamp}
+              control={onCheckForUpdates ? (
+                <button type="button" onClick={onCheckForUpdates} className={solidButton('secondary', 'sm')}>
+                  <RefreshCw className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  {t('updates.actions.checkNow', 'Check for updates')}
                 </button>
+              ) : undefined}
+            />
+            <TechDisclosure title={t('settings.status.deviceDetails', 'Device details')}>
+              {aboutData ? (
+                <>
+                  <dl className="divide-y liquid-glass-modal-border">
+                    {[
+                      { label: t('modals.connectionSettings.aboutBuildDate'), value: aboutData.buildTimestamp },
+                      { label: t('modals.connectionSettings.aboutGitSha'), value: aboutData.gitSha },
+                      { label: t('modals.connectionSettings.aboutPlatform'), value: `${aboutData.platform} (${aboutData.arch})` },
+                      { label: t('modals.connectionSettings.aboutRust'), value: aboutData.rustVersion },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="flex items-center justify-between gap-4 py-2">
+                        <dt className="text-sm liquid-glass-modal-text-muted">{label}</dt>
+                        <dd className="text-sm font-mono liquid-glass-modal-text">{value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                  <div>
+                    <button type="button" onClick={handleCopyAboutInfo} className={solidButton('secondary', 'md')}>
+                      {aboutCopied ? <Check className="h-4 w-4 shrink-0" aria-hidden="true" /> : <Copy className="h-4 w-4 shrink-0" aria-hidden="true" />}
+                      {aboutCopied ? t('modals.connectionSettings.aboutCopied') : t('modals.connectionSettings.aboutCopyInfo')}
+                    </button>
+                  </div>
+                </>
+              ) : aboutError ? (
+                <div role="alert" className="space-y-3">
+                  <p className="text-sm liquid-glass-modal-text">{t('settings.workflow.aboutLoadFailed', { defaultValue: 'Could not load device information.' })}</p>
+                  <button type="button" onClick={() => setAboutRetry(value => value + 1)} className={solidButton('secondary', 'md')}>{t('common.retry', 'Retry')}</button>
+                </div>
+              ) : (
+                <div className="py-2"><div className="mx-auto h-6 w-6 animate-spin rounded-full border-b-2 border-zinc-500" /></div>
               )}
-              <button
-                onClick={handleManualPolicySync}
-                disabled={isSyncingSettings}
-                className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-touch flex-1 items-center justify-center text-center leading-tight'}
-              >
-                {isSyncingSettings ? t('common.loading', 'Loading...') : t('settings.deviceSetup.syncButton', 'Sync settings')}
-              </button>
-            </div>
-            <div data-connection-primary-action className="flex justify-center">
-              <button
-                onClick={handleSaveConnection}
-                className={SAVE_BTN_MD + ' min-h-touch w-full sm:w-auto sm:min-w-[240px]'}
-              >
-                <Check className="w-4 h-4" />
-                {t('modals.connectionSettings.save')}
-              </button>
-            </div>
-          </div>
+            </TechDisclosure>
+          </SettingsGroup>
         </div>
         )}
 
-        {activeSettingsSection === 'connection' && <CafeLanSettings isMain={isMainTerminal} />}
 
         {/* PIN Settings */}
         {activeSettingsSection === 'security' && (
-        <div id="settings-section-security" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-3 transition-all">
-          {sectionHeader(
-            <Lock className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
-            t('modals.connectionSettings.pinSetup', 'Local PIN'),
-            pinResetRequired
-              ? t('settings.deviceSetup.pinResetRequired', 'A new PIN is required at next sign-in.')
-              : pin && !editingPin
-                ? '••••'
-                : t('settings.security.pinHelp', 'Local staff authentication'),
-          )}
+        <section id="settings-section-security" className="pos-group">
+          <div className={editingPin ? 'pos-row pos-row--stack' : 'pos-row'}>
+            <div className="pos-row__label">
+              <span className="pos-row__title">{t('modals.connectionSettings.pinSetup', 'Local PIN')}</span>
+              <span className="pos-row__help">
+                {pinResetRequired
+                  ? t('settings.deviceSetup.pinResetRequired', 'A new PIN is required at next sign-in.')
+                  : pin && !editingPin
+                    ? '••••'
+                    : t('settings.security.pinHelp', 'Local staff authentication')}
+              </span>
+            </div>
           {!editingPin ? (
-            <button
-              onClick={() => setEditingPin(true)}
-              className={liquidGlassModalButton('primary', 'md')}
-            >
-              {t('modals.connectionSettings.changePin')}
-            </button>
+            <div className="pos-row__control">
+              <button
+                type="button"
+                onClick={() => setEditingPin(true)}
+                className={SAVE_BTN_MD}
+              >
+                {t('modals.connectionSettings.changePin')}
+              </button>
+            </div>
           ) : (
             <>
               <div>
-                <label className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">{t('modals.connectionSettings.newPin')}</label>
+                <label htmlFor="settings-new-pin" className="block text-sm font-medium mb-1 liquid-glass-modal-text">{t('modals.connectionSettings.newPin')}</label>
                 <input
+                  id="settings-new-pin"
                   value={pin}
                   onChange={e => setPin(e.target.value.replace(/[^0-9]/g, ''))}
                   type="password"
                   inputMode="numeric"
                   maxLength={6}
-                  className="liquid-glass-modal-input"
+                  className="liquid-glass-modal-input w-full max-w-xs"
                   placeholder={t('modals.connectionSettings.enterPin')}
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">{t('modals.connectionSettings.confirmPin')}</label>
+                <label htmlFor="settings-confirm-pin" className="block text-sm font-medium mb-1 liquid-glass-modal-text">{t('modals.connectionSettings.confirmPin')}</label>
                 <input
+                  id="settings-confirm-pin"
                   value={confirmPin}
                   onChange={e => setConfirmPin(e.target.value.replace(/[^0-9]/g, ''))}
                   type="password"
                   inputMode="numeric"
                   maxLength={6}
-                  className="liquid-glass-modal-input"
+                  className="liquid-glass-modal-input w-full max-w-xs"
                   placeholder={t('modals.connectionSettings.confirmPinPlaceholder')}
                 />
               </div>
-              <div className="flex gap-2 pt-2">
+              <div className="flex gap-2 pt-1">
                 <button
                   onClick={() => setEditingPin(false)}
                   className={CANCEL_BTN_MD}
@@ -1400,176 +1328,115 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               </div>
             </>
           )}
-        </div>
+          </div>
+        </section>
         )}
 
         {/* Theme Switcher */}
         {activeSettingsSection === 'terminal' && (
         <>
-        <div id="settings-section-terminal" className={`rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Palette className="w-5 h-5 text-yellow-500" />
-              <span className={`font-medium liquid-glass-modal-text`}>{t('modals.connectionSettings.theme')}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => handleSaveTheme('light')}
-                className={`p-2 rounded-lg transition-all inline-flex items-center justify-center ${theme === 'light'
-                  ? 'bg-yellow-500/30 border-2 border-yellow-400 shadow-[0_0_12px_rgba(250,204,21,0.5)]'
-                  : 'bg-white/10 border border-gray-600 active:bg-white/20'
-                  }`}
-                aria-label={t('modals.connectionSettings.light')}
-              >
-                <Sun className={`w-5 h-5 ${theme === 'light' ? 'text-yellow-300' : 'text-gray-400'}`} />
-              </button>
-              <button
-                onClick={() => handleSaveTheme('dark')}
-                className={`p-2 rounded-lg transition-all inline-flex items-center justify-center ${theme === 'dark'
-                  ? 'bg-yellow-500/30 border-2 border-yellow-400 shadow-[0_0_12px_rgba(250,204,21,0.5)]'
-                  : 'bg-white/10 border border-gray-600 active:bg-white/20'
-                  }`}
-                aria-label={t('modals.connectionSettings.dark')}
-              >
-                <Moon className={`w-5 h-5 ${theme === 'dark' ? 'text-yellow-300' : 'text-gray-400'}`} />
-              </button>
-              <button
-                onClick={() => handleSaveTheme('auto')}
-                className={`p-2 rounded-lg transition-all inline-flex items-center justify-center ${theme === 'auto'
-                  ? 'bg-yellow-400/25 border-2 border-yellow-400 shadow-[0_0_12px_rgba(234,179,8,0.4)]'
-                  : 'bg-white/10 border border-gray-600 active:bg-white/20'
-                  }`}
-                aria-label={t('modals.connectionSettings.system')}
-              >
-                <Monitor className={`w-5 h-5 ${theme === 'auto' ? 'text-yellow-600 dark:text-yellow-400' : 'text-gray-400'}`} />
-              </button>
-            </div>
+        {/* Appearance and language: labelled choices (not bare icons or codes) so a
+            cashier can read every option. Languages show in their own name. */}
+        <section id="settings-section-terminal" data-settings-appearance className="pos-group">
+          <header className="pos-group__head">
+            <h3 className="pos-group__title">{t('modals.connectionSettings.theme')}</h3>
+          </header>
+          <div className="px-5 pb-4">
+          {/* Solid segmented choice (founder 30/10: no translucent selected wash). */}
+          <SegmentedControl
+            ariaLabel={t('modals.connectionSettings.theme')}
+            value={theme}
+            onChange={(value) => handleSaveTheme(value)}
+            options={[
+              { value: 'light', label: <><Sun className="h-4 w-4 shrink-0" aria-hidden="true" />{t('modals.connectionSettings.light')}</> },
+              { value: 'dark', label: <><Moon className="h-4 w-4 shrink-0" aria-hidden="true" />{t('modals.connectionSettings.dark')}</> },
+              { value: 'auto', label: <><Monitor className="h-4 w-4 shrink-0" aria-hidden="true" />{t('modals.connectionSettings.themeAutoDayNight', 'Automatic (day / night)')}</> },
+            ]}
+          />
           </div>
-        </div>
+        </section>
 
-        {/* Language Switcher */}
-        <div className={`rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Globe className="w-5 h-5 text-yellow-500" />
-              <span className={`font-medium liquid-glass-modal-text`}>{t('modals.connectionSettings.language')}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                disabled={savingLanguage}
-                onClick={() => void handleLanguageChange('en')}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'en'
-                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
-                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
-                  }`}
-                aria-label={t('settings.display.langEnglish')}
-              >
-                EN
-              </button>
-              <button
-                disabled={savingLanguage}
-                onClick={() => void handleLanguageChange('el')}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'el'
-                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
-                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
-                  }`}
-                aria-label={t('settings.display.langGreek')}
-              >
-                EL
-              </button>
-              <button
-                disabled={savingLanguage}
-                onClick={() => void handleLanguageChange('de')}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'de'
-                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
-                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
-                  }`}
-                aria-label={t('settings.display.langGerman')}
-              >
-                DE
-              </button>
-              <button
-                disabled={savingLanguage}
-                onClick={() => void handleLanguageChange('fr')}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'fr'
-                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
-                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
-                  }`}
-                aria-label={t('settings.display.langFrench')}
-              >
-                FR
-              </button>
-              <button
-                disabled={savingLanguage}
-                onClick={() => void handleLanguageChange('it')}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'it'
-                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
-                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
-                  }`}
-                aria-label={t('settings.display.langItalian')}
-              >
-                IT
-              </button>
-              <button
-                disabled={savingLanguage}
-                onClick={() => void handleLanguageChange('sq')}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'sq'
-                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
-                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
-                  }`}
-                aria-label={t('settings.display.langAlbanian')}
-              >
-                SQ
-              </button>
-            </div>
+        <section data-settings-language className="pos-group">
+          <header className="pos-group__head">
+            <h3 className="pos-group__title">{t('modals.connectionSettings.language')}</h3>
+          </header>
+          <div className="px-5 pb-4">
+          {/* Each language in its own name; the accessible name stays the translated settings.display.lang* key. */}
+          <SegmentedControl
+            ariaLabel={t('modals.connectionSettings.language')}
+            value={currentLanguage as SupportedLanguage}
+            disabled={savingLanguage}
+            columns={3}
+            onChange={(code) => void handleLanguageChange(code)}
+            options={([
+              { code: 'el', name: 'Ελληνικά', aria: 'settings.display.langGreek' },
+              { code: 'en', name: 'English', aria: 'settings.display.langEnglish' },
+              { code: 'de', name: 'Deutsch', aria: 'settings.display.langGerman' },
+              { code: 'fr', name: 'Français', aria: 'settings.display.langFrench' },
+              { code: 'it', name: 'Italiano', aria: 'settings.display.langItalian' },
+              { code: 'sq', name: 'Shqip', aria: 'settings.display.langAlbanian' },
+            ] as const).map(({ code, name, aria }) => ({ value: code, label: name, lang: code, ariaLabel: t(aria) }))}
+          />
           </div>
-        </div>
+        </section>
 
-        <SettingsRuntimePreferences onOpenPrinterSettings={() => openSection('printing')} onOpenSecurity={() => openSection('security')} />
+        <SettingsRuntimePreferences
+          soundExtras={(
+            <>
+              <PlatformNotificationSoundSettings />
+              {efoodPartner.efoodControllable && (
+                <SettingsGroup>
+                  <SettingsRow
+                    title={<span id="settings-efood-mute-label">{t('settings.platforms.efoodPartner.mute', 'Mute efood sounds')}</span>}
+                    help={t('settings.display.efoodMuteHelp', 'On the efood page inside the POS')}
+                    control={(
+                      <POSGlassSwitch
+                        aria-labelledby="settings-efood-mute-label"
+                        checked={efoodPartner.settings.muted}
+                        onChange={(muted: boolean) => efoodPartner.updateSettings({ muted })}
+                      />
+                    )}
+                  />
+                </SettingsGroup>
+              )}
+            </>
+          )}
+        />
         </>
         )}
 
         {/* Native sessions expire independently of display/power preferences. */}
         {activeSettingsSection === 'security' && (
-          <div data-session-timeout-card className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-4 space-y-3 dark:bg-black/10">
-            {sectionHeader(
-              <Timer className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
-              t('settings.workflow.sessionTitle', 'Session access'),
-              t('settings.workflow.sessionHelp', 'The POS requires your PIN again when the authenticated session expires.'),
-            )}
-            <p className="text-sm liquid-glass-modal-text-muted">{t('settings.workflow.sessionLimits', 'This version uses a 30-minute inactivity limit and a maximum session duration of 2 hours. Custom auto-lock timing is not available.')}</p>
-            <p className="text-xs liquid-glass-modal-text-muted">{t('settings.workflow.sessionShift', 'Signing in again does not close the active shift. Windows screen sleep is configured separately under Screen & Sound.')}</p>
-            <button type="button" onClick={() => openSection('terminal')} className={liquidGlassModalButton('secondary', 'sm')}>
-              {t('settings.settingsHub.sections.terminal.label', 'Screen & Sound')}
-            </button>
-          </div>
+          <section data-session-timeout-card className="pos-group">
+            <header className="pos-group__head">
+              <h3 className="pos-group__title">{t('settings.workflow.sessionTitle', 'Session access')}</h3>
+              <p className="pos-group__desc">{t('settings.workflow.sessionHelp', 'The POS requires your PIN again when the authenticated session expires.')}</p>
+            </header>
+            <div className="space-y-2 px-5 pb-4">
+              <p className="text-sm liquid-glass-modal-text">{t('settings.workflow.sessionLimits', 'This version uses a 30-minute inactivity limit and a maximum session duration of 2 hours. Custom auto-lock timing is not available.')}</p>
+              <p className="text-sm liquid-glass-modal-text-muted">{t('settings.workflow.sessionShift', 'Signing in again does not close the active shift. Windows screen sleep is configured separately under Screen & Sound.')}</p>
+            </div>
+          </section>
         )}
 
         {/* Database Management */}
         {activeSettingsSection === 'database' && (
-        <div id="settings-section-database" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
-          {sectionHeader(
-            <Database className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
-            t('settings.database.management', 'Database Management'),
-          )}
+        <div id="settings-section-database" className="space-y-4">
           <div className="flex flex-col gap-4 pb-24">
                 <RecoveryPanel />
 
-                {/* Zone 2 — Safe fixes: calm green maintenance that keeps the operator's data. */}
-                <div data-database-safe-fixes className="rounded-2xl border liquid-glass-modal-border bg-white/5 dark:bg-black/10 p-4 space-y-3">
-                  <div className="flex items-start gap-3">
-                    <Wrench className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-300" />
-                    <div className="min-w-0">
-                      <div className="font-semibold liquid-glass-modal-text">{t('settings.database.repairToolsTitle', 'Safe fixes')}</div>
-                      <div className="text-xs liquid-glass-modal-text-muted">{t('settings.database.repairToolsHelp', 'Keeps your data')}</div>
-                    </div>
-                  </div>
+                {/* Zone 2 — Safe fixes: maintenance that keeps the operator's data (kit rows, neutral). */}
+                <section data-database-safe-fixes className="pos-group">
+                  <header className="pos-group__head">
+                    <h3 className="pos-group__title">{t('settings.database.repairToolsTitle', 'Safe fixes')}</h3>
+                    <p className="pos-group__desc">{t('settings.database.repairToolsHelp', 'Keeps your data')}</p>
+                  </header>
 
                   {/* Clear Sync Queue */}
-                  <div className="flex items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2.5">
-                    <div className="text-left min-w-0">
-                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.clearSyncQueueLabel', 'Clear Sync Queue')}</span>
-                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.clearSyncQueueHelp', 'Clears stuck sync items without deleting data')}</span>
+                  <div className="pos-row">
+                    <div className="pos-row__label">
+                      <span className="pos-row__title">{t('settings.database.clearSyncQueueLabel', 'Clear Sync Queue')}</span>
+                      <span className="pos-row__help">{t('settings.database.clearSyncQueueHelp', 'Clears stuck sync items without deleting data')}</span>
                     </div>
                     <button
                       onClick={async () => {
@@ -1599,10 +1466,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   </div>
 
                   {/* Clear Old Orders */}
-                  <div className="flex items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2.5">
-                    <div className="text-left min-w-0">
-                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.clearOldOrdersLabel', 'Clear Old Orders')}</span>
-                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.clearOldOrdersHelp', 'Removes orphaned orders from previous days')}</span>
+                  <div className="pos-row">
+                    <div className="pos-row__label">
+                      <span className="pos-row__title">{t('settings.database.clearOldOrdersLabel', 'Clear Old Orders')}</span>
+                      <span className="pos-row__help">{t('settings.database.clearOldOrdersHelp', 'Removes orphaned orders from previous days')}</span>
                     </div>
                     <button
                       onClick={async () => {
@@ -1625,10 +1492,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   </div>
 
                   {/* Sync Deleted Orders */}
-                  <div className="flex items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2.5">
-                    <div className="text-left min-w-0">
-                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.syncDeletedOrdersLabel', 'Sync Deleted Orders')}</span>
-                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.syncDeletedOrdersHelp', 'Removes orders deleted from the dashboard')}</span>
+                  <div className="pos-row">
+                    <div className="pos-row__label">
+                      <span className="pos-row__title">{t('settings.database.syncDeletedOrdersLabel', 'Sync Deleted Orders')}</span>
+                      <span className="pos-row__help">{t('settings.database.syncDeletedOrdersHelp', 'Removes orders deleted from the dashboard')}</span>
                     </div>
                     <button
                       onClick={async () => {
@@ -1649,30 +1516,31 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                       {t('settings.database.repairDeletedOrdersButton', 'Sync deleted orders')}
                     </button>
                   </div>
-                </div>
+                </section>
 
                 {/* Zone 3 — Advanced reset tools: permanent deletions, COLLAPSED by default behind a
                     disclosure so they are never openly mixed with safe maintenance. The same three
                     destructive actions + their existing handlers/confirmation chain render only when an
                     operator deliberately expands. Red is reserved for the actual destructive buttons. */}
-                <details data-database-danger-zone className="group rounded-2xl border-2 border-red-500/40 bg-red-500/5 p-4">
-                  <summary className="flex min-h-touch cursor-pointer list-none items-center gap-3 transition-transform active:scale-[0.99] [&::-webkit-details-marker]:hidden">
-                    <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" />
+                {/* Neutral group; red is the text of the warning and of the destructive buttons only. */}
+                <details data-database-danger-zone className="group pos-group">
+                  <summary className="flex min-h-touch cursor-pointer list-none items-center gap-3 px-5 py-3 [&::-webkit-details-marker]:hidden">
+                    <AlertTriangle className="h-5 w-5 shrink-0 text-red-700 dark:text-red-300" aria-hidden="true" />
                     <span className="flex min-w-0 flex-1 flex-col">
-                      <span className="font-semibold text-red-600 dark:text-red-300">{t('settings.database.advancedResetTitle', 'Advanced reset tools')}</span>
-                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.advancedResetSummary', 'Deletes data')}</span>
+                      <span className="font-semibold text-red-700 dark:text-red-300">{t('settings.database.advancedResetTitle', 'Advanced reset tools')}</span>
+                      <span className="text-sm liquid-glass-modal-text-muted">{t('settings.database.advancedResetSummary', 'Deletes data')}</span>
                     </span>
-                    <ChevronDown className="h-4 w-4 shrink-0 text-red-500 transition-transform group-open:rotate-180" />
+                    <ChevronDown className="h-5 w-5 shrink-0 liquid-glass-modal-text-muted transition-transform group-open:rotate-180" aria-hidden="true" />
                   </summary>
-                  <div className="mt-3 space-y-3">
-                    <div className="text-xs liquid-glass-modal-text-muted">{t('settings.database.dangerZoneHelp', 'These actions permanently delete data and cannot be undone.')}</div>
+                  <div>
+                    <p className="px-5 pb-3 text-sm liquid-glass-modal-text-muted">{t('settings.database.dangerZoneHelp', 'These actions permanently delete data and cannot be undone.')}</p>
 
                   {/* Clear All Orders */}
-                  <div className="flex items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5">
-                    <div className="text-left min-w-0">
-                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.clearAllOrdersLabel', 'Clear All Orders')}</span>
-                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.clearAllOrdersHelp', 'Removes all orders including today\'s')}</span>
-                      <span className="mt-1.5 inline-flex items-center rounded-full border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-300">{t('settings.database.cannotUndo', 'Cannot be undone')}</span>
+                  <div className="pos-row">
+                    <div className="pos-row__label">
+                      <span className="pos-row__title">{t('settings.database.clearAllOrdersLabel', 'Clear All Orders')}</span>
+                      <span className="pos-row__help">{t('settings.database.clearAllOrdersHelp', 'Removes all orders including today\'s')}</span>
+                      <span className="mt-1.5 inline-flex w-fit items-center rounded-full border border-zinc-300 dark:border-zinc-600 px-2 py-0.5 text-xs font-semibold text-red-800 dark:text-red-300">{t('settings.database.cannotUndo', 'Cannot be undone')}</span>
                     </div>
                     <button
                       onClick={async () => {
@@ -1701,11 +1569,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   </div>
 
                   {/* Clear All Operational Data */}
-                  <div className="flex items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5">
-                    <div className="text-left min-w-0">
-                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.clearOperationalLabel', 'Clear All Operational Data')}</span>
-                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.clearOperationalHelp', 'Clears orders, shifts, drawers, payments. Keeps settings.')}</span>
-                      <span className="mt-1.5 inline-flex items-center rounded-full border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-300">{t('settings.database.cannotUndo', 'Cannot be undone')}</span>
+                  <div className="pos-row">
+                    <div className="pos-row__label">
+                      <span className="pos-row__title">{t('settings.database.clearOperationalLabel', 'Clear All Operational Data')}</span>
+                      <span className="pos-row__help">{t('settings.database.clearOperationalHelp', 'Clears orders, shifts, drawers, payments. Keeps settings.')}</span>
+                      <span className="mt-1.5 inline-flex w-fit items-center rounded-full border border-zinc-300 dark:border-zinc-600 px-2 py-0.5 text-xs font-semibold text-red-800 dark:text-red-300">{t('settings.database.cannotUndo', 'Cannot be undone')}</span>
                     </div>
                     <button
                       onClick={() => setShowClearOperationalConfirm(true)}
@@ -1716,11 +1584,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   </div>
 
                   {/* Factory Reset */}
-                  <div className="flex items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5">
-                    <div className="text-left min-w-0">
-                      <span className="font-medium block liquid-glass-modal-text">{t('settings.database.label')}</span>
-                      <span className="text-xs liquid-glass-modal-text-muted">{t('settings.database.helpText')}</span>
-                      <span className="mt-1.5 inline-flex items-center rounded-full border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-300">{t('settings.database.cannotUndo', 'Cannot be undone')}</span>
+                  <div className="pos-row">
+                    <div className="pos-row__label">
+                      <span className="pos-row__title">{t('settings.database.label')}</span>
+                      <span className="pos-row__help">{t('settings.database.helpText')}</span>
+                      <span className="mt-1.5 inline-flex w-fit items-center rounded-full border border-zinc-300 dark:border-zinc-600 px-2 py-0.5 text-xs font-semibold text-red-800 dark:text-red-300">{t('settings.database.cannotUndo', 'Cannot be undone')}</span>
                     </div>
                     <button
                       onClick={handleClearDatabase}
@@ -1735,369 +1603,259 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         </div>
         )}
 
-        {/* Hardware Settings */}
+        {/* Hardware Settings: one card per device with a plain state. "Connect" saves the
+            card's details first, so a cashier never needs a separate Save step. */}
         {activeSettingsSection === 'hardware' && (
-        <div id="settings-section-hardware" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
-          {sectionHeader(
-            <Cable className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
-            t('settings.peripherals.title', 'Peripherals'),
-            t('settings.peripherals.helpText', 'Configure external hardware devices'),
-          )}
-          <div className="space-y-4">
-
-              <p className="text-sm liquid-glass-modal-text-muted">{t('settings.workflow.hardwareHelp', { defaultValue: 'Save connection details, then connect each device. Saving alone does not connect hardware.' })}</p>
-              {hardwareDirty && <p role="status" className="text-sm text-amber-700 dark:text-amber-200">{t('settings.workflow.pendingChanges', { defaultValue: 'Unsaved device changes' })}</p>}
-              {hardwareError && <p role="alert" className="text-sm text-red-700 dark:text-red-300">{t('settings.workflow.hardwareUnknown', { defaultValue: 'Device status is unavailable. Refresh to check the connection.' })}</p>}
-              {hardwareActionError && <p role="alert" className="text-sm text-red-700 dark:text-red-300">{hardwareActionError}</p>}
-              <button type="button" disabled={hardwareLoading || Boolean(hardwareAction)} onClick={() => void refreshHardware()} className={liquidGlassModalButton('secondary', 'md')}>
-                <RefreshCw className={hardwareLoading ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
-                {t('settings.workflow.hardwareRefresh', { defaultValue: 'Refresh device status' })}
+        <div id="settings-section-hardware" className="space-y-4">
+          {hardwareError && (
+            <div role="alert" className="pos-notice pos-notice--bad pos-notice--row">
+              <span className="text-sm">{t('settings.workflow.hardwareUnknownPlain', { defaultValue: 'Device status is unavailable right now.' })}</span>
+              <button type="button" disabled={hardwareLoading || Boolean(hardwareAction)} onClick={() => void refreshHardware()} className={solidButton('secondary', 'sm')}>
+                {t('common.retry', 'Retry')}
               </button>
-              {/* --- Weighing Scale --- */}
-              <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-3 dark:bg-black/10">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span id="peripheral-scale-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.scale.title', 'Weighing Scale')}</span>
-                    {hardwareStatus?.scale?.connected && (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
-                        {t('settings.peripherals.scale.connected', 'Connected')}
-                      </span>
-                    )}
-                  </div>
-                  <POSGlassSwitch aria-labelledby="peripheral-scale-label" checked={scaleEnabled} onChange={setScaleEnabled} />
+            </div>
+          )}
+          {hardwareActionError && <p role="alert" className="pos-notice pos-notice--bad text-sm">{hardwareActionError}</p>}
+          <datalist id="settings-serial-port-options">
+            {serialPorts.map(port => <option key={port} value={port} />)}
+          </datalist>
+
+          {/* --- Weighing Scale --- */}
+          <section data-device-card="scale" className="pos-group">
+            <div className="pos-row">
+              <div className="pos-row__label">
+                <span id="peripheral-scale-label" className="pos-row__title">{t('settings.peripherals.scale.title', 'Weighing Scale')}</span>
+                {deviceStatusLine(Boolean(hardwareStatus?.scale?.connected), scaleEnabled)}
+              </div>
+              <div className="pos-row__control">
+                <POSGlassSwitch aria-labelledby="peripheral-scale-label" checked={scaleEnabled} onChange={setScaleEnabled} />
+              </div>
+            </div>
+            {(scaleEnabled || hardwareStatus?.scale?.connected) && (
+              <>
+                <div className="pos-row pos-row--stack">
+                  {renderPortField('peripheral-scale-port', t('settings.peripherals.scale.portPlain', 'Port (where the cable is plugged in)'), scalePort, setScalePort, 'COM3')}
+                  {renderConnectButton(
+                    'scale',
+                    Boolean(hardwareStatus?.scale?.connected),
+                    t('settings.peripherals.scale.connect', 'Connect'),
+                    t('settings.peripherals.scale.disconnect', 'Disconnect'),
+                    () => bridge.hardware.scaleConnect({ port: scalePort, baud: Number(scaleBaudRate), protocol: scaleProtocol }),
+                    () => bridge.hardware.scaleDisconnect(),
+                  )}
                 </div>
-                {(scaleEnabled || hardwareStatus?.scale?.connected) && (
-                  <div className="grid grid-cols-2 gap-3 pl-1">
+                <TechDisclosure title={t('settings.printer.forTechnicians', 'Settings for technicians')}>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div>
-                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scale.port', 'COM Port')}</label>
-                      <input value={scalePort} onChange={e => setScalePort(e.target.value)} className="liquid-glass-modal-input" placeholder="COM3" />
-                    </div>
-                    <div>
-                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scale.baudRate', 'Baud Rate')}</label>
-                      <select value={scaleBaudRate} onChange={e => setScaleBaudRate(e.target.value)} className="liquid-glass-modal-input">
-                        <option value="2400">2400</option>
-                        <option value="4800">4800</option>
-                        <option value="9600">9600</option>
-                        <option value="19200">19200</option>
+                      <label htmlFor="peripheral-scale-baud" className="block text-sm font-medium mb-1 liquid-glass-modal-text">{t('settings.peripherals.scale.baudRate', 'Baud Rate')}</label>
+                      <select id="peripheral-scale-baud" value={scaleBaudRate} onChange={e => setScaleBaudRate(e.target.value)} className="liquid-glass-modal-input w-full">
+                    <option value="2400">2400</option>
+                    <option value="4800">4800</option>
+                    <option value="9600">9600</option>
+                    <option value="19200">19200</option>
                       </select>
                     </div>
                     <div>
-                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scale.protocol', 'Protocol')}</label>
-                      <select value={scaleProtocol} onChange={e => setScaleProtocol(e.target.value)} className="liquid-glass-modal-input">
+                      <label htmlFor="peripheral-scale-protocol" className="block text-sm font-medium mb-1 liquid-glass-modal-text">{t('settings.peripherals.scale.protocol', 'Protocol')}</label>
+                      <select id="peripheral-scale-protocol" value={scaleProtocol} onChange={e => setScaleProtocol(e.target.value)} className="liquid-glass-modal-input w-full">
                         <option value="generic">{t('settings.peripherals.scale.protocolGeneric', 'Generic')}</option>
                         <option value="toledo">{t('settings.peripherals.scale.protocolToledo', 'Toledo / Mettler-Toledo')}</option>
                         <option value="cas">{t('settings.peripherals.scale.protocolCas', 'CAS')}</option>
                       </select>
                     </div>
-                    <div className="flex items-end">
-                      <button
-                        disabled={Boolean(hardwareAction) || hardwareLoading || !settingsLoaded}
-                        onClick={() => void runHardwareAction('scale', () => hardwareStatus?.scale?.connected ? bridge.hardware.scaleDisconnect() : bridge.hardware.scaleConnect({ port: scalePort, baud: Number(scaleBaudRate), protocol: scaleProtocol }))}
-                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all inline-flex items-center justify-center ${
-                          hardwareStatus?.scale?.connected
-                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 active:bg-red-500/30'
-                            : 'bg-yellow-500/20 border border-yellow-500/50 text-yellow-900 dark:text-yellow-200 active:bg-yellow-500/30'
-                        }`}
-                      >
-                        {hardwareStatus?.scale?.connected
-                          ? t('settings.peripherals.scale.disconnect', 'Disconnect')
-                          : t('settings.peripherals.scale.connect', 'Connect')}
-                      </button>
-                    </div>
                   </div>
-                )}
-              </div>
+                </TechDisclosure>
+              </>
+            )}
+          </section>
 
-              {/* --- Customer Display --- */}
-              <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-3 dark:bg-black/10">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span id="peripheral-display-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.display.title', 'Customer Display')}</span>
-                    {hardwareStatus?.customerDisplay?.connected && (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
-                        {t('settings.peripherals.scale.connected', 'Connected')}
-                      </span>
-                    )}
+          {/* --- Customer Display --- */}
+          <section data-device-card="display" className="pos-group">
+            <div className="pos-row">
+              <div className="pos-row__label">
+                <span id="peripheral-display-label" className="pos-row__title">{t('settings.peripherals.display.title', 'Customer Display')}</span>
+                {deviceStatusLine(Boolean(hardwareStatus?.customerDisplay?.connected), displayEnabled)}
+              </div>
+              <div className="pos-row__control">
+                <POSGlassSwitch aria-labelledby="peripheral-display-label" checked={displayEnabled} onChange={setDisplayEnabled} />
+              </div>
+            </div>
+            {(displayEnabled || hardwareStatus?.customerDisplay?.connected) && (
+              <>
+                <div className="pos-row pos-row--stack">
+                  <div>
+                    <div id="peripheral-display-connection-label" className="mb-1.5 text-sm font-medium liquid-glass-modal-text">{t('settings.peripherals.display.connectionPlain', 'How it is connected')}</div>
+                    <SegmentedControl
+                      ariaLabel={t('settings.peripherals.display.connectionPlain', 'How it is connected')}
+                      value={displayConnectionType}
+                      onChange={(value) => setDisplayConnectionType(value)}
+                      options={[
+                        { value: 'serial', label: t('settings.peripherals.display.serialPlain', 'Cable (COM port)') },
+                        { value: 'network', label: t('settings.peripherals.display.networkPlain', 'Network (IP address)') },
+                      ]}
+                    />
                   </div>
-                  <POSGlassSwitch aria-labelledby="peripheral-display-label" checked={displayEnabled} onChange={setDisplayEnabled} />
-                </div>
-                {(displayEnabled || hardwareStatus?.customerDisplay?.connected) && (
-                  <div className="grid grid-cols-2 gap-3 pl-1">
-                    <div>
-                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.display.connectionType', 'Connection Type')}</label>
-                      <select value={displayConnectionType} onChange={e => setDisplayConnectionType(e.target.value)} className="liquid-glass-modal-input">
-                        <option value="serial">{t('settings.peripherals.display.serial', 'Serial (COM)')}</option>
-                        <option value="network">{t('settings.peripherals.display.network', 'Network (TCP)')}</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.display.portOrIp', 'Port / IP Address')}</label>
-                      <input value={displayPort} onChange={e => setDisplayPort(e.target.value)} className="liquid-glass-modal-input" placeholder={displayConnectionType === 'network' ? '192.168.1.100' : 'COM4'} />
-                    </div>
-                    {displayConnectionType === 'serial' && (
+                  {displayConnectionType === 'serial'
+                    ? renderPortField('peripheral-display-port', t('settings.peripherals.scale.portPlain', 'Port (where the cable is plugged in)'), displayPort, setDisplayPort, 'COM4')
+                    : (
                       <div>
-                        <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.display.baudRate', 'Baud Rate')}</label>
-                        <select value={displayBaudRate} onChange={e => setDisplayBaudRate(e.target.value)} className="liquid-glass-modal-input">
-                          <option value="2400">2400</option>
-                          <option value="4800">4800</option>
-                          <option value="9600">9600</option>
-                          <option value="19200">19200</option>
-                        </select>
+                        <label htmlFor="peripheral-display-ip" className="block text-sm font-medium mb-1 liquid-glass-modal-text">{t('settings.peripherals.display.ipPlain', 'IP address of the display')}</label>
+                        <input id="peripheral-display-ip" value={displayPort} onChange={e => setDisplayPort(e.target.value)} className="liquid-glass-modal-input w-full max-w-sm" placeholder="192.168.1.100" />
                       </div>
                     )}
-                    {displayConnectionType === 'network' && (
-                      <div>
-                        <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.display.tcpPort', 'TCP Port')}</label>
-                        <input type="number" value={displayTcpPort} onChange={e => setDisplayTcpPort(e.target.value)} className="liquid-glass-modal-input" placeholder="9100" />
-                      </div>
-                    )}
-                    <div className="flex items-end">
-                      <button
-                        disabled={Boolean(hardwareAction) || hardwareLoading || !settingsLoaded}
-                        onClick={() => void runHardwareAction('display', () => hardwareStatus?.customerDisplay?.connected ? bridge.hardware.displayDisconnect() : bridge.hardware.displayConnect({ connectionType: displayConnectionType, target: displayPort, portNumber: displayConnectionType === 'network' ? Number(displayTcpPort) : undefined, baudRate: displayConnectionType === 'serial' ? Number(displayBaudRate) : undefined }))}
-                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all inline-flex items-center justify-center ${
-                          hardwareStatus?.customerDisplay?.connected
-                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 active:bg-red-500/30'
-                            : 'bg-yellow-500/20 border border-yellow-500/50 text-yellow-900 dark:text-yellow-200 active:bg-yellow-500/30'
-                        }`}
-                      >
-                        {hardwareStatus?.customerDisplay?.connected
-                          ? t('settings.peripherals.scale.disconnect', 'Disconnect')
-                          : t('settings.peripherals.scale.connect', 'Connect')}
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* --- Serial Barcode Scanner --- */}
-              <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-3 dark:bg-black/10">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span id="peripheral-scanner-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.scanner.title', 'Serial Barcode Scanner')}</span>
-                    {hardwareStatus?.serialScanner?.connected && (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
-                        {t('settings.peripherals.scanner.running', 'Running')}
-                      </span>
-                    )}
-                  </div>
-                  <POSGlassSwitch aria-labelledby="peripheral-scanner-label" checked={scannerEnabled} onChange={setScannerEnabled} />
+                  {renderConnectButton(
+                    'display',
+                    Boolean(hardwareStatus?.customerDisplay?.connected),
+                    t('settings.peripherals.scale.connect', 'Connect'),
+                    t('settings.peripherals.scale.disconnect', 'Disconnect'),
+                    () => bridge.hardware.displayConnect({ connectionType: displayConnectionType, target: displayPort, portNumber: displayConnectionType === 'network' ? Number(displayTcpPort) : undefined, baudRate: displayConnectionType === 'serial' ? Number(displayBaudRate) : undefined }),
+                    () => bridge.hardware.displayDisconnect(),
+                  )}
                 </div>
-                <p className={`text-xs liquid-glass-modal-text-muted -mt-1`}>{t('settings.peripherals.scanner.keyboardNote', 'Keyboard-wedge scanners work automatically — no configuration needed')}</p>
-                {(scannerEnabled || hardwareStatus?.serialScanner?.connected) && (
-                  <div className="grid grid-cols-2 gap-3 pl-1">
+                <TechDisclosure title={t('settings.printer.forTechnicians', 'Settings for technicians')}>
+                  {displayConnectionType === 'serial' ? (
                     <div>
-                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scanner.port', 'COM Port')}</label>
-                      <input value={scannerPort} onChange={e => setScannerPort(e.target.value)} className="liquid-glass-modal-input" placeholder="COM2" />
-                    </div>
-                    <div>
-                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scanner.baudRate', 'Baud Rate')}</label>
-                      <select value={scannerBaudRate} onChange={e => setScannerBaudRate(e.target.value)} className="liquid-glass-modal-input">
-                        <option value="2400">2400</option>
-                        <option value="4800">4800</option>
-                        <option value="9600">9600</option>
-                        <option value="19200">19200</option>
+                      <label htmlFor="peripheral-display-baud" className="block text-sm font-medium mb-1 liquid-glass-modal-text">{t('settings.peripherals.display.baudRate', 'Baud Rate')}</label>
+                      <select id="peripheral-display-baud" value={displayBaudRate} onChange={e => setDisplayBaudRate(e.target.value)} className="liquid-glass-modal-input w-full">
+                    <option value="2400">2400</option>
+                    <option value="4800">4800</option>
+                    <option value="9600">9600</option>
+                    <option value="19200">19200</option>
                       </select>
                     </div>
-                    <div className="col-span-2">
-                      <button
-                        disabled={Boolean(hardwareAction) || hardwareLoading || !settingsLoaded}
-                        onClick={() => void runHardwareAction('scanner', () => hardwareStatus?.serialScanner?.connected ? bridge.hardware.scannerSerialStop() : bridge.hardware.scannerSerialStart({ port: scannerPort, baud: Number(scannerBaudRate) }))}
-                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all inline-flex items-center justify-center ${
-                          hardwareStatus?.serialScanner?.connected
-                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 active:bg-red-500/30'
-                            : 'bg-yellow-500/20 border border-yellow-500/50 text-yellow-900 dark:text-yellow-200 active:bg-yellow-500/30'
-                        }`}
-                      >
-                        {hardwareStatus?.serialScanner?.connected
-                          ? t('settings.peripherals.scanner.stop', 'Stop')
-                          : t('settings.peripherals.scanner.start', 'Start')}
-                      </button>
+                  ) : (
+                    <div>
+                      <label htmlFor="peripheral-display-tcp" className="block text-sm font-medium mb-1 liquid-glass-modal-text">{t('settings.peripherals.display.tcpPort', 'TCP Port')}</label>
+                      <input id="peripheral-display-tcp" type="number" value={displayTcpPort} onChange={e => setDisplayTcpPort(e.target.value)} className="liquid-glass-modal-input w-full" placeholder="9100" />
                     </div>
+                  )}
+                </TechDisclosure>
+              </>
+            )}
+          </section>
+
+          {/* --- Serial Barcode Scanner --- */}
+          <section data-device-card="scanner" className="pos-group">
+            <div className="pos-row">
+              <div className="pos-row__label">
+                <span id="peripheral-scanner-label" className="pos-row__title">{t('settings.peripherals.scanner.title', 'Serial Barcode Scanner')}</span>
+                <span className="pos-row__help">{t('settings.peripherals.scanner.keyboardNote', 'Keyboard-wedge scanners work automatically — no configuration needed')}</span>
+                {deviceStatusLine(Boolean(hardwareStatus?.serialScanner?.connected), scannerEnabled)}
+              </div>
+              <div className="pos-row__control">
+                <POSGlassSwitch aria-labelledby="peripheral-scanner-label" checked={scannerEnabled} onChange={setScannerEnabled} />
+              </div>
+            </div>
+            {(scannerEnabled || hardwareStatus?.serialScanner?.connected) && (
+              <>
+                <div className="pos-row pos-row--stack">
+                  {renderPortField('peripheral-scanner-port', t('settings.peripherals.scale.portPlain', 'Port (where the cable is plugged in)'), scannerPort, setScannerPort, 'COM2')}
+                  {renderConnectButton(
+                    'scanner',
+                    Boolean(hardwareStatus?.serialScanner?.connected),
+                    t('settings.peripherals.scanner.start', 'Start'),
+                    t('settings.peripherals.scanner.stop', 'Stop'),
+                    () => bridge.hardware.scannerSerialStart({ port: scannerPort, baud: Number(scannerBaudRate) }),
+                    () => bridge.hardware.scannerSerialStop(),
+                  )}
+                </div>
+                <TechDisclosure title={t('settings.printer.forTechnicians', 'Settings for technicians')}>
+                  <div>
+                    <label htmlFor="peripheral-scanner-baud" className="block text-sm font-medium mb-1 liquid-glass-modal-text">{t('settings.peripherals.scanner.baudRate', 'Baud Rate')}</label>
+                    <select id="peripheral-scanner-baud" value={scannerBaudRate} onChange={e => setScannerBaudRate(e.target.value)} className="liquid-glass-modal-input w-full">
+                    <option value="2400">2400</option>
+                    <option value="4800">4800</option>
+                    <option value="9600">9600</option>
+                    <option value="19200">19200</option>
+                    </select>
                   </div>
+                </TechDisclosure>
+              </>
+            )}
+          </section>
+
+          {/* --- Loyalty / NFC Reader --- */}
+          <section data-device-card="loyalty" className="pos-group">
+            <div className="pos-row">
+              <div className="pos-row__label">
+                <span id="peripheral-loyalty-reader-label" className="pos-row__title">{t('settings.workflow.loyaltyInput', { defaultValue: 'Loyalty card keyboard input' })}</span>
+                <span className="pos-row__help">{t('settings.workflow.loyaltyInputHelp', { defaultValue: 'For readers that type the card number like a keyboard. Running means the input listener is active; it does not confirm that an NFC device is connected.' })}</span>
+                {hardwareStatus?.loyaltyReader?.connected && (
+                  <StatusLine tone="ok">{t('settings.peripherals.scanner.running', 'Running')}</StatusLine>
                 )}
               </div>
-
-              {/* --- Card Reader (MSR) --- */}
-              <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-2 dark:bg-black/10">
-                <div className="flex items-center justify-between">
-                  <span id="peripheral-card-reader-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.cardReader.title', 'Card Reader (MSR)')}</span>
-                  <span className="text-xs liquid-glass-modal-text-muted">{t('settings.workflow.unavailable', { defaultValue: 'Unavailable' })}</span>
-                </div>
-                <p className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.workflow.unsupportedMsr', { defaultValue: 'Magnetic card readers are not supported by this version. Use Card Machines for card payments.' })}</p>
+              <div className="pos-row__control">
+                <POSGlassSwitch aria-labelledby="peripheral-loyalty-reader-label" checked={loyaltyEnabled} onChange={setLoyaltyEnabled} />
               </div>
+            </div>
+          </section>
 
-              {/* --- Loyalty / NFC Reader --- */}
-              <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-2 dark:bg-black/10">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span id="peripheral-loyalty-reader-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.workflow.loyaltyInput', { defaultValue: 'Loyalty card keyboard input' })}</span>
-                    {hardwareStatus?.loyaltyReader?.connected && (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
-                        {t('settings.peripherals.scanner.running', 'Running')}
-                      </span>
-                    )}
-                  </div>
-                  <POSGlassSwitch aria-labelledby="peripheral-loyalty-reader-label" checked={loyaltyEnabled} onChange={setLoyaltyEnabled} />
-                </div>
-                <p className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.workflow.loyaltyInputHelp', { defaultValue: 'For readers that type the card number like a keyboard. Running means the input listener is active; it does not confirm that an NFC device is connected.' })}</p>
-              </div>
+          {/* --- Caller ID / VoIP --- (the cash register lives in Cards & cash register) */}
+          <CallerIdSection />
 
-              <div className="border-t liquid-glass-modal-border" />
-
-              {/* Save Peripherals Button */}
-              <div className="pt-2 border-t liquid-glass-modal-border">
-                <button
-                  disabled={Boolean(hardwareAction) || !settingsLoaded || !hardwareDirty}
-                  onClick={async () => {
-                    if (hardwareAction) return
-                    setHardwareAction('save')
-                    setHardwareActionError('')
-                    try {
-                      const results = await Promise.allSettled([
-                        bridge.settings.updateLocal({
-                          settingType: 'scale',
-                          settings: {
-                            enabled: scaleEnabled,
-                            port: scalePort,
-                            baud_rate: Number(scaleBaudRate),
-                            protocol: scaleProtocol,
-                          }
-                        }),
-                        bridge.settings.updateLocal({
-                          settingType: 'display',
-                          settings: {
-                            enabled: displayEnabled,
-                            connection_type: displayConnectionType,
-                            port: displayPort,
-                            baud_rate: Number(displayBaudRate),
-                            tcp_port: displayConnectionType === 'network' ? Number(displayTcpPort) : null,
-                          }
-                        }),
-                        bridge.settings.updateLocal({
-                          settingType: 'scanner',
-                          settings: {
-                            enabled: scannerEnabled,
-                            port: scannerPort,
-                            baud_rate: Number(scannerBaudRate),
-                          }
-                        }),
-                        bridge.settings.updateLocal({
-                          settingType: 'peripherals',
-                          settings: {
-                            card_reader_enabled: cardReaderEnabled,
-                            loyalty_card_reader: loyaltyEnabled,
-                          }
-                        }),
-                      ])
-                      for (const result of results) {
-                        if (result.status === 'rejected') throw result.reason
-                        requireSettingsSuccess(result.value)
-                      }
-                      setHardwareBaseline(hardwareSignature)
-                      toast.success(t('settings.workflow.hardwareSaved', { defaultValue: 'Device settings saved. Use Connect to apply them to each device.' }))
-                    } catch (e) {
-                      console.error('Failed to save hardware settings:', e)
-                      setHardwareActionError(getErrorMessage(e, t('settings.peripherals.saveFailed', 'Failed to save peripheral settings')))
-                      toast.error(t('settings.peripherals.saveFailed', 'Failed to save peripheral settings'))
-                    } finally {
-                      setHardwareAction(null)
-                    }
-                  }}
-                  className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-green-500 bg-green-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-green-600/30 transition-transform duration-150 active:scale-[0.98] active:bg-green-700"
-                >
-                  {t('settings.peripherals.saveButton', 'Save peripherals')}
-                </button>
-              </div>
-
-
-              {/* --- Cash Register / Fiscal Printer --- */}
-              <CashRegisterSection setupIntent={cashRegisterSetupIntent} />
-
-              <div className="border-t liquid-glass-modal-border" />
-
-              {/* --- Caller ID / VoIP --- */}
-              <CallerIdSection />
-
-
-          </div>
+          {/* Changes that are not followed by Connect (a device switched off, the loyalty input, a
+              corrected port) are saved here; Cancel goes back to what is saved. */}
+          <DirtyFooter
+            visible={hardwareDirty}
+            note={<span role="status">{t('settings.workflow.pendingChanges', { defaultValue: 'Unsaved device changes' })}</span>}
+            saveLabel={t('settings.peripherals.saveButton', 'Save peripherals')}
+            cancelLabel={t('common.actions.cancel', 'Cancel')}
+            onSave={() => void saveHardwareSettings()}
+            onCancel={restoreHardwareDraft}
+            saving={Boolean(hardwareAction)}
+            saveDisabled={!settingsLoaded}
+          />
         </div>
         )}
 
         {/* Printer Settings trigger */}
         {activeSettingsSection === 'printing' && (
-        <>
-        <div id="settings-section-printing" className={`rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Printer className="w-5 h-5 text-yellow-500" />
-              <div className="text-left">
-                <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.printer.label')}</span>
-                <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.printer.helpText')}</span>
-              </div>
-            </div>
-            <button
-              onClick={() => {
-                setPrinterSettingsInitialMode('quick')
-                setPrinterSettingsAutoStartWizard(false)
-                setShowPrinterSettingsModal(true)
-              }}
-              className={liquidGlassModalButton('primary', 'md')}
-            >
-              {t('settings.printer.configureButton')}
-            </button>
-          </div>
+        <div id="settings-section-printing" className="space-y-4">
+          {/* UI audit wave 7Γ: the printers and the receipt settings live here, not in a window
+              over Settings; the form, wizard and diagnostics open as a window when needed. */}
+          <PrinterSettingsModal
+            embedded
+            isOpen={isOpen}
+            onClose={() => undefined}
+            receiptPromptRow={(
+              <SettingsRow
+                title={<span id="printer-receipt-print-prompt-label">{t('settings.printer.askBeforePrint', 'Ask before printing')}</span>}
+                help={t('settings.printer.askBeforePrintHelp', 'Show a confirmation after payment before printing the receipt')}
+                control={(
+                  <POSGlassSwitch
+                    aria-labelledby="printer-receipt-print-prompt-label"
+                    checked={receiptPrintPromptEnabled}
+                    onChange={handleReceiptPrintPromptToggle}
+                  />
+                )}
+              />
+            )}
+          />
+          <PrintQueuePanel />
         </div>
-
-        <div className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <Printer className="w-5 h-5 text-yellow-500" />
-              <div className="text-left">
-                <div id="printer-receipt-print-prompt-label" className="font-medium liquid-glass-modal-text">
-                  {t('settings.printer.askBeforePrint', 'Ask before printing')}
-                </div>
-                <div className="text-xs liquid-glass-modal-text-muted">
-                  {t('settings.printer.askBeforePrintHelp', 'Show a confirmation after payment before printing the receipt')}
-                </div>
-              </div>
-            </div>
-            <POSGlassSwitch
-              aria-labelledby="printer-receipt-print-prompt-label"
-              checked={receiptPrintPromptEnabled}
-              onChange={handleReceiptPrintPromptToggle}
-            />
-          </div>
-        </div>
-
-        <PrintQueuePanel />
-        </>
         )}
 
-        {/* Payment Terminals Settings trigger */}
+        {/* Cards & cash register (UI audit wave 7Δ): the card machines and the cash register of this
+            till together; two different devices, saved where they always were. */}
         {activeSettingsSection === 'payments' && (
-        <div id="settings-section-payments" className={`rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <CreditCard className="w-5 h-5 text-yellow-500" />
-              <div className="text-left">
-                <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.paymentTerminals.label', 'Payment Terminals')}</span>
-                <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.paymentTerminals.helpText', 'Configure ECR payment devices')}</span>
-              </div>
-            </div>
-            <button
-              onClick={() => setShowPaymentTerminalsSection(true)}
-              className={liquidGlassModalButton('primary', 'md')}
-            >
-              {t('settings.paymentTerminals.configureButton', 'Configure')}
-            </button>
-          </div>
+        <div id="settings-section-payments" className="space-y-4">
+          <PaymentTerminalsSection
+            embedded
+            onOpenCashRegisterSetup={() => {
+              // Same section now: the register below opens its network setup.
+              setCashRegisterSetupIntent({ mode: 'rbs_network', token: Date.now() })
+            }}
+          />
+          <CashRegisterSection setupIntent={cashRegisterSetupIntent} />
         </div>
         )}
 
         {/* Waiter Devices Section — main terminal manages its mobile_waiter unit */}
         {activeSettingsSection === 'waiter_devices' && isMainTerminal && (
-          <WaiterDevicesSection />
+          <>
+            <WaiterDevicesSection />
+            <CafeLanSettings isMain={isMainTerminal} />
+          </>
         )}
 
         {/* Platforms Section — connected delivery platforms, open/close switches */}
@@ -2105,92 +1863,41 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           <PlatformsSection />
         )}
 
-        {/* About Section */}
-        {activeSettingsSection === 'about' && (
-        <div id="settings-section-about" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-3 transition-all">
-          {sectionHeader(
-            <Info className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
-            t('modals.connectionSettings.about'),
-            aboutData ? `v${aboutData.version}` : t('modals.connectionSettings.aboutSubtitle'),
-          )}
-          {aboutData ? (
-            <>
-              {[
-                { label: t('modals.connectionSettings.aboutVersion'), value: `v${aboutData.version}` },
-                { label: t('modals.connectionSettings.aboutBuildDate'), value: aboutData.buildTimestamp },
-                { label: t('modals.connectionSettings.aboutGitSha'), value: aboutData.gitSha },
-                { label: t('modals.connectionSettings.aboutPlatform'), value: `${aboutData.platform} (${aboutData.arch})` },
-                { label: t('modals.connectionSettings.aboutRust'), value: aboutData.rustVersion },
-              ].map(({ label, value }) => (
-                <div key={label} className="flex justify-between items-center py-2 border-b border-white/5 last:border-b-0">
-                  <span className="text-sm liquid-glass-modal-text-muted">{label}</span>
-                  <span className="text-sm font-mono liquid-glass-modal-text">{value}</span>
-                </div>
-              ))}
-              <div className="pt-3 flex flex-wrap justify-center gap-3">
-                <button
-                  onClick={handleCopyAboutInfo}
-                  className={liquidGlassModalButton('secondary', 'md')}
-                >
-                  <span className="inline-flex items-center gap-2">
-                    {aboutCopied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-                    {aboutCopied ? t('modals.connectionSettings.aboutCopied') : t('modals.connectionSettings.aboutCopyInfo')}
-                  </span>
-                </button>
-                {onCheckForUpdates && (
-                  <button
-                    type="button"
-                    onClick={onCheckForUpdates}
-                    className={liquidGlassModalButton('primary', 'md')}
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <RefreshCw className="w-4 h-4" />
-                      {t('updates.actions.checkNow', 'Check for updates')}
-                    </span>
-                  </button>
-                )}
-              </div>
-            </>
-          ) : (
-            <div className="py-4 text-center">
-              {aboutError ? <div role="alert" className="space-y-3">
-                <p>{t('settings.workflow.aboutLoadFailed', { defaultValue: 'Could not load device information.' })}</p>
-                <button type="button" onClick={() => setAboutRetry(value => value + 1)} className={liquidGlassModalButton('secondary', 'md')}>{t('common.retry', 'Retry')}</button>
-              </div> : <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-yellow-500 mx-auto" />}
-            </div>
-          )}
-        </div>
-        )}
+
+
           </div>
         </div>
       </div>
-      )}
 
     </LiquidGlassModal>
 
     <ConfirmDialog
       isOpen={showDiscardChanges}
-      onClose={() => setShowDiscardChanges(false)}
-      onConfirm={() => { setShowDiscardChanges(false); onClose() }}
-      title={t('settings.workflow.pendingChanges', { defaultValue: 'Unsaved device changes' })}
-      message={t('settings.workflow.unsavedHelp', { defaultValue: 'Device connection details have not been saved. Save them before leaving, or discard your changes.' })}
+      onClose={() => { setShowDiscardChanges(false); setPendingSection(null) }}
+      onConfirm={() => {
+        setShowDiscardChanges(false)
+        if (pendingSection) {
+          // Leaving a section: drop that section's drafts only.
+          dirtyRegistry.clear()
+          setActiveSettingsSection(pendingSection)
+          setPendingSection(null)
+          return
+        }
+        discardDrafts()
+        onClose()
+      }}
+      title={hardwareDirty && !otherDirty && !pendingSection
+        ? t('settings.workflow.pendingChanges', { defaultValue: 'Unsaved device changes' })
+        : t('settings.workflow.unsavedAnyTitle', { defaultValue: 'Unsaved changes' })}
+      message={hardwareDirty && !otherDirty && !pendingSection
+        ? t('settings.workflow.unsavedHelp', { defaultValue: 'Device connection details have not been saved. Save them before leaving, or discard your changes.' })
+        : t('settings.workflow.unsavedAnyHelp', { defaultValue: 'Some changes on this screen have not been saved. Discard them?' })}
       confirmText={t('settings.workflow.discardChanges', { defaultValue: 'Discard changes' })}
       cancelText={t('settings.workflow.keepEditing', { defaultValue: 'Keep editing' })}
       variant="warning"
     />
 
     {/* Sub-modals rendered outside LiquidGlassModal for independent viewport positioning */}
-    {showPrinterSettingsModal && (
-      <PrinterSettingsModal
-        isOpen={showPrinterSettingsModal}
-        initialMode={printerSettingsInitialMode}
-        autoStartWizard={printerSettingsAutoStartWizard}
-        onClose={() => {
-          setShowPrinterSettingsModal(false)
-          setPrinterSettingsAutoStartWizard(false)
-        }}
-      />
-    )}
 
     {/* Clear Operational Data Confirmation Dialog */}
     <ConfirmDialog
@@ -2276,7 +1983,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       }
     />
     {confirmationModal}
-    </>
+    </SettingsDirtyProvider>
   )
 }
 

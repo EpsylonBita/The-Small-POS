@@ -47,20 +47,22 @@ test('Z modal headline is the money collected in the whole day (store + platform
     source,
     /const collectedTotal = zReport\?\.daySummary\?\.total\s*\?\? \(cashCollected \+ cardCollected \+ twintCollected \+ platformCollected \+ otherTenderCollected\);/,
   );
-  assert.match(source, /text-yellow-300 sm:text-5xl">\s*\{formatMoney\(collectedTotal\)\}/);
+  // Founder 31/10: the headline in the one money ink (it was brown), said once -- the overview card that
+  // repeated it beside the headline is gone.
+  assert.match(source, /sm:text-5xl \$\{strongTextClass\}`\}>\s*\{formatMoney\(collectedTotal\)\}/);
   assert.match(source, /data-z-report-earned-source[\s\S]*?\{t\('modals\.zReport\.orders', \{ defaultValue: 'Orders' \}\)\}: \{totalOrders\}/);
-  // The 'earned' overview card agrees with the headline.
-  assert.match(source, /key: 'earned',[\s\S]*?value: formatMoney\(collectedTotal\),[\s\S]*?: \$\{totalOrders\} ·/);
+  assert.doesNotMatch(source, /key: 'earned',/);
   // The old staff-subset override is gone for good, and the headline never
   // falls back to the order-level gross.
   assert.doesNotMatch(source, /storeEarnedSoFar/);
   assert.doesNotMatch(source, /hasStaffEarnedSoFar/);
   assert.doesNotMatch(source, /staffEarnedSoFar/);
-  assert.doesNotMatch(source, /text-yellow-300 sm:text-5xl">\s*\{formatMoney\(totalSales\)\}/);
+  assert.doesNotMatch(source, /sm:text-5xl[^>]*>\s*\{formatMoney\(totalSales\)\}/);
   // No clamped residual pretending to be a tender: «other» is the real bucket.
   assert.doesNotMatch(source, /Math\.max\(\s*0,\s*totalSales - cashCollected/);
   assert.match(source, /const otherCollected = otherTenderCollected;/);
-  assert.match(source, /const netAfterExpenses = collectedTotal - expensesTotal - staffPaymentsTotal;/);
+  // The Check tab's cash card follows the drawer only (31/10): no «net» that mixed card money in.
+  assert.doesNotMatch(source, /netAfterExpenses/);
 });
 
 test('Z modal shows the three-way split under the headline: cash in the till + card + platforms (+ other tender)', () => {

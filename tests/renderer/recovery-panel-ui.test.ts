@@ -46,7 +46,7 @@ test('Round 198: recovery-point cards expose selected state via aria-pressed and
     list,
     /onClick=\{\(\) => setSelectedPointId\(point\.id\)\}\s*aria-pressed=\{isSelected\}/,
   );
-  assert.match(list, /isSelected\s*\?\s*'border-yellow-400\/60 bg-yellow-400\/10'/);
+  assert.match(list, /className=\{`pos-choice-card\$\{isSelected \? ' is-selected' : ''\}`\}/);
 
   // Stable list marker present for live QA / future guards.
   assert.match(source, /data-recovery-point-list/);

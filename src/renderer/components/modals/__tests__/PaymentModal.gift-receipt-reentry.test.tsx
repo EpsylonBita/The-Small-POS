@@ -85,8 +85,8 @@ describe('PaymentModal gift receipt reentry', () => {
     const view = render(<PaymentModal isOpen {...props} />);
 
     expect(screen.getByTestId('gift-card-tender')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /CASH/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: /CARD/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Cash/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Card/ })).toBeNull();
     expect(tender.props.at(-1)).toMatchObject({
       orderId: 'order-gift-paid',
       fixedAmountCents: 0,
@@ -101,7 +101,7 @@ describe('PaymentModal gift receipt reentry', () => {
     // Back has no payment selection to return to: it closes the reentry.
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole('button', { name: /CASH/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Cash/ })).toBeNull();
     expect(onPaymentComplete).not.toHaveBeenCalled();
   });
 
@@ -118,7 +118,7 @@ describe('PaymentModal gift receipt reentry', () => {
     );
 
     expect(screen.queryByTestId('gift-card-tender')).toBeNull();
-    expect(screen.getByRole('button', { name: /CASH/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Cash/ })).toBeInTheDocument();
     expect(tender.props).toHaveLength(0);
   });
 });

@@ -172,7 +172,7 @@ const AvailableState: React.FC<AvailableStateProps> = ({
   return (
     <div className="space-y-4">
       {/* Version info header */}
-      <div className="flex items-center space-x-3 text-amber-300">
+      <div className="flex items-center space-x-3 text-amber-800 dark:text-amber-300">
         <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path
             strokeLinecap="round"
@@ -334,7 +334,7 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
     <div className="space-y-6 text-center">
       {/* Success icon */}
       <div className="flex justify-center mb-4">
-        <div className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center text-green-400">
+        <div className="w-16 h-16 bg-(--pos-s-surface-2) rounded-full flex items-center justify-center text-green-800 dark:text-green-300">
           <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path
               strokeLinecap="round"
@@ -353,7 +353,7 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
       </p>
 
       {/* Warning note */}
-      <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-2xl p-3 text-sm text-amber-800 dark:text-yellow-200">
+      <div className="bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl p-3 text-sm text-amber-800 dark:text-yellow-200">
         {t('updates.downloaded.warning')}
       </div>
 
@@ -362,14 +362,14 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
         <button
           type="button"
           onClick={handleInstall}
-          className="w-full min-h-12 rounded-2xl bg-green-600 px-6 py-3 font-bold text-white transition-transform active:scale-[0.98] active:bg-green-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-green-300/80"
+          className="w-full min-h-12 rounded-2xl bg-(--pos-s-yellow) px-6 py-3 font-bold text-black transition-transform active:scale-[0.98] active:bg-yellow-500 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)"
         >
           {t('updates.actions.installNow')}
         </button>
         <button
           type="button"
           onClick={handleClose}
-          className="w-full min-h-12 rounded-2xl bg-gray-600 px-6 py-3 font-semibold text-white transition-transform active:scale-[0.98] active:bg-gray-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300/80"
+          className="w-full min-h-12 rounded-2xl bg-gray-600 px-6 py-3 font-semibold text-white transition-transform active:scale-[0.98] active:bg-gray-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)"
         >
           {t('updates.actions.installLater')}
         </button>
@@ -401,7 +401,7 @@ const ErrorState: React.FC<ErrorStateProps> = ({
     <div className="space-y-6 text-center">
       {/* Error icon */}
       <div className="flex justify-center mb-4">
-        <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center text-red-400">
+        <div className="w-16 h-16 bg-(--pos-s-surface-2) rounded-full flex items-center justify-center text-red-800 dark:text-red-300">
           <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path
               strokeLinecap="round"
@@ -462,7 +462,7 @@ const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion, 
     <div className="space-y-6 text-center">
       {/* Check icon */}
       <div className="flex justify-center mb-4">
-        <div className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center text-green-400">
+        <div className="w-16 h-16 bg-(--pos-s-surface-2) rounded-full flex items-center justify-center text-green-800 dark:text-green-300">
           <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path
               strokeLinecap="round"

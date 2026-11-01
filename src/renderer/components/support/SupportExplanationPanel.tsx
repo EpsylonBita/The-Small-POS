@@ -1,4 +1,5 @@
 import React from 'react';
+import { solidButton } from '../settings/SettingsKit'
 import { AlertTriangle, Info, ShieldAlert, Wrench } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type {
@@ -24,25 +25,25 @@ const severityMeta: Record<
 > = {
   info: {
     icon: Info,
-    badgeClassName: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
-    borderClassName: 'border-amber-500/25',
+    badgeClassName: 'bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800',
+    borderClassName: 'border-amber-300 dark:border-amber-800',
   },
   warning: {
     icon: AlertTriangle,
     badgeClassName:
-      'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
-    borderClassName: 'border-amber-500/25',
+      'bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800',
+    borderClassName: 'border-amber-300 dark:border-amber-800',
   },
   high: {
     icon: Wrench,
     badgeClassName:
-      'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
-    borderClassName: 'border-amber-500/25',
+      'bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800',
+    borderClassName: 'border-amber-300 dark:border-amber-800',
   },
   critical: {
     icon: ShieldAlert,
-    badgeClassName: 'bg-red-500/15 text-red-700 dark:text-red-300 border-red-500/30',
-    borderClassName: 'border-red-500/30',
+    badgeClassName: 'bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300 border-red-300 dark:border-red-800',
+    borderClassName: 'border-red-300 dark:border-red-800',
   },
 };
 
@@ -87,7 +88,7 @@ export const SupportExplanationPanel: React.FC<SupportExplanationPanelProps> = (
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex min-h-touch items-center rounded-2xl px-3 text-xs font-semibold text-slate-600 transition-transform active:scale-95 active:bg-black/5 dark:text-slate-300 dark:active:bg-white/10"
+            className="inline-flex min-h-touch items-center rounded-2xl px-3 text-xs font-semibold text-slate-600 transition-transform active:scale-95 dark:text-slate-300"
           >
             {t('common.actions.close')}
           </button>
@@ -110,7 +111,7 @@ export const SupportExplanationPanel: React.FC<SupportExplanationPanelProps> = (
             {explanation.evidence.map((item) => (
               <div
                 key={item.id}
-                className="rounded-2xl border border-white/10 bg-white/5 px-2.5 py-2"
+                className="rounded-2xl border border-zinc-200 dark:border-zinc-700 px-2.5 py-2"
               >
                 <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
                   {t(item.labelKey, { defaultValue: item.fallbackLabel })}
@@ -154,11 +155,7 @@ export const SupportExplanationPanel: React.FC<SupportExplanationPanelProps> = (
               type="button"
               onClick={() => onAction(action.id)}
               disabled={busyActionId === action.id}
-              className={`inline-flex min-h-touch items-center justify-center rounded-2xl px-3 py-2 text-xs font-semibold transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100 ${
-                action.variant === 'primary'
-                  ? 'border border-amber-500/35 bg-amber-400 text-black active:bg-amber-300 dark:border-amber-300/40 dark:bg-amber-400 dark:text-black'
-                  : 'border border-white/10 bg-white/8 text-slate-700 active:bg-white/[0.14] dark:text-slate-200'
-              }`}
+              className={solidButton(action.variant === 'primary' ? 'primary' : 'secondary', 'sm')}
             >
               {busyActionId === action.id ? t('support.actions.running') : action.label}
             </button>

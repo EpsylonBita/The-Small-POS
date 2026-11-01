@@ -66,6 +66,34 @@ try {
   await import('./renderer/styles/globals.css');
   await import('./renderer/styles/glassmorphism.css');
 
+  // Touch screens: show the pressed look from touch-down (WebView2 sets :active only on
+  // release). Visual only; the click fires as before.
+  const { installTouchPressFeedback } = await import('./renderer/utils/press-feedback');
+  installTouchPressFeedback();
+
+  // Founder 31/10 («το βίντεο να μπαίνει μόλις τρέχει η εφαρμογή»): the start-up intro clip starts now, before
+  // the app loads, in its own root so the loading, sign-in and till screens can change underneath it. Only on
+  // the till's own window; never in the way of the app if it cannot load.
+  try {
+    const { resolveExternalDisplayKind } = await import('./renderer/utils/externalDisplayKind');
+    const intro = await import('./renderer/components/AppIntro');
+    if (!resolveExternalDisplayKind('') && intro.shouldPlayAppIntro()) {
+      const introHost = document.createElement('div');
+      document.body.appendChild(introHost);
+      const introRoot = ReactDOM.createRoot(introHost);
+      introRoot.render(
+        <intro.default
+          onGone={() => {
+            introRoot.unmount();
+            introHost.remove();
+          }}
+        />
+      );
+    }
+  } catch (introError) {
+    console.warn('[Startup] intro skipped (non-fatal):', introError);
+  }
+
   // POS app entry
   const { default: App } = await import('./renderer/App');
 

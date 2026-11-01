@@ -4623,6 +4623,9 @@ fn repairs_bootstrap_server(
                     Err(error) => panic!("{error}"),
                 }
             };
+            // On Windows an accepted socket inherits the listener's non-blocking mode, so a
+            // read before the request arrived failed with WSAEWOULDBLOCK (10035), CI 01/11/2026.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();

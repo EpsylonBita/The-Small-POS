@@ -155,7 +155,7 @@ export const POSGlassCard = React.forwardRef<HTMLDivElement, POSGlassCardProps>(
     const baseClasses = 'liquid-glass-modal-card'
     const variantClass = `liquid-glass-modal-${variant}`
     const interactiveClass = onClick ? 'pos-glass-interactive' : ''
-    const selectedClass = isSelected ? 'ring-2 ring-yellow-400 ring-opacity-60' : ''
+    const selectedClass = isSelected ? 'ring-2 ring-(--pos-s-sel-bg)' : ''
     const loadingClass = isLoading ? 'animate-pulse' : ''
     const sizeClasses = {
       compact: 'p-3',
@@ -724,6 +724,9 @@ const getFocusableElements = (container: HTMLElement): HTMLElement[] => {
   ) as HTMLElement[]
 }
 
+// Exit animation (liquidModalExit) is 180 ms; this is the latest a close may settle.
+const MODAL_EXIT_FALLBACK_MS = 260
+
 export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   modalId,
   recoveryAccess = false,
@@ -838,25 +841,33 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
     setIsClosing(true)
   }, [isClosing])
 
-  // Handle animation end
-  const handleAnimationEnd = React.useCallback((event: React.AnimationEvent<HTMLDivElement>) => {
-    // Only the shell owns close settlement. Ignore descendant animations and
-    // finalize once so a parent-driven transition can never become a user close.
-    if (
-      event.target !== event.currentTarget ||
-      !isClosing ||
-      closeFinalizedRef.current
-    ) {
-      return
-    }
-
+  // Settle a close exactly once, from the exit animation's end or the fallback below.
+  const finalizeClose = React.useCallback(() => {
+    if (closeFinalizedRef.current) return
     closeFinalizedRef.current = true
     const externallyClosed = externalClosingRef.current
     externalClosingRef.current = false
     setIsClosing(false)
     setMounted(false)
-    if (!externallyClosed) onClose()
-  }, [isClosing, onClose])
+    if (!externallyClosed) closeActionRef.current()
+  }, [])
+
+  // Handle animation end
+  const handleAnimationEnd = React.useCallback((event: React.AnimationEvent<HTMLDivElement>) => {
+    // Only the shell owns close settlement. Ignore descendant animations and
+    // finalize once so a parent-driven transition can never become a user close.
+    if (event.target !== event.currentTarget || !isClosing) return
+    finalizeClose()
+  }, [isClosing, finalizeClose])
+
+  // The exit animation is 180 ms. If its animationend never arrives (a hidden or
+  // throttled window, a stylesheet override), the close still settles: a modal must
+  // never stay on screen, or hold up the next step, because of an animation.
+  React.useEffect(() => {
+    if (!isClosing) return
+    const timer = window.setTimeout(finalizeClose, MODAL_EXIT_FALLBACK_MS)
+    return () => window.clearTimeout(timer)
+  }, [isClosing, finalizeClose])
 
   // Sync mounted state with isOpen
   React.useEffect(() => {
@@ -1281,16 +1292,18 @@ export const POSGlassSwitch: React.FC<POSGlassSwitchProps> = ({
     {/* Visible pill -- fixed geometry, identical markup for every switch */}
     <span
       className={cn(
-        'relative inline-flex h-[34px] w-[58px] shrink-0 rounded-full border backdrop-blur-sm transition-all duration-200 group-active:scale-95 group-focus-visible:ring-2 group-focus-visible:ring-amber-400/60',
+        // Solid (UI audit wave 7): opaque track; "on" is the solid brand yellow (founder 30/10), no glass.
+        'relative inline-flex h-[34px] w-[58px] shrink-0 rounded-full border transition-all duration-200 group-active:scale-95 group-focus-visible:ring-2 group-focus-visible:ring-amber-700 dark:group-focus-visible:ring-amber-300',
         checked
-          ? 'border-green-500/70 bg-green-500 shadow-md shadow-green-500/40'
-          : 'border-black/10 bg-gray-200/80 shadow-inner dark:border-white/15 dark:bg-white/10'
+          ? 'border-yellow-500 bg-yellow-400 dark:border-yellow-400 dark:bg-yellow-400'
+          : 'border-zinc-500 bg-zinc-100 dark:border-zinc-500 dark:bg-zinc-800'
       )}
     >
       <span
         className={cn(
-          'absolute top-[3px] inset-s-[3px] h-7 w-7 rounded-full bg-white shadow-md shadow-black/20 transition-transform duration-200',
-          checked ? 'translate-x-[24px] rtl:translate-x-[-24px]' : 'translate-x-0'
+          // A short ease-out on the knob, no overshoot (reduce-motion turns it off with every transition).
+          'absolute top-[3px] inset-s-[3px] h-7 w-7 rounded-full bg-white shadow-sm transition-transform duration-200 ease-[cubic-bezier(0.2,0.8,0.2,1)]',
+          checked ? 'translate-x-[24px] rtl:translate-x-[-24px] dark:bg-zinc-900' : 'translate-x-0 dark:bg-zinc-400'
         )}
       />
     </span>

@@ -39,6 +39,47 @@ import type { GiftCardScope } from '../services/GiftCardsApiService';
 // in case order_save_from_remote echoes back our own order.
 const _recentlyCreatedOrderIds = new Set<string>();
 
+// "New order" toasts for orders from other devices. A catch-up sync can deliver many
+// old orders at once, so only orders created in the last 30 minutes count, and every
+// arrival within one short window merges into a single toast (one stable toast id).
+const REMOTE_ORDER_TOAST_MAX_AGE_MS = 30 * 60 * 1000;
+const REMOTE_ORDER_TOAST_BATCH_MS = 600;
+const REMOTE_ORDER_TOAST_ID = 'remote-new-orders';
+let _pendingRemoteOrderNumbers: string[] = [];
+let _remoteOrderToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function isRecentRemoteOrder(orderData: { created_at?: string; createdAt?: string }, now = Date.now()): boolean {
+  const created = Date.parse(orderData?.created_at || orderData?.createdAt || '');
+  if (!Number.isFinite(created)) return true;
+  return now - created <= REMOTE_ORDER_TOAST_MAX_AGE_MS;
+}
+
+export function remoteOrderToastMessage(numbers: string[]): string {
+  if (numbers.length > 1) {
+    return i18n.t('orders.remoteToast.many', { count: numbers.length, defaultValue: '{{count}} new orders' });
+  }
+  // Staff read the short visible number; a long technical id is left out.
+  const number = numbers[0] || '';
+  return number && number.length <= 12
+    ? i18n.t('orders.remoteToast.single', { number, defaultValue: 'New order #{{number}}' })
+    : i18n.t('orders.remoteToast.singleNoNumber', 'New order');
+}
+
+function queueRemoteOrderToast(orderData: Partial<Order>): void {
+  _pendingRemoteOrderNumbers.push(getVisibleOrderNumber(orderData as any).replace(/^#/, ''));
+  if (_remoteOrderToastTimer) return;
+  _remoteOrderToastTimer = setTimeout(() => {
+    const numbers = _pendingRemoteOrderNumbers;
+    _pendingRemoteOrderNumbers = [];
+    _remoteOrderToastTimer = null;
+    toast.success(remoteOrderToastMessage(numbers), {
+      id: REMOTE_ORDER_TOAST_ID,
+      duration: 5000,
+      icon: createElement(Bell, { className: 'w-4 h-4 text-yellow-600 dark:text-yellow-400' }),
+    });
+  }, REMOTE_ORDER_TOAST_BATCH_MS);
+}
+
 // ---------------------------------------------------------------------------
 // Existing-order ordinary collection owners (memory only).
 //
@@ -1024,10 +1065,13 @@ const findOrderInState = (state: Pick<OrderStore, 'orders' | 'pendingExternalOrd
 };
 
 const findOrderIndex = (orders: Order[], incoming: Partial<Order>): number => {
+  // Every key must be present on both sides: two orders that both lack a
+  // supabase_id are not the same order (undefined === undefined used to merge a
+  // new remote order into an unrelated unsynced one).
   return orders.findIndex((order) =>
     order.id === incoming.id ||
-    order.supabase_id === incoming.id ||
-    order.supabase_id === incoming.supabase_id ||
+    (Boolean(order.supabase_id) && order.supabase_id === incoming.id) ||
+    (Boolean(order.supabase_id) && order.supabase_id === incoming.supabase_id) ||
     (order.order_number && incoming.order_number && order.order_number === incoming.order_number) ||
     (order.orderNumber && incoming.orderNumber && order.orderNumber === incoming.orderNumber)
   );
@@ -1248,6 +1292,11 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
         console.log('📡 [useOrderStore] Received remote order:', orderData.id);
 
+        const alreadyKnown = findOrderIndex(
+          [...get().orders, ...get().pendingExternalOrders],
+          orderData,
+        ) >= 0;
+
         set((state) => {
           const combined = [...state.orders, ...state.pendingExternalOrders];
           const existingOrderIndex = findOrderIndex(combined, orderData);
@@ -1263,11 +1312,11 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
         get()._invalidateCache();
 
-        // Show toast for remote orders only
-        toast.success(`New order #${orderData.order_number || orderData.id.slice(0, 8)} received!`, {
-          duration: 5000,
-          icon: createElement(Bell, { className: 'w-4 h-4 text-blue-500' })
-        });
+        // Remote orders only, and only genuinely new ones: a re-delivered or
+        // catch-up order the till already holds, or one created long ago, stays quiet.
+        if (!alreadyKnown && isRecentRemoteOrder(orderData)) {
+          queueRemoteOrderToast(orderData);
+        }
       };
 
       // Wave 8 H25: the generic `order-updated` subscription was REMOVED.

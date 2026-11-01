@@ -126,7 +126,7 @@ describe('PrinterSetupWizard accessibility and theme consumption', () => {
     expect(screen.getByRole('button', { name: 'detect' })).toHaveAttribute('aria-current', 'step')
     const candidate = await screen.findByRole('button', { name: /Accessible Printer/ })
     expect(candidate).toHaveAttribute('aria-pressed', 'true')
-    expect(candidate).toHaveClass('min-h-touch')
+    expect(candidate).toHaveClass('min-h-14')
 
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'verify' }))
@@ -150,11 +150,12 @@ describe('PrinterSetupWizard accessibility and theme consumption', () => {
     />)
     await screen.findByText('Accessible Printer')
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-    await screen.findByRole('heading', { name: 'Step 2: Verify Compatibility' })
+    await screen.findByRole('heading', { name: 'Print a test receipt' })
 
     const markup = view.container.innerHTML
-    expect(markup).toContain('bg-slate-50')
-    expect(markup).toContain('dark:bg-slate-900/60')
+    // UI audit wave 7 / ΣΤ1: the shared neutral tone is an opaque neutral surface in both themes.
+    expect(markup).toContain('border-zinc-300 bg-white text-zinc-800')
+    expect(markup).toContain('dark:bg-zinc-900')
     expect(markup).not.toMatch(/(?:border-white\/10\s+bg-white\/5|bg-white\/5\s+border-white\/10)/)
   })
 
@@ -170,10 +171,13 @@ describe('PrinterSetupWizard accessibility and theme consumption', () => {
     />)
     await screen.findByText('Accessible Printer')
     fireEvent.click(screen.getByRole('button', { name: 'verify' }))
-    expect(screen.getByRole('combobox', { name: 'Paper Size' })).toBeVisible()
+    const paper = screen.getByRole('radiogroup', { name: 'Paper width' })
+    expect(within(paper).getAllByRole('radio')).toHaveLength(3)
+    expect(within(paper).getByRole('radio', { name: '80 mm' })).toHaveClass('min-h-touch')
 
     fireEvent.click(screen.getByRole('button', { name: 'style' }))
-    expect(screen.getByRole('combobox', { name: 'Receipt Template' })).toBeVisible()
+    const template = screen.getByRole('radiogroup', { name: 'Receipt Template' })
+    expect(within(template).getAllByRole('radio')).toHaveLength(2)
     const readability = screen.getByRole('radiogroup', { name: 'Readability' })
     const choices = within(readability).getAllByRole('radio')
     expect(choices).toHaveLength(3)
@@ -200,8 +204,10 @@ describe('PrinterSetupWizard accessibility and theme consumption', () => {
     expect(large).toHaveFocus()
 
     fireEvent.click(screen.getByRole('button', { name: 'save' }))
-    for (const checkbox of screen.getAllByRole('checkbox')) {
-      expect(checkbox.closest('label')).toHaveClass('min-h-touch')
+    // Role assignments are the shared touch-sized switches, never bare checkboxes.
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    for (const toggle of screen.getAllByRole('switch')) {
+      expect(toggle).toHaveClass('min-h-touch')
     }
   })
 })

@@ -548,7 +548,7 @@ const MenuPage: React.FC = () => {
             <div className="flex items-center space-x-4">
               <span className={`text-sm font-medium ${resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>{t('orders.fields.orderType')}</span>
               <span className={`px-3 py-1 rounded-full text-sm font-semibold ${
-                resolvedTheme === 'dark' ? 'bg-yellow-400/20 text-yellow-200' : 'bg-yellow-100 text-yellow-900'
+                resolvedTheme === 'dark' ? 'bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200' : 'bg-(--pos-s-surface-2) text-yellow-900'
               }`}>
                 {orderType === 'dine-in' ? t('orders.type.dineIn') : orderType === 'pickup' ? t('orders.type.pickup') : t('orders.type.delivery')}
               </span>

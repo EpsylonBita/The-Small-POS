@@ -594,7 +594,7 @@ describe('PlatformsSection', () => {
       efoodPartnerHook.updateSettings.mockReset();
     });
 
-    it('offers the in-POS page and its mute as toggles on the efood card and saves them', async () => {
+    it('offers the in-POS page as a toggle on the efood card and saves it (its mute lives in Display & sound)', async () => {
       posApiGet.mockResolvedValue(listResponse(makePlatform({ open: true })));
       render(<PlatformsSection />);
 
@@ -603,20 +603,16 @@ describe('PlatformsSection', () => {
       fireEvent.click(pageToggle);
       expect(efoodPartnerHook.updateSettings).toHaveBeenCalledWith({ enabled: false });
 
-      const muteToggle = screen.getByRole('button', { name: 'Mute efood sounds' });
-      expect(muteToggle).toHaveAttribute('aria-pressed', 'false');
-      fireEvent.click(muteToggle);
-      expect(efoodPartnerHook.updateSettings).toHaveBeenCalledWith({ muted: true });
+      expect(screen.queryByRole('button', { name: 'Mute efood sounds' })).not.toBeInTheDocument();
       // The efood switch itself is untouched: still the only switch on the card.
       expect(screen.getAllByRole('switch')).toHaveLength(1);
     });
 
-    it('shows the saved state of both toggles', async () => {
+    it('shows the saved state of the page toggle', async () => {
       efoodPartnerHook.settings = { enabled: false, muted: true };
       posApiGet.mockResolvedValue(listResponse(makePlatform({ open: true })));
       render(<PlatformsSection />);
       expect(await screen.findByRole('button', { name: 'efood page inside the POS' })).toHaveAttribute('aria-pressed', 'false');
-      expect(screen.getByRole('button', { name: 'Mute efood sounds' })).toHaveAttribute('aria-pressed', 'true');
     });
 
     it('keeps the toggles off the cards of other platforms and of an efood that this register cannot manage', async () => {

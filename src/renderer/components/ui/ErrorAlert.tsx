@@ -34,33 +34,34 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
 
     // Styling configuration based on severity
     const config = {
+        // Wave ΣΤ1: the kit's notice tints (solid, AA in both themes) instead of translucent washes.
         info: {
             icon: Info,
-            color: 'text-amber-300',
-            bg: 'bg-amber-500/10',
-            border: 'border-amber-500/20',
-            shadow: 'shadow-amber-500/5'
+            color: 'text-(--pos-s-fg)',
+            bg: 'bg-(--pos-s-surface-2)',
+            border: 'border-(--pos-s-border)',
+            shadow: ''
         },
         warning: {
             icon: AlertTriangle,
-            color: 'text-amber-300',
-            bg: 'bg-amber-500/10',
-            border: 'border-amber-500/20',
-            shadow: 'shadow-amber-500/5'
+            color: 'text-(--pos-s-warn)',
+            bg: 'bg-(--pos-s-warn-bg)',
+            border: 'border-(--pos-s-warn)',
+            shadow: ''
         },
         error: {
             icon: XCircle,
-            color: 'text-red-400',
-            bg: 'bg-red-500/10',
-            border: 'border-red-500/20',
-            shadow: 'shadow-red-500/5'
+            color: 'text-(--pos-s-bad)',
+            bg: 'bg-(--pos-s-bad-bg)',
+            border: 'border-(--pos-s-bad)',
+            shadow: ''
         },
         success: {
             icon: CheckCircle,
-            color: 'text-emerald-400',
-            bg: 'bg-emerald-500/10',
-            border: 'border-emerald-500/20',
-            shadow: 'shadow-emerald-500/5'
+            color: 'text-(--pos-s-ok)',
+            bg: 'bg-(--pos-s-ok-bg)',
+            border: 'border-(--pos-s-ok)',
+            shadow: ''
         }
     }[severity];
 
@@ -68,7 +69,7 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
 
     return (
         <div className={cn(
-            "relative overflow-hidden rounded-xl border backdrop-blur-md transition-all duration-300",
+            "relative overflow-hidden rounded-xl border transition-all duration-300",
             config.bg, config.border, config.shadow,
             className
         )}
@@ -86,7 +87,7 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
                     </h3>
 
                     {message && (
-                        <p className="mt-1 text-sm text-white/80 leading-relaxed">
+                        <p className="mt-1 text-sm text-(--pos-s-fg) leading-relaxed">
                             {message}
                         </p>
                     )}
@@ -100,7 +101,7 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
                                     onClick={action.onClick}
                                     variant={action.variant || 'secondary'}
                                     size="default"
-                                    className="h-8 text-xs px-3"
+                                    className="min-h-11 text-sm px-3"
                                 >
                                     {action.label}
                                 </POSGlassButton>
@@ -113,7 +114,7 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
                         <div className="mt-2">
                             <button
                                 onClick={() => setIsExpanded(!isExpanded)}
-                                className="flex min-h-8 items-center gap-1 rounded-xl px-2 text-xs font-semibold text-white/55 transition-transform active:scale-[0.98] active:bg-white/10 active:text-white/85"
+                                className="flex min-h-11 items-center gap-1 rounded-xl px-2 text-sm font-semibold text-(--pos-s-muted) transition-transform active:scale-[0.98] active:bg-(--pos-s-surface-2)"
                                 aria-expanded={isExpanded}
                             >
                                 {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
@@ -121,7 +122,7 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
                             </button>
 
                             {isExpanded && (
-                                <div className="mt-2 text-xs font-mono bg-black/30 p-2 rounded-sm border border-white/5 overflow-x-auto text-white/70 whitespace-pre-wrap">
+                                <div className="mt-2 text-xs font-mono bg-(--pos-s-surface) p-2 rounded-lg border border-(--pos-s-border) overflow-x-auto text-(--pos-s-fg) whitespace-pre-wrap">
                                     {typeof details === 'string' ? details : details}
                                 </div>
                             )}
@@ -132,7 +133,7 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
                 {onClose && (
                     <button
                         onClick={onClose}
-                        className="shrink-0 rounded-xl p-1.5 text-white/45 transition-transform active:scale-95 active:bg-white/10 active:text-white"
+                        className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-(--pos-s-muted) transition-transform active:scale-95 active:bg-(--pos-s-surface-2)"
                         aria-label="Close alert"
                     >
                         <X className="w-4 h-4" />

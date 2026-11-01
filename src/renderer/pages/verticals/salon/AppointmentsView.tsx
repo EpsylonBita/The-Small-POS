@@ -41,6 +41,7 @@ import {
   type AppointmentClaimOutcome,
 } from '../../../services/appointment-checkout-claims';
 import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
+import { WorkspaceChips, WorkspaceHeader, WorkspaceIconButton, WorkspaceSearch, WorkspaceSelect } from '../../../components/tables/TableWorkspace';
 
 type ViewMode = 'timeline' | 'list';
 type QuickFilter = 'today' | 'tomorrow' | 'week';
@@ -49,17 +50,17 @@ const statusConfig: Record<AppointmentStatus, { label: string; border: string; c
   scheduled: {
     label: 'Scheduled',
     border: 'border-l-amber-400',
-    chip: 'border border-amber-500/30 bg-amber-500/10 text-amber-500',
+    chip: 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300',
   },
   confirmed: {
     label: 'Confirmed',
     border: 'border-l-emerald-500',
-    chip: 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-500',
+    chip: 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-300',
   },
   in_progress: {
     label: 'In Progress',
     border: 'border-l-yellow-400',
-    chip: 'border border-yellow-500/30 bg-yellow-500/10 text-yellow-500',
+    chip: 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-300',
   },
   completed: {
     label: 'Completed',
@@ -69,12 +70,12 @@ const statusConfig: Record<AppointmentStatus, { label: string; border: string; c
   cancelled: {
     label: 'Cancelled',
     border: 'border-l-red-500',
-    chip: 'border border-red-500/30 bg-red-500/10 text-red-500',
+    chip: 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-300',
   },
   no_show: {
     label: 'No Show',
     border: 'border-l-red-500',
-    chip: 'border border-red-500/30 bg-red-500/10 text-red-500',
+    chip: 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-300',
   },
 };
 
@@ -611,7 +612,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
 
   if (!branchId || !effectiveOrgId) {
     return (
-      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'bg-black text-zinc-400' : 'bg-[#fdfaf5] text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'bg-black text-zinc-400' : 'bg-[#fdfaf5] text-gray-600'}`}>
         {t('appointments.selectBranch', 'Please select a branch to view appointments')}
       </motion.div>
     );
@@ -623,135 +624,85 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
   </div>;
 
   return (
-    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col p-4 ${isDark ? 'bg-black text-zinc-100' : 'bg-[#fdfaf5] text-gray-900'}`}>
-      <motion.section
-        variants={pageMotionItem}
-        data-vertical-hero="appointments"
-        className={`mb-4 rounded-3xl border p-4 backdrop-blur-xl ${isDark ? 'border-white/10 bg-zinc-950/72 shadow-[0_18px_46px_rgba(0,0,0,0.35)]' : 'border-yellow-200/80 bg-white/74 shadow-[0_18px_44px_rgba(15,23,42,0.10)]'}`}
-      >
-        <div className="mb-4 min-w-0">
-          <h1 className="truncate text-3xl font-bold tracking-tight">
-            {t('navigation.menu.appointments', { defaultValue: 'Appointments' })}
-          </h1>
-        </div>
+    // Founder 31/10: the shared workspace -- title with plain figures, search and refresh on one row,
+    // then the day chips, the date, the app's staff dropdown and the view switch.
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="table-workspace h-full" data-theme={isDark ? 'dark' : 'light'}>
+      <div className="table-workspace-controls">
+        <WorkspaceHeader
+          data-vertical-hero="appointments"
+          heading={embedded ? t('dashboard.tabs.services', { defaultValue: 'Services' }) : t('navigation.menu.appointments', { defaultValue: 'Appointments' })}
+          stats={[
+            { key: 'total', label: t('appointments.stats.total', 'Total'), value: stats.total },
+            { key: 'confirmed', label: t('appointments.stats.confirmed', 'Confirmed'), value: stats.confirmed },
+            { key: 'inProgress', label: t('appointments.stats.inProgress', 'In Progress'), value: stats.inProgress },
+            { key: 'completed', label: t('appointments.stats.completed', 'Completed'), value: stats.completed },
+          ]}
+        >
+          {/* A walk-in sale starts from the hub's «+»; this page alone has no «+» for it, so it keeps
+              the button. Its SalonCatalogPicker asks for the stylist separately for each service. */}
+          {!embedded && (
+            <button type="button" data-testid="salon-new-walk-in-sale" className="table-workspace-primary"
+              onClick={() => setSale({ items: [], customer: { id: '', name: '', phone: '' } })}>{t('salonSale.newSale')}</button>
+          )}
+          <WorkspaceSearch value={searchTerm} onChange={setSearchTerm} placeholder={t('appointments.searchPlaceholder', 'Search...')} />
+          <WorkspaceIconButton label={t('common.refresh', 'Refresh')} onClick={() => refetch()}>
+            <RefreshCw className={isLoading ? 'animate-spin' : undefined} />
+          </WorkspaceIconButton>
+        </WorkspaceHeader>
 
-        {/* Header */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <motion.div variants={pageMotionContainer} className="flex flex-wrap gap-3">
-            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-950/80 border-zinc-800' : 'bg-white/86 border-gray-200 shadow-xs'}`}>
-              <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('appointments.stats.total', 'Total')}</div>
-              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.total}</div>
-            </motion.div>
-            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border border-t-2 ${isDark ? 'bg-zinc-950/80 border-zinc-800 border-t-emerald-400' : 'bg-white/86 border-gray-200 border-t-emerald-500 shadow-xs'}`}>
-              <div className="text-sm text-green-500">{t('appointments.stats.confirmed', 'Confirmed')}</div>
-              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.confirmed}</div>
-            </motion.div>
-            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border border-t-2 ${isDark ? 'bg-zinc-950/80 border-zinc-800 border-t-amber-400' : 'bg-white/86 border-gray-200 border-t-amber-500 shadow-xs'}`}>
-              <div className="text-sm text-yellow-500">{t('appointments.stats.inProgress', 'In Progress')}</div>
-              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.inProgress}</div>
-            </motion.div>
-            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-950/80 border-zinc-800' : 'bg-white/86 border-gray-200 shadow-xs'}`}>
-              <div className="text-sm text-gray-500">{t('appointments.stats.completed', 'Completed')}</div>
-              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.completed}</div>
-            </motion.div>
-          </motion.div>
-
-          <div className="flex flex-wrap justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => refetch()}
-              aria-label={t('common.refresh', 'Refresh')}
-              className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border transition active:scale-95 ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-300 active:bg-zinc-800' : 'bg-gray-100 border-gray-300 text-gray-700 active:bg-gray-200'}`}
-            >
-              <RefreshCw className={`w-5 h-5 ${isLoading ? 'animate-spin' : ''}`} />
-            </button>
-            <div className="relative">
-              <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder={t('appointments.searchPlaceholder', 'Search...')}
-                className={`pl-10 pr-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-900 text-zinc-100 border-zinc-700' : 'bg-white text-gray-900 border-gray-200'} focus:outline-hidden ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
-              />
-            </div>
-          </div>
-        </div>
-      </motion.section>
-
-      {/* Filters Row */}
-      <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-4">
-        <motion.div variants={pageMotionContainer} className="flex gap-2">
-          {(['today', 'tomorrow', 'week'] as QuickFilter[]).map(filter => (
-            <motion.button
-              variants={pageMotionItem}
-              key={filter}
-              onClick={() => handleQuickFilter(filter)}
-              className={`px-3 py-1.5 rounded-xl text-sm ${
-                quickFilter === filter
-                  ? 'bg-yellow-400 text-black border border-yellow-400'
-                  : isDark ? 'bg-gray-800 text-gray-300 active:bg-gray-700' : 'bg-gray-100 text-gray-600 active:bg-gray-200'
-              }`}
-            >
-              {t(`appointments.filters.${filter}`, filter.charAt(0).toUpperCase() + filter.slice(1))}
-            </motion.button>
-          ))}
-        </motion.div>
-
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={() => navigateDate('prev')} aria-label={t('appointments.previousDay', 'Previous day')} className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition active:scale-95 ${isDark ? 'active:bg-gray-800' : 'active:bg-gray-100'}`}>
-            <ChevronLeft className="w-5 h-5" />
-          </button>
-          <input
-            type="date"
-            value={toLocalDateStr(selectedDate)}
-            onChange={(e) => {
-              // Parse date string as local date (not UTC)
-              const [year, month, day] = e.target.value.split('-').map(Number);
-              const newDate = new Date(year, month - 1, day);
-              console.log('[AppointmentsView] Date changed to:', newDate, 'from value:', e.target.value);
-              setSelectedDate(newDate);
-              // Reset quick filter when manually selecting date
-              setQuickFilter('today');
-            }}
-            className={`px-3 py-2 rounded-xl ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
+        <div className="table-workspace-toolbar">
+          <WorkspaceChips<QuickFilter>
+            label={t('appointments.filters.today', 'Today')}
+            value={quickFilter}
+            onChange={handleQuickFilter}
+            items={(['today', 'tomorrow', 'week'] as QuickFilter[]).map((filter) => ({
+              key: filter,
+              label: t(`appointments.filters.${filter}`, filter.charAt(0).toUpperCase() + filter.slice(1)),
+            }))}
           />
-          <button type="button" onClick={() => navigateDate('next')} aria-label={t('appointments.nextDay', 'Next day')} className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition active:scale-95 ${isDark ? 'active:bg-gray-800' : 'active:bg-gray-100'}`}>
-            <ChevronRight className="w-5 h-5" />
-          </button>
-        </div>
-
-        <div className="flex gap-2">
-          <select
+          <div className="table-workspace-date">
+            <WorkspaceIconButton label={t('appointments.previousDay', 'Previous day')} onClick={() => navigateDate('prev')}>
+              <ChevronLeft />
+            </WorkspaceIconButton>
+            <input
+              type="date"
+              value={toLocalDateStr(selectedDate)}
+              aria-label={t('appointments.filters.today', 'Today')}
+              onChange={(e) => {
+                // Parse date string as local date (not UTC)
+                const [year, month, day] = e.target.value.split('-').map(Number);
+                setSelectedDate(new Date(year, month - 1, day));
+                // Reset quick filter when manually selecting date
+                setQuickFilter('today');
+              }}
+            />
+            <WorkspaceIconButton label={t('appointments.nextDay', 'Next day')} onClick={() => navigateDate('next')}>
+              <ChevronRight />
+            </WorkspaceIconButton>
+          </div>
+          <span className="table-workspace-spacer" aria-hidden="true" />
+          <WorkspaceSelect
+            label={t('appointments.filters.allStaff', 'All Staff')}
             value={staffFilter}
-            onChange={(e) => setStaffFilter(e.target.value)}
-            className={`px-3 py-2 rounded-xl ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
-          >
-            <option value="all">{t('appointments.filters.allStaff', 'All Staff')}</option>
-            {filterStaffOptions.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-          <div className={`flex rounded-xl overflow-hidden ${isDark ? 'bg-gray-800' : 'bg-gray-100'}`}>
+            onChange={setStaffFilter}
+            options={[
+              { value: 'all', label: t('appointments.filters.allStaff', 'All Staff') },
+              ...filterStaffOptions.map((option) => ({ value: option.id, label: option.name })),
+            ]}
+          />
+          <div className="table-workspace-view-mode">
             {(['timeline', 'list'] as ViewMode[]).map(mode => (
-              <button
-                key={mode}
-                onClick={() => setViewMode(mode)}
-                className={`px-3 py-2 text-sm ${viewMode === mode ? 'bg-yellow-400 text-black border border-yellow-400' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
-              >
+              <button key={mode} type="button" aria-pressed={viewMode === mode} onClick={() => setViewMode(mode)}>
                 {t(`appointments.view.${mode}`, mode.charAt(0).toUpperCase() + mode.slice(1))}
               </button>
             ))}
           </div>
         </div>
-      </motion.div>
-
-      {/* Start an empty walk-in ticket. Its SalonCatalogPicker asks for the
-          stylist separately for each service added; no appointment staff is inherited. */}
-      <div className="px-4 py-2"><button type="button" data-testid="salon-new-walk-in-sale" className="rounded-xl bg-amber-400 px-4 py-2 font-semibold text-black"
-        onClick={() => setSale({ items: [], customer: { id: '', name: '', phone: '' } })}>{t('salonSale.newSale')}</button></div>
+      </div>
 
       {/* Loading State */}
       {isLoading && appointments.length === 0 && (
-        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
           <RefreshCw className="w-6 h-6 animate-spin mr-2" />
           {t('appointments.loading', 'Loading appointments...')}
         </motion.div>
@@ -759,7 +710,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
 
       {/* Content */}
       {!isLoading && (
-        <motion.div variants={pageMotionItem} className="flex-1 overflow-hidden">
+        <motion.div variants={pageMotionItem} className="relative mt-3 min-h-0 flex-1 overflow-hidden">
           {viewMode === 'timeline' ? (
             <motion.div variants={pageMotionContainer} className="h-full overflow-y-auto scrollbar-hide">
               <div className="grid grid-cols-[60px_1fr] gap-2">
@@ -767,10 +718,10 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
                   const hourAppointments = appointmentsByHour[hour] || [];
                   return (
                     <React.Fragment key={hour}>
-                      <div className={`text-sm font-medium py-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                        {hour}:00
+                      <div className="table-workspace-hour-label">
+                        {String(hour).padStart(2, '0')}:00
                       </div>
-                      <div className={`min-h-[60px] p-2 rounded-2xl ${isDark ? 'bg-gray-800/50' : 'bg-gray-50'}`}>
+                      <div className="table-workspace-hour">
                         <div className="flex flex-wrap gap-2">
                           {hourAppointments.map(apt => (
                             <motion.div
@@ -788,7 +739,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
                                   {t(`appointments.status.${apt.status}`, { defaultValue: statusConfig[apt.status].label })}
                                 </span>
                               </div>
-                              <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                              <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                                 {apt.serviceName || t('appointments.service', { defaultValue: 'Service' })} <span aria-hidden="true">&middot;</span> {apt.staffName || t('appointments.staff', { defaultValue: 'Staff' })} <span aria-hidden="true">&middot;</span> {apt.duration}{t('common.minutes', 'min')}
                               </div>
                               <div className="flex gap-1 mt-2">
@@ -800,7 +751,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
                                       onClick={action.action}
                                       className={`px-2 py-1 rounded-xl text-xs font-medium flex items-center gap-1 ${
                                         action.variant === 'primary' ? 'bg-yellow-400 text-black border border-yellow-400' :
-                                        action.variant === 'success' ? 'bg-green-600 text-white' :
+                                        action.variant === 'success' ? 'bg-(--pos-s-yellow) text-black' :
                                         action.variant === 'danger' ? 'bg-red-600 text-white' :
                                         isDark ? 'bg-gray-600 text-white' : 'bg-gray-200 text-gray-800'
                                       }`}
@@ -862,7 +813,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
                             onClick={action.action}
                             className={`px-3 py-1.5 rounded-xl text-sm font-medium flex items-center gap-1 ${
                               action.variant === 'primary' ? 'bg-yellow-400 text-black border border-yellow-400 active:bg-yellow-300' :
-                              action.variant === 'success' ? 'bg-green-600 text-white active:bg-green-700' :
+                              action.variant === 'success' ? 'bg-(--pos-s-yellow) text-black active:bg-yellow-500' :
                               action.variant === 'danger' ? 'bg-red-600 text-white active:bg-red-700' :
                               isDark ? 'bg-gray-700 text-white' : 'bg-gray-200 text-gray-800'
                             }`}
@@ -880,10 +831,12 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
           )}
 
           {appointments.length === 0 && !isLoading && (
-            <motion.div variants={pageMotionItem} className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-              <Calendar className="w-12 h-12 mx-auto mb-4 opacity-50" />
-              <p className="text-lg font-medium mb-2">{t('appointments.noAppointments', { defaultValue: 'No appointments found' })}</p>
-              <p className="text-sm">{t('appointments.noAppointmentsHint', { defaultValue: 'Try selecting a different date or adjusting your filters' })}</p>
+            <motion.div variants={pageMotionItem} data-appointments-empty className="table-workspace-empty">
+              <Calendar aria-hidden="true" />
+              <p className="table-workspace-empty-title">{t('appointments.noAppointments', { defaultValue: 'No appointments found' })}</p>
+              <p>{embedded
+                ? t('appointments.emptyPlusHint', { defaultValue: 'New appointment or service from the «+» button' })
+                : t('appointments.noAppointmentsHint', { defaultValue: 'Try selecting a different date or adjusting your filters' })}</p>
             </motion.div>
           )}
         </motion.div>
@@ -1051,7 +1004,7 @@ const GlassSelect: React.FC<GlassSelectProps> = ({ value, onChange, options, pla
         <span className={`min-w-0 flex-1 truncate ${selected ? '' : (isDark ? 'text-zinc-500' : 'text-gray-400')}`}>
           {selected ? selected.label : placeholder}
         </span>
-        <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${open ? 'rotate-180' : ''} ${isDark ? 'text-zinc-400' : 'text-gray-500'}`} />
+        <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${open ? 'rotate-180' : ''} ${isDark ? 'text-zinc-400' : 'text-gray-600'}`} />
       </button>
       {open && (
         <div
@@ -1269,7 +1222,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
             <h2 id={titleId} className={`text-lg sm:text-xl font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>
               {t('appointments.modal.title', 'New Appointment')}
             </h2>
-            <p className={`text-xs sm:text-sm mt-1 ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+            <p className={`text-xs sm:text-sm mt-1 ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
               {selectedDay && formData.startTime
                 ? `${formatDate(selectedDay)} - ${formData.startTime}`
                 : t('appointments.modal.phoneSearchLabel', 'Search Customer by Phone')}
@@ -1302,18 +1255,18 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
 
             {selectedCustomer ? (
               /* Selected customer card */
-              <div className={`p-3 rounded-xl border ${selectedCustomer.is_banned ? (isDark ? 'bg-red-500/10 border-red-500/30' : 'bg-red-50 border-red-200') : (isDark ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-emerald-50 border-emerald-200')}`}>
+              <div className={`p-3 rounded-xl border ${selectedCustomer.is_banned ? (isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border-(--pos-s-border)') : (isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border-(--pos-s-border)')}`}>
                 {selectedCustomer.is_banned && (
                   <div className="flex items-center gap-1.5 mb-2">
                     <Ban className="w-4 h-4 text-red-500" />
                     <span className="text-xs font-semibold text-red-500 uppercase">{t('appointments.modal.bannedCustomer', 'Banned Customer')}</span>
-                    {selectedCustomer.ban_reason && <span className="text-xs text-red-400">— {selectedCustomer.ban_reason}</span>}
+                    {selectedCustomer.ban_reason && <span className="text-xs text-red-700 dark:text-red-400">— {selectedCustomer.ban_reason}</span>}
                   </div>
                 )}
                 <div className="flex items-center justify-between">
                   <div>
                     <p className={`font-semibold ${selectedCustomer.is_banned ? 'text-red-400' : (isDark ? 'text-emerald-300' : 'text-emerald-700')}`}>{selectedCustomer.name}</p>
-                    <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{selectedCustomer.phone}</p>
+                    <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{selectedCustomer.phone}</p>
                     {selectedCustomer.email && <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>{selectedCustomer.email}</p>}
                   </div>
                   <div className="flex items-center gap-2">
@@ -1442,7 +1395,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
               </button>
             </div>
             <div className="grid grid-cols-7 gap-1 mb-1.5">
-              {weekDays.map((d, i) => <div key={i} className={`text-center text-xs py-1 ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>{d}</div>)}
+              {weekDays.map((d, i) => <div key={i} className={`text-center text-xs py-1 ${isDark ? 'text-zinc-500' : 'text-gray-600'}`}>{d}</div>)}
             </div>
             <div className="grid grid-cols-7 gap-1">
               {calendarDays.map((day, idx) => {
@@ -1462,7 +1415,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                       ${isPast
                         ? (isDark ? 'text-zinc-700 border-zinc-800 bg-zinc-900/40 cursor-not-allowed' : 'text-gray-300 border-gray-200 bg-gray-100 cursor-not-allowed')
                         : (isDark ? 'border-zinc-800 active:bg-zinc-800/80' : 'border-gray-200 active:bg-gray-100')}
-                      ${isSelected ? 'bg-yellow-400 text-black border-yellow-400' : ''}
+                      ${isSelected ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)' : ''}
                       ${isToday && !isSelected ? (isDark ? 'ring-1 ring-zinc-500' : 'ring-1 ring-gray-400') : ''}
                     `}
                   >
@@ -1479,9 +1432,9 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
           {!hasStaffAndService ? (
             <div
               data-appointment-slots-empty
-              className={`flex flex-col items-center justify-center gap-3 p-6 text-center rounded-2xl border ${isDark ? 'bg-amber-500/6 backdrop-blur-md border-amber-400/20' : 'bg-amber-50/60 backdrop-blur-xl border-amber-200/70'}`}
+              className={`flex flex-col items-center justify-center gap-3 p-6 text-center rounded-2xl border ${isDark ? 'bg-(--pos-s-surface-2) backdrop-blur-md border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) backdrop-blur-xl border-(--pos-s-border)'}`}
             >
-              <div className={`flex h-12 w-12 items-center justify-center rounded-2xl border ${isDark ? 'bg-amber-500/15 border-amber-400/30 text-amber-300' : 'bg-amber-100/80 border-amber-200 text-amber-600'}`}>
+              <div className={`flex h-12 w-12 items-center justify-center rounded-2xl border ${isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-amber-800 dark:text-amber-200' : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-amber-800 dark:text-amber-300'}`}>
                 <Clock className="h-6 w-6" />
               </div>
               <div>
@@ -1503,8 +1456,8 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                       key={step.key}
                       className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium ${
                         step.done
-                          ? (isDark ? 'bg-emerald-500/15 border-emerald-400/30 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-700')
-                          : (isDark ? 'bg-white/4 border-white/15 text-zinc-400' : 'bg-white/50 border-gray-200 text-gray-500')
+                          ? (isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-emerald-800 dark:text-emerald-200' : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-emerald-700')
+                          : (isDark ? 'bg-white/4 border-white/15 text-zinc-400' : 'bg-white/50 border-gray-200 text-gray-600')
                       }`}
                     >
                       {step.done ? <CheckCircle className="h-3.5 w-3.5" /> : <StepIcon className="h-3.5 w-3.5" />}
@@ -1524,7 +1477,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                     onClick={() => setTimePeriod(p)}
                     className={`py-2 text-xs sm:text-sm rounded-xl border font-medium transition-all ${
                       timePeriod === p
-                        ? 'bg-yellow-400 text-black border-yellow-400'
+                        ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
                         : (isDark ? 'bg-zinc-950 text-zinc-300 border-zinc-700 active:bg-zinc-800' : 'bg-white text-gray-700 border-gray-300 active:bg-gray-100')
                     }`}
                   >
@@ -1539,7 +1492,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
 
               {availabilityError && <div role="alert" className="text-sm text-red-600 dark:text-red-300"><p>{t('appointments.workflow.availabilityUnavailable', 'Availability could not be checked. Check the connection and try again.')}</p><button type="button" className="mt-2 min-h-10 rounded-xl border px-3" onClick={() => setAvailabilityRefresh(value => value + 1)}>{t('common.actions.retry', 'Try again')}</button></div>}
               {!loadingSlots && !availabilityError && availableSlots.length === 0 && <p className="text-sm">{t('appointments.workflow.noSlots', 'No available times for this staff member and service. Check the synced schedule or choose another day.')}</p>}
-              {loadingSlots && <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>{t('appointments.modal.loadingSlots', 'Loading...')}</p>}
+              {loadingSlots && <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-600'}`}>{t('appointments.modal.loadingSlots', 'Loading...')}</p>}
 
               <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 xl:grid-cols-5 gap-2 max-h-56 overflow-y-auto pr-1 scrollbar-hide">
                 {timeSlots.map(slot => {
@@ -1553,9 +1506,9 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                       onClick={() => handleTimeSelect(slot)}
                       className={`flex items-center justify-center min-h-touch py-2 px-2 text-xs sm:text-sm rounded-xl border relative transition-all
                         ${selected
-                          ? 'bg-yellow-400 text-black border-yellow-400'
+                          ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
                           : booked
-                            ? (isDark ? 'bg-red-500/10 border-red-500/30 text-red-300 line-through cursor-not-allowed' : 'bg-red-50 border-red-200 text-red-500 line-through cursor-not-allowed')
+                            ? (isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-red-800 dark:text-red-200 line-through cursor-not-allowed' : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-red-800 dark:text-red-300 line-through cursor-not-allowed')
                             : (isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 active:bg-gray-100')}
                       `}
                     >
@@ -1566,9 +1519,9 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                 })}
               </div>
 
-              <div className={`flex gap-4 text-xs ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>
+              <div className={`flex gap-4 text-xs ${isDark ? 'text-zinc-500' : 'text-gray-600'}`}>
                 <span className="flex items-center gap-1"><span className={`w-3 h-3 rounded-sm border ${isDark ? 'bg-zinc-800 border-zinc-600' : 'bg-white border-gray-300'}`} /> {t('appointments.modal.availability.available', 'Available')}</span>
-                <span className="flex items-center gap-1"><span className="w-3 h-3 bg-red-100 border border-red-200 rounded-sm" /> {t('appointments.workflow.unavailable', 'Unavailable')}</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-3 bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-sm" /> {t('appointments.workflow.unavailable', 'Unavailable')}</span>
               </div>
             </div>
           ) : null}
@@ -1576,7 +1529,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
 
           {/* Summary */}
           {formData.startTime && selectedService && selectedDay && (
-            <div className={`p-4 rounded-2xl border backdrop-blur-md ${isDark ? 'bg-emerald-500/10 border-emerald-500/25' : 'bg-emerald-50/70 border-emerald-200'}`}>
+            <div className={`p-4 rounded-2xl border backdrop-blur-md ${isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border-(--pos-s-border)'}`}>
               <div className="flex items-center justify-between text-sm">
                 <span className={isDark ? 'text-zinc-300' : 'text-gray-600'}>{formatDate(selectedDay)}</span>
                 <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{formData.startTime}</span>
@@ -1587,7 +1540,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                     return appointmentWallTimes(formData.date, formData.startTime, selectedService.duration).end.slice(11, 16);
                   })()}
                 </span>
-                <span className={isDark ? 'text-zinc-500' : 'text-gray-500'}>({selectedService.duration}{t('common.minutes', 'min')})</span>
+                <span className={isDark ? 'text-zinc-500' : 'text-gray-600'}>({selectedService.duration}{t('common.minutes', 'min')})</span>
               </div>
             </div>
           )}
@@ -1599,14 +1552,14 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
         <div className={`px-4 sm:px-6 py-4 border-t shrink-0 backdrop-blur-xl ${isDark ? 'border-white/10 bg-zinc-950/55' : 'border-white/40 bg-white/14'}`}>
           <div className="flex flex-col-reverse sm:flex-row gap-3 sm:justify-end">
           {/* Cancel = soft destructive red */}
-          <button onClick={onClose} className={`px-5 py-2.5 rounded-xl font-medium border transition-transform duration-150 active:scale-95 ${isDark ? 'border-red-500/40 bg-red-500/10 text-red-300 active:bg-red-500/20' : 'border-red-300 bg-red-50 text-red-700 active:bg-red-100'}`}>
+          <button onClick={onClose} className={`px-5 py-2.5 rounded-xl font-medium border transition-transform duration-150 active:scale-95 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'}`}>
             {t('appointments.modal.cancel', 'Cancel')}
           </button>
           {/* Create = green primary, with a clear disabled state */}
           <button
             onClick={handleCreateAppointment}
             disabled={isSubmitting || !formData.staffId || !formData.serviceId || !formData.startTime}
-            className="px-5 py-2.5 rounded-xl font-semibold bg-emerald-600 text-white border border-emerald-500 shadow-xs shadow-emerald-600/30 transition-transform duration-150 active:scale-95 active:bg-emerald-700 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
+            className="px-5 py-2.5 rounded-xl font-semibold bg-(--pos-s-yellow) text-black border border-(--pos-s-yellow) shadow-xs transition-transform duration-150 active:scale-95 active:bg-yellow-500 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
           >
             {isSubmitting ? t('appointments.modal.creating', 'Creating...') : t('appointments.modal.create', 'Create')}
           </button>

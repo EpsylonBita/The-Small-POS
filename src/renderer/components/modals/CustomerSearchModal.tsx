@@ -792,7 +792,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           {/* Real-time search indicator */}
           {isSearching && (
             <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
-              <div className="w-4 h-4 border-2 border-yellow-500/30 border-t-yellow-500 rounded-full animate-spin"></div>
+              <div className="w-4 h-4 border-2 border-(--pos-s-border) border-t-yellow-500 rounded-full animate-spin"></div>
             </div>
           )}
         </div>
@@ -814,7 +814,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
       {/* Error Message */}
       {error && (!callerIdWorkspace || error !== t('modals.customerSearch.customerNotFound')) && (
-        <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-600 dark:text-red-400 text-sm">
+        <div className="mb-4 p-3 bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl text-red-800 dark:text-red-400 text-sm">
           {error}
         </div>
       )}
@@ -829,7 +829,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           <button
             type="button"
             onClick={handleAddNewCustomer}
-            className="min-h-12 rounded-xl border-2 border-emerald-600 bg-white px-6 py-3 font-semibold text-emerald-700 shadow-[0_5px_0_rgba(4,120,87,0.24),0_10px_22px_rgba(15,23,42,0.12)] transition-transform active:translate-y-1 active:shadow-xs dark:border-emerald-500 dark:bg-white dark:text-emerald-700"
+            className="min-h-12 rounded-xl border-2 border-emerald-600 bg-white px-6 py-3 font-semibold text-emerald-700 transition-transform active:translate-y-1 active:shadow-xs dark:border-emerald-500 dark:bg-white dark:text-emerald-700"
             style={{
               backgroundColor: '#ffffff',
               borderColor: '#16a34a',
@@ -854,7 +854,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                 key={c.id}
                 className={`relative mb-3 w-full cursor-pointer rounded-2xl border p-4 text-left transition-all ${
                   c.is_banned
-                    ? 'border-red-500/50 bg-red-500/5'
+                    ? 'border-red-600 bg-(--pos-s-surface-2)'
                     : 'border-zinc-300/70 bg-zinc-100/85 active:bg-zinc-200/80 dark:border-zinc-700/70 dark:bg-zinc-800/80 dark:active:bg-zinc-700/70'
                 }`}
                 onClick={() => handleSelectFromList(c)}
@@ -865,7 +865,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                     <div className="flex items-center gap-2">
                       <p className={`font-medium truncate ${c.is_banned ? 'text-red-500' : 'liquid-glass-modal-text'}`}>{c.name}</p>
                       {c.is_banned && (
-                        <span className="px-2 py-0.5 text-xs font-semibold bg-red-500/20 text-red-500 rounded-full flex items-center gap-1">
+                        <span className="px-2 py-0.5 text-xs font-semibold bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 rounded-full flex items-center gap-1">
                           <Ban className="w-3 h-3" />
                           {t('modals.customerSearch.banned', 'BANNED')}
                         </span>
@@ -892,12 +892,12 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       {customer && (
         <div className={`mb-6 rounded-2xl border p-4 ${
           customer.is_banned
-            ? 'border-red-500/50 bg-red-500/5'
+            ? 'border-red-600 bg-(--pos-s-surface-2)'
             : 'border-zinc-300/70 bg-zinc-100/85 dark:border-zinc-700/70 dark:bg-zinc-800/80'
         }`}>
           {/* Banned Customer Warning Banner */}
           {customer.is_banned && (
-            <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-2xl">
+            <div className="mb-4 p-3 bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl">
               <div className="flex items-center gap-2 text-red-500 mb-1">
                 <Ban className="w-5 h-5" />
                 <span className="font-semibold text-sm uppercase tracking-wide">
@@ -911,7 +911,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                 </p>
               )}
               {customer.banned_at && (
-                <p className="text-xs text-red-400/70 mt-1 ml-6">
+                <p className="text-xs text-red-400 mt-1 ml-6">
                   {t('modals.customerSearch.bannedOn', 'Banned on')}: {formatDate(customer.banned_at)}
                 </p>
               )}
@@ -926,7 +926,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                   {customer.name}
                 </h3>
                 {customer.is_banned && (
-                  <span className="px-2 py-0.5 text-xs font-semibold bg-red-500/20 text-red-500 rounded-full flex items-center gap-1">
+                  <span className="px-2 py-0.5 text-xs font-semibold bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 rounded-full flex items-center gap-1">
                     <Ban className="w-3 h-3" />
                     {t('modals.customerSearch.banned', 'BANNED')}
                   </span>
@@ -945,8 +945,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               ? 'mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3'
               : 'mt-3 space-y-2'}>
               <p
-                className={`mb-1 text-xs font-semibold uppercase tracking-wider ${callerIdWorkspace ? 'md:col-span-2 xl:col-span-3' : ''}`}
-                style={{ color: resolvedTheme === 'dark' ? 'rgba(250, 204, 21, 0.85)' : '#ca8a04' }}
+                className={`mb-1 text-xs font-semibold uppercase tracking-wider text-(--pos-s-muted) ${callerIdWorkspace ? 'md:col-span-2 xl:col-span-3' : ''}`}
               >
                 {t('modals.customerSearch.addresses', 'Addresses')}
               </p>
@@ -965,7 +964,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                       setSelectedAddressId(addr.id);
                     }}
                     className={`w-full cursor-pointer rounded-lg p-2 transition-all ${callerIdWorkspace ? 'min-h-[116px] rounded-xl! p-4!' : ''} ${isSelected
-                      ? 'border-2 border-green-500/60 bg-transparent'
+                      ? 'border-2 border-green-600 bg-transparent'
                       : 'border border-gray-200 bg-transparent active:border-gray-300 dark:border-white/10 dark:active:border-white/20'
                       }`}
                   >
@@ -1001,7 +1000,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                               onEditCustomer({ ...customer, editAddressId: addr.id } as any);
                             }
                           }}
-                          className="p-1.5 text-amber-500 active:bg-amber-500/20 rounded-md transition-colors"
+                          className="p-1.5 text-amber-500 active:bg-(--pos-s-surface-2) rounded-md transition-colors"
                           aria-label={t('common.edit', 'Edit')}
                         >
                           <Edit className="w-3.5 h-3.5" />
@@ -1060,7 +1059,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                               </div>
                             ), { duration: 10000 });
                           }}
-                          className="p-1.5 text-red-500 active:bg-red-500/20 rounded-md transition-colors"
+                          className="p-1.5 text-red-500 active:bg-(--pos-s-surface-2) rounded-md transition-colors"
                           aria-label={t('common.delete', 'Delete')}
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -1114,7 +1113,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                   color: '#ffffff',
                   borderColor: '#16a34a'
                 }}
-                className="w-full mt-4 py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border active:bg-green-700 dark:active:bg-green-600/30 active:scale-[0.98]"
+                className="w-full mt-4 py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border active:bg-(--pos-s-surface-2) active:scale-[0.98]"
               >
                 <span>
                   {selectedAddressId && customer.addresses?.find(a => a.id === selectedAddressId)
@@ -1135,14 +1134,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             {onAddNewAddress && (
               <button
                 onClick={handleAddNewAddress}
-                style={{
-                  backgroundColor: 'transparent',
-                  color: resolvedTheme === 'dark' ? '#ffffff' : '#111827',
-                  borderColor: resolvedTheme === 'dark' ? 'rgba(250, 204, 21, 0.4)' : '#ca8a04'
-                }}
-                className="flex-1 py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-transform duration-150 active:scale-[0.98] border gap-1"
+                className="pos-solid-btn pos-solid-btn--sm flex-1 transition-transform duration-150 active:scale-[0.98]"
               >
-                <MapPin className="w-4 h-4 text-amber-500 dark:text-amber-300" />
+                <MapPin className="w-4 h-4" />
                 {t('modals.customerSearch.addNewAddress')}
               </button>
             )}
@@ -1150,29 +1144,19 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             {onEditCustomer && (
               <button
                 onClick={handleEditCustomer}
-                style={{
-                  backgroundColor: 'transparent',
-                  color: resolvedTheme === 'dark' ? '#ffffff' : '#111827',
-                  borderColor: resolvedTheme === 'dark' ? 'rgba(245, 158, 11, 0.3)' : '#d97706'
-                }}
-                className="flex-1 py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-all duration-300 border gap-1"
+                className="pos-solid-btn pos-solid-btn--sm flex-1 transition-transform duration-150 active:scale-[0.98]"
               >
-                <Edit className="w-4 h-4 text-amber-500 dark:text-amber-300" />
+                <Edit className="w-4 h-4" />
                 {t('modals.customerSearch.editCustomer')}
               </button>
             )}
             {/* Delete Customer Button */}
             <button
               onClick={handleDeleteCustomer}
-              style={{
-                backgroundColor: 'transparent',
-                color: resolvedTheme === 'dark' ? '#ffffff' : '#111827',
-                borderColor: resolvedTheme === 'dark' ? 'rgba(239, 68, 68, 0.3)' : '#dc2626'
-              }}
-              className="py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-all duration-300 border gap-1"
+              className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--danger transition-transform duration-150 active:scale-[0.98]"
               aria-label={t('modals.customerSearch.deleteCustomer')}
             >
-              <Trash2 className="w-4 h-4 text-red-500 dark:text-red-400" />
+              <Trash2 className="w-4 h-4" />
             </button>
                   </div>
                 </>
@@ -1185,7 +1169,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               <button
                 type="button"
                 onClick={handleAddNewAddress}
-                className="mt-4 flex min-h-touch w-full items-center justify-center gap-2 rounded-xl border border-amber-600 bg-white px-4 py-3 font-semibold text-slate-900 transition-transform active:scale-[0.98] dark:border-amber-400/50 dark:bg-slate-900 dark:text-white"
+                className="mt-4 flex min-h-touch w-full items-center justify-center gap-2 rounded-xl border border-amber-600 bg-white px-4 py-3 font-semibold text-slate-900 transition-transform active:scale-[0.98] dark:bg-slate-900 dark:text-white"
               >
                 <MapPin className="h-5 w-5 text-amber-600 dark:text-amber-300" />
                 {t('modals.customerSearch.addNewAddress', 'Add address')}
@@ -1199,7 +1183,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
         <button
           type="button"
           onClick={() => onContinueWithoutCustomer(searchQuery.trim())}
-          className="mb-3 w-full rounded-xl border border-yellow-400/60 bg-yellow-400 px-6 py-3 font-semibold text-black transition-transform active:scale-[0.98]"
+          className="mb-3 w-full rounded-xl border border-(--pos-s-yellow) bg-yellow-400 px-6 py-3 font-semibold text-black transition-transform active:scale-[0.98]"
         >
           {t('modals.customerSearch.chooseOrderType', 'Continue to order type')}
         </button>
@@ -1272,7 +1256,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                     buildSelectedCustomer(),
                     searchQuery.trim(),
                   )}
-                  className={`flex min-h-[96px] flex-col items-center justify-center gap-2 rounded-2xl border-2 bg-white px-4 py-4 font-semibold text-slate-900 shadow-[0_7px_0_rgba(15,23,42,0.12),0_14px_28px_rgba(15,23,42,0.14)] transition-transform active:translate-y-1 active:shadow-xs dark:bg-white dark:text-slate-900 ${config.classes}`}
+                  className={`flex min-h-[96px] flex-col items-center justify-center gap-2 rounded-2xl border-2 bg-white px-4 py-4 font-semibold text-slate-900 transition-transform active:translate-y-1 active:shadow-xs dark:bg-white dark:text-slate-900 ${config.classes}`}
                 >
                   <Icon className={`h-8 w-8 ${config.iconClasses}`} strokeWidth={1.8} />
                   <span className="text-center text-sm leading-tight">{config.label}</span>
@@ -1285,7 +1269,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
       {/* Add New Customer Option - only after an authoritative not-found result in Caller ID mode. */}
       {!callerIdWorkspace && Boolean(onAddNewCustomer) && lookupQuery.length >= 3 && !isSearching && ((!lookupOnly && customer) || error === t('modals.customerSearch.customerNotFound')) && (
-        <div className="p-4 bg-yellow-50 dark:bg-yellow-500/10 border border-yellow-200 dark:border-yellow-500/20 rounded-2xl">
+        <div className="p-4 bg-yellow-50 dark:bg-zinc-800 border border-yellow-200 dark:border-zinc-700 rounded-2xl">
           <p className="text-sm liquid-glass-modal-text-muted mb-3">
             {customer
               ? t('modals.customerSearch.differentPersonPrompt')
@@ -1299,7 +1283,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               color: '#ffffff',
               borderColor: '#16a34a'
             }}
-            className="w-full py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border active:bg-green-700 dark:active:bg-green-600/30 active:scale-[0.98]"
+            className="w-full py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border active:bg-(--pos-s-surface-2) active:scale-[0.98]"
           >
             {t('modals.customerSearch.addNewCustomer')}
           </button>

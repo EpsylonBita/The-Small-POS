@@ -244,7 +244,8 @@ test('table-destination sheets render the dark-mode-safe TableDestinationPicker 
   // Explicit readable colors for both themes: selected high-contrast, unselected
   // legible on light AND dark glass (no reliance on the native popup styling).
   assert.match(modalSource, /selected[\s\S]{0,40}'bg-blue-600 text-white/);
-  assert.match(modalSource, /text-gray-900 hover:bg-black\/5 dark:text-zinc-100 dark:hover:bg-white\/10/);
+  // UI audit wave 6: no hover on the touch tills; the unselected row keeps its readable text.
+  assert.match(modalSource, /: 'text-gray-900 dark:text-zinc-100 ?'/);
 
   // All four destination sheets are wired to the picker (3 target + 1 merge).
   const pickerUses = modalSource.match(/<TableDestinationPicker\b/g) || [];

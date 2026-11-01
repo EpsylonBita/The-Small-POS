@@ -50,8 +50,8 @@ test('Round 289: Refresh is an amber-glass icon button with an accessible name +
   const btn = sliceButton(source, 'onClick={handleRefresh}');
   // The shared amber-glass icon-button pattern (both themes), 44-48px, active press, neutral loading.
   assert.match(btn, /h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all/);
-  assert.match(btn, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(btn, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  // Wave ΣΤ4: a neutral secondary in both themes (was amber glass).
+  assert.match(btn, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
   assert.match(btn, /aria-label=\{t\('common\.refresh', 'Refresh'\)\}/);
   assert.match(btn, /\$\{isRefreshing \? 'opacity-60 cursor-not-allowed' : 'active:scale-95'\}/);
   // The old black/white inversion (and its shadow) are gone.
@@ -63,8 +63,7 @@ test('Round 289: Refresh is an amber-glass icon button with an accessible name +
 
 test('Round 289: Discover (header + empty state) is amber glass; disabled-reason folds into aria-label', () => {
   const header = sliceButton(source, "{t('ecr.discover', 'Discover')}");
-  assert.match(header, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(header, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  assert.match(header, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
   assert.match(header, /active:scale-95/);
   // Disabled-reason exposed as an aria-label only when actually disabled (no native title tooltip).
   assert.match(
@@ -74,8 +73,7 @@ test('Round 289: Discover (header + empty state) is amber glass; disabled-reason
   assert.match(header, /disabled=\{discoverAction\.disabled\}/);
 
   const empty = sliceButton(source, "{t('ecr.discoverTerminals', 'Discover Terminals')}");
-  assert.match(empty, /border border-amber-400\/30 bg-amber-500\/15/);
-  assert.match(empty, /border border-amber-400\/40 bg-amber-50/);
+  assert.match(empty, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
   assert.match(
     empty,
     /aria-label=\{discoverAction\.disabled && discoverAction\.message \? discoverAction\.message : undefined\}/,
@@ -84,13 +82,13 @@ test('Round 289: Discover (header + empty state) is amber glass; disabled-reason
 
 test('Round 289: Add Terminal is semantic green primary; Test is neutral glass (palette is not all-yellow)', () => {
   const add = sliceButton(source, "{t('ecr.addManual', 'Add Terminal')}");
-  assert.match(add, /border border-green-500 bg-green-600 active:bg-green-700/);
-  assert.match(add, /text-white/);
+  assert.match(add, /border border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\) active:bg-yellow-500/);
+  assert.match(add, /text-black/);
   assert.match(add, /active:scale-95/);
   // Behaviour preserved: Add stays gated on discoverAction.disabled exactly as before.
   assert.match(add, /disabled=\{discoverAction\.disabled\}/);
-  // It is green, not amber/yellow (so the header is not a wall of yellow).
-  assert.doesNotMatch(add, /bg-amber|bg-yellow/);
+  // Wave ΣΤ7: it is the screen's one yellow primary (Discover / Refresh are neutral secondaries).
+  assert.doesNotMatch(add, /bg-(?:green|emerald)-/);
 
   const testBtn = sliceButton(source, "{t('ecr.testPayment.button'");
   // Neutral zinc glass (secondary per-device utility) -- amber stays reserved for discover/refresh.
@@ -148,8 +146,9 @@ test('Round 289: the TerminalConfigModal footer/switch contract from earlier rou
     path.join(projectRoot, 'src', 'renderer', 'components', 'ecr', 'TerminalConfigModal.tsx'),
     'utf8',
   );
-  assert.match(config, /onClick=\{onClose\}[\s\S]*?bg-red-500\/10 active:bg-red-500\/20[\s\S]*?text-red-600/);
-  assert.match(config, /type="submit"[\s\S]*?bg-green-600 active:bg-green-700 text-white[\s\S]*?disabled:opacity-50/);
+  // UI audit wave 7A2: Cancel is the neutral kit button, Add/Save the one yellow kit button.
+  assert.match(config, /onClick=\{onClose\}[\s\S]*?className=\{solidButton\('secondary', 'md'\)\}/);
+  assert.match(config, /type="submit"[\s\S]*?className=\{solidButton\('primary', 'md'\)\}/);
   // Round 295: the green ECR switch is now the shared POSGlassSwitch (no local peer/pseudo class).
   assert.match(config, /<POSGlassSwitch\b/);
   assert.doesNotMatch(config, /peer-checked:/);
@@ -193,10 +192,11 @@ test('Round 294: TerminalConfigModal is not forced narrow and keeps substantial 
   assert.doesNotMatch(config, /<form id="terminal-config-form"[\s\S]*?space-y-6 pb-6"/);
 
   // Footer contract preserved: red Cancel (close-only) + green submit (Add/Save) bound to the form, handlers intact.
-  assert.match(config, /onClick=\{onClose\}[\s\S]*?bg-red-500\/10 active:bg-red-500\/20[\s\S]*?text-red-600/);
-  assert.match(config, /type="submit"\s+form="terminal-config-form"[\s\S]*?bg-green-600 active:bg-green-700 text-white[\s\S]*?disabled:opacity-50/);
+  // UI audit wave 7A2: Cancel is the neutral kit button, Add/Save the one yellow kit button.
+  assert.match(config, /onClick=\{onClose\}[\s\S]*?className=\{solidButton\('secondary', 'md'\)\}/);
+  assert.match(config, /type="submit"[\s\S]*?className=\{solidButton\('primary', 'md'\)\}/);
   // The sticky glass footer shelf is intact (Round 352: shelf holds the glass; buttons in an inner row).
-  assert.match(config, /px-8 py-4 border-t[\s\S]*?backdrop-blur-xl[\s\S]*?<div className="flex justify-end gap-3">/);
+  assert.match(config, /px-8 py-4 border-t pos-glass-footer">[\s\S]*?<div className="flex justify-end gap-3">/);
 
   // Touch-first + palette: no hover, no off-theme colour, and the ONLY title= is the LiquidGlassModal
   // heading PROP (a visible heading, not a native tooltip) -- so no native tooltip crept in.

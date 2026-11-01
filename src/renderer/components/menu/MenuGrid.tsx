@@ -97,7 +97,7 @@ export const MenuGrid: React.FC<MenuGridProps> = React.memo(({
                 className={`px-4 py-2 rounded-lg font-medium transition-colors ${
                   selectedCategory === 'all'
                     ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    : 'bg-gray-100 text-gray-700 '
                 }`}
               >
                 {showMostFrequented ? mostFrequentedTitle : 'All Items'}
@@ -112,7 +112,7 @@ export const MenuGrid: React.FC<MenuGridProps> = React.memo(({
                 className={`px-4 py-2 rounded-lg font-medium transition-colors ${
                   selectedCategory === category.id
                     ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    : 'bg-gray-100 text-gray-700 '
                 }`}
               >
                 {category.name}
@@ -203,7 +203,7 @@ const MenuItemCard: React.FC<MenuItemCardProps> = React.memo(({ item, onClick, o
   return (
     <div
       onClick={onClick}
-      className="border border-gray-200 rounded-lg p-4 cursor-pointer transform transition-all duration-200 hover:scale-105 hover:shadow-lg hover:border-blue-300 hover:-translate-y-1"
+      className="border border-gray-200 rounded-lg p-4 cursor-pointer transform transition-all duration-200 "
       style={{ contain: 'content', willChange: 'transform' }}
     >
       {/* Item Image Placeholder */}
@@ -212,7 +212,7 @@ const MenuItemCard: React.FC<MenuItemCardProps> = React.memo(({ item, onClick, o
           <OptimizedImg
             src={item.image}
             alt={item.name}
-            className="w-full h-full object-cover rounded-lg transition-transform duration-200 hover:scale-110"
+            className="w-full h-full object-cover rounded-lg transition-transform duration-200 "
           />
         ) : (
           <Utensils className="w-10 h-10 text-gray-400 animate-pulse" />

@@ -112,7 +112,7 @@ export function CloseWithoutHandoverPanel({ satelliteShiftId, onClosed }: {
   }));
 
   return (
-    <div className="mt-4 space-y-3 rounded-2xl border border-amber-400/40 bg-amber-500/10 p-4" data-testid="close-without-handover">
+    <div className="mt-4 space-y-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4" data-testid="close-without-handover">
       <p className="text-sm font-semibold liquid-glass-modal-text">
         {t('modals.staffShift.phoneShifts.closeWithoutHandover.explain', {
           defaultValue: 'The shift closes without cash: nothing is added to this drawer. A manager settles its money.',
@@ -123,7 +123,7 @@ export function CloseWithoutHandoverPanel({ satelliteShiftId, onClosed }: {
           type="button"
           onClick={() => setExpanded(true)}
           data-testid="close-without-handover-open"
-          className="rounded-2xl border border-amber-500/60 px-4 py-2 text-sm font-bold liquid-glass-modal-text"
+          className="rounded-2xl border border-(--pos-s-yellow) px-4 py-2 text-sm font-bold liquid-glass-modal-text"
         >
           {action}
         </button>

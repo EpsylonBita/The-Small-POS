@@ -136,7 +136,7 @@ function LockedSurface({
   message: string
 }) {
   return (
-    <div className="flex gap-3 rounded-xl border border-amber-500/35 bg-amber-500/10 p-4 text-sm text-amber-950 dark:text-amber-100">
+    <div className="flex gap-3 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4 text-sm text-amber-950 dark:text-amber-100">
       <Icon aria-hidden className="mt-0.5 h-5 w-5 shrink-0" />
       <p>{message}</p>
     </div>
@@ -152,10 +152,10 @@ function RepairStatusPill({
 }) {
   const { t } = useTranslation()
   const tone = status === 'ready'
-    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
+    ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200'
     : status === 'cancelled' || status === 'unrepairable'
-      ? 'border-red-500/30 bg-red-500/10 text-red-800 dark:text-red-200'
-      : 'border-blue-500/30 bg-blue-500/10 text-blue-800 dark:text-blue-200'
+      ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200'
+      : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-blue-800 dark:text-blue-200'
 
   return (
     <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold ${tone}`}>
@@ -192,7 +192,7 @@ function RepairConflictInbox({
         </h2>
       </div>
       {conflicts.length > 0 && !canResolve && (
-        <p id="repair-conflict-disabled-reason" className="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+        <p id="repair-conflict-disabled-reason" className="mb-3 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 text-sm">
           {t('repairs.messages.conflictResolutionUnavailable')}
         </p>
       )}
@@ -203,7 +203,7 @@ function RepairConflictInbox({
       ) : (
         <ul className="space-y-3">
           {conflicts.map((conflict) => (
-            <li key={conflict.conflictId} className="rounded-xl border border-amber-500/25 p-3">
+            <li key={conflict.conflictId} className="rounded-xl border border-(--pos-s-border) p-3">
               <p className="font-semibold text-slate-900 dark:text-white">
                 {conflict.displayNumber ?? t('repairs.fields.notRecorded')}
               </p>
@@ -667,7 +667,7 @@ export function RepairsShell({
       </header>
 
       {(isOffline || showQueuedReady) && (
-        <div role="status" aria-live="polite" className="flex shrink-0 gap-3 rounded-xl border border-blue-500/30 bg-blue-500/10 p-3 text-sm text-blue-950 dark:text-blue-100">
+        <div role="status" aria-live="polite" className="flex shrink-0 gap-3 rounded-xl border border-(--pos-s-warn) bg-(--pos-s-warn-bg) p-3 text-sm text-blue-950 dark:text-blue-100">
           <AlertTriangle aria-hidden className="h-5 w-5 shrink-0" />
           <div>
             {isOffline && <p>{t('repairs.messages.offline')}</p>}
@@ -707,7 +707,7 @@ export function RepairsShell({
                   const selected = workspace?.repair.id === repair.id
                   return (
                     <li key={repair.id}>
-                      <button type="button" aria-current={selected ? 'true' : undefined} onClick={() => onSelectRepair(repair.id)} className={`min-h-11 w-full rounded-xl border p-3 text-left ${selected ? 'border-blue-500 bg-blue-500/10' : 'border-transparent hover:bg-slate-100 dark:hover:bg-white/5'}`}>
+                      <button type="button" aria-current={selected ? 'true' : undefined} onClick={() => onSelectRepair(repair.id)} className={`min-h-11 w-full rounded-xl border p-3 text-left ${selected ? 'border-blue-500 bg-(--pos-s-surface-2)' : 'border-transparent '}`}>
                         <span className="flex items-start justify-between gap-2"><span className="font-bold">{repair.displayNumber}</span><RepairStatusPill status={repair.status} syncState={repair.syncState} /></span>
                         <span className="mt-2 flex items-center gap-2 text-sm text-slate-600 dark:text-zinc-400"><Smartphone aria-hidden className="h-4 w-4" />{repair.safeDeviceLabel || t('repairs.fields.notRecorded')}</span>
                         {repair.aliases.length > 0 && <span className="mt-1 block text-xs text-slate-500">{t('repairs.list.aliases', { aliases: repair.aliases.join(', ') })}</span>}

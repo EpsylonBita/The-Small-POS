@@ -20,7 +20,7 @@ test('module lock and upsell surfaces use amber/neutral touch styling, not old b
   assert.doesNotMatch(combined, /focus:ring-blue|focus:border-blue/);
   assert.doesNotMatch(combined, /rounded-lg/);
 
-  assert.match(lockedFeature, /from-amber-400\/25 to-white\/10/);
+  assert.match(lockedFeature, / to-white\/10/);
   assert.match(lockedFeature, /text-amber-300 relative z-10/);
   assert.match(lockedFeature, /min-h-touch(?![\w.-])[\s\S]*active:scale-\[0\.98\]/);
   assert.match(upsellCard, /text-amber-300/);

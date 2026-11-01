@@ -363,8 +363,10 @@ test('ReservationForm uses semantic action colours (cancel red, create green) an
   // The old purple focus/save styling is gone entirely.
   assert.doesNotMatch(source, /purple/);
   // Cancel button is red; submit/create button is green.
-  assert.match(source, /flex-1 inline-flex min-h-touch(?![\w.-])[^"]*border-red-500\/50 bg-red-500\/10[^"]*text-red-600/);
-  assert.match(source, /type="submit"[\s\S]*?bg-green-600 active:bg-green-700/);
+  // Wave ΣΤ3: a solid neutral surface with a red line and AA red words.
+  assert.match(source, /flex-1 inline-flex min-h-touch(?![\w.-])[^"]*border-\(--pos-s-border\) bg-\(--pos-s-surface-2\)[^"]*text-\(--pos-s-fg\)/);
+  // Wave ΣΤ3: white on green reaches AA one shade darker.
+  assert.match(source, /type="submit"[\s\S]*?bg-\(--pos-s-yellow\) text-black active:bg-yellow-500/);
 });
 
 test('ReservationForm guest steppers are centered 44px touch targets with active feedback + lucide icons', () => {

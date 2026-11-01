@@ -235,7 +235,7 @@ test('StaffShiftModal renders cashier-first role gate with readable yellow seman
 
   assert.match(
     modal,
-    /cashierFirstGateActive && \([\s\S]*bg-yellow-50[\s\S]*text-yellow-900[\s\S]*<AlertTriangle className="mt-0\.5 h-5 w-5 shrink-0 text-yellow-700 dark:text-yellow-300" \/>[\s\S]*<p className="text-yellow-800 dark:text-yellow-100\/90">/,
+    /cashierFirstGateActive && \([\s\S]*border-\(--pos-s-warn\) bg-\(--pos-s-warn-bg\)[\s\S]*text-yellow-900[\s\S]*<AlertTriangle className="mt-0\.5 h-5 w-5 shrink-0 text-yellow-700 dark:text-yellow-300" \/>[\s\S]*<p className="text-yellow-800 dark:text-yellow-100">/,
   );
   for (const fallback of cashierFirstFallbacks) {
     assert.doesNotMatch(modal, new RegExp(fallback.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
@@ -316,7 +316,7 @@ test('StaffShiftModal renders active shift cards with yellow card fill and stand
 
   assert.match(
     modal,
-    /border border-emerald-400\/45 bg-transparent px-3 py-1 text-xs font-semibold text-emerald-600 dark:border-emerald-400\/30 dark:bg-transparent/,
+    /border border-\(--pos-s-border\) bg-transparent px-3 py-1 text-xs font-semibold text-emerald-600 dark:border-zinc-700 dark:bg-transparent/,
   );
   assert.match(
     modal,

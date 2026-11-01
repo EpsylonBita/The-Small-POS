@@ -322,7 +322,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
             {loadFailed && (
               <div
                 role="status"
-                className="mb-5 rounded-[22px] border border-amber-200/90 bg-amber-50/90 px-4 py-4 text-sm text-amber-800 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100"
+                className="mb-5 rounded-[22px] border border-(--pos-s-warn) bg-(--pos-s-warn-bg) px-4 py-4 text-sm text-amber-800 dark:text-amber-100"
               >
                 {hasCurrentSnapshot
                   ? t('sync.recoveryCenter.staleData', {

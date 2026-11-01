@@ -121,12 +121,10 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
       onPointerLeave={handlePointerEnd}
       className={`p-3 rounded-xl border cursor-pointer transition-colors duration-150 active:scale-[0.98] flex flex-col touch-feedback min-h-[132px] sm:min-h-[144px] relative ${
         item.is_customizable
-          ? resolvedTheme === 'dark'
-            ? 'bg-amber-400/15 border-amber-400/30 active:bg-amber-400/25'
-            : 'bg-amber-100/95 border-amber-400/90 shadow-[0_10px_24px_rgba(15,23,42,0.08)] active:bg-amber-200/80'
+          ? 'pos-neon-card bg-(--pos-s-surface) border-(--pos-s-border) active:bg-(--pos-s-surface-2)'
           : resolvedTheme === 'dark'
-            ? 'bg-gray-700/30 border-gray-600/30 active:bg-gray-600/50'
-            : 'bg-white border-slate-300/80 shadow-[0_10px_24px_rgba(15,23,42,0.08)] active:bg-slate-50'
+            ? 'bg-gray-700/30 border-(--pos-s-border) active:bg-gray-600/50'
+            : 'bg-white border-(--pos-s-border) active:bg-slate-50'
       }`}
       role="button"
       tabIndex={0}
@@ -181,13 +179,13 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
           <div className="flex gap-2">
             <button
               onClick={handleCancelQuickAdd}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all bg-red-500 active:bg-red-600 text-white"
+              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all bg-(--pos-s-surface-2) border border-(--pos-s-border) active:bg-(--pos-s-border) text-(--pos-s-fg)"
             >
               {t('common.actions.cancel')}
             </button>
             <button
               onClick={handleQuickAdd}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-500 active:bg-emerald-600 text-white transition-all"
+              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-(--pos-s-yellow) active:bg-yellow-500 text-black transition-all"
             >
               {t('common.actions.add')} ({quickQuantity})
             </button>
@@ -201,8 +199,8 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
           <span
             className={`inline-flex h-6 w-6 items-center justify-center rounded-lg border shadow-xs ${
               resolvedTheme === 'dark'
-                ? 'border-yellow-400/30 bg-yellow-400/15 text-yellow-300'
-                : 'border-amber-500/40 bg-amber-200/70 text-amber-900'
+                ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200'
+                : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-900'
             }`}
             role="img"
             aria-label={t('menu.item.customizable')}
@@ -223,7 +221,7 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
       {/* Item Description */}
       {item.description && (
         <p className={`text-sm font-semibold leading-snug line-clamp-2 mb-1.5 antialiased ${
-          resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-800'
+          'text-(--pos-s-muted)'
         }`}>
           {item.description}
         </p>

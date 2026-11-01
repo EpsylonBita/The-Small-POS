@@ -1,3 +1,4 @@
+import { isPartiallyRefundedOrder } from '../../../../../shared/pos/orders/order-refund-state';
 import twintLogo from '../../../../../shared/payments/assets/twint-logo.png';
 import React, { memo, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -7,7 +8,7 @@ import { isFullyRefundedCompletedTable } from '../../../../../shared/pos/orders/
 import { useTheme } from '../../contexts/theme-context';
 import { OrderStatusControls } from './OrderStatusControls';
 import TableOrderIcon from '../icons/TableOrderIcon';
-import PickupOrderIcon from '../icons/PickupOrderIcon';
+import { DeliveryScooterIcon, PickupHandBagIcon } from '../icons/OrderTypeGlyphs';
 import type { Order, OrderStatus } from '../../types/orders';
 import toast from 'react-hot-toast';
 import { PluginIcon, isExternalPlatform } from '../../utils/plugin-icons';
@@ -16,7 +17,6 @@ import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
 import {
   normalizeOrderCustomerName,
   normalizeOrderTypeForDisplay,
-  resolveOrderDisplayTitle,
 } from '../../utils/orderDisplay';
 import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../../utils/orderNumberUtils';
 import { resolveFoodDeliveryShortCode } from '../../utils/foodDeliveryMetadata';
@@ -111,11 +111,11 @@ export const OrderCard = memo<OrderCardProps>(({
     const diffMinutes = Math.floor((now.getTime() - orderTime.getTime()) / (1000 * 60));
 
     if (diffMinutes <= 30) {
-      return 'text-green-500 drop-shadow-[0_0_8px_rgba(34,197,94,0.8)]';
+      return 'text-green-500';
     } else if (diffMinutes <= 40) {
-      return 'text-amber-500 drop-shadow-[0_0_8px_rgba(245,158,11,0.8)]';
+      return 'text-amber-500';
     } else {
-      return 'text-red-500 drop-shadow-[0_0_8px_rgba(239,68,68,0.8)]';
+      return 'text-red-500';
     }
   };
 
@@ -142,7 +142,8 @@ export const OrderCard = memo<OrderCardProps>(({
           trimmedOrderNum,
           order.created_at || order.createdAt,
         );
-        return compactFallbackNumber.startsWith('#')
+        // The fallback already reads «ORD #0ZF4…»: never prefix a second # («#ORD #…», founder 31/10).
+        return compactFallbackNumber.includes('#')
           ? compactFallbackNumber
           : `#${compactFallbackNumber}`;
       }
@@ -196,30 +197,13 @@ export const OrderCard = memo<OrderCardProps>(({
     return minutes > 40;
   };
 
-  // Icon component for order type
+  // Icon component for order type. Founder 31/10: «επανέφερε τα εικονίδια που δείχνουν το είδος της
+  // παραγγελίας» -- it stands beside the payment icon again (the translated word stays beside the number).
   const OrderTypeIcon = ({ orderType }: { orderType: string }) => {
-    const iconSize = 24;
-
     if (orderType === 'delivery') {
-      // Delivery truck icon in orange
-      return (
-        <svg
-          width={iconSize}
-          height={iconSize}
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="#d97706"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2" />
-          <path d="M15 18H9" />
-          <path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14" />
-          <circle cx="17" cy="18" r="2" />
-          <circle cx="7" cy="18" r="2" />
-        </svg>
-      );
+      // Founder 31/10: delivery is his scooter rider, in the orange the truck had; 28px, since the
+      // drawing has more in it than a 24px glyph can hold.
+      return <DeliveryScooterIcon className="h-7 w-7 text-[#d97706]" />;
     } else if (orderType === 'dine-in' || orderType === 'dine_in' || orderType === 'table') {
       // Table / dine-in order: same glyph as the OrderDashboard/OrderFlow chooser (TableOrderIcon)
       return (
@@ -229,18 +213,11 @@ export const OrderCard = memo<OrderCardProps>(({
         />
       );
     } else {
-      // Pickup / takeaway / default: the shared PickupOrderIcon rendered as a PLAIN bag silhouette at
-      // row scale (w-6 h-6, matching the sibling delivery/table icons) with a theme-aware semantic green
-      // stroke (light text-green-600 / dark text-green-400, OrderCard's resolvedTheme idiom) so it stays
-      // readable on the cream/light row and the dark row. The earlier green rounded badge/holder
-      // (the ~28px filled green chip wrapping a white bag, round 213) is gone -- on the live Dashboard
-      // row that filled chip read as a separate boxed treatment apart from the unboxed delivery/table
-      // siblings. No tap animation (no hover, no active scale), never a Store/Package/storefront glyph,
-      // and never a raw ShoppingBag -- the bag always goes through the shared PickupOrderIcon wrapper.
+      // Pickup / takeaway / default: founder 31/10, his hand holding the bag, in the theme-aware green
+      // (light text-green-600 / dark text-green-400). The order-type chooser keeps its own bag.
       return (
-        <PickupOrderIcon
-          className={`w-6 h-6 ${resolvedTheme === 'light' ? 'text-green-600' : 'text-green-400'}`}
-          strokeWidth={2}
+        <PickupHandBagIcon
+          className={`h-7 w-7 ${resolvedTheme === 'light' ? 'text-green-600' : 'text-green-400'}`}
         />
       );
     }
@@ -326,15 +303,14 @@ export const OrderCard = memo<OrderCardProps>(({
       ? 'split'
       : paymentMethodNormalized;
   const [resolvedAddress, setResolvedAddress] = useState<string>('');
-  const orderTypeLabel = orderTypeNormalized
-    ? t(`orders.type.${orderTypeNormalized}`, { defaultValue: orderTypeNormalized })
-    : '';
-  const nonDeliveryTitle = resolveOrderDisplayTitle({
-    orderType: orderTypeNormalized,
-    customerName: rawCustomerName,
-    pickupLabel: t('orders.type.pickup', { defaultValue: 'Pickup' }),
-    fallbackLabel: orderTypeLabel || t('orderCard.customer', { defaultValue: 'Customer' }),
-  });
+  // Founder 31/10: the order type, translated (dine-in showed raw), sits on the order number's line.
+  const orderTypeKey =
+    orderTypeNormalized === 'dine-in' || orderTypeNormalized === 'dine_in' || orderTypeNormalized === 'table'
+      ? 'dineIn'
+      : orderTypeNormalized === 'room_service'
+        ? 'roomService'
+        : orderTypeNormalized;
+  const orderTypeLabel = orderTypeKey ? t(`orders.type.${orderTypeKey}`, { defaultValue: orderTypeKey }) : '';
 
   // Format address for display - only show street/road and number, not city, postal code, or floor
   const formatAddressForDisplay = (fullAddress: string): string => {
@@ -364,6 +340,11 @@ export const OrderCard = memo<OrderCardProps>(({
   const orderStatusForPayment = String(order.status ?? '').trim().toLowerCase();
   const paymentSettled =
     paymentStatusNormalized === 'paid' || paymentStatusNormalized === 'completed';
+  const partiallyRefunded = isPartiallyRefundedOrder({
+    status: order.status,
+    receivedCents: order.received_amount_cents ?? order.receivedAmountCents,
+    refundedCents: order.refunded_amount_cents ?? order.refundedAmountCents,
+  });
   const completedTableReturn = isFullyRefundedCompletedTable(order,
     Array.isArray(order.payment_receipts) ? order.payment_receipts : []);
   const platformPaymentPresentation = paymentSettled
@@ -389,7 +370,8 @@ export const OrderCard = memo<OrderCardProps>(({
   const driverNameNormalized = order.driverName || order.driver_name || '';
   const orderStatusNormalized = (order.status || '').toLowerCase();
   const isDeliveredOrCompleted = orderStatusNormalized === 'completed' || orderStatusNormalized === 'delivered';
-  const showReadyStatusPill = orderStatusNormalized === 'ready' || isDeliveredOrCompleted;
+  // Founder 31/10: history rows carry no «ολοκληρώθηκε» pill (the tab already says it); an active ready order keeps it.
+  const showReadyStatusPill = orderStatusNormalized === 'ready';
   const readyStatusKey = orderStatusNormalized === 'ready' ? 'ready' : 'completed';
   const readyStatusBadgeClass = getStatusBadgeColor('ready');
   const readyStatusLabel = t(`orders.status.${readyStatusKey}`, {
@@ -425,7 +407,7 @@ export const OrderCard = memo<OrderCardProps>(({
   // Left edge: age-based urgency only for active orders. Terminal rows use a neutral edge, except cancelled
   // keeps a calm semantic red (status-based, never age-based).
   const leftEdgeColorClass = isTerminalOrder
-    ? (isCancelledTerminal ? 'border-l-red-400/50' : 'border-l-white/30')
+    ? (isCancelledTerminal ? 'border-l-red-600' : 'border-l-white/30')
     : getLeftEdgeColor(orderCreatedAt);
 
   // Calm timestamp for terminal rows: prefer the terminal/most-recent time, falling back to created_at only if
@@ -458,9 +440,9 @@ export const OrderCard = memo<OrderCardProps>(({
         : 'completed';
   const terminalStatusLabel = t(`orders.status.${terminalStatusKey}`, { defaultValue: terminalStatusKey });
   const terminalTimestamp = formatTerminalStamp(terminalTimestampRaw);
-  const terminalTimestampLabel = terminalTimestamp
-    ? `${terminalStatusLabel} ${terminalTimestamp}`
-    : terminalStatusLabel;
+  // Founder 31/10: a history row sits under its own tab (Παραδόθηκαν / Ακυρωμένες), so it shows the time
+  // alone; the status word only stands in when there is no time.
+  const terminalTimestampLabel = terminalTimestamp ?? terminalStatusLabel;
 
   // Fallback: resolve address via customer lookup when missing
   // Checks both customer_addresses table and legacy customers.address field
@@ -522,16 +504,16 @@ export const OrderCard = memo<OrderCardProps>(({
       // still reads through — plain alpha blending, no backdrop read); light =
       // #fffaf1 at 90% over the warm-white field ~= solid #fef8ee. The overdue
       // (>40 min) delivery treatment keeps its attention signal but is no longer a
-      // perpetual repaint: one inset shadow (was four stacked) and a FINITE pulse
-      // (`order-card-overdue-pulse`, 4 cycles then steady — see OrderCard.css)
-      // instead of infinite `animate-pulse`.
-      className={`relative rounded-2xl sm:rounded-full py-3 sm:py-3 px-3 sm:px-6 cursor-pointer transform transition-all duration-300 touch-feedback ${resolvedTheme === 'light'
-        ? 'bg-[#fef8ee] border border-amber-100/80 shadow-xs active:bg-[#f8ecd9]'
+      // perpetual repaint: a solid red border and left edge (Wave ΣΤ2 removed the red
+      // inset wash) and a FINITE pulse (`order-card-overdue-pulse`, 4 cycles then
+      // steady — see OrderCard.css) instead of infinite `animate-pulse`.
+      className={`relative rounded-2xl sm:rounded-full py-3 sm:py-3 px-3 sm:px-6 cursor-pointer transform transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] touch-feedback ${resolvedTheme === 'light'
+        ? 'bg-[#fef8ee] border border-(--pos-s-border) shadow-xs active:bg-[#f8ecd9]'
         : 'bg-[#26231e]/95 border border-white/20 shadow-lg active:bg-[#38342c]/95'
         } ${deliveryOlderThan40
-          ? 'border-red-500/60 shadow-[inset_0_0_40px_6px_rgba(239,68,68,0.45)] order-card-overdue-pulse'
+          ? 'border-red-600 order-card-overdue-pulse'
           : ''
-        } border-l-4 ${deliveryOlderThan40 ? 'border-l-red-500' : leftEdgeColorClass} ${isSelected ? 'ring-2 ring-blue-400/50 scale-[1.02] shadow-lg' : ''
+        } border-l-4 ${deliveryOlderThan40 ? 'border-l-red-500' : leftEdgeColorClass} ${isSelected ? 'ring-2 ring-inset ring-(--pos-s-sel-bg) scale-[0.98]' : ''
         }`}
       onClick={() => onSelect(order.id)}
       onDoubleClick={() => onDoubleClick?.(order.id)}
@@ -540,9 +522,16 @@ export const OrderCard = memo<OrderCardProps>(({
         {/* Left Section - Order Number & Time */}
         <div className="flex items-center gap-2 sm:gap-4 relative shrink-0">
           <div className="flex flex-col gap-0.5 sm:gap-1">
-            <span className={`text-base sm:text-lg font-bold min-w-[50px] sm:min-w-[80px] ${resolvedTheme === 'light' ? 'text-gray-900' : 'text-white'}`}>
-              {formatOrderNumber()}
-            </span>
+            <div className="flex items-baseline gap-2 sm:gap-3">
+              <span className={`text-base sm:text-lg font-bold ${resolvedTheme === 'light' ? 'text-gray-900' : 'text-white'}`}>
+                {formatOrderNumber()}
+              </span>
+              {orderTypeLabel && (
+                <span data-testid="order-card-type" className="whitespace-nowrap text-sm sm:text-base font-semibold text-(--pos-s-muted)">
+                  {orderTypeLabel}
+                </span>
+              )}
+            </div>
             {showReadyStatusPill && (
               <span className={`inline-flex w-fit items-center gap-1 px-2 py-0.5 rounded-full text-[10px] sm:text-xs font-semibold border ${readyStatusBadgeClass}`}>
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
@@ -596,16 +585,10 @@ export const OrderCard = memo<OrderCardProps>(({
                 {isDeliveredOrCompleted && (driverIdNormalized || driverNameNormalized) && (
                   <div className="flex items-center gap-1 mt-1">
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${resolvedTheme === 'light'
-                      ? 'bg-green-100 text-green-700 border border-green-200'
-                      : 'bg-green-900/30 text-green-400 border border-green-700/40'
+                      ? 'bg-(--pos-s-surface-2) text-green-700 border border-(--pos-s-border)'
+                      : 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 border border-(--pos-s-border)'
                       }`}>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2" />
-                        <path d="M15 18H9" />
-                        <path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14" />
-                        <circle cx="17" cy="18" r="2" />
-                        <circle cx="7" cy="18" r="2" />
-                      </svg>
+                      <DeliveryScooterIcon className="h-5 w-5" />
                       {driverNameNormalized || t('orderCard.driverAssigned', 'Driver Assigned')}
                     </span>
                   </div>
@@ -619,9 +602,12 @@ export const OrderCard = memo<OrderCardProps>(({
                       // Same recognition anchor for pickup platform orders.
                       <PluginIcon plugin={orderPlugin} size={32} className="shrink-0" showTooltip={false} />
                     )}
-                    <div className={`text-sm sm:text-base font-bold truncate min-w-0 ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
-                      {nonDeliveryTitle}
-                    </div>
+                    {/* Founder 31/10: the type sits beside the order number; the title is the customer's name only. */}
+                    {customerNameNormalized && (
+                      <div className={`text-sm sm:text-base font-bold truncate min-w-0 ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
+                        {customerNameNormalized}
+                      </div>
+                    )}
                   </div>
                 {/* Show phone number */}
                 {customerPhoneNormalized && (
@@ -633,7 +619,7 @@ export const OrderCard = memo<OrderCardProps>(({
             )}
             {isBoxOrder(order) && (order.is_test === true || order.is_test === 1 || order.isTest === true
               || order.integration_environment === 'sandbox' || order.integrationEnvironment === 'sandbox') && (
-              <span data-testid="box-test-order-badge" className="mt-1 inline-flex rounded-sm border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-700 dark:text-amber-300">
+              <span data-testid="box-test-order-badge" className="mt-1 inline-flex rounded-sm border border-(--pos-s-yellow) bg-(--pos-s-surface-2) px-2 py-0.5 text-xs font-semibold text-amber-700 dark:text-amber-300">
                 {t('boxOrder.testOrder', { defaultValue: 'TEST · SANDBOX' })}
               </span>
             )}
@@ -649,7 +635,9 @@ export const OrderCard = memo<OrderCardProps>(({
             {formatCurrency(totalNormalized, order.currency ?? null)}
           </span>
           <div className="flex items-center gap-2">
-            <OrderTypeIcon orderType={orderTypeNormalized} />
+            <span aria-hidden="true" data-testid="order-card-type-icon" className="inline-flex">
+              <OrderTypeIcon orderType={orderTypeNormalized} />
+            </span>
             {!showPaymentPending && (platformPaymentPresentation ? (
               <ShieldCheck
                 width={20}
@@ -665,9 +653,15 @@ export const OrderCard = memo<OrderCardProps>(({
             <span
               data-testid="order-card-platform-payment"
               aria-label={platformPaymentA11y}
-              className={`text-[10px] sm:text-xs font-semibold whitespace-nowrap rounded-sm px-1.5 py-0.5 border border-cyan-500/40 bg-cyan-500/10 ${resolvedTheme === 'light' ? 'text-cyan-700' : 'text-cyan-400'}`}
+              className={`text-[10px] sm:text-xs font-semibold whitespace-nowrap rounded-sm px-1.5 py-0.5 border border-(--pos-s-border) bg-(--pos-s-surface-2) ${resolvedTheme === 'light' ? 'text-cyan-700' : 'text-cyan-400'}`}
             >
               {platformPaymentLabel}
+            </span>
+          )}
+          {partiallyRefunded && (
+            <span data-testid="order-card-partial-refund" role="status"
+              className="text-[10px] sm:text-xs font-semibold whitespace-nowrap rounded-sm px-1.5 py-0.5 border border-zinc-300 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">
+              {t('orderCard.partialRefund')}
             </span>
           )}
           {completedTableReturn ? (
@@ -679,7 +673,7 @@ export const OrderCard = memo<OrderCardProps>(({
               data-testid="order-card-payment-pending"
               role="status"
               aria-label={t('orderCard.paymentPendingA11y', { defaultValue: 'Payment pending' })}
-              className={`text-[10px] sm:text-xs font-semibold tracking-wide whitespace-nowrap rounded-sm px-1.5 py-0.5 border border-amber-500/40 bg-amber-500/10 ${resolvedTheme === 'light' ? 'text-amber-700' : 'text-amber-400'}`}
+              className={`text-[10px] sm:text-xs font-semibold tracking-wide whitespace-nowrap rounded-sm px-1.5 py-0.5 border border-(--pos-s-warn) bg-(--pos-s-warn-bg) ${resolvedTheme === 'light' ? 'text-amber-700' : 'text-amber-400'}`}
             >
               {t('orderCard.paymentPending', { defaultValue: 'PAY PENDING' })}
             </span>
@@ -744,7 +738,7 @@ export const OrderCard = memo<OrderCardProps>(({
 
       {/* Quick Actions - Order Status Controls */}
       {showQuickActions && onStatusChange && onDriverAssign && (
-        <div className={`mt-4 pt-4 border-t ${resolvedTheme === 'light' ? 'border-amber-100/80' : 'border-white/10'
+        <div className={`mt-4 pt-4 border-t ${resolvedTheme === 'light' ? 'border-(--pos-s-border)' : 'border-white/10'
           }`}>
           <OrderStatusControls
             order={order}

@@ -95,13 +95,23 @@ test('LiquidGlassModal finalizes a parent-driven close exactly once', () => {
   assert.match(source, /const closeFinalizedRef = React\.useRef<boolean>\(false\)/);
   assert.match(
     source,
-    /event\.target !== event\.currentTarget[\s\S]*?!isClosing[\s\S]*?closeFinalizedRef\.current/,
-    'bubbled and duplicate animation events must be ignored',
+    /if \(event\.target !== event\.currentTarget \|\| !isClosing\) return\s*finalizeClose\(\)/,
+    'bubbled animation events must be ignored',
   );
   assert.match(
     source,
-    /closeFinalizedRef\.current = true[\s\S]*?const externallyClosed = externalClosingRef\.current[\s\S]*?if \(!externallyClosed\) onClose\(\)/,
-    'an external close must unmount without firing the user onClose callback',
+    /const finalizeClose = React\.useCallback\(\(\) => \{\s*if \(closeFinalizedRef\.current\) return\s*closeFinalizedRef\.current = true[\s\S]*?const externallyClosed = externalClosingRef\.current[\s\S]*?if \(!externallyClosed\) closeActionRef\.current\(\)/,
+    'a close settles once, and an external close unmounts without firing the user onClose callback',
+  );
+});
+
+// Audit 30/10: a missed animationend (throttled window, stylesheet override) must never leave a
+// closed modal on screen or hold up the next step.
+test('LiquidGlassModal settles a close after a bounded fallback even without animationend', () => {
+  assert.match(source, /const MODAL_EXIT_FALLBACK_MS = 260/);
+  assert.match(
+    source,
+    /if \(!isClosing\) return\s*const timer = window\.setTimeout\(finalizeClose, MODAL_EXIT_FALLBACK_MS\)\s*return \(\) => window\.clearTimeout\(timer\)/,
   );
 });
 

@@ -2232,20 +2232,31 @@ const waiterDevicesSectionPath = path.join(
   'settings',
   'WaiterDevicesSection.tsx',
 );
+const settingsSectionsPath = path.join(
+  process.cwd(),
+  'src',
+  'renderer',
+  'components',
+  'settings',
+  'settings-sections.ts',
+);
 
 test('settings hub registers the waiter_devices section gated on main terminal', () => {
   const source = readFileSync(connectionSettingsModalPath, 'utf8');
+  // Since the nine-section Settings shell (UI audit wave 7B) the ids and the nav groups live in
+  // settings-sections.ts; the modal labels the nav and renders the sections.
+  const sections = readFileSync(settingsSectionsPath, 'utf8');
 
   // The section id exists in the SettingsSectionId union and renders the section component.
-  assert.match(source, /\|\s*'waiter_devices'/);
+  assert.match(sections, /\|\s*'waiter_devices'/);
   assert.match(source, /<WaiterDevicesSection\s*\/>/);
-  assert.match(source, /settings\.settingsHub\.sections\.waiter_devices\.label/);
-  assert.match(source, /settings\.settingsHub\.sections\.waiter_devices\.detail/);
+  assert.match(source, /settings\.settingsHub\.nav\.waiter_devices/);
 
   // Main-terminal gate: derived from useFeatures' terminalType, stripping the
   // nav entry AND guarding the render block for non-main terminals.
   assert.match(source, /const isMainTerminal = terminalType === 'main'/);
-  assert.match(source, /id !== 'waiter_devices' \|\| isMainTerminal/);
+  assert.match(source, /buildSettingsNavGroups\(isMainTerminal\)/);
+  assert.match(sections, /id !== 'waiter_devices' \|\| isMainTerminal/);
   assert.match(
     source,
     /activeSettingsSection === 'waiter_devices' && isMainTerminal/,

@@ -2475,6 +2475,8 @@ export interface PlatformBridge {
       baud?: number;
     }): Promise<IpcResult>;
     scannerSerialStop(): Promise<IpcResult>;
+    /** Serial/COM ports Windows reports (name, portType, USB vid/pid). Suggestions only. */
+    listSerialPorts(): Promise<Array<{ name: string; portType?: string }> | { ports?: Array<{ name: string }> }>;
     loyaltyReaderStart(): Promise<IpcResult>;
     loyaltyReaderStop(): Promise<IpcResult>;
     loyaltyProcessCard(uid: string): Promise<IpcResult>;
@@ -4332,6 +4334,7 @@ export class TauriBridge implements PlatformBridge {
     scannerSerialStart: (p: { port: string; baud?: number }) =>
       this.inv("scanner-serial-start", p),
     scannerSerialStop: () => this.inv("scanner-serial-stop"),
+    listSerialPorts: () => this.inv("serial:list-ports"),
     loyaltyReaderStart: () => this.inv("loyalty-reader-start"),
     loyaltyReaderStop: () => this.inv("loyalty-reader-stop"),
     loyaltyProcessCard: (uid: string) => this.inv("loyalty-process-card", uid),

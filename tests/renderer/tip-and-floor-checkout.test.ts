@@ -35,7 +35,9 @@ test('customer address forms expose reusable floor presets without removing manu
   assert.match(presetPicker, /BASEMENT|basement/i);
   assert.match(presetPicker, /GROUND|ground/i);
   assert.match(presetPicker, /type="text"/);
-  assert.match(presetPicker, /preset\.wide \? 'col-span-2'/);
+  // Founder 31/10: one row of solid picks; the selection is the kit's.
+  assert.match(presetPicker, /grid-cols-\[1\.5fr_1\.5fr_repeat\(6,1fr\)\]/);
+  assert.match(presetPicker, /'border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)'/);
 });
 
 test('delivery customer forms require floor and ringer name and preserve saved address context', () => {
@@ -126,7 +128,7 @@ test('tip controls have raised touch depth and role-colored icons in both themes
 
   assert.match(
     tipModal,
-    /const tipChoiceButtonBaseClass =\s*'[^']*shadow-\[0_8px_20px_rgba\(15,23,42,0\.10\)\][^']*dark:shadow-\[0_10px_24px_rgba\(0,0,0,0\.28\)\][^']*active:translate-y-px[^']*'/,
+    /const tipChoiceButtonBaseClass =\s*'[^']*bg-\(--pos-s-surface\) shadow-\[0_8px_20px_rgba\(0,0,0,0\.10\)\][^']*dark:shadow-\[0_10px_24px_rgba\(0,0,0,0\.28\)\][^']*active:translate-y-px[^']*'/,
     'percentage and recipient choices should use a shared raised touch surface',
   );
   assert.match(tipModal, /cashier:\s*'tip-recipient-icon-cashier'/);
@@ -146,7 +148,7 @@ test('tip controls have raised touch depth and role-colored icons in both themes
   }
   assert.match(
     tipModal,
-    /className="liquid-glass-modal-button[^"]*shadow-\[0_10px_24px_rgba\(15,23,42,0\.12\)\][^"]*active:translate-y-px/,
+    /className="liquid-glass-modal-button[^"]*shadow-\[0_10px_24px_rgba\(0,0,0,0\.12\)\][^"]*active:translate-y-px/,
     'footer actions should not remain visually flat',
   );
   assert.doesNotMatch(tipModal, /<span className="rounded-xl bg-white\/10 p-2">/);

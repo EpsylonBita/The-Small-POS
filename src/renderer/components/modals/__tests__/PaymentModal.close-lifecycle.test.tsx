@@ -50,7 +50,7 @@ describe('PaymentModal close lifecycle', () => {
     const onPaymentComplete = vi.fn().mockResolvedValue(undefined);
     render(<PaymentModal isOpen onClose={vi.fn()} orderTotal={18.5}
       onPaymentComplete={onPaymentComplete} allowTips={false} />);
-    fireEvent.click(screen.getByRole('button', { name: /CASH/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Cash/ }));
     const complete = screen.getByRole('button', { name: 'Complete' });
     expect(complete.closest('.liquid-glass-modal-content')).toBeNull();
     expect(complete).toBeDisabled();

@@ -29,14 +29,11 @@ test('AppointmentsView opens Create from the hub via openCreateSignal (Round 236
 });
 
 test('Round 369: AppointmentsView renders the standard visible page title above its controls', () => {
+  // Founder 31/10: the shared workspace header carries the visible title -- the hub tab's name when
+  // embedded («Υπηρεσίες»), «Ραντεβού» on its own page -- with the figures on the same row.
   assert.match(
     viewSource,
-    /<h1 className="truncate text-3xl font-bold tracking-tight">\s*\{t\('navigation\.menu\.appointments', \{ defaultValue: 'Appointments' \}\)\}\s*<\/h1>/,
-  );
-  assert.match(
-    viewSource,
-    /data-vertical-hero="appointments"[\s\S]*rounded-3xl border p-4 backdrop-blur-xl[\s\S]*navigation\.menu\.appointments[\s\S]*appointments\.stats\.total/,
-    'Appointments title and stats should live in the same rounded glass hero',
+    /<WorkspaceHeader\s*data-vertical-hero="appointments"\s*heading=\{embedded \? t\('dashboard\.tabs\.services', \{ defaultValue: 'Services' \}\) : t\('navigation\.menu\.appointments', \{ defaultValue: 'Appointments' \}\)\}[\s\S]*?appointments\.stats\.total/,
   );
   assert.ok(
     viewSource.indexOf("navigation.menu.appointments") < viewSource.indexOf("appointments.stats.total"),
@@ -52,7 +49,7 @@ test('Round 392: Appointments page rows use static status classes, smooth contro
   // status styling must stay as static, on-palette classes instead.
   assert.match(viewSource, /border: 'border-l-amber-400'/);
   assert.match(viewSource, /border: 'border-l-emerald-500'/);
-  assert.match(viewSource, /chip: 'border border-yellow-500\/30 bg-yellow-500\/10 text-yellow-500'/);
+  assert.match(viewSource, /chip: 'border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-yellow-(?:700|800)(?: dark:text-yellow-\d00)?'/);
   assert.match(pageRegion, /statusConfig\[apt\.status\]\.border/);
   assert.match(pageRegion, /statusConfig\[apt\.status\]\.chip/);
   assert.doesNotMatch(pageRegion, /statusConfig\[apt\.status\]\.color/);
@@ -253,9 +250,10 @@ test('Appointments page staff filter sources branch staff, usable even with zero
     viewSource,
     /const filterStaffOptions = useMemo\(\s*\(\) => \(staffList\.length > 0 \? staffList : staff\),/,
   );
+  // Founder 31/10: the app's dropdown instead of the Windows one, same branch-first options.
   assert.match(
     viewSource,
-    /\{filterStaffOptions\.map\(s => <option key=\{s\.id\} value=\{s\.id\}>\{s\.name\}<\/option>\)\}/,
+    /\.\.\.filterStaffOptions\.map\(\(option\) => \(\{ value: option\.id, label: option\.name \}\)\)/,
   );
   // The page filter no longer maps the appointment-derived staff array directly.
   assert.doesNotMatch(viewSource, /\{staff\.map\(/);
@@ -346,19 +344,16 @@ test('Round 230: AppointmentsView icon buttons are named + touch-safe, with no h
     return viewSource.slice(viewSource.lastIndexOf('<button', i), viewSource.indexOf('</button>', i) + '</button>'.length);
   };
 
-  // Top refresh button: localized accessible name + 44x44 centred sizing + active feedback.
-  const refresh = button('onClick={() => refetch()}');
-  assert.match(refresh, /aria-label=\{t\('common\.refresh', 'Refresh'\)\}/);
-  assert.match(refresh, /h-11 w-11 items-center justify-center/);
-  assert.match(refresh, /active:scale-95/);
-
-  // Main date previous / next day buttons.
-  const prevDay = button("navigateDate('prev')");
-  assert.match(prevDay, /aria-label=\{t\('appointments\.previousDay', 'Previous day'\)\}/);
-  assert.match(prevDay, /h-11 w-11 items-center justify-center/);
-  const nextDay = button("navigateDate('next')");
-  assert.match(nextDay, /aria-label=\{t\('appointments\.nextDay', 'Next day'\)\}/);
-  assert.match(nextDay, /h-11 w-11 items-center justify-center/);
+  // Founder 31/10: refresh and the previous / next day buttons are the shared workspace icon button
+  // (a named 44x44 button; the name is its aria-label).
+  assert.match(viewSource, /<WorkspaceIconButton label=\{t\('common\.refresh', 'Refresh'\)\} onClick=\{\(\) => refetch\(\)\}>/);
+  assert.match(viewSource, /<WorkspaceIconButton label=\{t\('appointments\.previousDay', 'Previous day'\)\} onClick=\{\(\) => navigateDate\('prev'\)\}>/);
+  assert.match(viewSource, /<WorkspaceIconButton label=\{t\('appointments\.nextDay', 'Next day'\)\} onClick=\{\(\) => navigateDate\('next'\)\}>/);
+  const workspaceSource = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'components', 'tables', 'TableWorkspace.tsx'), 'utf8');
+  assert.match(workspaceSource, /<button type="button" className="table-workspace-icon-button" aria-label=\{label\} onClick=\{onClick\}>/);
+  const workspaceCss = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'components', 'tables', 'table-workspace.css'), 'utf8');
+  assert.match(workspaceCss, /\.table-workspace button \{[^}]*min-height: 44px;[^}]*min-width: 44px;/);
+  assert.match(workspaceCss, /\.table-workspace button\.table-workspace-icon-button \{ width: 44px;/);
 
   // Modal close button (anchored on its unique close key; still wires onClose elsewhere in the panel).
   const close = button("t('common.actions.close', 'Close')");
@@ -474,10 +469,10 @@ test('Round 355: the appointment modal is an animated translucent glass dialog w
   // Cancel reads as soft destructive RED in both themes.
   assert.match(
     viewSource,
-    /onClick=\{onClose\} className=\{`px-5 py-2\.5 rounded-xl font-medium border[\s\S]*?border-red-500\/40 bg-red-500\/10 text-red-300[\s\S]*?border-red-300 bg-red-50 text-red-700/,
+    /onClick=\{onClose\} className=\{`px-5 py-2\.5 rounded-xl font-medium border[\s\S]*?border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\)[\s\S]*?: 'border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\)/,
   );
   // Create reads as semantic GREEN and stays clearly DISABLED until staff + service + start time are chosen.
-  assert.match(viewSource, /onClick=\{handleCreateAppointment\}[\s\S]*?bg-emerald-600 text-white border border-emerald-500/);
+  assert.match(viewSource, /onClick=\{handleCreateAppointment\}[\s\S]*?bg-\(--pos-s-yellow\) text-black border border-\(--pos-s-yellow\)/);
   assert.match(
     viewSource,
     /onClick=\{handleCreateAppointment\}\s*\n\s*disabled=\{isSubmitting \|\| !formData\.staffId \|\| !formData\.serviceId \|\| !formData\.startTime\}[\s\S]*?disabled:bg-zinc-400\/20[\s\S]*?disabled:cursor-not-allowed/,
@@ -491,7 +486,7 @@ test('Round 355: the appointment modal is an animated translucent glass dialog w
 
 test('Round 240: modal Cancel is soft-destructive red, Create is green primary with a clear disabled state', () => {
   // Cancel = red (both themes) with active tap feedback; the old neutral cancel fill is gone.
-  assert.match(viewSource, /border-red-500\/40 bg-red-500\/10 text-red-300 active:bg-red-500\/20/);
+  assert.match(viewSource, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)/);
   assert.match(viewSource, /\{t\('appointments\.modal\.cancel', 'Cancel'\)\}/);
   assert.doesNotMatch(viewSource, /bg-zinc-900 border-zinc-700 text-zinc-200 active:bg-zinc-800/);
 
@@ -500,7 +495,7 @@ test('Round 240: modal Cancel is soft-destructive red, Create is green primary w
   // explicit neutral/muted glass; this guard only pins the enabled emerald + a disabled-* state.)
   assert.match(
     viewSource,
-    /onClick=\{handleCreateAppointment\}\s*disabled=\{[^}]*\}\s*className="px-5 py-2\.5 rounded-xl font-semibold bg-emerald-600 text-white[^"]*disabled:cursor-not-allowed/,
+    /onClick=\{handleCreateAppointment\}\s*disabled=\{[^}]*\}\s*className="px-5 py-2\.5 rounded-xl font-semibold bg-\(--pos-s-yellow\) text-black[^"]*disabled:cursor-not-allowed/,
   );
   // Scope the negative check to the Create button (the old white/black slab also appears on unrelated
   // page action buttons, which are intentionally untouched).
@@ -555,18 +550,18 @@ test('Round 248: New Appointment availability controls use the yellow selected a
   assert.doesNotMatch(availability, /bg-zinc-100 text-black/, 'no white slab in availability controls');
   assert.doesNotMatch(availability, /bg-black text-white/, 'no black slab in availability controls');
 
-  // All three selected states (calendar day, period segment, time slot) use the core
-  // yellow accent with black text — identical in light and dark.
-  const yellowSelected = availability.match(/bg-yellow-400 text-black border-yellow-400/g) || [];
+  // All three selected states (calendar day, period segment, time slot) use the kit selection
+  // (dark in light, white in dark) — Wave ΣΤ8b; yellow stays on the primary action.
+  const kitSelected = availability.match(/border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)|bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)/g) || [];
   assert.ok(
-    yellowSelected.length >= 3,
-    `expected >=3 yellow selected accents (calendar/period/slot), found ${yellowSelected.length}`,
+    kitSelected.length >= 3,
+    `expected >=3 kit selected states (calendar/period/slot), found ${kitSelected.length}`,
   );
 
   // Each selected branch specifically resolves to the yellow accent (no theme-split slab).
-  assert.match(viewSource, /\$\{isSelected \? 'bg-yellow-400 text-black border-yellow-400' : ''\}/);
-  assert.match(viewSource, /timePeriod === p\s*\?\s*'bg-yellow-400 text-black border-yellow-400'/);
-  assert.match(viewSource, /\$\{selected\s*\?\s*'bg-yellow-400 text-black border-yellow-400'/);
+  assert.match(viewSource, /\$\{isSelected \? 'border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)' : ''\}/);
+  assert.match(viewSource, /timePeriod === p\s*\?\s*'bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)'/);
+  assert.match(viewSource, /\$\{selected\s*\?\s*'bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)'/);
 
   // Touch/glass invariants for the modal are unchanged (no hover-only effects, no native titles).
   assert.doesNotMatch(viewSource, /hover:/);
@@ -581,7 +576,7 @@ test('Round 248: disabled Create is neutral/muted glass while enabled Create sta
   assert.ok(createBtn.length > 0, 'create button markup must be found');
 
   // Enabled state stays emerald green primary.
-  assert.match(createBtn, /bg-emerald-600 text-white border border-emerald-500/);
+  assert.match(createBtn, /bg-\(--pos-s-yellow\) text-black border border-\(--pos-s-yellow\)/);
 
   // Disabled state is explicit neutral/muted glass (translucent zinc fill + muted zinc text +
   // neutral border + no green shadow) — not a dimmed green.
@@ -601,7 +596,7 @@ test('Round 248: disabled Create is neutral/muted glass while enabled Create sta
   assert.match(createBtn, /disabled:cursor-not-allowed disabled:active:scale-100/);
 
   // Cancel stays soft-destructive red (unchanged by this round).
-  assert.match(viewSource, /border-red-500\/40 bg-red-500\/10 text-red-300 active:bg-red-500\/20/);
+  assert.match(viewSource, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)/);
 });
 
 // --- Round 249 (live QA after Round 248, Greek/dark): the page-level (outside-modal) selected/
@@ -617,16 +612,19 @@ test('Round 249: page-level selected/primary controls use the yellow accent, not
   const pageRegion = viewSource.slice(0, viewSource.indexOf('const CreateAppointmentModalContent'));
   assert.ok(pageRegion.length > 0, 'page region (AppointmentsView body) must be found');
 
-  // Quick filter (Today/Tomorrow/Week) selected branch → yellow accent.
-  assert.match(pageRegion, /quickFilter === filter\s*\?\s*'bg-yellow-400 text-black border border-yellow-400'/);
-  // View mode (Timeline/List) selected branch → yellow accent.
-  assert.match(pageRegion, /viewMode === mode \? 'bg-yellow-400 text-black border border-yellow-400'/);
+  // Founder 31/10: the quick filter is the shared chip group and the view switch the shared segment;
+  // both select in the kit's yellow (table-workspace.css).
+  const workspaceCss = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'components', 'tables', 'table-workspace.css'), 'utf8');
+  assert.match(pageRegion, /<WorkspaceChips<QuickFilter>[\s\S]*?value=\{quickFilter\}/);
+  assert.match(pageRegion, /aria-pressed=\{viewMode === mode\}/);
+  assert.match(workspaceCss, /\.table-workspace-status-filters button\[aria-pressed='true'\] \{ color: var\(--pos-s-sel-fg\); background: var\(--pos-s-sel-bg\); \}/);
+  assert.match(workspaceCss, /\.table-workspace-view-mode button\[aria-pressed='true'\][^{]*\{ background: var\(--pos-s-sel-bg\); color: var\(--pos-s-sel-fg\);/);
   // Primary row quick-actions (timeline + list) → yellow accent (both occurrences).
   const primaryYellow = pageRegion.match(/action\.variant === 'primary' \? 'bg-yellow-400 text-black border border-yellow-400/g) || [];
   assert.ok(primaryYellow.length >= 2, `expected >=2 primary row actions on the yellow accent, found ${primaryYellow.length}`);
 
   // Semantic row-action colours are preserved: success stays green, danger stays red.
-  assert.match(pageRegion, /action\.variant === 'success' \? 'bg-green-600 text-white/);
+  assert.match(pageRegion, /action\.variant === 'success' \? 'bg-\(--pos-s-yellow\) text-black/);
   assert.match(pageRegion, /action\.variant === 'danger' \? 'bg-red-600 text-white/);
 
   // The old white/black slabs are gone from the page region (both the dark zinc slab and its
@@ -634,8 +632,8 @@ test('Round 249: page-level selected/primary controls use the yellow accent, not
   assert.doesNotMatch(pageRegion, /bg-zinc-100 text-black/, 'no white slab in page-level controls');
   assert.doesNotMatch(pageRegion, /bg-black text-white/, 'no black slab in page-level controls');
 
-  // Inactive styling preserved (not collapsed into the yellow accent).
-  assert.match(pageRegion, /bg-gray-800 text-gray-300 active:bg-gray-700/);
+  // Inactive chips stay a quiet pill (not collapsed into the yellow accent).
+  assert.match(workspaceCss, /\.table-workspace-status-filters button \{[^}]*background: var\(--table-soft\);/);
 
   // Touch/glass invariants unchanged across the whole view: no hover-only effects, no native titles.
   assert.doesNotMatch(viewSource, /hover:/);
@@ -673,11 +671,11 @@ test('Round 255: the New Appointment Date & Time section is a side-by-side calen
   assert.match(viewSource, /p-4 sm:p-6 overflow-y-auto flex-1 min-h-0 scrollbar-hide/);
   assert.match(viewSource, /max-h-56 overflow-y-auto pr-1 scrollbar-hide/);
 
-  // Selected calendar day / period / time slot stay yellow + black (3 branches); no hover / native title.
-  const yellowSelected = viewSource.match(/bg-yellow-400 text-black border-yellow-400/g) || [];
+  // Selected calendar day / period / time slot = the kit selection (3 branches); no hover / native title.
+  const kitSelected = viewSource.match(/border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)|bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)/g) || [];
   assert.ok(
-    yellowSelected.length >= 3,
-    `calendar/period/slot selected controls must stay yellow/black (found ${yellowSelected.length})`,
+    kitSelected.length >= 3,
+    `calendar/period/slot selected controls must use the kit selection (found ${kitSelected.length})`,
   );
   assert.doesNotMatch(viewSource, /hover:/);
   assert.doesNotMatch(viewSource, /\btitle=/);
@@ -713,8 +711,8 @@ test('Round 278: the light New Appointment modal is warm glass (transparent shel
   assert.ok(darkGlassPanels.length >= 5, `dark glass panels must be preserved, found ${darkGlassPanels.length}`);
 
   // Button semantics preserved: Cancel red glass, Create emerald enabled / neutral-zinc disabled.
-  assert.match(viewSource, /border-red-500\/40 bg-red-500\/10 text-red-300 active:bg-red-500\/20/);
-  assert.match(viewSource, /bg-emerald-600 text-white border border-emerald-500/);
+  assert.match(viewSource, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)/);
+  assert.match(viewSource, /bg-\(--pos-s-yellow\) text-black border border-\(--pos-s-yellow\)/);
   assert.match(viewSource, /disabled:bg-zinc-400\/20 disabled:text-zinc-400 disabled:border-zinc-400\/30/);
 
   // Touch/glass invariants: no hover-only effects, no native title tooltips, modal body scroll hidden.
@@ -797,8 +795,8 @@ test('Round 285/307: New Appointment slots stay gated on staff + service (in-con
   // >=44px touch target, is disabled only when booked, and uses the selected-yellow / booked-red semantics.
   assert.match(viewSource, /min-h-touch(?![\w.-])/);
   assert.match(viewSource, /disabled=\{booked\}/);
-  assert.match(viewSource, /selected\s*\?\s*'bg-yellow-400 text-black border-yellow-400'/);
-  assert.match(viewSource, /bg-red-500\/10 border-red-500\/30 text-red-300 line-through cursor-not-allowed/);
+  assert.match(viewSource, /selected\s*\?\s*'bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)'/);
+  assert.match(viewSource, /bg-\(--pos-s-surface-2\) border-\(--pos-s-border\) text-red-800 dark:text-red-(?:200|300) line-through cursor-not-allowed/);
   // The old per-button pre-context muted-glass disabled slot is gone (the empty state replaces it).
   assert.doesNotMatch(viewSource, /disabled=\{booked \|\| !hasStaffAndService\}/);
   assert.doesNotMatch(viewSource, /bg-white\/3 border-white\/10 text-zinc-600 cursor-not-allowed/);
@@ -875,8 +873,8 @@ test('Round 307: pre-context Date & Time shows a warm-glass empty state + checkl
   // In-context: the real slot grid + period buttons + selected/available/booked behavior live here.
   assert.match(inContext, /timeSlots\.map/, 'the real slot grid must live in the staff+service branch');
   assert.match(inContext, /onClick=\{\(\) => handleTimeSelect\(slot\)\}/);
-  assert.match(inContext, /selected\s*\?\s*'bg-yellow-400 text-black border-yellow-400'/);
-  assert.match(inContext, /bg-red-500\/10 border-red-500\/30 text-red-300 line-through/);
+  assert.match(inContext, /selected\s*\?\s*'bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)'/);
+  assert.match(inContext, /bg-\(--pos-s-surface-2\) border-\(--pos-s-border\) text-red-800 dark:text-red-(?:200|300) line-through/);
   assert.match(inContext, /appointments\.modal\.periods\.morning/);
 });
 

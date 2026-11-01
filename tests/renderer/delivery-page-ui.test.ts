@@ -13,8 +13,7 @@ test('DeliveryPage refresh uses amber glass and no native title tooltip', () => 
   assert.match(source, /disabled=\{isRefreshing\}/);
   assert.match(source, /aria-label=\{t\('common\.refresh', 'Refresh'\)\}/);
   assert.doesNotMatch(source, /\btitle=/);
-  assert.match(source, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(source, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  assert.match(source, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) \$\{/);
   assert.doesNotMatch(source, /border border-white\/80 bg-white text-black/);
   assert.doesNotMatch(source, /border border-black bg-black text-white/);
 });

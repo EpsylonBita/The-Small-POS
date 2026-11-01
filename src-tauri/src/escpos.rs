@@ -76,6 +76,7 @@ pub struct EscPosBuilder {
     /// When true, code page commands use Star Line Mode format (ESC GS t n)
     /// instead of standard ESC/POS (ESC t n).
     star_line_mode: bool,
+    euro_fallback: bool,
 }
 
 impl EscPosBuilder {
@@ -102,12 +103,19 @@ impl EscPosBuilder {
             greek_mode: false,
             active_code_page: 14, // CP737 (Greek)
             star_line_mode: false,
+            euro_fallback: false,
         }
     }
 
     /// Enable Star Line Mode code page commands (ESC GS t instead of ESC t).
     pub fn with_star_line_mode(mut self) -> Self {
         self.star_line_mode = true;
+        self
+    }
+
+    /// Use ASCII currency text when the printer cannot reliably print euro.
+    pub(crate) fn with_euro_fallback(mut self, enabled: bool) -> Self {
+        self.euro_fallback = enabled;
         self
     }
 
@@ -295,7 +303,9 @@ impl EscPosBuilder {
     pub fn text(&mut self, s: &str) -> &mut Self {
         // Split on € to handle inline code page switches
         for (i, segment) in s.split('€').enumerate() {
-            if i > 0 {
+            if i > 0 && self.euro_fallback {
+                self.buffer.extend_from_slice(b"EUR");
+            } else if i > 0 {
                 // Emit € via inline code page switch to CP858 (has € at 0xD5).
                 // Star Line Mode uses different code page numbers: CP858 = page 4.
                 // Standard ESC/POS (Epson): CP858 = page 19.
@@ -835,6 +845,13 @@ mod tests {
             b.build()
         };
         assert_eq!(data, vec![b'A', b'B', b'C', b'\n']);
+    }
+
+    #[test]
+    fn test_text_euro_fallback_uses_ascii_without_code_page_switches() {
+        let mut builder = EscPosBuilder::new().with_euro_fallback(true);
+        builder.text("1,20 \u{20AC} / 2.50 CHF");
+        assert_eq!(builder.build(), b"1,20 EUR / 2.50 CHF");
     }
 
     #[test]

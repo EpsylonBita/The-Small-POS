@@ -46,18 +46,17 @@ test('CouponsPage exposes scanner action and routes scanned codes into coupon se
   assert.match(page, /coupon\.code\.toUpperCase\(\) === scannedCode/);
   assert.match(page, /coupons\.scan\.button/);
   assert.match(page, /scrollbar-hide/);
-  assert.match(page, /border border-yellow-400\/70 bg-yellow-400\/10 text-yellow-100 active:bg-yellow-400\/20/);
-  assert.match(page, /border border-yellow-400\/70 bg-yellow-50 text-yellow-700 active:bg-yellow-100/);
+  assert.match(page, /border border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\) text-yellow-800 dark:text-yellow-200 active:bg-\(--pos-s-surface-2\)/);
+  assert.match(page, /border border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\) text-yellow-700 active:bg-\(--pos-s-surface-2\)/);
   assert.match(page, /<CheckCircle className="w-5 h-5 text-green-500" \/>/);
   assert.match(page, /<Ticket className="w-5 h-5 text-yellow-500" \/>/);
   assert.match(page, /text-xs font-semibold text-green-500 inline-flex items-center gap-1/);
-  assert.match(page, /text-xs font-semibold text-red-400 inline-flex items-center gap-1/);
-  assert.match(page, /bg-transparent text-amber-300 border border-amber-500\/40/);
-  assert.match(page, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(page, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
-  assert.match(page, /bg-green-600 active:bg-green-700 text-white/);
-  assert.match(page, /border border-red-500\/25 bg-red-500\/10 text-red-200 active:bg-red-500\/15/);
-  assert.match(page, /border border-red-300\/70 bg-red-50 text-red-700 active:bg-red-100/);
+  assert.match(page, /text-xs font-semibold text-red-(?:700|800) dark:text-red-400 inline-flex items-center gap-1/);
+  assert.match(page, /bg-transparent text-amber-800 dark:text-amber-300 border border-\(--pos-s-border\)/);
+  assert.match(page, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
+  assert.match(page, /bg-\(--pos-s-yellow\) active:bg-yellow-500 text-black/);
+  assert.match(page, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)/);
+  assert.match(page, /: 'border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)'/);
   assert.doesNotMatch(page, /hover:/);
   assert.doesNotMatch(page, /group-hover:|dark:hover:/);
   assert.doesNotMatch(page, /bg-cyan-500\/15 text-cyan-100/);
@@ -96,16 +95,17 @@ test('LoyaltyPage exposes scanner action and supports card, phone, and member-co
   assert.match(page, /loyalty\.scan\.button/);
   assert.match(page, /scrollbar-hide/);
   // Round 167: scan button is yellow/touch-first (not the old cyan), TrendingUp stat is amber.
-  assert.match(page, /border border-yellow-400\/70 text-white active:bg-yellow-400\/10/);
+  // Wave ΣΤ4: solid yellow outline, kit text, kit pressed surface.
+  assert.match(page, /border border-\(--pos-s-yellow\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)/);
   assert.match(page, /<Users className="w-5 h-5 text-green-500" \/>/);
   assert.match(page, /<Award className="w-5 h-5 text-yellow-500" \/>/);
   assert.match(page, /<TrendingUp className="w-5 h-5 text-amber-500" \/>/);
   assert.match(page, /px-2 py-1 text-xs font-medium rounded-sm border bg-transparent flex items-center gap-1/);
-  assert.match(page, /text-amber-300 border-amber-400\/50/);
-  assert.match(page, /text-yellow-400 border-yellow-500\/40/);
+  assert.match(page, /text-amber-300 border-\(--pos-s-yellow\)/);
+  assert.match(page, /text-yellow-400 border-\(--pos-s-border\)/);
   assert.match(page, /text-zinc-300 border-zinc-400\/40/);
-  assert.match(page, /text-amber-500 border-amber-500\/40/);
-  assert.match(page, /selectedCustomer\?\.id === customer\.id \? 'ring-2 ring-yellow-400' : ''/);
+  assert.match(page, /text-amber-500 border-\(--pos-s-border\)/);
+  assert.match(page, /selectedCustomer\?\.id === customer\.id \? 'ring-2 ring-\(--pos-s-sel-bg\)' : ''/); // founder 31/10: selection = the yellow kit sel
   assert.doesNotMatch(page, /bg-transparent text-white border border-cyan-500\/40/);
   assert.doesNotMatch(page, /bg-cyan-500\/15 text-cyan-100/);
   assert.doesNotMatch(page, /bg-cyan-50 text-cyan-800/);
@@ -154,9 +154,8 @@ test('LoyaltyPage refresh button is amber glass with aria-label only (no native 
   assert.doesNotMatch(page, /hover:/);
   assert.doesNotMatch(page, /group-hover:/);
 
-  // Round 260: amber glass in both themes (matching DeliveryZones/Suppliers Round 257/259).
-  assert.match(page, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(page, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  // Wave ΣΤ4: a neutral secondary in both themes (was Round 260's amber glass).
+  assert.match(page, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
   // The old stark black/white inversion square is gone.
   assert.doesNotMatch(page, /border border-white\/80 bg-white text-black/);
   assert.doesNotMatch(page, /border border-black bg-black text-white/);

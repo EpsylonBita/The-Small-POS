@@ -22,14 +22,15 @@ test('TablesDashboard uses the POS palette for selected controls and table statu
   );
 
   assert.match(tablesDashboardSource, /bg-yellow-400 text-black/);
-  assert.match(tablesDashboardSource, /border-yellow-400\/45 bg-yellow-500\/10/);
-  assert.match(tablesDashboardSource, /border-red-400\/35 bg-red-500\/10/);
-  assert.match(tablesDashboardSource, /bg-emerald-600 text-white/);
+  assert.match(tablesDashboardSource, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\)/);
+  assert.match(tablesDashboardSource, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\)/);
+  // Wave ΣΤ7: the table tile action is the yellow primary for both an open check and a free table.
+  assert.doesNotMatch(tablesDashboardSource, /bg-emerald-700 text-white/);
 });
 
-test('ReservationForm existing-reservation warning is amber glass, not blue admin chrome', () => {
+test('ReservationForm existing-reservation warning is the kit warn notice, not blue admin chrome', () => {
   assert.doesNotMatch(reservationFormSource, /border-blue|bg-blue|text-blue/);
-  assert.match(reservationFormSource, /border-amber-200 bg-amber-50/);
-  assert.match(reservationFormSource, /dark:border-amber-500\/30 dark:bg-amber-500\/10/);
+  // Wave ΣΤ3: the solid warn notice tint in both themes (no translucent amber wash).
+  assert.match(reservationFormSource, /border border-\(--pos-s-warn\) bg-\(--pos-s-warn-bg\) p-3/);
   assert.match(reservationFormSource, /text-amber-800 dark:text-amber-300/);
 });

@@ -55,7 +55,7 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
   const fieldClass = isDark
     ? 'bg-zinc-900 border-zinc-800 text-white placeholder:text-zinc-500'
     : 'bg-white border-gray-200 text-gray-950 placeholder:text-gray-400';
-  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-500';
+  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-600';
   const actionClass = isDark
     ? 'border-zinc-700 bg-zinc-900 text-zinc-100 active:bg-zinc-800'
     : 'border-gray-200 bg-white text-gray-900 active:bg-gray-100';
@@ -149,7 +149,7 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
         <div className={`flex items-start justify-between gap-4 border-b p-5 ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <ScanLine className="h-5 w-5 text-amber-400" />
+              <ScanLine className="h-5 w-5 text-amber-700 dark:text-amber-400" />
               <h2 className="text-lg font-bold">{title}</h2>
             </div>
             <p className={`mt-1 text-sm ${subtleClass}`}>{description}</p>
@@ -176,7 +176,7 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
                   </p>
                 </div>
                 {scannerReady ? (
-                  <CheckCircle className="h-6 w-6 text-emerald-400" />
+                  <CheckCircle className="h-6 w-6 text-emerald-700 dark:text-emerald-400" />
                 ) : (
                   <ScanLine className={`h-6 w-6 ${isDark ? 'text-zinc-500' : 'text-gray-400'}`} />
                 )}
@@ -201,7 +201,7 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
                   </p>
                 </div>
                 {canUseCamera ? (
-                  <CheckCircle className="h-6 w-6 text-emerald-400" />
+                  <CheckCircle className="h-6 w-6 text-emerald-700 dark:text-emerald-400" />
                 ) : (
                   <XCircle className={`h-6 w-6 ${isDark ? 'text-zinc-500' : 'text-gray-400'}`} />
                 )}
@@ -215,7 +215,7 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
           </div>
 
           {includeLoyaltyReader && (
-            <div className={`rounded-2xl border px-4 py-3 text-sm ${isDark ? 'border-amber-500/30 bg-amber-500/10 text-amber-100' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+            <div className={`rounded-2xl border px-4 py-3 text-sm ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-900'}`}>
               {loyaltyReaderConnected
                 ? t('scannerPanel.loyaltyReaderConnected', 'Loyalty card reader connected')
                 : t('scannerPanel.loyaltyReaderReady', 'Loyalty card reader will listen while this scanner is open')}

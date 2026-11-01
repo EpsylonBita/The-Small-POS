@@ -21,9 +21,9 @@ test('Round 394: GuestBillingView uses touch-first glass chrome without old blue
   );
 
   assert.match(source, /focus:ring-2 focus:ring-yellow-400/);
-  assert.match(source, /ring-2 ring-yellow-400/);
-  assert.match(source, /bg-yellow-400 text-black border border-yellow-500/);
-  assert.match(source, /bg-green-600 text-white/);
+  assert.match(source, /ring-2 ring-\(--pos-s-sel-bg\)/); // founder 31/10: selection = the yellow kit sel
+  assert.match(source, /bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border border-\(--pos-s-sel-bg\)/);
+  assert.match(source, /bg-\(--pos-s-yellow\) text-black/);
   assert.match(source, /text-amber-500/);
 
   assert.doesNotMatch(source, /hover:/);

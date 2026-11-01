@@ -1079,16 +1079,16 @@ const CALLER_ID_CHECKING_VIEW: CallerIdCardView = {
 };
 
 const CALLER_ID_VISUALS: Record<CallerIdCardState, { color: string; icon: typeof Plug }> = {
-  checking: { color: '#71717a', icon: Loader2 },
-  listening_here: { color: '#22c55e', icon: CheckCircle },
-  not_verified: { color: '#f59e0b', icon: AlertCircle },
-  configured_not_listening: { color: '#f59e0b', icon: AlertCircle },
-  listener_error: { color: '#f59e0b', icon: AlertCircle },
-  line_setup_incomplete: { color: '#f59e0b', icon: AlertCircle },
-  other_terminal: { color: '#6b7280', icon: Info },
-  switched_off: { color: '#6b7280', icon: XCircle },
-  not_assigned: { color: '#6b7280', icon: XCircle },
-  unknown: { color: '#71717a', icon: HelpCircle },
+  checking: { color: 'var(--pos-s-muted)', icon: Loader2 },
+  listening_here: { color: 'var(--pos-s-ok)', icon: CheckCircle },
+  not_verified: { color: 'var(--pos-s-warn)', icon: AlertCircle },
+  configured_not_listening: { color: 'var(--pos-s-warn)', icon: AlertCircle },
+  listener_error: { color: 'var(--pos-s-warn)', icon: AlertCircle },
+  line_setup_incomplete: { color: 'var(--pos-s-warn)', icon: AlertCircle },
+  other_terminal: { color: 'var(--pos-s-muted)', icon: Info },
+  switched_off: { color: 'var(--pos-s-muted)', icon: XCircle },
+  not_assigned: { color: 'var(--pos-s-muted)', icon: XCircle },
+  unknown: { color: 'var(--pos-s-muted)', icon: HelpCircle },
 };
 
 const callerIdStateLabel = (t: Translate, state: CallerIdCardState): string => {
@@ -1287,10 +1287,10 @@ const IntegrationCard = memo<IntegrationCardProps>(({
 
   const getStatusColor = (status: IntegrationWithStatus['status']) => {
     switch (status) {
-      case 'connected': return '#22c55e';
-      case 'pending': return '#f59e0b';
-      case 'disconnected': return '#6b7280';
-      case 'unknown': return '#71717a';
+      case 'connected': return 'var(--pos-s-ok)';
+      case 'pending': return 'var(--pos-s-warn)';
+      case 'disconnected': return 'var(--pos-s-muted)';
+      case 'unknown': return 'var(--pos-s-muted)';
     }
   };
 
@@ -1308,7 +1308,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
   const callerIdCard = integration.id === 'caller_id' ? integration.callerIdCard ?? CALLER_ID_CHECKING_VIEW : null;
   const callerIdVisual = callerIdCard ? CALLER_ID_VISUALS[callerIdCard.state] : null;
   const StatusIcon = isLocked ? AlertCircle : callerIdVisual ? callerIdVisual.icon : getStatusIcon(integration.status);
-  const statusColor = isLocked ? '#f59e0b' : callerIdVisual ? callerIdVisual.color : getStatusColor(integration.status);
+  const statusColor = isLocked ? 'var(--pos-s-warn)' : callerIdVisual ? callerIdVisual.color : getStatusColor(integration.status);
   const isAdminDashboardSetup = usesAdminDashboardSetup(integration.id, integration.readOnlyAdminSetup);
   // A card from the till's saved copy of the list: no status, readiness or
   // switch is claimed from it (see asSavedCopyCard).
@@ -1525,7 +1525,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               className={`p-2 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 active:scale-95 ${
                 isDark
                   ? 'active:bg-white/10 text-gray-400 active:text-white'
-                  : 'active:bg-gray-100 text-gray-500 active:text-gray-700'
+                  : 'active:bg-gray-100 text-gray-600 active:text-gray-700'
               }`}
               aria-label={t('integrations.configure', 'Configure')}
             >
@@ -1551,7 +1551,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               disabled={isToggleDisabled}
               className={`relative inline-flex h-6 w-14 shrink-0 items-center rounded-full border transition-all duration-200 ${
                 isEnabled
-                  ? 'bg-[#67d75f] border-[#67d75f] shadow-[0_0_12px_rgba(103,215,95,0.45)]'
+                  ? 'bg-[#67d75f] border-[#67d75f]'
                   : 'bg-[#d7d7d9] border-[#d7d7d9]'
               } ${isToggleDisabled ? 'opacity-45 cursor-not-allowed' : 'cursor-pointer'}`}
             >
@@ -1565,7 +1565,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
             </button>
           )}
           <span
-            className={`text-[10px] font-medium ${isEnabled ? 'text-emerald-400' : isDark ? 'text-zinc-400' : 'text-gray-500'}`}
+            className={`text-[10px] font-medium ${isEnabled ? 'text-emerald-400' : isDark ? 'text-zinc-400' : 'text-gray-600'}`}
             data-testid={isAdminDashboardSetup ? 'admin-managed-side-status' : undefined}
           >
             {sideStatusLabel}
@@ -1629,15 +1629,15 @@ const CategorySection = memo<CategorySectionProps>(({
             <h2 className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t(`integrations.category.${category}`, config.label)}
             </h2>
-            <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+            <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
               {connectedCount}/{integrations.length} {t('integrations.connected', 'connected')}
             </p>
           </div>
         </div>
         {isExpanded ? (
-          <ChevronUp size={20} className={isDark ? 'text-zinc-400' : 'text-gray-500'} />
+          <ChevronUp size={20} className={isDark ? 'text-zinc-400' : 'text-gray-600'} />
         ) : (
-          <ChevronDown size={20} className={isDark ? 'text-zinc-400' : 'text-gray-500'} />
+          <ChevronDown size={20} className={isDark ? 'text-zinc-400' : 'text-gray-600'} />
         )}
       </button>
 
@@ -1687,7 +1687,7 @@ const StatsCard = memo<StatsCardProps>(({ label, value, icon: Icon, color, isDar
         <p className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
           {value}
         </p>
-        <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+        <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
           {label}
         </p>
       </div>
@@ -2738,8 +2738,8 @@ export const IntegrationsPage: React.FC = () => {
               {/* Online Status */}
               <div className={`flex items-center gap-2 ${
                 isOnline
-                  ? isDark ? 'text-green-400' : 'text-green-600'
-                  : isDark ? 'text-red-400' : 'text-red-600'
+                  ? isDark ? 'text-green-400' : 'text-green-700'
+                  : isDark ? 'text-red-400' : 'text-red-700'
               }`}>
                 {isOnline ? <Wifi size={16} /> : <WifiOff size={16} />}
                 <span className="text-xs font-medium">
@@ -2753,11 +2753,7 @@ export const IntegrationsPage: React.FC = () => {
                 onClick={handleRefresh}
                 disabled={isRefreshing || !isOnline}
                 aria-label={t('common.refresh', 'Refresh')}
-                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
-                  isDark
-                    ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
-                    : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
-                } ${isRefreshing || !isOnline ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) ${isRefreshing || !isOnline ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
               >
                 <RefreshCw
                   size={20}
@@ -2802,14 +2798,14 @@ export const IntegrationsPage: React.FC = () => {
 
         {/* Error State */}
         {error && (
-          <motion.div variants={pageMotionItem} className={`p-4 rounded-2xl mb-6 ${isDark ? 'bg-red-500/10 border border-red-500/20' : 'bg-red-50 border border-red-200'}`}>
+          <motion.div variants={pageMotionItem} className={`p-4 rounded-2xl mb-6 ${isDark ? 'bg-(--pos-s-bad-bg) border border-(--pos-s-bad)' : 'bg-(--pos-s-bad-bg) border border-(--pos-s-bad)'}`}>
             <div className="flex items-center gap-3">
-              <AlertCircle className="text-red-500" size={20} />
+              <AlertCircle className="text-(--pos-s-bad)" size={20} />
               <div>
                 <p className={`font-medium ${isDark ? 'text-red-400' : 'text-red-700'}`}>
               {t('integrations.error', 'Error loading plugins')}
                 </p>
-                <p className={`text-sm ${isDark ? 'text-red-400/70' : 'text-red-600'}`}>
+                <p className={`text-sm ${isDark ? 'text-red-400' : 'text-red-600'}`}>
                   {error}
                 </p>
               </div>
@@ -2823,15 +2819,15 @@ export const IntegrationsPage: React.FC = () => {
             variants={pageMotionItem}
             role="status"
             data-testid="integrations-saved-copy"
-            className={`p-4 rounded-2xl mb-6 ${isDark ? 'bg-amber-500/10 border border-amber-500/20' : 'bg-amber-50 border border-amber-200'}`}
+            className={`p-4 rounded-2xl mb-6 ${isDark ? 'bg-(--pos-s-warn-bg) border border-(--pos-s-warn)' : 'bg-(--pos-s-warn-bg) border border-(--pos-s-warn)'}`}
           >
             <div className="flex items-center gap-3">
-              <AlertCircle className="shrink-0 text-amber-500" size={20} />
+              <AlertCircle className="shrink-0 text-(--pos-s-warn)" size={20} />
               <div>
                 <p className={`font-medium ${isDark ? 'text-amber-300' : 'text-amber-800'}`}>
                   {t('integrations.savedCopy.title', 'Saved copy — not up to date')}
                 </p>
-                <p className={`text-sm ${isDark ? 'text-amber-200/80' : 'text-amber-700'}`}>
+                <p className={`text-sm ${isDark ? 'text-amber-200' : 'text-amber-700'}`}>
                   {savedCopyTime
                     ? t('integrations.savedCopy.bodyAt', 'The office could not be reached, so this is the plugin list this till saved at {{time}}. Statuses may have changed and are not shown until the list refreshes.', { time: savedCopyTime })
                     : t('integrations.savedCopy.body', 'The office could not be reached, so this is the plugin list this till saved earlier. Statuses may have changed and are not shown until the list refreshes.')}
@@ -2882,11 +2878,11 @@ export const IntegrationsPage: React.FC = () => {
           closeOnEscape={!myDataSaving}
         >
         <div className="plugin-setup-modal-body space-y-4 text-zinc-900 dark:text-zinc-100">
-            <div className={`rounded-2xl p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
+            <div className={`rounded-2xl p-3 text-sm ${isDark ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'bg-(--pos-s-surface-2) text-amber-700'}`}>
               <div className="font-medium">
                 {t('integrations.mydata.dashboardBanner.title', 'myDATA setup happens in the Admin Dashboard')}
               </div>
-              <p className={`mt-1 text-xs ${isDark ? 'text-amber-200/80' : 'text-amber-700/90'}`}>
+              <p className={`mt-1 text-xs ${isDark ? 'text-amber-200' : 'text-amber-700'}`}>
                 {t(
                   'integrations.mydata.dashboardBanner.body',
                   'Receipts are sent to the tax office (AADE) automatically once myDATA is set up. The setup itself (credentials, VAT info, activation) is done in your Admin Dashboard: open Plugins → MyData and follow the steps. This screen is only needed if you connect a fiscal printer (ΦΗΜ) to this till.'
@@ -2905,19 +2901,19 @@ export const IntegrationsPage: React.FC = () => {
               )}
             </div>
             {saveMyDataAction.disabled && (
-              <div className={`rounded-2xl p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
+              <div className={`rounded-2xl p-3 text-sm ${isDark ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'bg-(--pos-s-surface-2) text-amber-700'}`}>
                 {saveMyDataAction.message}
               </div>
             )}
             {myDataConfigError && (
               <div className={`rounded-2xl p-3 text-sm ${
                 isMyDataMissing
-                  ? (isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700')
-                  : (isDark ? 'bg-red-500/10 text-red-300' : 'bg-red-50 text-red-700')
+                  ? (isDark ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'bg-(--pos-s-surface-2) text-amber-700')
+                  : (isDark ? 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-200' : 'bg-(--pos-s-surface-2) text-red-700')
               }`}>
                 {myDataConfigError}
                 {isMyDataMissing && (
-                  <div className={`mt-1 text-xs ${isDark ? 'text-amber-200/70' : 'text-amber-600'}`}>
+                  <div className={`mt-1 text-xs ${isDark ? 'text-amber-200' : 'text-amber-600'}`}>
                     {t('integrations.mydata.saveToCreate', 'Create the MyData configuration in Admin Dashboard first.')}
                   </div>
                 )}
@@ -3068,7 +3064,7 @@ export const IntegrationsPage: React.FC = () => {
                     </option>
                   )}
                 </select>
-                <p className={`mt-2 text-xs ${isDark ? 'text-amber-200/80' : 'text-amber-700'}`}>
+                <p className={`mt-2 text-xs ${isDark ? 'text-amber-200' : 'text-amber-700'}`}>
                   {t(
                     myDataProtocolProfile === 'cap_driver'
                       ? 'integrations.mydata.capConnectionTestHelp'
@@ -3087,7 +3083,7 @@ export const IntegrationsPage: React.FC = () => {
                 {t('integrations.mydata.capTargetMismatch', 'The CAP service target is unavailable or differs from this form. Open connection setup, configure this IP or COM port in the vendor service, then refresh support status.')}
               </p>}
               {myDataProtocolProfile === 'cap_driver' && (
-                <div className="md:col-span-2 rounded-2xl border border-purple-500/20 bg-purple-500/10 p-3">
+                <div className="md:col-span-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
                   <div className={`text-sm font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
                     {t('integrations.mydata.capDepartmentTitle', 'Fiscal VAT departments')}
                   </div>
@@ -3118,7 +3114,7 @@ export const IntegrationsPage: React.FC = () => {
                 </div>
               )}
               {myDataProtocolProfile === 'cap_driver' && (
-                <details className="md:col-span-2 rounded-2xl border border-purple-500/20 p-3">
+                <details className="md:col-span-2 rounded-2xl border border-(--pos-s-border) p-3">
                   <summary className="cursor-pointer text-sm font-medium">
                     {t('integrations.mydata.capAdvanced', 'CAP Driver advanced settings')}
                   </summary>
@@ -3164,7 +3160,7 @@ export const IntegrationsPage: React.FC = () => {
                         onChange={event => { const raw = event.target.value.trim(); setMyDataCapSettings(previous => ({ ...previous, voucherPaymentCode: raw === '' ? undefined : Number(raw) })); }}
                         disabled={!myDataLocalSettingsReady || myDataSaving || saveMyDataAction.disabled} />
                       {myDataVoucherCodeIssue(myDataCapSettings.voucherPaymentCode, myDataCapSettings.cashPaymentCode, myDataCapSettings.cardPaymentCode) && (
-                        <p role="alert" className="mt-1 text-xs text-red-400">
+                        <p role="alert" className="mt-1 text-xs text-red-700 dark:text-red-400">
                           {t('integrations.mydata.capSettings.voucherPaymentCodeInvalid', 'Use 2–20 and a code different from the cash and card codes.')}
                         </p>
                       )}
@@ -3211,7 +3207,7 @@ export const IntegrationsPage: React.FC = () => {
             {activePlugin && (
               <>
                 {saveAction.disabled && (
-                  <div className={`rounded-2xl p-3 text-sm ${isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
+                  <div className={`rounded-2xl p-3 text-sm ${isDark ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'bg-(--pos-s-surface-2) text-amber-700'}`}>
                     {saveAction.message}
                   </div>
                 )}

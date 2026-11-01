@@ -5,7 +5,7 @@ import type { RestaurantTable, TableStatus } from '../../types/tables';
 import { formatTableDisplayNumber } from '../../utils/table-display';
 import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { ShoppingCart, Calendar, Users, Minus, Plus, CheckCircle2, Pencil, UserX, Ban } from 'lucide-react';
+import { ShoppingCart, Calendar, History, Users, Minus, Plus, CheckCircle2, Pencil, UserX, Ban } from 'lucide-react';
 import './table-action-modal.css';
 import { TableHistoryPanel } from './TableHistoryPanel';
 
@@ -65,7 +65,7 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
       ? t('tableActionModal.newOrderMaintenanceDisabled', { defaultValue: 'Return this table to service before taking a new order' })
       : isUnavailableTable
         ? t('tableActionModal.newOrderUnavailableDisabled', { defaultValue: 'Make this table available before taking a new order' })
-        : t('tableActionModal.newOrderDescription', { defaultValue: 'Start a new order for this table' });
+        : undefined;
   const hint = isCleaningTable
     ? t('tableActionModal.cleaningHint', { defaultValue: 'Set the table as cleaned to make it available for orders' })
     : isMaintenanceTable
@@ -74,7 +74,7 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
         ? t('tableActionModal.reservedHint', { defaultValue: 'Manage this reservation or start the table order when guests arrive' })
         : isUnavailableTable
           ? t('tableActionModal.unavailableHint', { defaultValue: 'Set the table available before using it for guests' })
-          : t('tableActionModal.hint', { defaultValue: 'Select an action to continue' });
+          : null;
 
   const action = (label: string, icon: React.ReactNode, onClick: () => void, description?: string, disabled = false, variant = '') => (
     <div>
@@ -85,15 +85,17 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
     </div>
   );
 
+  // Founder 31/10: glass like every modal (it was the solid opt-out); the table itself is the title.
   return <LiquidGlassModal isOpen={isOpen} onClose={onClose} closeMode="request"
-    title={t('tableActionModal.title', { defaultValue: 'Table Actions' })} size="md" blur={false}
+    title={`${t('tableActionModal.tableNumber', { defaultValue: 'Table' })} ${formatTableDisplayNumber(table.tableNumber)}`} size="md"
     className={`table-action-dialog table-action-dialog--${resolvedTheme}`} contentClassName="table-action-body">
     <section className="table-action-details" data-table-action-modal>
-      <h3>{t('tableActionModal.tableNumber', { defaultValue: 'Table' })} {formatTableDisplayNumber(table.tableNumber)}</h3>
-      <div className="table-action-status" data-status={table.status}><span className="table-action-status-dot" aria-hidden="true" />{statusLabels[table.status]}</div>
-      <div className="table-action-capacity"><Users size={16} aria-hidden="true" /><span>{table.capacity} {t('tableActionModal.guests', {
-        count: table.capacity, defaultValue: table.capacity === 1 ? 'guest' : 'guests',
-      })}</span></div>
+      <div className="table-action-meta">
+        <div className="table-action-status" data-status={table.status}><span className="table-action-status-dot" aria-hidden="true" />{statusLabels[table.status]}</div>
+        <div className="table-action-capacity"><Users size={16} aria-hidden="true" /><span>{table.capacity} {t('tableActionModal.guests', {
+          count: table.capacity, defaultValue: table.capacity === 1 ? 'guest' : 'guests',
+        })}</span></div>
+      </div>
       {table.notes && <p className="table-action-notes">{table.notes}</p>}
     </section>
     {historyOpen ? <>
@@ -114,7 +116,6 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
       defaultValue: 'Open balance: {{amount}}', amount: formatCurrency(table.unpaidBalance),
     })}</p>}
     <div className="table-action-list">
-      {action(t('tables.actions.history', { defaultValue: 'History' }), <Calendar size={20} aria-hidden="true" />, () => setHistoryOpen(true))}
       {action(t('tableActionModal.newOrder', { defaultValue: 'New Order' }), <ShoppingCart size={20} aria-hidden="true" />, handleNewOrder, newOrderDescription, blocksGuestActions, 'table-action-button--primary')}
       {blocksGuestActions && action(isCleaningTable ? t('tableActionModal.markCleaned', { defaultValue: 'Cleaned' })
         : isMaintenanceTable ? t('tableActionModal.markBackInService', { defaultValue: 'Back in service' })
@@ -131,9 +132,10 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
       </>}
       {canCreateReservation && !isReservedTable && action(t('tableActionModal.newReservation', { defaultValue: 'New Reservation' }), <Calendar size={20} aria-hidden="true" />, handleNewReservation,
         isMaintenanceTable || isUnavailableTable ? t('tableActionModal.newReservationUnavailableDescription', { defaultValue: 'Return this table to service before booking' })
-          : t('tableActionModal.newReservationDescription', { defaultValue: 'Book this table for a future time' }), isMaintenanceTable || isUnavailableTable)}
+          : undefined, isMaintenanceTable || isUnavailableTable)}
+      {action(t('tables.actions.history', { defaultValue: 'History' }), <History size={20} aria-hidden="true" />, () => setHistoryOpen(true))}
     </div>
-    <p className="table-action-hint">{hint}</p>
+    {hint && <p className="table-action-hint">{hint}</p>}
     </>}
   </LiquidGlassModal>;
 });

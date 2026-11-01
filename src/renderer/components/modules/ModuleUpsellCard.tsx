@@ -152,7 +152,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
     return (
       <div className={liquidGlassModalCard()}>
         <div className="flex items-center justify-center py-8">
-          <Loader2 className="h-6 w-6 animate-spin text-amber-300" />
+          <Loader2 className="h-6 w-6 animate-spin text-amber-800 dark:text-amber-300" />
         </div>
       </div>
     )
@@ -177,8 +177,8 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
         >
           <div className="flex items-center gap-3">
             {/* Lock icon with gradient */}
-            <div className="w-10 h-10 rounded-2xl bg-linear-to-br from-amber-400/25 to-white/10 flex items-center justify-center shrink-0 border border-amber-400/25">
-              <Lock className="h-5 w-5 text-amber-300" />
+            <div className="w-10 h-10 rounded-2xl bg-linear-to-br to-white/10 flex items-center justify-center shrink-0 border border-(--pos-s-border)">
+              <Lock className="h-5 w-5 text-amber-800 dark:text-amber-300" />
             </div>
 
             <div className="flex-1 min-w-0">
@@ -283,8 +283,8 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
     <div className="space-y-6">
       {/* Header with icon and description */}
       <div className="flex items-start gap-4">
-        <div className="w-16 h-16 rounded-2xl bg-linear-to-br from-amber-400/25 to-white/10 flex items-center justify-center shrink-0 border border-amber-400/25">
-          <Lock className="h-8 w-8 text-amber-300" />
+        <div className="w-16 h-16 rounded-2xl bg-linear-to-br to-white/10 flex items-center justify-center shrink-0 border border-(--pos-s-border)">
+          <Lock className="h-8 w-8 text-amber-800 dark:text-amber-300" />
         </div>
         <div>
           {compact && (
@@ -299,13 +299,13 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
       {/* Features list */}
       <div>
         <h5 className="liquid-glass-modal-text font-medium mb-3 flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-amber-400" />
+          <Sparkles className="h-4 w-4 text-amber-700 dark:text-amber-400" />
           Included Features
         </h5>
         <ul className="space-y-2">
           {displayedFeatures.slice(0, compact ? 3 : 5).map((feature) => (
             <li key={feature.id} className="flex items-start gap-2">
-              <Check className="h-4 w-4 text-green-400 mt-0.5 shrink-0" />
+              <Check className="h-4 w-4 text-green-700 dark:text-green-400 mt-0.5 shrink-0" />
               <div>
                 <span className="liquid-glass-modal-text text-sm">{feature.name}</span>
                 {!compact && feature.description && (

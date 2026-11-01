@@ -97,8 +97,8 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
         <div className="mb-3">
           <div className={`inline-flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-semibold ${
             resolvedTheme === 'dark'
-              ? 'bg-green-600/20 text-green-400 border border-green-500/30'
-              : 'bg-green-100 text-green-700 border border-green-200'
+              ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 border border-(--pos-s-border)'
+              : 'bg-(--pos-s-surface-2) text-green-700 border border-(--pos-s-border)'
           }`}>
             <MapPin className="w-3 h-3" />
             <span>{validationResult.zone.name}</span>
@@ -110,7 +110,7 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center space-x-3">
           <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
-            resolvedTheme === 'dark' ? 'bg-yellow-400/18' : 'bg-yellow-200/80'
+            resolvedTheme === 'dark' ? 'bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2)'
           }`}>
             <MapPin className={resolvedTheme === 'dark' ? 'h-5 w-5 text-yellow-300' : 'h-5 w-5 text-yellow-700'} />
           </div>
@@ -158,8 +158,8 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
                 }}
                 className={`rounded-2xl p-2 transition-transform duration-150 active:scale-95 ${
                   resolvedTheme === 'dark'
-                    ? 'text-red-300 active:bg-red-500/18'
-                    : 'text-red-600 active:bg-red-100'
+                    ? 'text-red-800 dark:text-red-200 active:bg-(--pos-s-surface-2)'
+                    : 'text-red-600 active:bg-(--pos-s-surface-2)'
                 }`}
               >
                 <Trash2 className="h-4 w-4" aria-hidden="true" />
@@ -205,8 +205,8 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
           <div className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${
             address.is_default
               ? resolvedTheme === 'dark'
-                ? 'bg-green-600/20 text-green-400'
-                : 'bg-green-100 text-green-700'
+                ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300'
+                : 'bg-(--pos-s-surface-2) text-green-700'
               : resolvedTheme === 'dark'
                 ? 'bg-white/10 text-gray-200'
                 : 'bg-gray-100 text-gray-700'
@@ -277,8 +277,8 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
         <div className="mt-4 pt-4 border-t border-gray-200/20">
           <div className={`flex items-center space-x-2 rounded-2xl px-3 py-2 ${
             resolvedTheme === 'dark'
-              ? 'bg-yellow-600/20 text-yellow-400'
-              : 'bg-yellow-100 text-yellow-700'
+              ? 'bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-300'
+              : 'bg-(--pos-s-surface-2) text-yellow-700'
           }`}>
             <AlertTriangle className="h-4 w-4" aria-hidden="true" />
             <span className="text-sm font-medium">{t('delivery.validation.outsideArea')}</span>

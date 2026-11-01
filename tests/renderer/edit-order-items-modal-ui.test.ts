@@ -22,9 +22,9 @@ test('EditOrderItemsModal quantity and remove controls are labelled tap targets'
   assert.match(source, /aria-label=\{t\('common\.decrease', 'Decrease'\)\}/);
   assert.match(source, /aria-label=\{t\('common\.increase', 'Increase'\)\}/);
   assert.match(source, /aria-label=\{t\('common\.remove', 'Remove'\)\}/);
-  assert.match(source, /active:bg-red-200\/50 dark:active:bg-red-900\/50 transition-transform duration-150 active:scale-95/);
-  assert.match(source, /active:bg-green-200\/50 dark:active:bg-green-900\/50 transition-transform duration-150 active:scale-95/);
-  assert.match(source, /active:bg-red-500\/20 liquid-glass-modal-text active:text-red-600 transition-transform duration-150 active:scale-95/);
+  assert.match(source, /active:bg-\(--pos-s-surface-2\) dark:active:bg-zinc-800 transition-transform duration-150 active:scale-95/);
+  assert.match(source, /active:bg-\(--pos-s-surface-2\) dark:active:bg-zinc-800 transition-transform duration-150 active:scale-95/);
+  assert.match(source, /active:bg-\(--pos-s-surface-2\) liquid-glass-modal-text active:text-red-600 transition-transform duration-150 active:scale-95/);
 });
 
 test('EditOrderItemsModal loading spinner uses the yellow accent', () => {

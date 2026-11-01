@@ -3479,7 +3479,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               >
                 <span className="whitespace-normal wrap-break-word">{getModalTitle()}</span>
                 {editMode && (
-                  <span className="shrink-0 whitespace-normal text-xs font-medium text-amber-800 dark:text-amber-300 bg-amber-500/20 px-2 py-0.5 rounded-full">
+                  <span className="shrink-0 whitespace-normal text-xs font-medium text-amber-800 dark:text-amber-300 bg-(--pos-s-surface-2) px-2 py-0.5 rounded-full">
                     <Pencil className="w-3 h-3 inline mr-1" />
                     {t('modals.menu.editModeMessage') || 'Editing'}
                   </span>
@@ -3495,7 +3495,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   value={menuSearchQuery}
                   onChange={(e) => setMenuSearchQuery(e.target.value)}
                   placeholder={salonMode ? t('salonSale.search') : t('menu.search', { defaultValue: 'Search menu items...' })}
-                  className="liquid-glass-modal-input h-10 w-full rounded-xl pl-9 pr-9 text-sm focus:border-yellow-400/70 focus:outline-hidden focus:ring-1 focus:ring-yellow-400"
+                  className="liquid-glass-modal-input h-10 w-full rounded-xl pl-9 pr-9 text-sm focus:border-(--pos-s-yellow) focus:outline-hidden focus:ring-1 focus:ring-yellow-400"
                 />
                 {menuSearchQuery && (
                   <button
@@ -3550,7 +3550,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 <span>{selectedAddress.street_address || selectedAddress.street}, {selectedAddress.postal_code || selectedAddress.city}</span>
                 {effectiveDeliveryZoneInfo?.zone && (
                   <>
-                    <span className="px-2 py-0.5 rounded-sm bg-amber-500/20 text-amber-300 font-medium">
+                    <span className="px-2 py-0.5 rounded-sm bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 font-medium">
                       {effectiveDeliveryZoneInfo.zone.name}
                     </span>
                     <span>{t('modals.menu.fee')}: {formatCurrency(resolvedDeliveryFee)}</span>
@@ -3573,7 +3573,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           <p role="status" className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{t('modals.menu.emptyEditHint')}</p>
         )}
         {(draftPersistence.error || draftPersistence.status !== 'ready' || draftPersistence.isPending()) && (
-          <div role="status" className="px-4 py-3 border-b border-amber-500 text-amber-700 dark:text-amber-200">
+          <div role="status" className="px-4 py-3 border-b border-amber-500 text-amber-800 dark:text-amber-200">
             {(draftPersistence.error ? t(`modals.menu.${draftPersistence.error}`) : null) || (draftPersistence.isPending()
               ? (editMode
                 ? t('modals.menu.editDraftPending', { defaultValue: 'Your original change is saved for recovery. Check its result before making another change.' })
@@ -3926,7 +3926,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             <button disabled={legacyCurrencyBusy} onClick={() => { setLegacyCurrency(null); setLegacyCurrencyPin(''); }}
               className="liquid-glass-modal-button rounded-lg px-4 py-2">{t('common.actions.cancel')}</button>
             <button disabled={legacyCurrencyBusy} onClick={() => void confirmLegacyCurrency()}
-              className="rounded-lg bg-amber-500 px-4 py-2 font-semibold text-gray-950 disabled:opacity-50">
+              className="rounded-lg bg-(--pos-s-yellow) px-4 py-2 font-semibold text-gray-950 disabled:opacity-50">
               {t('modals.menu.legacyCurrency.confirm', { currency: legacyCurrency?.currency })}
             </button>
           </div>

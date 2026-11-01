@@ -111,7 +111,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
   const panelClass = isDark
     ? 'bg-zinc-950 border-zinc-800 text-white'
     : 'bg-white border-gray-200 text-gray-950';
-  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-500';
+  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-600';
   const fieldClass = isDark
     ? 'bg-zinc-900 border-zinc-800 text-white placeholder:text-zinc-500'
     : 'bg-white border-gray-200 text-gray-950 placeholder:text-gray-400';
@@ -122,8 +122,8 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
     ? 'border-zinc-800 bg-zinc-900 text-zinc-100 active:bg-zinc-800'
     : 'border-gray-200 bg-white text-gray-800 active:bg-gray-100';
   const primaryButtonClass = isDark
-    ? 'border-yellow-400/70 text-white active:bg-yellow-400/10'
-    : 'border-yellow-400 text-gray-950 active:bg-yellow-50';
+    ? 'border-(--pos-s-yellow) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'
+    : 'border-yellow-400 text-gray-950 active:bg-(--pos-s-surface-2)';
 
   const refreshSources = useCallback(async () => {
     const [loaded, storedDefault] = await Promise.all([
@@ -390,11 +390,11 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
                     className={`shrink-0 rounded-2xl border px-2 py-1 text-xs font-semibold ${
                       status === 'unavailable'
                         ? isDark
-                          ? 'border-red-900 text-red-200'
-                          : 'border-red-200 text-red-700'
+                          ? 'border-red-900 text-red-800 dark:text-red-200'
+                          : 'border-(--pos-s-border) text-red-700'
                         : isDark
-                          ? 'border-emerald-900 text-emerald-200'
-                          : 'border-emerald-200 text-emerald-700'
+                          ? 'border-emerald-900 text-emerald-800 dark:text-emerald-200'
+                          : 'border-(--pos-s-border) text-emerald-700'
                     }`}
                   >
                     {t(sourceStatusKey(status), status)}
@@ -680,7 +680,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
           {problem && (
             <div
               className={`mb-4 flex items-center gap-2 rounded-2xl border px-3 py-2 text-sm ${
-                isDark ? 'border-red-900 bg-red-950/30 text-red-100' : 'border-red-200 bg-red-50 text-red-700'
+                isDark ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800 dark:text-red-200' : 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-700'
               }`}
             >
               <AlertCircle className="h-4 w-4 shrink-0" />

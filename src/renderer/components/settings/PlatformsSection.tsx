@@ -1,10 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Store, RefreshCw, Loader2, AlertTriangle, WifiOff } from 'lucide-react'
+import { RefreshCw, Loader2, AlertTriangle, WifiOff } from 'lucide-react'
 import { posApiGet, posApiPost } from '../../utils/api-helpers'
 import { POSGlassSwitch } from '../ui/pos-glass-components'
-import { liquidGlassModalButton } from '../../styles/designSystem'
-import { PlatformNotificationSoundSettings } from './PlatformNotificationSoundSettings'
+import { StatusLine, solidButton, type StatusTone } from './SettingsKit'
 import { EfoodWeeklyScheduleEditor } from './EfoodWeeklyScheduleEditor'
 import type { EfoodDaySchedule } from '../../services/efoodWeeklySchedule'
 import { useEfoodPartner } from '../../hooks/useEfoodPartner'
@@ -522,60 +521,41 @@ export const PlatformsSection: React.FC = () => {
         ? t('settings.platforms.status.closed', 'Closed')
         : t('settings.platforms.status.unknown', 'Unknown')
 
-  const statusToneClass = (open: boolean | null): string =>
-    open === true
-      ? 'text-green-700 dark:text-green-400'
-      : open === false
-        ? 'liquid-glass-modal-text-muted'
-        : 'text-amber-700 dark:text-amber-300'
+  // One status line per platform (wave 7Ε): open = ok, closed = idle, unknown = warn.
+  const statusTone = (open: boolean | null): StatusTone =>
+    open === true ? 'ok' : open === false ? 'idle' : 'warn'
 
   return (
-    <div
-      id="settings-section-platforms"
-      className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all"
-    >
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-yellow-400 text-black ring-1 ring-yellow-500/55 shadow-[0_8px_20px_rgba(250,204,21,0.22)]">
-            <Store className="h-5 w-5 text-black" />
-          </span>
-          <div className="min-w-0">
-            <span className="block font-semibold liquid-glass-modal-text">
-              {t('settings.platforms.title', 'Delivery Platforms')}
-            </span>
-            <span className="block text-xs liquid-glass-modal-text-muted">
-              {t(
-                'settings.platforms.helpText',
-                'Open or close connected delivery platforms for this store',
-              )}
-            </span>
-          </div>
-        </div>
+    <div id="settings-section-platforms" className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {/* The pane title (the rail label) names the section; this line only explains it. */}
+        <p className="min-w-0 text-sm liquid-glass-modal-text-muted">
+          {t(
+            'settings.platforms.helpText',
+            'Open or close connected delivery platforms for this store',
+          )}
+        </p>
         <button
           type="button"
           onClick={() => void loadPlatforms({ refresh: true })}
           disabled={isLoading || isRefreshing}
-          className={liquidGlassModalButton('secondary', 'md')}
+          className={solidButton('secondary', 'md')}
         >
-          <span className="inline-flex items-center gap-2">
-            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-            {t('settings.platforms.refresh', 'Refresh')}
-          </span>
+          <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+          {t('settings.platforms.refresh', 'Refresh')}
         </button>
       </div>
 
-      <p className="text-xs liquid-glass-modal-text-muted">
+      <p className="text-sm liquid-glass-modal-text-muted">
         {t(
           'settings.platforms.manualClosureNote',
           'efood opens automatically when the first cashier checks in and closes when the Z report is issued. Closing it here keeps it closed until the next check-in, unless you open it again.',
         )}
       </p>
 
-      <PlatformNotificationSoundSettings />
-
       {!isOnline && (
-        <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
-          <WifiOff className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
+        <div className="pos-notice pos-notice--warn">
+          <WifiOff className="pos-notice__icon h-5 w-5" />
           <span className="text-sm liquid-glass-modal-text">
             {t(
               'settings.platforms.offline',
@@ -591,27 +571,28 @@ export const PlatformsSection: React.FC = () => {
           {t('settings.platforms.loading', 'Loading platforms...')}
         </div>
       ) : loadFailed ? (
-        <div className="flex items-start gap-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3">
-          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-500" />
-          <span className="text-sm liquid-glass-modal-text">
+        <div role="alert" className="pos-notice pos-notice--bad">
+          <AlertTriangle className="pos-notice__icon h-5 w-5" />
+          <span className="text-sm">
             {t('settings.platforms.loadFailed', 'Could not load platforms')}
           </span>
         </div>
       ) : platforms.length === 0 ? (
-        <div className="rounded-xl border liquid-glass-modal-border bg-white/5 px-4 py-8 text-center dark:bg-black/10">
-          <Store className="mx-auto mb-2 h-8 w-8 opacity-40 liquid-glass-modal-text-muted" />
-          <p className="text-sm font-medium liquid-glass-modal-text">
-            {t('settings.platforms.empty', 'No delivery platforms connected')}
-          </p>
-          <p className="mt-1 text-xs liquid-glass-modal-text-muted">
-            {t(
-              'settings.platforms.emptyHelp',
-              'Connect a delivery platform from the admin dashboard to manage it here.',
-            )}
-          </p>
-        </div>
+        <section className="pos-group">
+          <div className="pos-row">
+            <div className="pos-row__label">
+              <span className="pos-row__title">{t('settings.platforms.empty', 'No delivery platforms connected')}</span>
+              <span className="pos-row__help">
+                {t(
+                  'settings.platforms.emptyHelp',
+                  'Connect a delivery platform from the admin dashboard to manage it here.',
+                )}
+              </span>
+            </div>
+          </div>
+        </section>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-4">
           {platforms.map((platform) => {
             const action = pending[platform.plugin_id]
             const isPending = Boolean(action)
@@ -636,32 +617,35 @@ export const PlatformsSection: React.FC = () => {
             const isScheduleOpen = weeklyScheduleOpenFor === platform.plugin_id
 
             return (
-              <div
+              <section
                 key={platform.plugin_id}
-                className="rounded-xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-2 dark:bg-gray-800/10"
+                className="pos-group"
+                data-platform={platform.plugin_id}
               >
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="min-w-0">
+                <div className="pos-row">
+                  <div className="pos-row__label">
                     <span
                       id={`platform-${platform.plugin_id}-label`}
-                      className="block truncate font-medium liquid-glass-modal-text"
+                      className="pos-row__title truncate"
                     >
                       {platform.name}
                     </span>
                     {showConfirmationLabel ? (
-                      <span className="flex items-center gap-1.5 text-xs font-semibold text-amber-700 dark:text-amber-300">
-                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
-                        {platform.open
-                          ? t('settings.platforms.status.opening', 'Opening…')
-                          : t('settings.platforms.status.closing', 'Closing…')}
-                      </span>
+                      <StatusLine tone="warn">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+                          {platform.open
+                            ? t('settings.platforms.status.opening', 'Opening…')
+                            : t('settings.platforms.status.closing', 'Closing…')}
+                        </span>
+                      </StatusLine>
                     ) : (
-                      <span className={`block text-xs font-semibold ${statusToneClass(platform.open)}`}>
+                      <StatusLine tone={statusTone(platform.open)}>
                         {statusLabel(platform.open)}
-                      </span>
+                      </StatusLine>
                     )}
                     {showClosedUntil && (
-                      <span className="block text-xs liquid-glass-modal-text-muted">
+                      <span className="pos-row__help">
                         {t('settings.platforms.closedUntil', {
                           time: closureEndTime,
                           defaultValue: 'Closed until {{time}}',
@@ -669,7 +653,7 @@ export const PlatformsSection: React.FC = () => {
                       </span>
                     )}
                     {showAcceptingOrders && (
-                      <span className="block text-xs liquid-glass-modal-text-muted">
+                      <span className="pos-row__help">
                         {platform.accepting_orders
                           ? t('settings.platforms.acceptingOrders', 'Receiving orders')
                           : t(
@@ -679,12 +663,12 @@ export const PlatformsSection: React.FC = () => {
                       </span>
                     )}
                     {reasonText && (
-                      <span className="block text-xs liquid-glass-modal-text-muted">
+                      <span className="pos-row__help">
                         {reasonText}
                       </span>
                     )}
                     {platform.open === false && platform.closure_status && (
-                      <span className="block text-xs liquid-glass-modal-text-muted">
+                      <span className="pos-row__help">
                         {t('settings.platforms.closureStatus', {
                           status: platform.closure_status,
                           defaultValue: 'efood status: {{status}}',
@@ -692,8 +676,8 @@ export const PlatformsSection: React.FC = () => {
                       </span>
                     )}
                     {isUncertain && (
-                      <span className="mt-1 flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-300">
-                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      <span className="pos-row__help mt-1 flex items-center gap-1.5">
+                        <AlertTriangle className="pos-notice__icon h-4 w-4 shrink-0" aria-hidden="true" />
                         {t(
                           'settings.platforms.uncertain',
                           'Could not confirm the result. Refresh to check the current status.',
@@ -701,7 +685,7 @@ export const PlatformsSection: React.FC = () => {
                       </span>
                     )}
                     {platform.open === null && typeof knownBefore === 'boolean' && (
-                      <span className="block text-xs liquid-glass-modal-text-muted">
+                      <span className="pos-row__help">
                         {t('settings.platforms.lastKnown', {
                           status: knownBefore
                             ? t('settings.platforms.status.open', 'Open')
@@ -712,6 +696,7 @@ export const PlatformsSection: React.FC = () => {
                     )}
                   </div>
 
+                  <div className="pos-row__control">
                   {!platform.controllable && platform.open === null ? null : !platform.controllable ? (
                     <POSGlassSwitch
                       aria-labelledby={`platform-${platform.plugin_id}-label`}
@@ -724,23 +709,19 @@ export const PlatformsSection: React.FC = () => {
                         type="button"
                         onClick={() => void handleToggle(platform, true)}
                         disabled={!isOnline || isPending}
-                        className={liquidGlassModalButton('secondary', 'md')}
+                        className={solidButton('secondary', 'md')}
                       >
-                        <span className="inline-flex items-center gap-2">
-                          {action === 'open' && <Loader2 className="h-4 w-4 animate-spin" />}
-                          {t('settings.platforms.open', 'Open')}
-                        </span>
+                        {action === 'open' && <Loader2 className="h-4 w-4 animate-spin" />}
+                        {t('settings.platforms.open', 'Open')}
                       </button>
                       <button
                         type="button"
                         onClick={() => void handleToggle(platform, false)}
                         disabled={!isOnline || isPending}
-                        className={liquidGlassModalButton('secondary', 'md')}
+                        className={solidButton('secondary', 'md')}
                       >
-                        <span className="inline-flex items-center gap-2">
-                          {action === 'close' && <Loader2 className="h-4 w-4 animate-spin" />}
-                          {t('settings.platforms.close', 'Close')}
-                        </span>
+                        {action === 'close' && <Loader2 className="h-4 w-4 animate-spin" />}
+                        {t('settings.platforms.close', 'Close')}
                       </button>
                     </div>
                   ) : (
@@ -754,9 +735,12 @@ export const PlatformsSection: React.FC = () => {
                       />
                     </div>
                   )}
+                  </div>
                 </div>
 
+                {/* efood: weekly hours, the efood page inside the POS and its schedule editor. */}
                 {canManageEfoodSchedule && (
+                  <div className="pos-row pos-row--stack">
                   <div>
                     <button
                       type="button"
@@ -766,50 +750,39 @@ export const PlatformsSection: React.FC = () => {
                         )
                       }
                       disabled={isPending}
-                      className={liquidGlassModalButton('secondary', 'sm')}
+                      className={solidButton('secondary', 'sm')}
                     >
                       {t('settings.platforms.weeklySchedule.action', 'Weekly hours')}
                     </button>
                   </div>
-                )}
-
-                {canManageEfoodSchedule && (
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
                       aria-pressed={efoodPartner.settings.enabled}
                       onClick={() => efoodPartner.updateSettings({ enabled: !efoodPartner.settings.enabled })}
-                      className={`${liquidGlassModalButton('secondary', 'sm')} ${efoodPartner.settings.enabled ? 'ring-2 ring-yellow-400/70' : ''}`}
+                      className={`pos-choice${efoodPartner.settings.enabled ? ' is-selected' : ''}`}
                     >
                       {t('settings.platforms.efoodPartner.pageToggle', 'efood page inside the POS')}
                     </button>
-                    <button
-                      type="button"
-                      aria-pressed={efoodPartner.settings.muted}
-                      onClick={() => efoodPartner.updateSettings({ muted: !efoodPartner.settings.muted })}
-                      className={`${liquidGlassModalButton('secondary', 'sm')} ${efoodPartner.settings.muted ? 'ring-2 ring-yellow-400/70' : ''}`}
-                    >
-                      {t('settings.platforms.efoodPartner.mute', 'Mute efood sounds')}
-                    </button>
-                    <span className="block w-full text-xs liquid-glass-modal-text-muted">
+                    <span className="pos-row__help block w-full">
                       {t(
                         'settings.platforms.efoodPartner.help',
                         'efood keeps the shop closed unless its own app is connected. The POS keeps the efood Live Orders page running here, so no separate browser is needed: open it from the efood icon in the sidebar.',
                       )}
                     </span>
                   </div>
+                  {isScheduleOpen && (
+                    <EfoodWeeklyScheduleEditor
+                      onClose={() => setWeeklyScheduleOpenFor(null)}
+                      parentActionPending={isPending}
+                      isOnline={isOnline}
+                      pendingSubmission={efoodPendingSchedule}
+                      onPendingSubmissionChange={setEfoodPendingSchedule}
+                    />
+                  )}
+                  </div>
                 )}
-
-                {canManageEfoodSchedule && isScheduleOpen && (
-                  <EfoodWeeklyScheduleEditor
-                    onClose={() => setWeeklyScheduleOpenFor(null)}
-                    parentActionPending={isPending}
-                    isOnline={isOnline}
-                    pendingSubmission={efoodPendingSchedule}
-                    onPendingSubmissionChange={setEfoodPendingSchedule}
-                  />
-                )}
-              </div>
+              </section>
             )
           })}
         </div>

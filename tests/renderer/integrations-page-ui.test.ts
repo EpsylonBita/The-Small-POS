@@ -20,8 +20,7 @@ const glassStyles = readFileSync(
 
 test('Round 286: IntegrationsPage refresh is the shared amber-glass icon button (not a solid black/white slab)', () => {
   // Amber glass in BOTH themes, centered 44-48px, active press, neutral disabled/loading.
-  assert.match(source, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(source, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  assert.match(source, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
   assert.match(source, /h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all/);
   assert.match(source, /\$\{isRefreshing \|\| !isOnline \? 'opacity-60 cursor-not-allowed' : 'active:scale-95'\}/);
 

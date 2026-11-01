@@ -2,6 +2,10 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* The tills are touch screens (founder 30/10/2026): a tapped control keeps :hover, so the
+   hover: variant (and group-hover:/peer-hover:) never matches anything here. */
+@custom-variant hover (&:not(*));
+
 @theme {
   --breakpoint-*: initial;
   --breakpoint-xs: 375px;
@@ -323,32 +327,44 @@ a {
   display: none;
 }
 
-/* Receipt scale slider */
+/* Receipt scale slider: a 40px touch row; the inline fill gradient is drawn as an
+   8px track centred in it (the inline background shorthand would reset size/position). */
 .receipt-scale-slider {
   -webkit-appearance: none;
   appearance: none;
-  height: 6px;
-  border-radius: 3px;
+  height: 40px;
+  background-size: 100% 8px !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  border-radius: 4px;
   outline: none;
   cursor: pointer;
+}
+.receipt-scale-slider:focus-visible {
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.6);
 }
 .receipt-scale-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 18px;
-  height: 18px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  border: 2px solid #eab308;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
   cursor: pointer;
+  transition: transform 120ms ease;
+}
+.receipt-scale-slider:active::-webkit-slider-thumb {
+  transform: scale(1.12);
 }
 .receipt-scale-slider::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-  border: none;
+  border: 2px solid #eab308;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
   cursor: pointer;
 }
 }

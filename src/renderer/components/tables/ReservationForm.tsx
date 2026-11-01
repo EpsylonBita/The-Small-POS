@@ -533,14 +533,14 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
           {/* Existing Reservations Warning (upcoming only, localized date/time). Amber info
               panel; ASCII-safe list markers via list-disc (no literal bullet glyph). */}
           {upcomingReservations.length > 0 && (
-            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-500/30 dark:bg-amber-500/10">
+            <div className="rounded-2xl border border-(--pos-s-warn) bg-(--pos-s-warn-bg) p-3">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
                 <div>
                   <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
                     {t('reservationForm.existingReservations', { defaultValue: 'This table has existing reservations:' })}
                   </p>
-                  <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-amber-700 dark:text-amber-200/80">
+                  <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-amber-700 dark:text-amber-200">
                     {upcomingReservations.slice(0, 3).map((res) => {
                       const start = resolveReservationStart(res);
                       return (
@@ -567,19 +567,19 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
 
           {/* Conflict Warning (semantic red; ASCII-safe list markers) */}
           {showConflictWarning && conflictingReservations.length > 0 && (
-            <div className="rounded-2xl border border-red-200 bg-red-50 p-3 dark:border-red-500/30 dark:bg-red-500/10">
+            <div className="rounded-2xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-3">
               <div className="flex items-start gap-2">
                 <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
                 <div>
                   <p className="text-sm font-medium text-red-700 dark:text-red-400">
                     {t('reservationForm.conflictWarning', { defaultValue: 'Time conflict detected!' })}
                   </p>
-                  <p className="mt-1 text-xs text-red-600 dark:text-red-300/80">
+                  <p className="mt-1 text-xs text-red-600 dark:text-red-300">
                     {t('reservationForm.conflictDescription', {
                       defaultValue: 'There is already a reservation at this time:'
                     })}
                   </p>
-                  <ul className="mt-1 list-disc pl-5 text-xs text-red-600 dark:text-red-300/80">
+                  <ul className="mt-1 list-disc pl-5 text-xs text-red-600 dark:text-red-300">
                     {conflictingReservations.map((res) => {
                       const start = resolveReservationStart(res);
                       return (
@@ -595,7 +595,7 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
                       );
                     })}
                   </ul>
-                  <p className="mt-2 text-xs text-red-600 dark:text-red-300/80">
+                  <p className="mt-2 text-xs text-red-600 dark:text-red-300">
                     {t('reservationForm.conflictAction', {
                       defaultValue: 'Please choose a different time or cancel the existing reservation first.'
                     })}
@@ -612,17 +612,17 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
             <button
               type="button"
               onClick={handleCancel}
-              className="flex-1 inline-flex min-h-touch items-center justify-center rounded-xl border border-red-500/50 bg-red-500/10 font-medium text-red-600 transition active:scale-[0.98] active:bg-red-500/20 dark:text-red-300"
+              className="flex-1 inline-flex min-h-touch items-center justify-center rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) font-medium text-(--pos-s-fg) transition active:scale-[0.98] active:bg-(--pos-s-surface-2)"
             >
               {t('reservationForm.cancel', { defaultValue: 'Cancel' })}
             </button>
             <button
               type="submit"
               disabled={isSubmitting || capacityWarning || showConflictWarning}
-              className={`flex-1 inline-flex min-h-touch items-center justify-center rounded-xl font-medium text-white transition active:scale-[0.98] ${
+              className={`flex-1 inline-flex min-h-touch items-center justify-center rounded-xl font-medium transition active:scale-[0.98] ${
                 isSubmitting || capacityWarning || showConflictWarning
-                  ? 'cursor-not-allowed bg-green-600/40 text-white/60'
-                  : 'bg-green-600 active:bg-green-700 shadow-lg shadow-green-600/25'
+                  ? 'cursor-not-allowed bg-(--pos-s-surface-2) text-(--pos-s-muted)'
+                  : 'bg-(--pos-s-yellow) text-black active:bg-yellow-500 shadow-lg'
               }`}
             >
               {isSubmitting

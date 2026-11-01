@@ -11,8 +11,9 @@
  * - the surface is the sampled solid/near-opaque equivalent (dark
  *   `bg-[#26231e]/95`, light `bg-[#fef8ee]`), not the old translucent glass;
  * - the overdue delivery treatment keeps its attention signal via a FINITE
- *   pulse (`order-card-overdue-pulse`, 4 cycles then steady) and exactly ONE
- *   inset shadow — never `animate-pulse`, never the four-shadow stack;
+ *   pulse (`order-card-overdue-pulse`, 4 cycles then steady) and a solid red
+ *   border + red left edge — never `animate-pulse`; since Wave ΣΤ2 (founder
+ *   31/10/2026) no red inset wash either;
  * - terminal (completed/cancelled) and fresh orders get no overdue treatment.
  */
 
@@ -129,14 +130,15 @@ describe('OrderCard surface (de-glassed)', () => {
 });
 
 describe('OrderCard overdue delivery treatment', () => {
-  it('pulses finitely with exactly one inset shadow when a delivery is >40 minutes old', () => {
+  it('pulses finitely with a solid red edge and no red wash when a delivery is >40 minutes old', () => {
     const classes = renderCardClasses(
       makeOrder({ created_at: minutesAgo(45) }),
     );
     expect(classes).toContain('order-card-overdue-pulse');
     expect(classes).not.toContain('animate-pulse');
-    // Exactly ONE inset shadow — the four-layer stack must not come back.
-    expect(classes.match(/inset_/g)).toHaveLength(1);
+    // Wave ΣΤ2: the overdue meaning is the solid red border and left edge, not a coloured inset wash.
+    expect(classes.match(/inset_/g)).toBeNull();
+    expect(classes).toContain('border-red-600');
     expect(classes).toContain('border-l-red-500');
   });
 

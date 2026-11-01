@@ -83,7 +83,7 @@ export function SatelliteHandoverReleasePanel({ cashierShiftId, onReleased }: {
   const refused = handovers.filter((handover) => handover.state === 'refused');
   if (refused.length === 0) return null;
   return (
-    <div className="mb-4 space-y-3 rounded-2xl border border-amber-400/40 bg-amber-500/10 p-4" data-testid="satellite-handover-release">
+    <div className="mb-4 space-y-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4" data-testid="satellite-handover-release">
       <p className="text-sm font-semibold liquid-glass-modal-text">
         {t('modals.staffShift.satelliteHandover.releaseTitle', { defaultValue: 'Satellite cash handover refused' })}
       </p>

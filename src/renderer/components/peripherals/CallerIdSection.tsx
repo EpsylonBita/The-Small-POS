@@ -13,7 +13,6 @@ import {
   Info,
   Loader2,
   MonitorCheck,
-  PhoneIncoming,
   RadioTower,
   RefreshCcw,
   Server,
@@ -26,15 +25,34 @@ import {
   type CallerIdServerConfig,
   type CallerIdServerSourceLine,
   type CallerIdStatus,
-  type CallerIdStatusReason,
 } from '../../services/CallerIdService'
 import CallerIdNetworkAccessCard from './CallerIdNetworkAccessCard'
+import { StatusLine, TechDisclosure, type StatusTone } from '../settings/SettingsKit'
 
-const statusTone = (status?: CallerIdStatus | null) => {
-  if (status?.status === 'listening') return 'text-green-700 dark:text-green-300'
-  if (status?.status === 'registering') return 'text-amber-700 dark:text-amber-300'
-  if (status?.status === 'error') return 'text-red-700 dark:text-red-300'
-  return 'liquid-glass-modal-text-muted'
+/** The server refuses Caller ID for a store without the plugin with this code (HTTP 403). */
+export const CALLER_ID_ENTITLEMENT_REQUIRED = 'CALLER_ID_ENTITLEMENT_REQUIRED'
+
+/**
+ * The POS API error text ends with the server's JSON body ("… (HTTP 403): {"error":…,"code":…}").
+ * The code is read only from that JSON's own `code` string, never matched anywhere in free text.
+ */
+export function callerIdErrorCode(message: string | null | undefined): string | null {
+  if (typeof message !== 'string') return null
+  const start = message.indexOf('{')
+  if (start < 0) return null
+  try {
+    const body = JSON.parse(message.slice(start)) as { code?: unknown } | null
+    return body && typeof body.code === 'string' ? body.code : null
+  } catch {
+    return null
+  }
+}
+
+const statusTone = (status?: CallerIdStatus | null): StatusTone => {
+  if (status?.status === 'listening') return 'ok'
+  if (status?.status === 'registering') return 'warn'
+  if (status?.status === 'error') return 'bad'
+  return 'idle'
 }
 
 const statusLabel = (status?: CallerIdStatus | null) => {
@@ -53,20 +71,6 @@ const profileLabel = (profileKey: string): string => {
   return labels[profileKey] || profileKey || '—'
 }
 
-const reasonKey = (reason: CallerIdStatusReason | undefined): string => {
-  switch (reason) {
-    case 'port_in_use':
-      return 'portInUse'
-    case 'network_error':
-      return 'networkError'
-    case 'invalid_config':
-      return 'invalidConfig'
-    case 'timeout':
-      return 'timeout'
-    default:
-      return 'failed'
-  }
-}
 
 interface DetailRowProps {
   label: string
@@ -75,7 +79,7 @@ interface DetailRowProps {
 
 const DetailRow: React.FC<DetailRowProps> = ({ label, value }) => (
   <div className="liquid-glass-modal-inset rounded-xl px-3 py-2.5">
-    <p className="liquid-glass-modal-text-muted text-[11px]">{label}</p>
+    <p className="liquid-glass-modal-text-muted text-xs">{label}</p>
     <p className="liquid-glass-modal-text mt-0.5 wrap-break-word text-sm font-medium">{value || '—'}</p>
   </div>
 )
@@ -89,7 +93,7 @@ const SourceLineCard: React.FC<SourceLineCardProps> = ({ line, t }) => (
   <div className="liquid-glass-modal-inset space-y-3 rounded-2xl border p-3">
     <div className="flex flex-wrap items-start justify-between gap-2">
       <div className="flex min-w-0 items-start gap-2">
-        <RadioTower className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-300" />
+        <RadioTower className="mt-0.5 h-4 w-4 shrink-0 liquid-glass-modal-text-muted" />
         <div className="min-w-0">
           <p className="liquid-glass-modal-text text-sm font-semibold">
             {line.name || t('settings.peripherals.callerId.serverManaged.sourceLine', 'Source line')}
@@ -101,7 +105,7 @@ const SourceLineCard: React.FC<SourceLineCardProps> = ({ line, t }) => (
           </p>
         </div>
       </div>
-      <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] font-medium text-amber-800 dark:text-amber-200">
+      <span className="pos-badge shrink-0">
         {t('settings.peripherals.callerId.serverManaged.readOnly', 'Read-only')}
       </span>
     </div>
@@ -233,30 +237,73 @@ const CallerIdSection: React.FC = () => {
   const receivingLines = serverConfig?.receivingLines ?? []
   const hasAssignment = sourceLines.length > 0 || receivingLines.length > 0
   const listening = status?.status === 'listening'
+  const notEntitled = callerIdErrorCode(serverError) === CALLER_ID_ENTITLEMENT_REQUIRED
+  // Raw server and listener texts for support only; the screen says what it means in plain words.
+  const supportDetails = [
+    serverError,
+    status?.error,
+    status?.reason ? `reason: ${status.reason}` : null,
+    localStatusError,
+  ].filter((text): text is string => typeof text === 'string' && text.length > 0)
+  const supportDisclosure = supportDetails.length > 0 ? (
+    <TechDisclosure
+      title={t('settings.peripherals.callerId.supportDetails', 'Support details')}
+      data-testid="caller-id-support-details"
+    >
+      {supportDetails.map((text, index) => (
+        <p key={index} className="liquid-glass-modal-text-muted font-mono text-xs break-all">{text}</p>
+      ))}
+    </TechDisclosure>
+  ) : null
+
+  // Caller ID is an optional plugin: without it for this store there is nothing to fix here.
+  if (notEntitled) {
+    return (
+      <section className="pos-group" data-device-card="caller-id" data-caller-id-state="not-entitled">
+        <div className="pos-row">
+          <div className="pos-row__label">
+            <h3 className="pos-row__title">
+              {t('settings.peripherals.callerId.title', 'Caller ID')}
+            </h3>
+            <StatusLine tone="idle">{t('settings.peripherals.callerId.notActive', 'Not active')}</StatusLine>
+          </div>
+        </div>
+        <div className="px-5 pb-4">
+          <div className="pos-notice" role="status">
+            <Info className="mt-0.5 h-4 w-4 shrink-0 liquid-glass-modal-text-muted" aria-hidden="true" />
+            <p className="text-sm">
+              {t(
+                'settings.peripherals.callerId.notEntitledPlain',
+                'Caller ID is not active for this store. It is turned on from the Admin Dashboard.',
+              )}
+            </p>
+          </div>
+        </div>
+        {supportDisclosure}
+      </section>
+    )
+  }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <PhoneIncoming className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
-          <h3 className="liquid-glass-modal-text text-sm font-semibold">
+    <section className="pos-group" data-device-card="caller-id">
+      <div className="pos-row">
+        <div className="pos-row__label">
+          <h3 className="pos-row__title">
             {t('settings.peripherals.callerId.title', 'Caller ID')}
           </h3>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className={`text-xs font-medium ${statusTone(status)}`}>
+          <StatusLine tone={localStatusError ? 'bad' : statusTone(status)}>
             {localStatusError ? t('settings.workflow.unavailable', 'Unavailable') : t(
               `settings.peripherals.callerId.status.${statusLabel(status)}`,
               statusLabel(status),
             )}
-          </span>
-          {listening ? <CheckCircle className="h-3.5 w-3.5 text-green-500" /> : null}
+          </StatusLine>
         </div>
       </div>
+      <div className="space-y-4 px-5 pb-4">
 
       <CallerIdNetworkAccessCard />
 
-      <div className="liquid-glass-modal-warning flex items-start gap-2 rounded-2xl border px-3 py-2.5">
+      <div className="pos-notice pos-notice--warn">
         <Info className="mt-0.5 h-4 w-4 shrink-0" />
         <p className="text-xs">
           {t(
@@ -267,7 +314,7 @@ const CallerIdSection: React.FC = () => {
       </div>
 
       <section className="space-y-2">
-        <p className="liquid-glass-modal-text-muted text-[11px] font-semibold uppercase tracking-wide">
+        <p className="liquid-glass-modal-text text-sm font-semibold">
           {t(
             'settings.peripherals.callerId.serverManaged.step1',
             'Step 1 · Server configuration',
@@ -277,7 +324,7 @@ const CallerIdSection: React.FC = () => {
           {serverConfig?.enabled && hasAssignment ? (
             <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-green-600 dark:text-green-300" />
           ) : (
-            <Server className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
+            <Server className="mt-0.5 h-5 w-5 shrink-0 liquid-glass-modal-text-muted" />
           )}
           <div className="space-y-1">
             <p className="liquid-glass-modal-text text-sm font-semibold">
@@ -295,7 +342,7 @@ const CallerIdSection: React.FC = () => {
         </div>
 
         {serverConfig && !serverConfig.enabled ? (
-          <div className="liquid-glass-modal-warning flex items-start gap-2 rounded-2xl border p-3">
+          <div className="pos-notice pos-notice--warn">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
               <p className="text-xs font-medium">
@@ -312,7 +359,7 @@ const CallerIdSection: React.FC = () => {
         ) : null}
 
         {serverConfig?.ipTrustSourcePolicy === 'blocked' && sourceLines.length > 0 ? (
-          <div className="liquid-glass-modal-warning flex items-start gap-2 rounded-2xl border p-3">
+          <div className="pos-notice pos-notice--warn">
             <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
               <p className="text-xs font-medium">
@@ -329,22 +376,27 @@ const CallerIdSection: React.FC = () => {
         ) : null}
 
         {serverError ? (
-          <div className="liquid-glass-modal-error flex items-start gap-2 rounded-2xl border p-3" role="alert">
+          <div className="pos-notice pos-notice--bad" role="alert">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <p className="text-xs">{serverError}</p>
+            <p className="text-xs">
+              {t(
+                'settings.peripherals.callerId.loadFailedPlain',
+                'The Caller ID setup could not be loaded from the Admin Dashboard. Press "Refresh status".',
+              )}
+            </p>
           </div>
         ) : null}
       </section>
 
       <section className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="liquid-glass-modal-text-muted text-[11px] font-semibold uppercase tracking-wide">
+          <p className="liquid-glass-modal-text text-sm font-semibold">
             {t(
               'settings.peripherals.callerId.serverManaged.step2',
               'Step 2 · FXO line details',
             )}
           </p>
-          <p className="liquid-glass-modal-text-muted text-[11px]">
+          <p className="liquid-glass-modal-text-muted text-xs">
             {t(
               'settings.peripherals.callerId.serverManaged.changeInDashboard',
               'Change these values in Admin Dashboard',
@@ -380,7 +432,7 @@ const CallerIdSection: React.FC = () => {
         ) : null}
 
         {!hasAssignment && !serverError ? (
-          <div className="liquid-glass-modal-warning flex items-start gap-2 rounded-2xl border p-3">
+          <div className="pos-notice pos-notice--warn">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
               <p className="text-xs font-medium">
@@ -397,23 +449,23 @@ const CallerIdSection: React.FC = () => {
         ) : null}
       </section>
 
-      {localStatusError && <div role="alert" className="liquid-glass-modal-error rounded-2xl border p-3 text-xs">
-        {t('settings.workflow.callerStatusFailed', 'Local Caller ID status is unavailable. Refresh to check again.')} {localStatusError}
+      {localStatusError && <div role="alert" className="pos-notice pos-notice--bad pos-notice--stack text-xs">
+        {t('settings.workflow.callerStatusFailed', 'Local Caller ID status is unavailable. Refresh to check again.')}
       </div>}
       {(status?.error || status?.reason) ? (
-        <div className="liquid-glass-modal-error flex items-start gap-2 rounded-2xl border p-3" role="alert">
+        <div className="pos-notice pos-notice--bad" role="alert">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <p className="text-xs">
-            {status.error || t(
-              `settings.peripherals.callerId.reason.${reasonKey(status.reason)}`,
-              'Caller ID failed to start.',
+            {t(
+              'settings.peripherals.callerId.notStartedPlain',
+              'Caller ID did not start on this till. Press "Refresh status"; if it stays, give the support details to support.',
             )}
           </p>
         </div>
       ) : null}
 
       <section className="liquid-glass-modal-footer space-y-3 rounded-2xl border px-3 py-3">
-        <p className="liquid-glass-modal-text-muted text-[11px] font-semibold uppercase tracking-wide">
+        <p className="liquid-glass-modal-text text-sm font-semibold">
           {t(
             'settings.peripherals.callerId.serverManaged.step3',
             'Step 3 · Verify reception',
@@ -423,7 +475,7 @@ const CallerIdSection: React.FC = () => {
           {listening ? (
             <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-green-600 dark:text-green-300" />
           ) : (
-            <RadioTower className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
+            <RadioTower className="mt-0.5 h-5 w-5 shrink-0 liquid-glass-modal-text-muted" />
           )}
           <div className="space-y-1">
             <p className="liquid-glass-modal-text text-sm font-semibold">
@@ -453,7 +505,7 @@ const CallerIdSection: React.FC = () => {
               )}: {status?.callsDetected ?? 0}
             </p>
             <div
-              className="liquid-glass-modal-text-muted grid grid-cols-2 gap-x-4 gap-y-1 pt-1 text-[11px]"
+              className="liquid-glass-modal-text-muted grid grid-cols-2 gap-x-4 gap-y-1 pt-1 text-xs"
               aria-label={t(
                 'settings.peripherals.callerId.serverManaged.intakeDiagnostics',
                 'Local intake diagnostics',
@@ -489,7 +541,9 @@ const CallerIdSection: React.FC = () => {
           {t('settings.peripherals.callerId.serverManaged.refresh', 'Refresh status')}
         </button>
       </section>
-    </div>
+      </div>
+      {supportDisclosure}
+    </section>
   )
 }
 

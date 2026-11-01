@@ -167,11 +167,11 @@ export function getStatusColor(status: TableStatus): string {
 
 export function getStatusClasses(status: TableStatus): string {
   const colors: Record<TableStatus, string> = {
-    available: 'border-green-500 bg-green-500/10',
-    occupied: 'border-blue-500 bg-blue-500/10',
-    reserved: 'border-yellow-500 bg-yellow-500/10',
+    available: 'border-green-500 bg-(--pos-s-surface-2)',
+    occupied: 'border-blue-500 bg-(--pos-s-surface-2)',
+    reserved: 'border-yellow-500 bg-(--pos-s-surface-2)',
     cleaning: 'border-gray-500 bg-gray-500/10',
-    maintenance: 'border-orange-500 bg-orange-500/10',
+    maintenance: 'border-orange-500 bg-(--pos-s-surface-2)',
     unavailable: 'border-slate-500 bg-slate-500/10',
   };
   return colors[status] || colors.available;

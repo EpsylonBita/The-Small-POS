@@ -6,6 +6,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { solidButton, StatusLine } from '../settings/SettingsKit'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { getBridge, offEvent, onEvent } from '../../../lib'
@@ -19,8 +20,6 @@ import {
   AlertCircle,
   CheckCircle,
   XCircle,
-  Wifi,
-  WifiOff,
   ChevronDown,
 } from 'lucide-react'
 import { liquidGlassModalButton } from '../../styles/designSystem'
@@ -413,7 +412,7 @@ const colorMap = {
 const MiniStatCard: React.FC<MiniStatCardProps> = ({ label, value, icon: Icon, color }) => {
   const colors = colorMap[color]
   return (
-    <div className="rounded-2xl p-2 bg-white/5 dark:bg-gray-800/20 border liquid-glass-modal-border">
+    <div className="rounded-2xl p-2 border liquid-glass-modal-border">
       <div className="flex items-center gap-2">
         <Icon size={18} className={`shrink-0 ${colors.text} ${colors.shadow}`} />
         <div>
@@ -430,13 +429,17 @@ const MiniStatCard: React.FC<MiniStatCardProps> = ({ label, value, icon: Icon, c
 // ============================================================
 
 interface Props {
-  onBack: () => void
+  /** Leaves the full-page view; not used when embedded in Settings. */
+  onBack?: () => void
   onOpenCashRegisterSetup?: () => void
+  /** UI audit wave 7Δ: rendered inside Settings → Cards & cash register (no Back, no page title). */
+  embedded?: boolean
 }
 
 export const PaymentTerminalsSection: React.FC<Props> = ({
   onBack,
   onOpenCashRegisterSetup,
+  embedded = false,
 }) => {
   const { t } = useTranslation()
 
@@ -828,17 +831,137 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
     }
   }, [devices, statuses])
 
+  // Dialogs shared by the full page and the Settings embed.
+  const terminalModals = (
+    <>
+      {/* Discovery Modal */}
+      <TerminalDiscoveryModal
+        isOpen={showDiscoveryModal}
+        onClose={() => setShowDiscoveryModal(false)}
+        onSelect={handleDiscoveredDeviceSelect}
+        discoverDevices={ecrAPI.discoverDevices}
+        onOpenCashRegisterSetup={onOpenCashRegisterSetup ? handleOpenCashRegisterSetup : undefined}
+      />
+
+      {/* Config Modal */}
+      <TerminalConfigModal
+        isOpen={showConfigModal}
+        onClose={() => {
+          setShowConfigModal(false)
+          setEditingDevice(undefined)
+          setSelectedDiscoveredDevice(undefined)
+        }}
+        onSave={handleSaveDevice}
+        device={editingDevice}
+        discoveredDevice={selectedDiscoveredDevice}
+        onOpenCashRegisterSetup={
+          onOpenCashRegisterSetup
+            ? () => {
+                setShowConfigModal(false)
+                setEditingDevice(undefined)
+                setSelectedDiscoveredDevice(undefined)
+                onOpenCashRegisterSetup()
+              }
+            : undefined
+        }
+        notAdmittedNotice={
+          admission !== undefined && !isEcrTypeAdmitted(admission, 'payment_terminal')
+            ? ecrNotAdmittedMessage(t, 'payment_terminal')
+            : undefined
+        }
+      />
+    </>
+  )
+
   // Loading state
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
         <div className="text-center">
-          <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3 text-emerald-400" />
+          <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3 liquid-glass-modal-text-muted" />
           <p className="text-sm liquid-glass-modal-text-muted">
             {t('ecr.loading', 'Loading payment terminals...')}
           </p>
         </div>
       </div>
+    )
+  }
+
+  // UI audit wave 7Δ: Settings → Cards & cash register. One kit group: the till's online state, the
+  // configured machines (each with its own status), then Discover / Add. No Back, no page title, no
+  // coloured counters; the full page below keeps its layout.
+  if (embedded) {
+    return (
+      <section className="pos-group" data-payment-terminals-embedded>
+        <header className="pos-group__head flex items-center justify-between gap-3">
+          <h3 className="pos-group__title">{t('settings.paymentTerminals.cardMachines', 'Card machines')}</h3>
+          <div className="flex items-center gap-3">
+            <StatusLine tone={isOnline ? 'ok' : 'bad'}>
+              {isOnline ? t('common.online', 'Online') : t('common.offline', 'Offline')}
+            </StatusLine>
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              aria-label={t('ecr.refreshStatus', 'Refresh connection status')}
+              className="pos-icon-btn"
+            >
+              <RefreshCw size={18} className={isRefreshing ? 'animate-spin' : ''} />
+            </button>
+          </div>
+        </header>
+        {devices.length === 0 ? (
+          <div className="pos-row">
+            <div className="pos-row__label">
+              <span className="pos-row__title">{t('ecr.empty.title', 'No payment terminals')}</span>
+              <span className="pos-row__help">{t('ecr.empty.description', 'Add a payment terminal to accept card payments')}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2 px-5 pb-2 pt-1">
+            {devices.map((device) => {
+              const { notices, needsAttention } = deviceNotices(device)
+              return (
+                <TerminalCardCompact
+                  key={device.id}
+                  device={device}
+                  status={statuses[device.id]}
+                  onConnect={() => handleConnect(device)}
+                  onDisconnect={() => handleDisconnect(device.id)}
+                  onEdit={() => handleEdit(device)}
+                  onDelete={() => handleDelete(device.id)}
+                  onSetDefault={() => handleSetDefault(device.id)}
+                  notices={notices}
+                  onDisable={needsAttention ? () => void handleDisable(device) : undefined}
+                />
+              )
+            })}
+          </div>
+        )}
+        <div className="flex flex-wrap gap-2 px-5 pb-4 pt-2">
+          <button
+            type="button"
+            onClick={() => setShowDiscoveryModal(true)}
+            className={solidButton('secondary', 'md') + ' flex-1'}
+          >
+            <Search size={16} />
+            {t('ecr.discover', 'Discover')}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setEditingDevice(undefined)
+              setSelectedDiscoveredDevice(undefined)
+              setShowConfigModal(true)
+            }}
+            className={solidButton('primary', 'md') + ' flex-1'}
+          >
+            <Plus size={16} />
+            {t('ecr.addManual', 'Add Terminal')}
+          </button>
+        </div>
+        {terminalModals}
+      </section>
     )
   }
 
@@ -855,16 +978,9 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
         </button>
         <div className="flex items-center gap-3">
           {/* Online Status */}
-          <span
-            className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-md ${
-              isOnline
-                ? 'bg-green-500/20 text-green-400'
-                : 'bg-red-500/20 text-red-400'
-            }`}
-          >
-            {isOnline ? <Wifi size={12} /> : <WifiOff size={12} />}
+          <StatusLine tone={isOnline ? 'ok' : 'bad'}>
             {isOnline ? t('common.online', 'Online') : t('common.offline', 'Offline')}
-          </span>
+          </StatusLine>
 
           {/* Refresh Button - 44x44 centered glass icon button with a localized accessible name
               (was an unnamed icon-only button). No native title tooltip, no hover; active tap feedback. */}
@@ -873,7 +989,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
             onClick={handleRefresh}
             disabled={isRefreshing}
             aria-label={t('ecr.refreshStatus', 'Refresh connection status')}
-            className="inline-flex h-11 w-11 items-center justify-center rounded-xl border liquid-glass-modal-border bg-white/5 dark:bg-black/20 transition active:scale-95 active:bg-white/10 disabled:opacity-50"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-xl border liquid-glass-modal-border transition active:scale-95 disabled:opacity-50"
           >
             <RefreshCw
               size={16}
@@ -926,8 +1042,8 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
 
       {/* Configured Terminals Section */}
       <div
-        className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 transition-all ${
-          showTerminalsList ? 'bg-white/10 dark:bg-gray-800/20' : ''
+        className={`rounded-xl border liquid-glass-modal-border transition-all ${
+          showTerminalsList ? '' : ''
         }`}
       >
         <button
@@ -935,12 +1051,12 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
           className="w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text"
         >
           <div className="flex items-center gap-3">
-            <CreditCard className="w-5 h-5 text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
+            <CreditCard className="w-5 h-5 text-emerald-400" />
             <span className="font-medium">
               {t('ecr.configuredTerminals', 'Configured Terminals')}
             </span>
             {devices.length > 0 && (
-              <span className="px-2 py-0.5 text-xs rounded-full bg-emerald-500/20 text-emerald-400">
+              <span className="px-2 py-0.5 text-xs rounded-full bg-emerald-50 dark:bg-emerald-950 text-emerald-400">
                 {devices.length}
               </span>
             )}
@@ -1002,49 +1118,14 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
             setSelectedDiscoveredDevice(undefined)
             setShowConfigModal(true)
           }}
-          className="flex-1 inline-flex min-h-touch items-center justify-center gap-2 rounded-xl border border-green-600 bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-green-600/30 transition-transform duration-150 active:scale-[0.98] active:bg-green-700"
+          className={solidButton('primary', 'md') + ' flex-1'}
         >
           <Plus size={16} />
           {t('ecr.addManual', 'Add Terminal')}
         </button>
       </div>
 
-      {/* Discovery Modal */}
-      <TerminalDiscoveryModal
-        isOpen={showDiscoveryModal}
-        onClose={() => setShowDiscoveryModal(false)}
-        onSelect={handleDiscoveredDeviceSelect}
-        discoverDevices={ecrAPI.discoverDevices}
-        onOpenCashRegisterSetup={onOpenCashRegisterSetup ? handleOpenCashRegisterSetup : undefined}
-      />
-
-      {/* Config Modal */}
-      <TerminalConfigModal
-        isOpen={showConfigModal}
-        onClose={() => {
-          setShowConfigModal(false)
-          setEditingDevice(undefined)
-          setSelectedDiscoveredDevice(undefined)
-        }}
-        onSave={handleSaveDevice}
-        device={editingDevice}
-        discoveredDevice={selectedDiscoveredDevice}
-        onOpenCashRegisterSetup={
-          onOpenCashRegisterSetup
-            ? () => {
-                setShowConfigModal(false)
-                setEditingDevice(undefined)
-                setSelectedDiscoveredDevice(undefined)
-                onOpenCashRegisterSetup()
-              }
-            : undefined
-        }
-        notAdmittedNotice={
-          admission !== undefined && !isEcrTypeAdmitted(admission, 'payment_terminal')
-            ? ecrNotAdmittedMessage(t, 'payment_terminal')
-            : undefined
-        }
-      />
+      {terminalModals}
     </div>
   )
 }

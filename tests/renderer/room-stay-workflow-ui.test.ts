@@ -34,15 +34,15 @@ test('Round 350: New Order Room card opens a 3-action Room chooser modal (not th
   // Exactly the three actions, each a touch-first <button> with its semantic color + handler.
   // 1. Room Order -- amber/orange.
   assert.match(region, /onClick=\{handleRoomFlowOrder\}/);
-  assert.match(region, /border-amber-400\/30[\s\S]*?from-amber-500\/10/);
+  assert.match(region, /border-\(--pos-s-border\)[\s\S]*?/);
   assert.match(region, /text-amber-400[\s\S]*?orderFlow\.roomFlowOrder/);
   // 2. Check-in -- green.
   assert.match(region, /onClick=\{handleRoomFlowCheckin\}/);
-  assert.match(region, /border-green-400\/30[\s\S]*?from-green-500\/10/);
+  assert.match(region, /border-\(--pos-s-border\)[\s\S]*?/);
   assert.match(region, /text-green-400[\s\S]*?orderFlow\.roomFlowCheckin/);
   // 3. Create Reservation -- purple.
   assert.match(region, /onClick=\{handleRoomFlowReservation\}/);
-  assert.match(region, /border-purple-400\/30[\s\S]*?from-purple-500\/10/);
+  assert.match(region, /border-\(--pos-s-border\)[\s\S]*?/);
   assert.match(region, /text-\[#a855f7\][\s\S]*?orderFlow\.roomFlowReservation/);
 
   // Touch-first: the chooser actions are real buttons with active-press only (no hover-era styling).
@@ -124,8 +124,8 @@ test('Round 350: New Reservation form has selected-room chip, required guest nam
   assert.match(form, /label=\{t\('roomsView\.guestName'[\s\S]*?\n\s*required/);
 
   // Cancel = red destructive glass; Create = emerald, DISABLED until a name is entered (no submit on empty).
-  assert.match(form, /border border-red-400\/40 bg-red-500\/15[\s\S]*?text-red-300/);
-  assert.match(form, /disabled=\{!name\.trim\(\) \|\| [^\n]+submitting[^\n]*\}\s*\n\s*className="flex-1 rounded-xl border border-emerald-500 bg-emerald-600/);
+  assert.match(form, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\)[\s\S]*?text-\(--pos-s-fg\)/);
+  assert.match(form, /disabled=\{!name\.trim\(\) \|\| [^\n]+submitting[^\n]*\}\s*\n\s*className="flex-1 rounded-xl border border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\)/);
   assert.match(form, /t\('roomsView\.createReservation'/);
   // The submit handler also fails closed on an empty name.
   assert.match(form, /if \(!name\.trim\(\) \|\| !phone\.trim\(\)\)/);
@@ -141,8 +141,8 @@ test('Round 350: New Check-in form mirrors the required-name + red-cancel/green-
   assert.match(form, /title=\{t\('roomsView\.newCheckin'/);
   assert.match(form, /<RoomChip room=\{(?:selectedRoom|room)\}/);
   assert.match(form, /label=\{t\('roomsView\.guestName'[\s\S]*?\n\s*required/);
-  assert.match(form, /border border-red-400\/40 bg-red-500\/15[\s\S]*?text-red-300/);
-  assert.match(form, /disabled=\{!name\.trim\(\) \|\| [^\n]+submitting[^\n]*\}\s*\n\s*className="flex-1 rounded-xl border border-emerald-500 bg-emerald-600/);
+  assert.match(form, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\)[\s\S]*?text-\(--pos-s-fg\)/);
+  assert.match(form, /disabled=\{!name\.trim\(\) \|\| [^\n]+submitting[^\n]*\}\s*\n\s*className="flex-1 rounded-xl border border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\)/);
   assert.match(form, /t\('roomsView\.completeCheckin'/);
 });
 

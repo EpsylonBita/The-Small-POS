@@ -63,25 +63,25 @@ const severityClasses: Record<
 > = {
   critical: {
     badge:
-      'border border-red-400/30 bg-red-500/10 text-red-700 dark:text-red-200',
+      'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-700 dark:text-red-200',
     panel:
-      'border-red-200/80 bg-red-50/80 dark:border-red-400/25 dark:bg-red-500/10',
+      'border-(--pos-s-border) bg-(--pos-s-surface-2) dark:border-zinc-700 dark:bg-zinc-800',
     icon: ShieldAlert,
     iconClass: 'text-red-600 dark:text-red-300',
   },
   error: {
     badge:
-      'border border-red-400/30 bg-red-500/10 text-red-700 dark:text-red-200',
+      'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-700 dark:text-red-200',
     panel:
-      'border-red-200/80 bg-red-50/80 dark:border-red-400/25 dark:bg-red-500/10',
+      'border-(--pos-s-border) bg-(--pos-s-surface-2) dark:border-zinc-700 dark:bg-zinc-800',
     icon: AlertTriangle,
     iconClass: 'text-red-600 dark:text-red-300',
   },
   warning: {
     badge:
-      'border border-amber-400/30 bg-amber-500/10 text-amber-700 dark:text-amber-200',
+      'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700 dark:text-amber-200',
     panel:
-      'border-amber-200/80 bg-amber-50/80 dark:border-amber-400/25 dark:bg-amber-500/10',
+      'border-(--pos-s-border) bg-(--pos-s-surface-2) dark:border-zinc-700 dark:bg-zinc-800',
     icon: Wrench,
     iconClass: 'text-amber-600 dark:text-amber-300',
   },
@@ -106,13 +106,13 @@ const entityLabelKey: Record<string, string> = {
 
 const actionButtonTone = (action: RecoveryActionDescriptor) => {
   if (action.recommended) {
-    return 'border-emerald-300/80 bg-emerald-50/90 text-emerald-800 active:bg-emerald-100 dark:border-emerald-400/30 dark:bg-emerald-500/15 dark:text-emerald-100 dark:active:bg-emerald-500/20';
+    return 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 active:bg-emerald-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-emerald-100 dark:active:bg-zinc-800';
   }
   if (action.safetyLevel === 'destructive_server') {
-    return 'border-red-300/80 bg-red-50/90 text-red-700 active:bg-red-100 dark:border-red-400/25 dark:bg-red-500/10 dark:text-red-200 dark:active:bg-red-500/15';
+    return 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-700 active:bg-red-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-red-200 dark:active:bg-zinc-800';
   }
   if (action.safetyLevel === 'destructive_local') {
-    return 'border-amber-300/80 bg-amber-50/90 text-amber-700 active:bg-amber-100 dark:border-amber-400/25 dark:bg-amber-500/10 dark:text-amber-200 dark:active:bg-amber-500/15';
+    return 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700 active:bg-amber-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-200 dark:active:bg-zinc-800';
   }
   return 'border-slate-200/90 bg-white/90 text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:active:bg-white/9';
 };
@@ -219,7 +219,7 @@ const RecoveryIssueCard: React.FC<{
   );
 
   return (
-    <div className={cn('rounded-[24px] border p-5 shadow-[0_10px_24px_rgba(15,23,42,0.05)] dark:shadow-none', style.panel)}>
+    <div className={cn('rounded-[24px] border p-5 dark:shadow-none', style.panel)}>
       <div className="flex flex-col gap-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-3">
@@ -686,7 +686,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
           ))}
         </div>
       ) : (
-        <div className="rounded-[22px] border border-emerald-200/80 bg-emerald-50/90 px-4 py-4 text-sm text-emerald-700 dark:border-emerald-400/25 dark:bg-emerald-500/10 dark:text-emerald-200">
+        <div className="rounded-[22px] border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-4 text-sm text-emerald-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-emerald-200">
           {t(emptyKey)}
         </div>
       )}
@@ -698,9 +698,9 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
       {confirmationModal}
       <section className="space-y-4 text-slate-900 dark:text-slate-100">
         <TableAttemptRecoveryNotice />
-        {actionFeedback && <div role="status" className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100">{actionFeedback}</div>}
+        {actionFeedback && <div role="status" className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-100">{actionFeedback}</div>}
         {!primaryIssue ? (
-          <div className="rounded-2xl border border-emerald-300 bg-emerald-50 p-5 text-emerald-900 dark:border-emerald-400/25 dark:bg-emerald-500/10 dark:text-emerald-100">
+          <div className="rounded-2xl border border-emerald-300 bg-emerald-50 p-5 text-emerald-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-emerald-100">
             <h3 className="flex items-center gap-2 text-lg font-bold"><CheckCircle2 className="h-5 w-5" />{t('recovery.center.noVisibleBlockerTitle')}</h3>
             <p className="mt-2 text-sm">{t('recovery.center.noVisibleBlockerDescription')}</p>
           </div>

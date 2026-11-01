@@ -870,11 +870,11 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-2xl ${
                   isOnline
                     ? isDark
-                      ? 'bg-green-500/20 text-green-400'
-                      : 'bg-green-100 text-green-600'
+                      ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300'
+                      : 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300'
                     : isDark
-                      ? 'bg-red-500/20 text-red-400'
-                      : 'bg-red-100 text-red-600'
+                      ? 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-300'
+                      : 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-300'
                 }`}
               >
                 {isOnline ? <Wifi size={16} /> : <WifiOff size={16} />}
@@ -889,11 +889,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                 onClick={handleRefresh}
                 disabled={isRefreshing}
                 aria-label={t('common.refresh', 'Refresh')}
-                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
-                  isDark
-                    ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
-                    : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
-                } ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) ${isRefreshing ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
               >
                 <RefreshCw size={20} className={isRefreshing ? 'animate-spin' : ''} />
               </button>
@@ -903,7 +899,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                 onClick={() => setShowDiscoveryModal(true)}
                 disabled={discoverAction.disabled}
                 aria-label={discoverAction.disabled && discoverAction.message ? discoverAction.message : undefined}
-                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl transition-all ${isDark ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25' : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'} disabled:opacity-50 disabled:cursor-not-allowed active:scale-95`}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) disabled:opacity-50 disabled:cursor-not-allowed active:scale-95`}
               >
                 <Search size={18} />
                 {t('ecr.discover', 'Discover')}
@@ -918,7 +914,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                 }}
                 disabled={discoverAction.disabled}
                 aria-label={discoverAction.disabled && discoverAction.message ? discoverAction.message : undefined}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl font-medium text-white transition-all border border-green-500 bg-green-600 active:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl font-medium text-black transition-all border border-(--pos-s-yellow) bg-(--pos-s-yellow) active:bg-yellow-500 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
               >
                 <Plus size={18} />
                 {t('ecr.addManual', 'Add Terminal')}
@@ -984,7 +980,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
               onClick={() => setShowDiscoveryModal(true)}
               disabled={discoverAction.disabled}
               aria-label={discoverAction.disabled && discoverAction.message ? discoverAction.message : undefined}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl transition-all ${isDark ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25' : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'} disabled:opacity-50 disabled:cursor-not-allowed active:scale-95`}
+              className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) disabled:opacity-50 disabled:cursor-not-allowed active:scale-95`}
             >
               <Search size={18} />
               {t('ecr.discoverTerminals', 'Discover Terminals')}

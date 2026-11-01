@@ -1135,7 +1135,7 @@ export function OrderApprovalPanel({
                 <div
                   role="status"
                   data-testid="box-decision-closed"
-                  className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3"
+                  className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3"
                 >
                   {isBoxManualCheck ? (
                     <>
@@ -1163,7 +1163,7 @@ export function OrderApprovalPanel({
                     void handleCloseBoxOrder();
                   }}
                   disabled={isClosingOrder}
-                  className="liquid-glass-modal-button min-h-13 w-full justify-center gap-2 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30 disabled:opacity-50"
+                  className="pos-solid-btn pos-solid-btn--md pos-solid-btn--danger min-h-13 w-full gap-2"
                 >
                   <Ban className="h-4 w-4" />
                   {isClosingOrder
@@ -1201,7 +1201,7 @@ export function OrderApprovalPanel({
                         data-testid={`order-approval-prep-${time}`}
                         className={`min-h-11 rounded-lg px-2 text-sm font-bold transition ${
                           estimatedTime === time
-                            ? 'border border-amber-400 bg-amber-400 text-black shadow-lg shadow-amber-400/30'
+                            ? 'border border-amber-400 bg-amber-400 text-black shadow-lg'
                             : 'liquid-glass-modal-button'
                         } ${disabled ? 'cursor-not-allowed opacity-35' : ''}`}
                         aria-pressed={estimatedTime === time}
@@ -1221,7 +1221,7 @@ export function OrderApprovalPanel({
                     type="button"
                     onClick={handleApprove}
                     disabled={isApproving || isDeclining || isCheckingDecline}
-                    className="liquid-glass-modal-button min-h-13 justify-center gap-2 border-green-500/30 bg-green-600/20 text-green-400 active:bg-green-600/30"
+                    className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary min-h-13 gap-2"
                   >
                     <Check className="h-4 w-4" />
                     {isApproving ? t('orderApprovalPanel.approving', { defaultValue: 'Approving...' }) : t('orderApprovalPanel.approveButton', { defaultValue: 'Approve' })}
@@ -1232,7 +1232,7 @@ export function OrderApprovalPanel({
                       void openDeclineModal();
                     }}
                     disabled={isApproving || isDeclining || isCheckingDecline}
-                    className="liquid-glass-modal-button min-h-13 justify-center gap-2 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30"
+                    className="pos-solid-btn pos-solid-btn--md pos-solid-btn--danger min-h-13 gap-2"
                   >
                     <XCircle className="h-4 w-4" />
                     {t('orderApprovalPanel.declineButton', { defaultValue: 'Decline' })}
@@ -1253,7 +1253,7 @@ export function OrderApprovalPanel({
                 <button
                   type="button"
                   onClick={onClose}
-                  className="liquid-glass-modal-button w-full gap-2 border-blue-500/30 bg-blue-600/20 text-blue-400 active:bg-blue-600/30"
+                  className="pos-solid-btn pos-solid-btn--md w-full gap-2"
                 >
                   {t('common.actions.close', { defaultValue: 'Close' })}
                 </button>
@@ -1285,9 +1285,9 @@ export function OrderApprovalPanel({
 
             <section className={`liquid-glass-modal-card p-4 ${
               requestedPaymentMethod === 'cash'
-                ? 'border-green-500/25 bg-green-500/10'
+                ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
                 : requestedPaymentMethod === 'card' || requestedPaymentMethod === 'online'
-                  ? 'border-blue-500/25 bg-blue-500/10'
+                  ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
                   : ''
             }`}>
               <div className="flex items-center gap-3">
@@ -1318,7 +1318,7 @@ export function OrderApprovalPanel({
           {orderType === 'delivery' && (deliveryAddress || deliveryCity || deliveryPostalCode || deliveryFloor || nameOnRinger || deliveryNotes) && (
             <section className="liquid-glass-modal-card p-4">
               <div className="flex items-start gap-3">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-400">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300">
                   <MapPin className="h-5 w-5" />
                 </div>
                 <div className="min-w-0 flex-1">
@@ -1481,7 +1481,7 @@ export function OrderApprovalPanel({
               type="button"
               onClick={handleDecline}
               disabled={isDeclining || (isBox ? !isBoxRejectionReason(selectedBoxReason) : !declineReason.trim())}
-              className="liquid-glass-modal-button flex-1 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30 disabled:opacity-50"
+              className="pos-solid-btn pos-solid-btn--md pos-solid-btn--danger flex-1"
             >
               {isDeclining ? t('orderApprovalPanel.declining', { defaultValue: 'Declining...' }) : t('orderApprovalPanel.confirmDecline', { defaultValue: 'Confirm' })}
             </button>
@@ -1515,7 +1515,7 @@ export function OrderApprovalPanel({
                     onClick={() => setSelectedBoxReason(reason)}
                     disabled={isDeclining}
                     className={`liquid-glass-modal-button min-h-11 w-full justify-between px-4 py-2 text-left disabled:opacity-50 ${
-                      isSelected ? 'border-red-500/60 bg-red-600/20 text-red-400' : ''
+                      isSelected ? 'border-red-600 bg-(--pos-s-surface-2) text-red-800 dark:text-red-300' : ''
                     }`}
                   >
                     <span className="flex min-w-0 flex-col items-start">

@@ -270,12 +270,12 @@ const GiftCardsPage: React.FC = () => {
   const mutedClass = isDark ? 'text-zinc-400' : 'text-gray-500';
   const bannerClass: Record<BannerTone, string> = {
     success: isDark
-      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
-      : 'border-emerald-200 bg-emerald-50 text-emerald-800',
-    error: isDark ? 'border-red-500/40 bg-red-500/10 text-red-200' : 'border-red-200 bg-red-50 text-red-800',
+      ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200'
+      : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800',
+    error: isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800',
     warning: isDark
-      ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
-      : 'border-amber-200 bg-amber-50 text-amber-900',
+      ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200'
+      : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-900',
   };
 
   const money = useCallback(

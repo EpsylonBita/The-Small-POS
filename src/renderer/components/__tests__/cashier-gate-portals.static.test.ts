@@ -16,6 +16,7 @@ const portalReview: Record<string, PortalReview> = {
   'components/FinancialSyncPanel.tsx': { classification: 'recovery', reason: 'Financial sync opens from Health; its root explicitly marks cashier recovery.' },
   'components/PortaledToaster.tsx': { classification: 'non-blocking', reason: 'Toast notifications have no blocking backdrop.' },
   'components/SyncStatusIndicator.tsx': { classification: 'recovery', reason: 'Health portal root explicitly marks cashier recovery.' },
+  'components/UtilityRail.tsx': { classification: 'gate-aware', reason: 'The rail is a recovery root for Health; its expenses slot portal unmounts while the cashier gate is locked.' },
   'components/callerid/CallerIdMinimizedPanel.tsx': { classification: 'non-blocking', reason: 'Small movable caller-ID panel has no backdrop.' },
   'components/menu/MenuItemGrid.tsx': { classification: 'gate-aware', reason: 'Preview pointer catcher stays mounted but hidden and inert while locked.' },
   'components/modals/LoyaltyRedeemModal.tsx': { classification: 'gate-aware', reason: 'Redemption draft stays mounted but hidden and inert while locked.' },
@@ -24,7 +25,7 @@ const portalReview: Record<string, PortalReview> = {
   'components/tables/TableCheckManagerModal.tsx': { classification: 'gate-aware', reason: 'Main check and separate secondary sheets hide and suspend Escape while locked.' },
   'components/ui/FloatingActionButton.tsx': { classification: 'non-blocking', reason: 'Floating action button has no full-screen backdrop.' },
   'components/ui/pos-glass-components.tsx': { classification: 'gate-aware', reason: 'Both glass modals preserve drafts, hide operational portals and release isolation while locked.' },
-  'pages/LoginPage.tsx': { classification: 'non-blocking', reason: 'Not applicable: App returns LoginPage while logged out, before mounting GlobalCashierGate; its fence never coexists with the PIN portal.' },
+  'pages/LoginPage.tsx': { classification: 'non-blocking', reason: 'App returns the login layer while logged out, before mounting GlobalCashierGate. Signed in, it mounts only as the brief sign-in / sign-out cover (loginExit), with no PIN entry left to fence.' },
   'pages/TablesPage.tsx': { classification: 'gate-aware', reason: 'Table status changer stays mounted but hidden and inert while locked.' },
   'pages/verticals/salon/StaffScheduleView.tsx': { classification: 'gate-aware', reason: 'Schedule preview and shift backdrops hide and suspend Escape while locked.' },
 };
@@ -65,8 +66,15 @@ describe('cashier-gate portal classification', () => {
 
   it('keeps login outside the mounted cashier gate', () => {
     const app = readFileSync(path.join(renderer, 'App.tsx'), 'utf8');
-    const loggedOut = app.slice(app.indexOf('if (!user) {', app.indexOf('// Show login')));
-    expect(loggedOut).toMatch(/if \(!user\) \{[\s\S]*<LoginPage[\s\S]*\n  \}\s*\n\s*\/\/ Show main POS interface/);
-    expect(loggedOut.indexOf('<LoginPage')).toBeLessThan(loggedOut.indexOf('<GlobalCashierGate'));
+    // Logged out, App returns only the login layer: no GlobalCashierGate exists yet.
+    const loggedOutStart = app.indexOf('if (!user) {', app.indexOf('// Show login'));
+    const loggedOut = app.slice(loggedOutStart, app.indexOf('// Show main POS interface', loggedOutStart));
+    expect(loggedOut).toContain('{loginLayer}');
+    expect(loggedOut).not.toContain('<GlobalCashierGate');
+    // The login layer holds LoginPage; signed in, it exists only as the sign-in / sign-out cover.
+    const layerStart = app.indexOf('const loginLayer = ');
+    expect(app.slice(layerStart, layerStart + 80)).toMatch(/const loginLayer = !user \|\| loginExit !== null \?/);
+    expect(app.indexOf('<LoginPage', layerStart)).toBeGreaterThan(layerStart);
+    expect(app.indexOf('<LoginPage', layerStart)).toBeLessThan(app.indexOf('<GlobalCashierGate'));
   });
 });

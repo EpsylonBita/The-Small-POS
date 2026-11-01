@@ -17,7 +17,7 @@ test('SimplePricingModal uses shared glass shell and touch-first semantic action
   assert.match(modal, /<LiquidGlassModal[\s\S]*?isOpen=\{isOpen\}[\s\S]*?onClose=\{onClose\}[\s\S]*?title=\{titleToShow\}/);
   assert.match(modal, /liquid-glass-modal-card/);
   assert.match(modal, /liquid-glass-modal-input/);
-  assert.match(modal, /focus:ring-yellow-400/);
+  assert.match(modal, /focus:ring-\(--pos-s-fg\)/);
   assert.match(modal, /variant="error"[\s\S]*?\{t\('common\.actions\.cancel'/);
   assert.match(modal, /variant="success"[\s\S]*?\{t\('modals\.simplePricing\.savePricing'\)/);
   assert.match(modal, /icon=\{<Save className="h-4 w-4" aria-hidden="true" \/>\}/);

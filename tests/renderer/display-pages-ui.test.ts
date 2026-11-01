@@ -67,12 +67,12 @@ test('CustomerDisplayPage reads local orders and projects them natively to deskt
   assert.match(source, /border border-white\/80 bg-white text-black active:bg-zinc-200/);
   assert.match(source, /border border-black bg-black text-white active:bg-zinc-800/);
   assert.match(source, /<RefreshCw className=\{`w-5 h-5 \$\{isRefreshing \? 'animate-spin' : ''\}`\} \/>/);
-  assert.match(source, /border-amber-400\/40 bg-amber-500\/10 text-amber-200 active:bg-amber-500\/20/);
+  assert.match(source, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-amber-800 dark:text-amber-200 active:bg-\(--pos-s-surface-2\)/);
   assert.match(source, /rounded-xl border bg-transparent px-4 py-3 \$\{meta\.border\}/);
   assert.match(source, /isDark \? 'border-zinc-800 bg-transparent' : 'border-slate-200 bg-transparent'/);
   assert.match(source, /rounded-full bg-transparent/);
   assert.match(source, /color: 'text-yellow-400'/);
-  assert.match(source, /border: 'border-yellow-400\/40'/);
+  assert.match(source, /border: 'border-\(--pos-s-border\)'/);
   assert.match(source, /rounded-2xl border border-dashed px-4 text-center text-lg/);
   assert.match(source, /isDark \? 'border-white\/15' : 'border-slate-300'/);
   assert.doesNotMatch(source, /rounded-xl border border-dashed border-white\/15/);
@@ -118,8 +118,8 @@ test('KitchenDisplayPage keeps terminal-scoped local tickets and exposes desktop
   assert.match(source, /border border-white\/80 bg-white text-black active:bg-zinc-200/);
   assert.match(source, /border border-black bg-black text-white active:bg-zinc-800/);
   assert.match(source, /<RefreshCw className=\{`w-5 h-5 \$\{loading \? 'animate-spin' : ''\}`\} \/>/);
-  assert.match(source, /border-amber-400\/40 bg-amber-500\/10 text-amber-200 active:bg-amber-500\/20/);
-  assert.match(source, /bg-yellow-400 text-black border-yellow-400/);
+  assert.match(source, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-amber-800 dark:text-amber-200 active:bg-\(--pos-s-surface-2\)/);
+  assert.match(source, /bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)/);
   assert.match(source, /const getOrderTypeTextColor = \(type: string\): string =>/);
   assert.match(source, /<span className=\{`text-xs font-medium \$\{getOrderTypeTextColor\(order\.order_type\)\}`\}>/);
   assert.match(source, /<span className="text-xs font-medium text-amber-400">/);

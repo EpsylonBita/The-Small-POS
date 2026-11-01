@@ -29,7 +29,7 @@ export const UpdateToast: React.FC<UpdateToastProps> = ({ t, version, onOpenDial
   return (
     <div
       onClick={handleClick}
-      className="flex cursor-pointer items-start gap-3 rounded-2xl p-3 transition-transform active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300/80"
+      className="flex cursor-pointer items-start gap-3 rounded-2xl p-3 transition-transform active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)"
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
@@ -64,7 +64,7 @@ export function showUpdateToast(version: string, onOpenDialog: () => void): stri
       <div
         className={`${
           t.visible ? 'animate-enter' : 'animate-leave'
-        } pointer-events-auto w-full max-w-md rounded-2xl border border-amber-500/45 bg-amber-300 shadow-[0_18px_48px_rgba(120,53,15,0.28)]`}
+        } pointer-events-auto w-full max-w-md rounded-2xl border border-(--pos-s-border) bg-amber-300 `}
       >
         <UpdateToast t={t} version={version} onOpenDialog={onOpenDialog} />
       </div>

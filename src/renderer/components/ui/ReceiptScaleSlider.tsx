@@ -48,9 +48,9 @@ export const ReceiptScaleSlider: React.FC<ReceiptScaleSliderProps> = ({
   return (
     <div className={`space-y-1.5 ${disabled ? 'opacity-60' : ''}`}>
       <div className="flex items-center justify-between">
-        <label className="text-xs font-medium text-white/80">{label}</label>
+        <label className="text-xs font-medium liquid-glass-modal-text">{label}</label>
         <div className="flex items-center gap-2">
-          <span className="text-xs font-mono text-white/90 bg-white/5 px-1.5 py-0.5 rounded-sm border border-white/10">
+          <span className="text-xs font-mono tabular-nums liquid-glass-modal-text bg-slate-100 px-1.5 py-0.5 rounded-sm border liquid-glass-modal-border">
             {formatValue(value)}
           </span>
           {!isDefault && (
@@ -58,7 +58,7 @@ export const ReceiptScaleSlider: React.FC<ReceiptScaleSliderProps> = ({
               type="button"
               onClick={handleReset}
               disabled={disabled}
-              className="min-h-7 rounded-2xl px-1.5 text-[10px] font-semibold text-amber-300 transition-transform active:scale-95 active:bg-amber-400/10 disabled:text-white/25 disabled:active:scale-100"
+              className="pos-solid-btn pos-solid-btn--sm"
             >
               {resetLabel}
             </button>
@@ -75,15 +75,15 @@ export const ReceiptScaleSlider: React.FC<ReceiptScaleSliderProps> = ({
         disabled={disabled}
         className="receipt-scale-slider w-full disabled:cursor-not-allowed"
         style={{
-          background: `linear-gradient(to right, rgb(245 158 11 / 0.78) 0%, rgb(245 158 11 / 0.78) ${pct}%, rgb(255 255 255 / 0.08) ${pct}%, rgb(255 255 255 / 0.08) 100%)`,
+          background: `linear-gradient(to right, rgb(245 158 11 / 0.78) 0%, rgb(245 158 11 / 0.78) ${pct}%, rgb(100 116 139 / 0.28) ${pct}%, rgb(100 116 139 / 0.28) 100%)`,
         }}
       />
-      <div className="flex justify-between text-[9px] text-white/40 px-0.5">
+      <div className="flex justify-between text-[11px] tabular-nums liquid-glass-modal-text-muted px-0.5">
         <span>{formatValue(min)}</span>
         <span>{formatValue(defaultValue)}</span>
         <span>{formatValue(max)}</span>
       </div>
-      {hint && <p className="text-[10px] text-white/40 mt-0.5">{hint}</p>}
+      {hint && <p className="text-xs liquid-glass-modal-text-muted mt-0.5">{hint}</p>}
     </div>
   );
 };

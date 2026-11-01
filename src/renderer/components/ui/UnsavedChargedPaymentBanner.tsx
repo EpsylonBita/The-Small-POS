@@ -42,7 +42,7 @@ export function UnsavedChargedPaymentBanner({
     <div
       data-testid="unsaved-charged-payment-banner"
       role="alert"
-      className={`rounded-2xl border border-red-400/40 bg-red-500/10 p-3.5 text-red-900 dark:text-red-100 ${className}`}
+      className={`rounded-2xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-3.5 text-red-900 dark:text-red-100 ${className}`}
     >
       <div className="flex items-start gap-2.5">
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -81,7 +81,7 @@ export function UnsavedChargedPaymentBanner({
               type="button"
               onClick={() => void onSaveAgain()}
               disabled={isSaving}
-              className="mt-1 inline-flex items-center gap-2 rounded-xl border border-red-400/40 bg-red-500/15 px-3 py-2 text-xs font-bold transition active:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-60"
+              className="mt-1 inline-flex items-center gap-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-xs font-bold transition active:bg-(--pos-s-surface-2) disabled:cursor-not-allowed disabled:opacity-60"
             >
               {isSaving ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />

@@ -50,12 +50,12 @@ test('SyncStatusIndicator collapsed controls expose accessible labels with activ
   assert.match(block, /aria-label=\{t\('sync\.actions\.retry', \{ defaultValue: 'Retry sync' \}\)\}/);
   assert.match(block, /onClick=\{handleForceSync\}/);
   assert.match(block, /disabled=\{syncStatus\.syncInProgress\}/);
-  assert.match(block, /active:bg-red-500\/20/);
+  assert.match(block, /active:bg-\(--pos-s-surface-2\)/);
 
   // Capacity-warning badge: aria-label, click-to-open preserved, warning color + active press kept.
   assert.match(block, /aria-label=\{t\('sync\.capacity\.title', \{ defaultValue: 'Sync backlog growing' \}\)\}/);
   assert.match(block, /onClick=\{\(\) => setShowDetailPanel\(true\)\}/);
-  assert.match(block, /text-orange-600 transition-colors active:bg-orange-500\/15 dark:text-orange-300/);
+  assert.match(block, /text-orange-600 transition-colors active:bg-\(--pos-s-surface-2\) dark:text-orange-300/);
 });
 
 // Round 178 (touch-first): the detail-modal controls have now been cleaned too (Round 175 had
@@ -84,5 +84,5 @@ test('SyncStatusIndicator has no native title or hover utilities anywhere, detai
   assert.match(source, /bg-yellow-400 px-4 py-2\.5 text-sm font-semibold text-black transition-all active:bg-yellow-500/);
   // Semantic destructive (red) and success (emerald) colors are preserved with active feedback.
   assert.match(source, /bg-red-600 px-4 py-2\.5 text-sm font-semibold text-white transition-colors active:bg-red-700/);
-  assert.match(source, /active:bg-emerald-100/);
+  assert.match(source, /active:bg-\(--pos-s-surface-2\)/);
 });

@@ -21,7 +21,8 @@ test('Round 250: MenuCart edit-mode save action is green, not amber/orange', () 
   // editMode footer primary action → semantic green (with active press feedback).
   assert.match(
     cartSource,
-    /editMode\s*\?\s*'bg-green-600 text-white active:bg-green-700 active:scale-\[1\.02\]'/,
+    // UI audit wave 5: every press shrinks to 0.97 (it used to grow to 1.02).
+    /editMode\s*\?\s*'bg-\(--pos-s-yellow\) text-black active:bg-yellow-500 active:scale-\[0\.97\]'/,
   );
   // The amber/orange edit-mode save treatment is gone from that branch.
   assert.doesNotMatch(
@@ -31,7 +32,7 @@ test('Round 250: MenuCart edit-mode save action is green, not amber/orange', () 
   // The normal (non-edit) complete-order action stays intentional yellow/black.
   assert.match(
     cartSource,
-    /:\s*'bg-yellow-400 text-black active:bg-yellow-300 active:scale-\[1\.02\]'/,
+    /:\s*'bg-yellow-400 text-black active:bg-yellow-300 active:scale-\[0\.97\]'/,
   );
   // Disabled state stays neutral (not green), and the save handler/logic is unchanged.
   assert.match(

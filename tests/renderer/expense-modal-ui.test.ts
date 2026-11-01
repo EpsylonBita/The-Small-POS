@@ -38,11 +38,11 @@ const source = readFileSync(expenseModalPath, 'utf8');
 test('ExpenseModal uses yellow selected tabs and neutral inactive tabs', () => {
   assert.match(
     source,
-    /active\s*\?\s*'border-yellow-400 bg-yellow-400 text-black shadow-\[0_14px_34px_rgba\(250,204,21,0\.24\)\]'/,
+    /active\s*\?\s*'border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)'/,
   );
   assert.match(
     source,
-    /:\s*'border-slate-200\/90 bg-white\/80 text-slate-700 shadow-\[0_8px_20px_rgba\(15,23,42,0\.06\)\] dark:border-neutral-700\/60 dark:bg-neutral-950\/55 dark:text-neutral-200 dark:shadow-none'/,
+    /:\s*'border-slate-200\/90 bg-white\/80 text-slate-700 dark:border-neutral-700\/60 dark:bg-neutral-950\/55 dark:text-neutral-200 dark:shadow-none'/,
   );
   assert.doesNotMatch(
     source,
@@ -107,7 +107,7 @@ test('ExpenseModal renders recent expenses empty state with unwrapped green mone
   assert.match(source, /Banknote,/);
   assert.match(
     source,
-    /renderEmptyState\(\s*<Banknote className="mx-auto block h-9 w-9 text-emerald-400" strokeWidth=\{2\.2\} \/>[\s\S]*\{ wrapIcon: false \},/,
+    /renderEmptyState\(\s*<Banknote className="mx-auto block h-9 w-9 text-emerald-(?:700|800) dark:text-emerald-400" strokeWidth=\{2\.2\} \/>[\s\S]*\{ wrapIcon: false \},/,
   );
   assert.match(
     source,

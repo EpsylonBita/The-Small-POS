@@ -2,7 +2,8 @@ import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "re
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Truck, Phone, FileText, History, Banknote, Smartphone, RotateCcw, Split, Copy, Edit3, Mail, Loader2 } from 'lucide-react';
+import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Phone, FileText, History, Banknote, Smartphone, RotateCcw, Split, Copy, Edit3, Mail, Loader2 } from 'lucide-react';
+import { DeliveryScooterIcon, PickupHandBagIcon } from '../icons/OrderTypeGlyphs';
 import { toast } from 'react-hot-toast';
 import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
 import {
@@ -46,6 +47,7 @@ interface OrderDetailsModalProps {
   onPrintReceipt?: () => void;
   onShowCustomerHistory?: (customerPhone: string) => void;
   openPaymentOnMount?: boolean;
+  onRequestCancellation?: (orderId: string) => Promise<boolean>;
 }
 
 function isCompletedPaymentRecord(payment: any): boolean {
@@ -311,12 +313,14 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   order,
   onClose,
   onPrintReceipt,
+  onRequestCancellation,
   openPaymentOnMount = false,
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [orderData, setOrderData] = useState<any>(null);
+  const [retainedPayment, setRetainedPayment] = useState<{ orderId: string; cents: number } | null>(null);
   const [orderPayments, setOrderPayments] = useState<any[]>([]);
   const [paidItems, setPaidItems] = useState<any[]>([]);
   const [customerOrders, setCustomerOrders] = useState<any[]>([]);
@@ -536,14 +540,19 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     const isCurrent = () =>
       paymentReadRequestRef.current === request && isCurrentView(epoch, targetOrderId);
     try {
-      const [paymentsResult, paidItemsResult] = await Promise.all([
+      const [paymentsResult, paidItemsResult, settlement] = await Promise.all([
         bridge.payments.getOrderPayments(targetOrderId),
         bridge.payments.getPaidItems(targetOrderId),
+        onRequestCancellation
+          ? Promise.resolve().then(() => bridge.payments.getSettlementSnapshot(targetOrderId)).catch(() => null)
+          : Promise.resolve(null),
       ]);
       if (!isCurrent()) {
         return false;
       }
 
+      setRetainedPayment(settlement?.success === true && settlement.orderId === targetOrderId &&
+        Number.isFinite(settlement.netPaid) ? { orderId: targetOrderId, cents: Math.round(settlement.netPaid * 100) } : null);
       const read = isBridgeArray(paymentsResult) && isBridgeArray(paidItemsResult);
       // After a confirmed gift return a failed read keeps the rows it cannot replace.
       if (read || !options.keepOnFailure) {
@@ -553,6 +562,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       return read;
     } catch (error) {
       console.error('Error loading order payment state:', error);
+      setRetainedPayment(null);
       if (!isCurrent()) {
         return false;
       }
@@ -1042,6 +1052,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const hasDriverAssignment = !!(displayOrder.driver_id || displayOrder.driverId || driverName);
   const isDelivered = status?.toLowerCase() === 'completed' || status?.toLowerCase() === 'delivered';
   const isDeliveryOrder = orderType?.toLowerCase() === 'delivery';
+  const isPickupOrder = ['pickup', 'takeaway'].includes(orderType?.toLowerCase() ?? '');
   const rawDisplayOrderNumber = getVisibleOrderNumber(displayOrder) || orderId;
   const displayOrderNumber = formatCompactOrderNumberForDisplay(
     rawDisplayOrderNumber,
@@ -1077,7 +1088,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     );
   const isDarkTheme = resolvedTheme === 'dark';
   const shellPanelClass =
-    'rounded-[30px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-[rgba(12,14,20,0.88)]';
+    'rounded-[30px] border border-zinc-200/80 bg-white/90 dark:border-white/10 dark:bg-[rgba(12,14,20,0.88)]';
   const insetPanelClass =
     'rounded-2xl border border-zinc-200/70 bg-white/70 dark:border-white/10 dark:bg-white/4';
   const mutedEyebrowClass =
@@ -1254,6 +1265,19 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     return deduped.join(' | ');
   };
 
+  const canCancelReturnedOrder = Boolean(onRequestCancellation) &&
+    ['completed', 'delivered'].includes(String(displayOrder.status).toLowerCase()) &&
+    retainedPayment?.orderId === orderId && retainedPayment.cents === 0 &&
+    orderPayments.some(payment => String(payment.status).toLowerCase() === 'refunded' || Number(payment.refundedAmount) > 0);
+  const requestCancellation = async (targetOrderId: string): Promise<boolean> => {
+    const handled = await onRequestCancellation?.(targetOrderId) ?? false;
+    if (handled) {
+      setShowRefundModal(false);
+      onClose();
+    }
+    return handled;
+  };
+
   const canRefund = paymentStatus === 'paid' || paymentStatus === 'completed' || fullyReturnedTable;
   // Gift card rows go back only to their original card. A partial return moves the
   // header to partially_paid, so the entry stays while a completed gift row remains;
@@ -1305,6 +1329,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const canSplitPayment =
     !isCancelledOrder &&
     platformHeldNotice === null &&
+    !canCancelReturnedOrder &&
     unsaved.payments.length === 0 &&
     !giftRefreshBlocked &&
     (paymentStatus === 'pending' || paymentStatus === 'partially_paid');
@@ -1333,9 +1358,10 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     (onPrintReceipt ? 1 : 0) +
     (canSplitPayment ? 1 : 0) +
     (showRefundEntry ? 1 : 0) +
+    (canCancelReturnedOrder ? 1 : 0) +
     1; // Close button is always shown
   const footerGridCols =
-    footerButtonCount === 4 ? 'grid-cols-4' :
+    footerButtonCount >= 4 ? 'grid-cols-4' :
     footerButtonCount === 3 ? 'grid-cols-3' :
     'grid-cols-2';
 
@@ -1453,10 +1479,19 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         {canSplitPayment && (
           <button
             onClick={() => setShowSplitPaymentModal(true)}
-            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-amber-300/60 bg-amber-50 px-4 text-sm font-semibold text-amber-700 transition active:bg-amber-100 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200 dark:active:bg-amber-500/15"
+            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-amber-50 px-4 text-sm font-semibold text-amber-700 transition active:bg-amber-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-200 dark:active:bg-zinc-800"
           >
             <Split className="h-4 w-4" />
             {t('payment.split.title', { defaultValue: 'Split Payment' })}
+          </button>
+        )}
+        {canCancelReturnedOrder && (
+          <button data-testid="order-details-cancel-returned" data-intent="destructive" disabled={giftRefreshBlocked} onClick={() => void requestCancellation(orderId).catch(error => {
+            console.error('Returned order cancellation failed', error);
+            toast.error(t('orderDashboard.cancelFailed'));
+          })}
+            className="flex min-h-[52px] w-full items-center justify-center rounded-2xl border border-(--pos-s-border) bg-red-50 px-4 text-sm font-semibold text-red-700 transition active:bg-red-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-red-200 dark:active:bg-zinc-800">
+            {t('orders.actions.cancel', { defaultValue: 'Cancel order' })}
           </button>
         )}
         {showRefundEntry && (
@@ -1464,7 +1499,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
             data-testid="order-details-void-refund"
             onClick={() => setShowRefundModal(true)}
             disabled={giftRefreshBlocked}
-            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-red-300/70 bg-red-50 px-4 text-sm font-semibold text-red-700 transition active:bg-red-100 disabled:opacity-50 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200 dark:active:bg-red-500/15"
+            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-red-50 px-4 text-sm font-semibold text-red-700 transition active:bg-red-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-red-200 dark:active:bg-zinc-800"
           >
             <RotateCcw className="h-4 w-4" />
             {canRefund
@@ -1530,7 +1565,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
               </div>
 
               {isCancelledOrder ? (
-                <div className="mb-5 rounded-2xl border border-red-500/70 bg-black px-6 py-7 text-center shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
+                <div className="mb-5 rounded-2xl border border-red-600 bg-black px-6 py-7 text-center shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
                   <div className="flex items-center justify-center gap-2 text-sm font-bold text-red-400">
                     <RotateCcw className="h-4 w-4" />
                     {t('modals.orderDetails.cancellationReason', { defaultValue: 'Cancellation Reason' })}
@@ -1545,7 +1580,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                 <div
                   role="status"
                   data-testid="order-details-box-decision-closed"
-                  className="mb-5 rounded-2xl border border-amber-300/70 bg-amber-50/90 px-5 py-4 dark:border-amber-500/30 dark:bg-amber-500/10"
+                  className="mb-5 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-5 py-4 dark:border-zinc-700 dark:bg-zinc-800"
                 >
                   {isBoxManualCheck ? (
                     <>
@@ -1571,12 +1606,13 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <div className={`${insetPanelClass} px-4 py-3`}>
                   <div className="flex items-center gap-3">
-                    <span className={`flex h-5 w-5 shrink-0 items-center justify-center ${
+                    <span className={`flex h-7 w-7 shrink-0 items-center justify-center ${
                       isDeliveryOrder
                         ? 'text-orange-500 dark:text-orange-300'
                         : 'text-slate-600 dark:text-slate-300'
                     }`}>
-                      {isDeliveryOrder ? <Truck className="h-5 w-5" /> : <Clock className="h-5 w-5" />}
+                      {/* Founder 31/10: his scooter and bag for delivery and pickup. */}
+                      {isDeliveryOrder ? <DeliveryScooterIcon className="h-7 w-7" /> : isPickupOrder ? <PickupHandBagIcon className="h-7 w-7" /> : <Clock className="h-5 w-5" />}
                     </span>
                     <div className="min-w-0">
                       <div className={mutedEyebrowClass}>{t('modals.orderDetails.orderType', { defaultValue: 'Order Type' })}</div>
@@ -1627,7 +1663,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                             type="button"
                             data-testid="order-details-gift-refresh-retry"
                             onClick={() => void refreshAfterGiftReturn(orderId)}
-                            className="min-h-touch rounded-xl border border-red-300/70 bg-red-50 px-3 font-semibold text-red-700 active:bg-red-100 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200"
+                            className="min-h-touch rounded-xl border border-(--pos-s-border) bg-red-50 px-3 font-semibold text-red-700 active:bg-(--pos-s-surface-2) dark:border-zinc-700 dark:bg-zinc-800 dark:text-red-200"
                           >
                             {t('modals.refund.gift.retry')}
                           </button>
@@ -1756,7 +1792,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                         </div>
                       ) : null}
                       {deliveryAddress.notes ? (
-                        <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50/90 px-4 py-3 text-sm text-amber-900 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-100">
+                        <div className="mt-3 rounded-2xl border border-amber-200 bg-(--pos-s-surface-2) px-4 py-3 text-sm text-amber-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-100">
                           {deliveryAddress.notes}
                         </div>
                       ) : null}
@@ -1766,7 +1802,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                   {isDeliveryOrder && hasDriverAssignment ? (
                     <div className={`${insetPanelClass} px-4 py-3`}>
                       <div className="mb-3 flex items-center gap-2 text-sm font-bold liquid-glass-modal-text-muted">
-                        <Truck className="h-4 w-4" />
+                        <DeliveryScooterIcon className="h-5 w-5" />
                         {t('modals.orderDetails.deliveryFulfillment', { defaultValue: 'Delivery Fulfillment' })}
                       </div>
                       <div className="text-lg font-semibold liquid-glass-modal-text">
@@ -1834,7 +1870,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                             key={item.id || index}
                             className={`rounded-[24px] border px-4 py-4 transition-colors ${
                               shouldShowItemPaymentState && isItemPaid
-                                ? 'border-green-500/20 bg-green-500/8'
+                                ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
                                 : 'border-zinc-200/70 bg-white/70 dark:border-white/10 dark:bg-white/4'
                             }`}
                           >
@@ -1863,8 +1899,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                             ? 'bg-slate-500/15 text-slate-300 border border-slate-500/30'
                                             : itemPaymentPresentation === 'split'
                                               ? 'bg-slate-500/15 text-slate-300 border border-slate-500/30'
-                                              : 'bg-green-500/15 text-green-300 border border-green-500/30'
-                                          : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                                              : 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-200 border border-(--pos-s-border)'
+                                          : 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border border-(--pos-s-border)'
                                       }`}>
                                         {isItemPaid
                                           ? `${t('modals.orderDetails.paid', { defaultValue: 'Paid' })}${itemPaymentPresentation ? ` • ${getPaymentMethodLabel(itemPaymentPresentation).toUpperCase()}` : ''}`
@@ -1880,7 +1916,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                               <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold uppercase tracking-wide ${
                                                 entry.method === 'card'
                                                   ? 'border border-slate-500/30 bg-slate-500/15 text-slate-300'
-                                                  : 'border border-green-500/30 bg-green-500/15 text-green-300'
+                                                  : 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-green-800 dark:text-green-200'
                                               }`}>
                                                 {getPaymentMethodLabel(entry.method)}
                                               </span>
@@ -1918,7 +1954,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                               <div className="ml-11 mt-3 space-y-2">
                                 {/* Added ingredients */}
                                 {customizations.filter(c => !c.isWithout).length > 0 && (
-                                  <div className="space-y-1 rounded-2xl border border-emerald-200/70 bg-emerald-50/70 px-3 py-3 dark:border-emerald-500/15 dark:bg-emerald-500/6">
+                                  <div className="space-y-1 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-3 dark:border-zinc-700 dark:bg-zinc-800">
                                     {customizations.filter(c => !c.isWithout).map((c, idx) => (
                                       <div key={`add-${idx}`} className="flex justify-between text-xs">
                                         <span className="flex items-center gap-1 liquid-glass-modal-text-muted">
@@ -1933,7 +1969,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                 )}
                                 {/* Without ingredients */}
                                 {customizations.filter(c => c.isWithout).length > 0 && (
-                                  <div className="mt-1 space-y-1 rounded-2xl border border-red-200/70 bg-red-50/70 px-3 py-3 dark:border-red-500/15 dark:bg-red-500/6">
+                                  <div className="mt-1 space-y-1 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-3 dark:border-zinc-700 dark:bg-zinc-800">
                                     <div className="text-[11px] font-semibold text-red-700 dark:text-red-300">{withoutLabel}</div>
                                     {customizations.filter(c => c.isWithout).map((c, idx) => (
                                       <div key={`without-${idx}`} className="flex justify-between text-xs text-red-600 dark:text-red-300">
@@ -2147,7 +2183,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
         {/* Cancellation reason — visible whenever the order is cancelled. */}
         {String(status).toLowerCase() === 'cancelled' ? (
-          <div className="mt-4 rounded-2xl border border-rose-300/70 bg-rose-50/80 p-4 dark:border-rose-700/70 dark:bg-rose-950/30">
+          <div className="mt-4 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4 dark:border-rose-600 dark:bg-zinc-800">
             <div className="text-xs font-semibold text-rose-700 dark:text-rose-300">
               {t('modals.orderDetails.cancellation.title', { defaultValue: 'Cancellation' })}
             </div>
@@ -2161,7 +2197,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                 })}
             </div>
             {cancelledAt ? (
-              <div className="mt-1 text-xs text-rose-700/80 dark:text-rose-300/80">
+              <div className="mt-1 text-xs text-rose-700 dark:text-rose-300">
                 <span className="font-medium">
                   {t('modals.orderDetails.cancellation.cancelledAtLabel', {
                     defaultValue: 'Cancelled at',
@@ -2317,6 +2353,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         onClose={() => setShowRefundModal(false)}
         orderId={orderId}
         orderTotal={total}
+        orderStatus={displayOrder.status}
+        onRequestCancellation={onRequestCancellation ? requestCancellation : undefined}
         giftReturnOnly={!canRefund}
         onRefundComplete={(detail?: RefundCompleteDetail) => {
           if (detail?.giftReturn) {

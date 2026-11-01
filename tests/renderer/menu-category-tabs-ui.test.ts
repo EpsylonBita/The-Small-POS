@@ -67,7 +67,7 @@ test('MenuPage keeps category icons source-safe and uses touch-first page contro
   assert.doesNotMatch(pageSource, /rounded-lg|rounded-md/);
   assert.match(pageSource, /rounded-2xl shadow-lg overflow-hidden/);
   assert.match(pageSource, /active:scale-\[0\.98\]/);
-  assert.match(pageSource, /bg-yellow-100 text-yellow-900/);
+  assert.match(pageSource, /bg-\(--pos-s-surface-2\) text-yellow-900/);
   assert.match(pageSource, /bg-black text-white/);
 });
 
@@ -87,12 +87,12 @@ test('flavor tab copy and selected styling avoid clipped glow artifacts', () => 
 
   assert.equal(enLocale.menu.categories.savory, 'Savoury');
   assert.equal(enLocale.menu.itemModal.savory, 'Savoury');
-  assert.match(tabsSource, /border-yellow-300\/55 bg-yellow-400 text-black/);
-  assert.match(tabsSource, /border-yellow-500\/60 bg-yellow-400 text-black/);
+  // Wave ΣΤ8: the selected tab is the kit selection (dark in light, white in dark), not yellow.
+  assert.match(tabsSource, /border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)/);
+  assert.doesNotMatch(tabsSource, /bg-yellow-400 text-black/);
   assert.doesNotMatch(tabsSource, /border-blue-300\/45 bg-blue-500\/85 text-white/);
   assert.doesNotMatch(tabsSource, /border-blue-400\/50 bg-blue-500 text-white/);
-  // Round 251: the selected tab/subcategory now uses the approved yellow/black style (asserted
-  // above on lines 71-72); guard that the old emerald selected glow stays gone.
+  // Round 251: guard that the old emerald selected glow stays gone.
   assert.doesNotMatch(tabsSource, /bg-emerald-500\/75/);
   assert.match(tabsSource, /border-b border-gray-200\/20 pb-1/);
   assert.match(tabsSource, /relative px-2 py-3 sm:px-3 sm:py-4/);
@@ -103,7 +103,7 @@ test('flavor tab copy and selected styling avoid clipped glow artifacts', () => 
   assert.doesNotMatch(tabsSource, /shadow-\[0_10px_28px/);
   assert.match(itemModalSource, /flavorFilterButtonBaseClass/);
   assert.match(itemModalSource, /inline-flex h-12 min-w-28 items-center justify-center rounded-full border px-5/);
-  assert.match(itemModalSource, /border-orange-400\/70 bg-orange-500/);
+  assert.match(itemModalSource, /border-orange-600 bg-orange-500/);
   // Round 251: the sweet flavor filter is now slate/neutral (was pink) after the item-modal polish.
   assert.match(itemModalSource, /border-slate-300\/70 bg-slate-500/);
   assert.doesNotMatch(itemModalSource, /border-pink-400\/70 bg-pink-500/);
@@ -120,11 +120,12 @@ test('menu modal cards and cart keep the compact glass layout', () => {
   const cartSource = readFileSync(cartPath, 'utf8');
   const modalSource = readFileSync(menuModalPath, 'utf8');
 
-  assert.match(cardSource, /text-yellow-300/);
+  // Wave ΣΤ8b: the description is muted neutral; the card border is the kit border.
+  assert.match(cardSource, /'text-\(--pos-s-muted\)'/);
   assert.match(cardSource, /text-yellow-800/);
   assert.match(cardSource, /text-emerald-800/);
-  assert.match(cardSource, /bg-white border-slate-300\/80/);
-  assert.match(cardSource, /bg-amber-100\/95/);
+  assert.match(cardSource, /bg-white border-\(--pos-s-border\)/);
+  assert.match(cardSource, /bg-\(--pos-s-surface-2\)/);
   assert.match(cardSource, /Settings2/);
   assert.doesNotMatch(cardSource, /hover:-translate-y/);
   assert.doesNotMatch(cardSource, /hover:scale/);
@@ -145,9 +146,11 @@ test('menu modal cards and cart keep the compact glass layout', () => {
   assert.doesNotMatch(modalSource, /shadow-\[0_18px_42px_rgba\(0,0,0,0\.22\)\]/);
   assert.doesNotMatch(modalSource, /bg-white\/2\.5(?![\w.-])/);
   assert.doesNotMatch(modalSource, /backdrop-blur-2xl/);
-  assert.match(cartSource, /rounded-\[28px\] border border-black\/15 bg-transparent/);
-  assert.match(cartSource, /dark:border-white\/60/);
-  assert.match(cartSource, /shadow-\[0_10px_28px_rgba\(15,23,42,0\.06\)\]/);
+  // Founder 31/10 («το καλάθι δεν είναι εύκολα αναγνώσιμο»): the cart is a solid kit panel, not see-through.
+  assert.match(cartSource, /rounded-\[28px\] border border-\(--pos-s-border\) bg-\(--pos-s-surface\) text-\(--pos-s-fg\)/);
+  assert.doesNotMatch(cartSource, /bg-black\/3 dark:bg-white\/6|bg-black\/8 dark:bg-white\/12|bg-slate-500\/15/);
+  // Wave ΣΤ2: flat solid surfaces, no tinted elevation shadow.
+  assert.doesNotMatch(cartSource, /shadow-\[0_10px_28px_rgba/);
   assert.match(cartSource, /overflow-y-auto p-3 touch-scroll scrollbar-hide/);
   assert.doesNotMatch(cartSource, /overflow-y-auto p-3 touch-scroll pos-scrollbar-glass/);
   assert.match(cartSource, /bg-transparent space-y-3/);
@@ -174,7 +177,7 @@ test('menu modal keeps search below the wrapping title and cards expose hold pre
   assert.match(modalSource, /whitespace-normal wrap-break-word/);
   assert.match(modalSource, /ref=\{menuSearchRef\}/);
   assert.match(modalSource, /relative min-w-0 col-span-2 row-start-2/);
-  assert.match(modalSource, /focus:border-yellow-400\/70 focus:outline-hidden focus:ring-1 focus:ring-yellow-400/);
+  assert.match(modalSource, /focus:border-\(--pos-s-yellow\) focus:outline-hidden focus:ring-1 focus:ring-yellow-400/);
   // Both customer states use the reviewed neutral chip; the editable one retains its action.
   assert.match(modalSource, /<OrderContextChip onClick=\{\(\) => setShowCustomerPopover\(true\)\}>/);
   assert.match(chipSource, /<User size=\{15\} aria-hidden="true" \/>/);

@@ -133,8 +133,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
         <div
           className={`rounded-2xl border p-5 text-center ${
             isRefund
-              ? 'border-orange-400/30 bg-orange-500/10'
-              : 'border-emerald-400/30 bg-emerald-500/10'
+              ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
+              : 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
           }`}
         >
           <div className="text-xs font-semibold uppercase tracking-wider liquid-glass-modal-text-muted">
@@ -163,8 +163,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
             aria-disabled={submitting || !permits('cash')}
             className={`flex flex-col items-center gap-2 rounded-2xl border px-4 py-5 text-sm font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-60 ${
               isRefund
-                ? 'border-orange-400/30 bg-orange-500/10 text-orange-900 dark:text-orange-200 active:border-orange-400/50 active:bg-orange-500/15'
-                : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-900 dark:text-emerald-200 active:border-emerald-400/50 active:bg-emerald-500/15'
+                ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-orange-900 dark:text-orange-200 active:border-orange-600 active:bg-(--pos-s-surface-2)'
+                : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-900 dark:text-emerald-200 active:border-emerald-600 active:bg-(--pos-s-surface-2)'
             }`}
             data-testid="edit-settlement-delta-cash"
           >
@@ -179,8 +179,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
             aria-disabled={submitting || !permits('card')}
             className={`flex flex-col items-center gap-2 rounded-2xl border px-4 py-5 text-sm font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-60 ${
               isRefund
-                ? 'border-orange-400/30 bg-orange-500/10 text-orange-900 dark:text-orange-200 active:border-orange-400/50 active:bg-orange-500/15'
-                : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-900 dark:text-emerald-200 active:border-emerald-400/50 active:bg-emerald-500/15'
+                ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-orange-900 dark:text-orange-200 active:border-orange-600 active:bg-(--pos-s-surface-2)'
+                : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-900 dark:text-emerald-200 active:border-emerald-600 active:bg-(--pos-s-surface-2)'
             }`}
             data-testid="edit-settlement-delta-card"
           >
@@ -194,7 +194,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
           <div
             role="note"
             data-testid="edit-settlement-delta-method-policy"
-            className="flex items-start gap-2 rounded-2xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-900 dark:text-amber-200/90"
+            className="flex items-start gap-2 rounded-2xl border border-(--pos-s-warn) bg-(--pos-s-warn-bg) px-3 py-2 text-xs text-(--pos-s-fg)"
           >
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>
@@ -211,7 +211,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
 
         {/* Refund caveat */}
         {isRefund && (
-          <div className="flex items-start gap-2 rounded-2xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-900 dark:text-amber-200/90">
+          <div className="flex items-start gap-2 rounded-2xl border border-(--pos-s-warn) bg-(--pos-s-warn-bg) px-3 py-2 text-xs text-(--pos-s-fg)">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>
               {t('modals.editSettlementDelta.refundNote', {

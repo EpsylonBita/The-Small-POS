@@ -163,7 +163,7 @@ export function RepairWorkspaceActions({
   })), [remainConsumed, transitionReason, workspace.allowedTransitions])
 
   const errorNode = error ? (
-    <p role="alert" className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-800 dark:text-red-200">
+    <p role="alert" className="rounded-xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-3 text-sm text-red-800 dark:text-red-200">
       {error}
     </p>
   ) : null
@@ -404,7 +404,7 @@ export function RepairWorkspaceActions({
                   const allowed = commandAllowed(reverseCommand, connectivity, workspace.capabilities.consumeParts, hasActiveShift)
                   return <li key={line.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-white/10"><span className="text-sm font-semibold">{line.nameSnapshot}</span><button type="button" disabled={isBusy || !allowed} onClick={() => void run(reverseCommand)} className="min-h-11 rounded-xl border border-amber-500 px-3 text-sm font-semibold disabled:opacity-45">{t('repairs.actions.reversePart')}</button></li>
                 }
-                return <li key={line.id} className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">{line.nameSnapshot}: {t('repairs.locked.stockReversal')}</li>
+                return <li key={line.id} className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 text-sm">{line.nameSnapshot}: {t('repairs.locked.stockReversal')}</li>
               }
               return null
             })}

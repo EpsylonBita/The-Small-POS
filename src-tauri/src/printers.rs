@@ -55,6 +55,23 @@ impl PrinterBrand {
             Self::Unknown => "Unknown",
         }
     }
+
+    /// The brand a stored [`label`](Self::label) names; `None` for `Unknown`
+    /// or anything else.
+    pub fn from_label(label: &str) -> Option<Self> {
+        [
+            Self::Epson,
+            Self::Star,
+            Self::Citizen,
+            Self::Bixolon,
+            Self::Custom,
+            Self::Sewoo,
+            Self::Rongta,
+            Self::Xprinter,
+        ]
+        .into_iter()
+        .find(|brand| brand.label().eq_ignore_ascii_case(label.trim()))
+    }
 }
 
 /// Detect printer brand from the Windows printer name.
@@ -136,6 +153,43 @@ const NETWORK_BRAND_PROBE_TIMEOUT_MS: u64 = 1200;
 
 fn network_brand_cache() -> &'static Mutex<HashMap<String, (Instant, PrinterBrand)>> {
     NETWORK_BRAND_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The last brand each network host named, for as long as the app runs.
+/// `print::resolve_layout_config` seeds it from local settings after a restart.
+static NETWORK_BRAND_LAST_KNOWN: std::sync::OnceLock<Mutex<HashMap<String, PrinterBrand>>> =
+    std::sync::OnceLock::new();
+
+fn network_brand_last_known() -> &'static Mutex<HashMap<String, PrinterBrand>> {
+    NETWORK_BRAND_LAST_KNOWN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record the brand a network host is known to be (from a probe, or from
+/// storage after a restart). `Unknown` is never recorded.
+pub(crate) fn remember_network_printer_brand(host: &str, brand: PrinterBrand) {
+    let trimmed = host.trim();
+    if trimmed.is_empty() || brand == PrinterBrand::Unknown {
+        return;
+    }
+    if let Ok(mut known) = network_brand_last_known().lock() {
+        known.insert(trimmed.to_string(), brand);
+    }
+}
+
+/// A probe that gets no answer is not evidence of a different printer: a Star
+/// that is asleep, busy or already printing misses the 1.2 s window. Falling
+/// back to ESC/POS then sends GS v 0 raster, which a Star prints as pages of
+/// gibberish, and that keeps it too busy to answer the next probe either
+/// (Tomikro, 31/10/2026). So an unanswered probe keeps the last known brand.
+fn keep_last_known_network_brand(host: &str, probed: PrinterBrand) -> PrinterBrand {
+    if probed != PrinterBrand::Unknown {
+        return probed;
+    }
+    network_brand_last_known()
+        .lock()
+        .ok()
+        .and_then(|known| known.get(host).copied())
+        .unwrap_or(PrinterBrand::Unknown)
 }
 
 fn parse_network_http_probe_target(host: &str) -> Option<(String, u16, String)> {
@@ -284,7 +338,7 @@ pub fn detect_network_printer_brand(host: &str) -> PrinterBrand {
     if let Ok(cache) = network_brand_cache().lock() {
         if let Some((cached_at, cached_brand)) = cache.get(trimmed) {
             if cached_at.elapsed().as_secs() < NETWORK_BRAND_CACHE_TTL_SECS {
-                return *cached_brand;
+                return keep_last_known_network_brand(trimmed, *cached_brand);
             }
         }
     }
@@ -297,9 +351,19 @@ pub fn detect_network_printer_brand(host: &str) -> PrinterBrand {
 
     if detected != PrinterBrand::Unknown {
         info!(host = %trimmed, detected_brand = %detected.label(), "Detected network printer brand");
+        remember_network_printer_brand(trimmed, detected);
+        return detected;
     }
 
-    detected
+    let kept = keep_last_known_network_brand(trimmed, detected);
+    if kept != PrinterBrand::Unknown {
+        warn!(
+            host = %trimmed,
+            kept_brand = %kept.label(),
+            "Network printer brand probe got no answer; keeping the last known brand"
+        );
+    }
+    kept
 }
 
 /// Outcome of one raw dispatch, returned by the production `RawPrinter` trait.
@@ -992,7 +1056,9 @@ pub fn profile_uses_star_line_mode(profile: &Value) -> bool {
     }
 }
 
-pub fn detect_printer_brand_for_profile(profile: &Value) -> PrinterBrand {
+/// The host a network or Wi-Fi profile's brand probe asks; `None` for every
+/// other connection type.
+pub(crate) fn network_printer_probe_host(profile: &Value) -> Option<String> {
     let connection_json = profile_connection_json_value(profile);
     let connection = connection_json.as_ref().and_then(Value::as_object);
     let connection_type = normalized_printer_type(
@@ -1006,6 +1072,25 @@ pub fn detect_printer_brand_for_profile(profile: &Value) -> PrinterBrand {
             })
             .as_deref(),
     );
+    if !matches!(connection_type, "network" | "wifi") {
+        return None;
+    }
+    value_to_trimmed_string(connection.and_then(|obj| obj.get("hostname")))
+        .or_else(|| value_to_trimmed_string(connection.and_then(|obj| obj.get("host"))))
+        .or_else(|| value_to_trimmed_string(connection.and_then(|obj| obj.get("ip"))))
+        .or_else(|| value_to_trimmed_string(connection.and_then(|obj| obj.get("address"))))
+        .or_else(|| {
+            value_to_trimmed_string(
+                profile
+                    .get("printerName")
+                    .or_else(|| profile.get("printer_name")),
+            )
+        })
+}
+
+pub fn detect_printer_brand_for_profile(profile: &Value) -> PrinterBrand {
+    let connection_json = profile_connection_json_value(profile);
+    let connection = connection_json.as_ref().and_then(Value::as_object);
 
     let candidates = [
         value_to_trimmed_string(
@@ -1028,23 +1113,10 @@ pub fn detect_printer_brand_for_profile(profile: &Value) -> PrinterBrand {
         }
     }
 
-    if matches!(connection_type, "network" | "wifi") {
-        let network_host = value_to_trimmed_string(connection.and_then(|obj| obj.get("hostname")))
-            .or_else(|| value_to_trimmed_string(connection.and_then(|obj| obj.get("host"))))
-            .or_else(|| value_to_trimmed_string(connection.and_then(|obj| obj.get("ip"))))
-            .or_else(|| value_to_trimmed_string(connection.and_then(|obj| obj.get("address"))))
-            .or_else(|| {
-                value_to_trimmed_string(
-                    profile
-                        .get("printerName")
-                        .or_else(|| profile.get("printer_name")),
-                )
-            });
-        if let Some(host) = network_host {
-            let detected = detect_network_printer_brand(&host);
-            if detected != PrinterBrand::Unknown {
-                return detected;
-            }
+    if let Some(host) = network_printer_probe_host(profile) {
+        let detected = detect_network_printer_brand(&host);
+        if detected != PrinterBrand::Unknown {
+            return detected;
         }
     }
 
@@ -3325,6 +3397,58 @@ mod tests {
 
         handle.join().expect("listener thread should finish");
         assert_eq!(detected, PrinterBrand::Star);
+    }
+
+    #[test]
+    fn test_detect_network_printer_brand_keeps_star_when_its_page_stops_answering() {
+        // Tomikro 31/10/2026: after 38 idle minutes the Star's web page missed
+        // the probe window, the brand became Unknown and receipts went out as
+        // ESC/POS raster, which the Star printed as pages of gibberish.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback http listener");
+        let host = format!("127.0.0.1:{}", listener.local_addr().expect("addr").port());
+        let body = "<html><head><title>mC-Print3 Network Utility</title></head></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let handle = thread::spawn(move || {
+            let (mut stream, _peer) = listener.accept().expect("accept http probe");
+            let mut request = [0u8; 512];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(response.as_bytes())
+                .expect("write http response");
+        });
+        assert_eq!(detect_network_printer_brand(&host), PrinterBrand::Star);
+        handle.join().expect("listener thread should finish");
+
+        // The page no longer answers (the listener is gone) and the 5-minute
+        // cache has expired.
+        network_brand_cache().lock().unwrap().remove(&host);
+        assert_eq!(detect_network_printer_brand(&host), PrinterBrand::Star);
+        // While the unanswered probe is cached, the known brand still wins.
+        assert_eq!(detect_network_printer_brand(&host), PrinterBrand::Star);
+    }
+
+    #[test]
+    fn test_detect_network_printer_brand_stays_unknown_for_a_printer_never_identified() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback port");
+        let host = format!("127.0.0.1:{}", listener.local_addr().expect("addr").port());
+        drop(listener);
+
+        assert_eq!(detect_network_printer_brand(&host), PrinterBrand::Unknown);
+    }
+
+    #[test]
+    fn test_printer_brand_from_label_round_trips_known_brands_only() {
+        assert_eq!(PrinterBrand::from_label("Star"), Some(PrinterBrand::Star));
+        assert_eq!(
+            PrinterBrand::from_label(" epson "),
+            Some(PrinterBrand::Epson)
+        );
+        assert_eq!(PrinterBrand::from_label("Unknown"), None);
+        assert_eq!(PrinterBrand::from_label(""), None);
     }
 
     #[test]

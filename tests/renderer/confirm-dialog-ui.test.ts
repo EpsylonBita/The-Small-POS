@@ -26,18 +26,18 @@ test('ConfirmDialog keeps shared confirmation modals on the yellow glass palette
       source,
       new RegExp(
         `${variant}: \\{[^}]*color: 'text-yellow-700 dark:text-yellow-300'[^}]*`
-          + `checkboxColor: 'text-yellow-600 focus:ring-yellow-500/70 dark:text-yellow-400'`,
+          + `checkboxColor: 'text-yellow-600 focus:ring-yellow-500 dark:text-yellow-400'`,
       ),
       `${variant} must use the theme-aware yellow icon and checkbox`,
     );
   }
   assert.match(
     source,
-    /error: \{[^}]*color: 'text-red-600 dark:text-red-400'[^}]*checkboxColor: 'text-red-600 focus:ring-red-500\/70 dark:text-red-400'/,
+    /error: \{[^}]*color: 'text-red-600 dark:text-red-400'[^}]*checkboxColor: 'text-red-600 focus:ring-red-500 dark:text-red-400'/,
   );
   assert.match(
     source,
-    /success: \{[^}]*color: 'text-emerald-700 dark:text-emerald-400'[^}]*checkboxColor: 'text-emerald-600 focus:ring-emerald-500\/70 dark:text-emerald-400'/,
+    /success: \{[^}]*color: 'text-emerald-700 dark:text-emerald-400'[^}]*checkboxColor: 'text-emerald-600 focus:ring-emerald-500 dark:text-emerald-400'/,
   );
   assert.doesNotMatch(source, /bgIcon/);
 
@@ -46,7 +46,7 @@ test('ConfirmDialog keeps shared confirmation modals on the yellow glass palette
   assert.match(source, /min-h-\[52px\][^"]*rounded-2xl[^"]*active:scale-\[0\.99\]/);
   assert.match(
     source,
-    /'h-5 w-5 rounded-xl border-slate-400 bg-white focus:ring-2 focus:ring-offset-0 dark:border-white\/30 dark:bg-black\/40'/,
+    /'h-5 w-5 rounded-xl border-slate-400 bg-white focus:ring-2 focus:ring-offset-0 dark:border-zinc-400 dark:bg-zinc-900'/,
   );
   assert.match(source, /<LiquidGlassModal/);
   assert.match(source, /ariaLabel=\{title\}/);

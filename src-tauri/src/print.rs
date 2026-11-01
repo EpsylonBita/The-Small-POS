@@ -3399,6 +3399,39 @@ fn setting_text(conn: &rusqlite::Connection, category: &str, key: &str) -> Optio
         .filter(|value| !value.is_empty())
 }
 
+/// Category `local` keeps it out of the renderer settings snapshot.
+const PRINTER_BRAND_SETTING_PREFIX: &str = "printer_last_known_brand:";
+
+/// A network printer named only by its address (Tomikro's Star mC-Print3 is
+/// "LAN Printer (192.168.1.19)") is identified by asking its web page. The
+/// last brand a host named is stored, so a probe that gets no answer keeps it
+/// after a restart too; see `printers::keep_last_known_network_brand`.
+///
+/// The probe can take a few seconds when the printer is slow, so it runs
+/// without the database lock: a checkout never waits on a printer's web page.
+fn resolve_printer_brand(db: &DbState, profile: &Value) -> Result<printers::PrinterBrand, String> {
+    let Some(host) = printers::network_printer_probe_host(profile) else {
+        return Ok(printers::detect_printer_brand_for_profile(profile));
+    };
+    let key = format!("{PRINTER_BRAND_SETTING_PREFIX}{host}");
+    let stored = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        setting_text(&conn, "local", &key)
+            .and_then(|label| printers::PrinterBrand::from_label(&label))
+    };
+    if let Some(brand) = stored {
+        printers::remember_network_printer_brand(&host, brand);
+    }
+    let detected = printers::detect_printer_brand_for_profile(profile);
+    if detected != printers::PrinterBrand::Unknown && stored != Some(detected) {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if let Err(error) = crate::db::set_setting(&conn, "local", &key, detected.label()) {
+            warn!(host = %host, error = %error, "could not store the printer brand");
+        }
+    }
+    Ok(detected)
+}
+
 fn parse_setting_bool(raw: Option<&str>) -> bool {
     matches!(
         raw.unwrap_or_default().trim().to_ascii_lowercase().as_str(),
@@ -4101,7 +4134,7 @@ pub(crate) fn apply_order_currency_to_layout(
     let conn = db.conn.lock().map_err(|error| error.to_string())?;
     let currency = order_print_currency(&conn, order_id)?;
     layout.currency_symbol = match currency {
-        Some(code) => format!(" {code}"),
+        Some(code) => receipt_renderer::printed_currency_suffix(&code),
         None => " ?".to_string(),
     };
     Ok(())
@@ -4154,6 +4187,8 @@ pub fn resolve_layout_config(
     profile: &Value,
     entity_type: &str,
 ) -> Result<LayoutConfig, String> {
+    // Before the lock: the brand probe may wait on the printer's web page.
+    let detected_brand = resolve_printer_brand(db, profile)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let receipt_like_entity = is_receipt_like_entity_type(entity_type);
     let paper_mm = profile
@@ -4210,7 +4245,7 @@ pub fn resolve_layout_config(
     let store_phone = setting_text(&conn, "restaurant", "phone")
         .or_else(|| setting_text(&conn, "terminal", "store_phone"));
     let currency_symbol = crate::fiscal::payload_builder::resolve_store_currency_code(&conn)
-        .map(|currency| format!(" {currency}"))
+        .map(|currency| receipt_renderer::printed_currency_suffix(&currency))
         .unwrap_or_default();
     let vat_number =
         if crate::fiscal::greece_vat::branch_vat_settings(&conn).vat_registered == Some(false) {
@@ -4242,7 +4277,6 @@ pub fn resolve_layout_config(
         .or_else(|| profile.get("printer_name"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    let detected_brand = printers::detect_printer_brand_for_profile(profile);
     let capability_snapshot = printers::read_capability_snapshot(profile);
     let verification_status = printers::capability_verification_status(profile);
 
@@ -4509,19 +4543,6 @@ pub fn resolve_layout_config(
             );
         }
         auto_cp
-    };
-
-    let currency_symbol = if template == ReceiptTemplate::Classic
-        && matches!(entity_type, "order_receipt" | "delivery_slip")
-    {
-        receipt_renderer::normalize_currency_symbol_for_layout(
-            &currency_symbol,
-            &character_set,
-            escpos_code_page,
-            detected_brand,
-        )
-    } else {
-        currency_symbol
     };
 
     let text_scale = setting_text(&conn, "receipt", "text_scale")
@@ -6354,7 +6375,7 @@ fn platform_slip_banner(
             amount = amount.replace('.', ",");
         }
         if let Some(code) = currency.map(str::trim).filter(|code| !code.is_empty()) {
-            amount = format!("{amount} {code}");
+            amount.push_str(&receipt_renderer::printed_currency_suffix(code));
         }
         banner.push_str(&format!(
             " · {} {amount}",
@@ -11176,7 +11197,7 @@ mod tests {
         };
         assert_eq!(
             banner("efood", metadata, "pending", 5.9),
-            Some("EFOOD #42 · ΑΝΤΙΚΑΤΑΒΟΛΗ 5,90 EUR".to_string())
+            Some("EFOOD #42 · ΑΝΤΙΚΑΤΑΒΟΛΗ 5,90 €".to_string())
         );
 
         let prepaid =
@@ -18289,7 +18310,7 @@ mod tests {
             // A platform order ingested without a currency.
             insert_receipt_order(&conn, "slip-none", "SLIP-NONE", 8.0);
         }
-        for (order_id, expected) in [("slip-eur", "EUR"), ("slip-none", "CHF")] {
+        for (order_id, expected) in [("slip-eur", "€"), ("slip-none", "CHF")] {
             for entity_type in ["delivery_slip", "order_receipt"] {
                 let document = build_document_for_job(&db, entity_type, order_id, None).unwrap();
                 let (_, layout, _, _) =
@@ -18363,11 +18384,11 @@ mod tests {
             let (_, layout, _, _) =
                 render_managed_payload(&db, entity_type, &serde_json::json!({}), &document)
                     .unwrap();
-            assert_eq!(layout.currency_symbol.trim(), "EUR", "{entity_type}");
+            assert_eq!(layout.currency_symbol.trim(), "€", "{entity_type}");
         }
         let doc = build_order_receipt_doc(&db, "eur-order").unwrap();
         let banner = doc.status_label.unwrap_or_default();
-        assert!(banner.ends_with(" EUR"), "{banner}");
+        assert!(banner.ends_with(" €"), "{banner}");
         assert!(!banner.contains("CHF"), "{banner}");
     }
 
@@ -19143,7 +19164,7 @@ mod tests {
             let conn = db.conn.lock().unwrap();
             db::set_setting(&conn, "restaurant", "currency", "USD").unwrap();
         }
-        for (currency, expected) in [(Some("CHF"), "CHF"), (None, "?")] {
+        for (currency, expected) in [(Some("EUR"), "€"), (Some("CHF"), "CHF"), (None, "?")] {
             let payload = serde_json::json!({
                 "currency": currency,
                 "date": "2026-10-01",
@@ -20796,6 +20817,159 @@ mod tests {
 
         assert_eq!(layout.emulation_mode, ReceiptEmulationMode::StarLine);
         assert_eq!(layout.escpos_code_page, Some(15));
+    }
+
+    /// A loopback address nothing listens on: the brand probe gets no answer.
+    fn silent_printer_host() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback port");
+        let host = format!("127.0.0.1:{}", listener.local_addr().expect("addr").port());
+        drop(listener);
+        host
+    }
+
+    fn printer_named_by_address(host: &str) -> Value {
+        serde_json::json!({
+            "paperWidthMm": 80,
+            "name": format!("LAN Printer ({host})"),
+            "printerName": host,
+            "printerType": "network",
+            "characterSet": "PC737_GREEK",
+            "connectionJson": format!("{{\"type\":\"network\",\"ip\":\"{host}\"}}")
+        })
+    }
+
+    #[test]
+    fn test_resolve_layout_config_keeps_the_stored_star_when_the_brand_probe_gets_no_answer() {
+        // Tomikro 31/10/2026: a Star mC-Print3 named only by its address missed
+        // the brand probe, the layout fell back to ESC/POS and the Star printed
+        // GS v 0 raster as gibberish until the app and printer were restarted.
+        let db = test_db();
+        let host = silent_printer_host();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "local",
+                &format!("{PRINTER_BRAND_SETTING_PREFIX}{host}"),
+                "Star",
+            )
+            .unwrap();
+        }
+
+        let layout = resolve_layout_config(&db, &printer_named_by_address(&host), "order_receipt")
+            .expect("resolve layout config");
+
+        assert_eq!(layout.detected_brand, crate::printers::PrinterBrand::Star);
+        assert!(crate::receipt_renderer::uses_star_commands(
+            layout.detected_brand,
+            layout.emulation_mode
+        ));
+    }
+
+    #[test]
+    fn test_resolve_layout_config_stores_the_brand_a_network_printer_names() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind http listener");
+        let host = format!("127.0.0.1:{}", listener.local_addr().expect("addr").port());
+        let body = "<html><head><title>mC-Print3 Network Utility</title></head></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _peer) = listener.accept().expect("accept http probe");
+            let mut request = [0u8; 512];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(response.as_bytes())
+                .expect("write http response");
+        });
+        let db = test_db();
+
+        let layout = resolve_layout_config(&db, &printer_named_by_address(&host), "order_receipt")
+            .expect("resolve layout config");
+        handle.join().expect("listener thread should finish");
+
+        assert_eq!(layout.detected_brand, crate::printers::PrinterBrand::Star);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            db::get_setting(
+                &conn,
+                "local",
+                &format!("{PRINTER_BRAND_SETTING_PREFIX}{host}")
+            )
+            .as_deref(),
+            Some("Star")
+        );
+    }
+
+    #[test]
+    fn test_resolve_layout_config_probes_the_printer_without_the_database_lock() {
+        // A slow printer web page must never make a checkout wait on the lock.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind http listener");
+        let host = format!("127.0.0.1:{}", listener.local_addr().expect("addr").port());
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _peer) = listener.accept().expect("accept http probe");
+            let mut request = [0u8; 512];
+            let _ = stream.read(&mut request);
+            accepted_tx.send(()).expect("signal accepted probe");
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            let body = "<html><title>mC-Print3</title></html>";
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .as_bytes(),
+            );
+        });
+        let db = test_db();
+        let profile = printer_named_by_address(&host);
+
+        std::thread::scope(|scope| {
+            let resolving = scope.spawn(|| resolve_layout_config(&db, &profile, "order_receipt"));
+            accepted_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the brand probe reached the printer");
+            assert!(
+                db.conn.try_lock().is_ok(),
+                "the database must stay free while the printer's page is slow"
+            );
+            let layout = resolving
+                .join()
+                .expect("resolve thread")
+                .expect("resolve layout");
+            assert_eq!(layout.detected_brand, crate::printers::PrinterBrand::Star);
+        });
+        server.join().expect("listener thread should finish");
+    }
+
+    #[test]
+    fn test_resolve_layout_config_never_identified_silent_printer_stays_escpos() {
+        let db = test_db();
+        let host = silent_printer_host();
+
+        let layout = resolve_layout_config(&db, &printer_named_by_address(&host), "order_receipt")
+            .expect("resolve layout config");
+
+        assert_eq!(
+            layout.detected_brand,
+            crate::printers::PrinterBrand::Unknown
+        );
+        assert_eq!(layout.emulation_mode, ReceiptEmulationMode::Escpos);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            db::get_setting(
+                &conn,
+                "local",
+                &format!("{PRINTER_BRAND_SETTING_PREFIX}{host}")
+            ),
+            None
+        );
     }
 
     #[test]

@@ -49,10 +49,10 @@ test('RoomsView supports embedded hub presets (Round 236)', () => {
 // disabling scroll, and the hub preset must be one-shot (cleared after a room tap consumes it and
 // when staff manually change the status filter).
 test('RoomsView hub preset is one-shot and the embedded grid hides the native scrollbar (Round 236 follow-up)', () => {
-  // Scroll is preserved (overflow-y-auto) but the native scrollbar is hidden when embedded.
+  // Scroll is preserved (the shared workspace scroll) but the native scrollbar is hidden when embedded.
   assert.match(
     viewSource,
-    /className=\{`flex-1 overflow-y-auto space-y-4 pb-20 \$\{embedded \? 'scrollbar-hide' : ''\}`\}/,
+    /className=\{`table-workspace-scroll \$\{embedded \? 'scrollbar-hide' : ''\}`\}/,
   );
 
   // Consuming a preset disarms hubMode (one-shot) in both routes, before opening the flow.
@@ -64,8 +64,8 @@ test('RoomsView hub preset is one-shot and the embedded grid hides the native sc
     viewSource,
     /const handleManualStatusFilterChange = \(next: RoomStatus \| 'all'\) => \{\s*setHubMode\(null\);\s*setStatusFilter\(next\);/,
   );
-  assert.match(viewSource, /<StatusFilterButtons statusFilter=\{statusFilter\} setStatusFilter=\{handleManualStatusFilterChange\}/);
-  assert.doesNotMatch(viewSource, /<StatusFilterButtons statusFilter=\{statusFilter\} setStatusFilter=\{setStatusFilter\}/);
+  assert.match(viewSource, /value=\{statusFilter\}\s*onChange=\{handleManualStatusFilterChange\}/);
+  assert.doesNotMatch(viewSource, /onChange=\{setStatusFilter\}/);
 
   // The preset effect still sets statusFilter directly, so it does NOT self-clear hubMode.
   assert.match(viewSource, /setStatusFilter\(hubPreset === 'checkin' \? 'reserved' : 'available'\)/);
@@ -73,7 +73,7 @@ test('RoomsView hub preset is one-shot and the embedded grid hides the native sc
 
 test('RoomsView routes its app-owned strings through i18n', () => {
   // Representative strings that were hardcoded English are now translated.
-  assert.match(roomSources, /t\('roomsView\.stats\.total', \{ defaultValue: 'Total' \}\)/);
+  assert.match(roomSources, /t\('roomsView\.stats\.available', \{ defaultValue: 'Available' \}\)/);
   assert.match(roomSources, /t\('roomsView\.searchPlaceholder', \{ defaultValue: 'Search room or guest\.\.\.' \}\)/);
   assert.match(roomSources, /t\('roomsView\.newCheckin', \{ defaultValue: 'New Check-in' \}\)/);
   assert.match(roomSources, /t\('roomsView\.newReservation', \{ defaultValue: 'New Reservation' \}\)/);
@@ -429,12 +429,13 @@ test('RoomsView detail quick-status buttons compare against getRoomEffectiveStat
 });
 
 test('Round 429: Rooms reservation controls stay on the yellow/amber system with smoother touch controls', () => {
-  assert.match(viewSource, /reserved: \{ color: 'text-yellow-500', bgClass: 'bg-yellow-500\/10 border-yellow-500\/30'/);
+  assert.match(viewSource, /reserved: \{ color: 'text-yellow-700 dark:text-yellow-400', bgClass: 'bg-\(--pos-s-surface-2\) border-\(--pos-s-border\)'/);
   assert.match(viewSource, /label=\{t\('roomsView\.newReservation'[\s\S]*?color="amber"/);
   assert.match(viewSource, /label=\{t\('roomsView\.actions\.reserve'[\s\S]*?color="amber"/);
-  assert.match(workflowSource, /bg-emerald-600[\s\S]*?active:scale-95[\s\S]*?disabled:cursor-not-allowed/);
-  assert.match(viewSource, /className=\{`px-3 py-1\.5 rounded-2xl text-xs sm:text-sm font-medium transition-transform active:scale-95/);
-  assert.match(viewSource, /className=\{`px-3 py-1\.5 rounded-2xl text-xs sm:text-sm \$\{/);
+  assert.match(workflowSource, /bg-\(--pos-s-yellow\)[\s\S]*?active:scale-95[\s\S]*?disabled:cursor-not-allowed/);
+  // Founder 31/10: status chips and the floor picker are the shared workspace controls.
+  assert.match(viewSource, /<WorkspaceChips<RoomStatus \| 'all'>/);
+  assert.match(viewSource, /<WorkspaceSelect/);
   assert.match(viewSource, /className=\{`h-9 w-9 rounded-full inline-flex items-center justify-center transition-transform active:scale-95/);
   assert.match(viewSource, /className=\{`flex items-center justify-center gap-2 py-3 px-4 rounded-2xl font-medium transition-transform active:scale-95/);
   assert.doesNotMatch(viewSource, /purple-/);
@@ -487,54 +488,21 @@ test('RoomsView shared room selectors and selected-room forms use unfiltered all
 // floor select, and refresh. The search now sits on its own full-width row (data-rooms-search / w-full),
 // and the status/floor/refresh controls wrap on a separate row below (data-rooms-filter-controls) — so
 // long localized placeholders are never squeezed. Filtering wiring + touch rules are unchanged.
-test('Round 254: Rooms search is its own full-width row, not squeezed by the desktop status/floor/refresh controls', () => {
-  // The search & filter bar stacks vertically (no sm:flex-row), so search never shares a row with the controls.
+test('Round 254 (founder 31/10): Rooms search sits with refresh in the header row, wide enough for its placeholder', () => {
+  // The shared workspace header: title, figures, then search and refresh on the right.
   assert.match(
     viewSource,
-    /\{\/\* Search & Filter Bar \*\/\}\s*<motion\.div variants=\{pageMotionItem\} data-rooms-filter-bar className="flex flex-col gap-2 sm:gap-3 mb-3 sm:mb-4">/,
+    /<WorkspaceHeader[\s\S]*?<WorkspaceSearch value=\{searchTerm\} onChange=\{setSearchTerm\} placeholder=\{t\('roomsView\.searchPlaceholder', \{ defaultValue: 'Search room or guest\.\.\.' \}\)\} \/>\s*<WorkspaceIconButton label=\{t\('common\.refresh', \{ defaultValue: 'Refresh' \}\)\} onClick=\{\(\) => refetch\(\)\}>/,
   );
-  // The old single-row (sm:flex-row) search bar that squeezed the field is gone.
-  assert.doesNotMatch(
-    viewSource,
-    /Search & Filter Bar \*\/\}\s*<motion\.div variants=\{pageMotionItem\} className="flex flex-col sm:flex-row/,
-  );
+  const css = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'components', 'tables', 'table-workspace.css'), 'utf8');
+  assert.match(css, /\.table-workspace-search \{[^}]*width: 300px;/);
+  // The status chips and the floor picker live in the toolbar row below, and wrap.
+  assert.ok(viewSource.indexOf('<WorkspaceSearch') < viewSource.indexOf('data-rooms-filter-bar'), 'the header comes before the toolbar');
+  assert.match(css, /\.table-workspace-status-filters \{[^}]*flex-wrap: wrap;/);
 
-  // The search field is a full-width row (w-full), not a squeezable flex-1, and keeps its i18n placeholder.
-  assert.match(
-    viewSource,
-    /<div data-rooms-search className=\{`relative w-full \$\{isDark \? 'text-white' : 'text-gray-900'\}`\}>/,
-  );
-  assert.doesNotMatch(viewSource, /<div className=\{`relative flex-1 \$\{isDark \? 'text-white' : 'text-gray-900'\}`\}>/);
-  assert.match(
-    viewSource,
-    /data-rooms-search[\s\S]*?placeholder=\{t\('roomsView\.searchPlaceholder', \{ defaultValue: 'Search room or guest\.\.\.' \}\)\}/,
-  );
-
-  // The status filters + floor selector + refresh live in a separate wrapping controls row, after the search.
-  assert.match(viewSource, /<div data-rooms-filter-controls className="flex flex-wrap items-center gap-2">/);
-  assert.ok(
-    viewSource.indexOf('data-rooms-search') < viewSource.indexOf('data-rooms-filter-controls'),
-    'the search row must come before the controls row',
-  );
-  const controlsRegion = viewSource.slice(
-    viewSource.indexOf('data-rooms-filter-controls'),
-    viewSource.indexOf('{/* Mobile Filters'),
-  );
-  assert.match(
-    controlsRegion,
-    /<StatusFilterButtons statusFilter=\{statusFilter\} setStatusFilter=\{handleManualStatusFilterChange\}/,
-  );
-  assert.match(controlsRegion, /<FloorSelect floorFilter=\{floorFilter\}/);
-  assert.match(controlsRegion, /onClick=\{\(\) => refetch\(\)\}/);
-  // The desktop filters wrap so many translated status chips never force a horizontal squeeze.
-  assert.match(controlsRegion, /<div className="hidden sm:flex flex-wrap gap-2">/);
-
-  // Touch rules preserved on the relocated bar: active feedback, no hover-only utilities, no native title.
-  const barRegion = viewSource.slice(
-    viewSource.indexOf('data-rooms-filter-bar'),
-    viewSource.indexOf('{/* Mobile Filters'),
-  );
-  assert.match(barRegion, /active:bg-gray-700/);
+  // Touch rules on the header and toolbar: no hover-only utilities, no native title.
+  const barRegion = viewSource.slice(viewSource.indexOf('<WorkspaceHeader'), viewSource.indexOf('{/* Loading State */}'));
+  assert.ok(barRegion.length > 0);
   assert.doesNotMatch(barRegion, /hover:/);
   assert.doesNotMatch(barRegion, /\stitle=/);
 });

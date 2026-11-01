@@ -70,13 +70,13 @@ export function isCancelledOrderHeldEdit(blocker: UnsettledPaymentBlocker): bool
 function getMethodBadgeClasses(method: string): string {
   switch (method) {
     case "cash":
-      return "border-emerald-400/30 bg-emerald-500/10 text-emerald-200";
+      return "border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200";
     case "card":
-      return "border-zinc-300/25 bg-white/6 text-zinc-100";
+      return "border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg)";
     case "split":
-      return "border-amber-400/30 bg-amber-500/10 text-amber-200";
+      return "border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200";
     default:
-      return "border-amber-400/30 bg-amber-500/10 text-amber-200";
+      return "border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200";
   }
 }
 
@@ -123,20 +123,20 @@ export function UnsettledPaymentBlockersPanel({
 
   return (
     <div
-      className={`rounded-2xl border border-amber-400/30 bg-amber-500/10 p-4 shadow-[0_12px_28px_rgba(245,158,11,0.12)] ${className}`}
+      className={`rounded-2xl border border-(--pos-s-warn) bg-(--pos-s-warn-bg) p-4 ${className}`}
     >
       <div className="flex items-start gap-3">
-        <div className="rounded-full border border-amber-400/35 bg-amber-500/15 p-2 text-amber-200">
+        <div className="rounded-full border border-(--pos-s-border) bg-(--pos-s-surface-2) p-2 text-amber-800 dark:text-amber-200">
           <AlertTriangle className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-extrabold uppercase tracking-[0.18em] text-amber-100">
+          <div className="text-sm font-extrabold uppercase tracking-[0.18em] text-amber-800 dark:text-amber-200">
             {title ||
               t("paymentIntegrity.blockersTitle", {
                 defaultValue: "Payment Integrity Blockers",
               })}
           </div>
-          <p className="mt-1 text-sm font-medium text-amber-50/90">
+          <p className="mt-1 text-sm font-medium text-amber-800 dark:text-amber-200">
             {helperText ||
               t("paymentIntegrity.blockersHelper", {
                 defaultValue:
@@ -222,7 +222,7 @@ export function UnsettledPaymentBlockersPanel({
             >
               <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
                 <div>
-                  <div className="text-lg font-black text-white">
+                  <div className="text-lg font-black text-(--pos-s-fg)">
                     {/* A card charged at new-order checkout whose order is not
                         written yet (item E): no order number exists. */}
                     {isNewOrderCheckoutBlocker(blocker)
@@ -249,7 +249,7 @@ export function UnsettledPaymentBlockersPanel({
                         defaultValue: "Set-aside payment",
                       })}
                     </div>
-                    <div className="mt-2 text-sm font-bold text-amber-200">
+                    <div className="mt-2 text-sm font-bold text-amber-800 dark:text-amber-200">
                       {formatCurrency(reviewPayment.amount || 0)}
                     </div>
                   </div>
@@ -259,7 +259,7 @@ export function UnsettledPaymentBlockersPanel({
                         defaultValue: "Taken at",
                       })}
                     </div>
-                    <div className="mt-2 text-sm font-bold text-white">
+                    <div className="mt-2 text-sm font-bold text-(--pos-s-fg)">
                       {reviewPayment.takenAt
                         ? formatDateTime(reviewPayment.takenAt, {
                             day: "2-digit",
@@ -276,7 +276,7 @@ export function UnsettledPaymentBlockersPanel({
                         defaultValue: "Total",
                       })}
                     </div>
-                    <div className="mt-2 text-sm font-bold text-white">
+                    <div className="mt-2 text-sm font-bold text-(--pos-s-fg)">
                       {formatBlockerAmount(blocker.totalAmount || 0)}
                     </div>
                   </div>
@@ -289,7 +289,7 @@ export function UnsettledPaymentBlockersPanel({
                         defaultValue: "Charged, not saved",
                       })}
                     </div>
-                    <div className="mt-2 text-sm font-bold text-red-200">
+                    <div className="mt-2 text-sm font-bold text-red-800 dark:text-red-200">
                       {isManualTwintRecord(unsavedPayment) ? formatCurrency(unsavedPayment.amountCents / 100,unsavedPayment.currency || 'CHF') : formatCurrency(unsavedPayment.amount || 0)}
                     </div>
                   </div>
@@ -299,7 +299,7 @@ export function UnsettledPaymentBlockersPanel({
                         defaultValue: "Charged at",
                       })}
                     </div>
-                    <div className="mt-2 text-sm font-bold text-white">
+                    <div className="mt-2 text-sm font-bold text-(--pos-s-fg)">
                       {unsavedPayment.capturedAt
                         ? formatDateTime(unsavedPayment.capturedAt, {
                             day: "2-digit",
@@ -316,7 +316,7 @@ export function UnsettledPaymentBlockersPanel({
                         defaultValue: "Total",
                       })}
                     </div>
-                    <div className="mt-2 text-sm font-bold text-white">
+                    <div className="mt-2 text-sm font-bold text-(--pos-s-fg)">
                       {formatBlockerAmount(blocker.totalAmount || 0)}
                     </div>
                   </div>
@@ -329,7 +329,7 @@ export function UnsettledPaymentBlockersPanel({
                         defaultValue: "Total",
                       })}
                     </div>
-                    <div className="mt-2 text-sm font-bold text-white">
+                    <div className="mt-2 text-sm font-bold text-(--pos-s-fg)">
                       {formatBlockerAmount(blocker.totalAmount || 0)}
                     </div>
                   </div>
@@ -339,7 +339,7 @@ export function UnsettledPaymentBlockersPanel({
                         defaultValue: "Settled",
                       })}
                     </div>
-                    <div className="mt-2 text-sm font-bold text-emerald-300">
+                    <div className="mt-2 text-sm font-bold text-emerald-800 dark:text-emerald-200">
                       {formatCurrency(blocker.settledAmount || 0)}
                     </div>
                   </div>
@@ -349,7 +349,7 @@ export function UnsettledPaymentBlockersPanel({
                         defaultValue: "Outstanding",
                       })}
                     </div>
-                    <div className="mt-2 text-sm font-bold text-amber-200">
+                    <div className="mt-2 text-sm font-bold text-amber-800 dark:text-amber-200">
                       {formatCurrency(outstanding)}
                     </div>
                   </div>
@@ -376,8 +376,8 @@ export function UnsettledPaymentBlockersPanel({
                   </span>
                 </div>
 
-                <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-50 xl:max-w-[60%]">
-                  <span className="mr-2 text-xs font-bold uppercase tracking-[0.18em] text-amber-200/80">
+                <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-sm font-medium text-amber-800 dark:text-amber-200 xl:max-w-[60%]">
+                  <span className="mr-2 text-xs font-bold uppercase tracking-[0.18em] text-amber-800 dark:text-amber-200">
                     {t("paymentIntegrity.fixLabel", {
                       defaultValue: "Fix",
                     })}
@@ -416,7 +416,7 @@ export function UnsettledPaymentBlockersPanel({
                       type="button"
                       disabled={Boolean(resolvingKey)}
                       onClick={() => onSaveUnsavedPayment(blocker)}
-                      className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-transparent bg-emerald-400 px-3 py-2 text-sm font-semibold text-slate-950 transition-transform active:scale-[0.98] active:bg-emerald-300 ${
+                      className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-transparent bg-(--pos-s-yellow) px-3 py-2 text-sm font-semibold text-black transition-transform active:scale-[0.98] ${
                         resolvingKey ? "cursor-not-allowed opacity-60" : ""
                       }`}
                       aria-busy={resolvingKey === unsavedSavingKey(unsavedPayment.idempotencyKey)}
@@ -436,7 +436,7 @@ export function UnsettledPaymentBlockersPanel({
                       type="button"
                       disabled={Boolean(resolvingKey)}
                       onClick={() => onResolveUnsavedPayment(blocker)}
-                      className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition-transform active:scale-[0.98] active:bg-amber-500/25 ${
+                      className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-sm font-semibold text-amber-800 dark:text-amber-200 transition-transform active:scale-[0.98] active:bg-(--pos-s-surface-2) ${
                         resolvingKey ? "cursor-not-allowed opacity-60" : ""
                       }`}
                       aria-busy={resolvingKey === unsavedResolvingKey(unsavedPayment.idempotencyKey)}
@@ -457,7 +457,7 @@ export function UnsettledPaymentBlockersPanel({
                       disabled={Boolean(resolvingKey)}
                       onClick={() => onResolveTwintReturned(blocker)}
                       data-testid={`twint-returned-${unsavedPayment.idempotencyKey}`}
-                      className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition-transform active:scale-[0.98] active:bg-amber-500/25 ${
+                      className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-sm font-semibold text-amber-800 dark:text-amber-200 transition-transform active:scale-[0.98] active:bg-(--pos-s-surface-2) ${
                         resolvingKey ? "cursor-not-allowed opacity-60" : ""
                       }`}
                       aria-busy={resolvingKey === unsavedResolvingKey(unsavedPayment.idempotencyKey)}
@@ -482,7 +482,7 @@ export function UnsettledPaymentBlockersPanel({
                     disabled={Boolean(resolvingKey)}
                     onClick={() => onCloseHeldEdit(blocker)}
                     data-testid={`close-held-edit-${blocker.orderId}`}
-                    className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition-transform active:scale-[0.98] active:bg-amber-500/25 ${
+                    className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-sm font-semibold text-amber-800 dark:text-amber-200 transition-transform active:scale-[0.98] active:bg-(--pos-s-surface-2) ${
                       resolvingKey ? "cursor-not-allowed opacity-60" : ""
                     }`}
                     aria-busy={resolvingKey === heldEditClosingKey(blocker.orderId)}
@@ -506,11 +506,10 @@ export function UnsettledPaymentBlockersPanel({
                     const isResolving = resolvingKey === buttonKey;
                     const isBusy = Boolean(resolvingKey) && resolvingKey !== buttonKey;
                     const isPreferred = preferredMethod === method;
+                    // Wave ΣΤ7: the preferred way is the one yellow primary; the other is a neutral secondary.
                     const baseClasses = isPreferred
-                      ? method === "cash"
-                        ? "border-transparent bg-emerald-500 text-slate-950 active:bg-emerald-400"
-                        : "border-transparent bg-amber-400 text-slate-950 active:bg-amber-300"
-                      : "border-white/10 bg-white/4 text-white active:bg-white/8";
+                      ? "border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black"
+                      : "border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border)";
                     const icon =
                       method === "cash" ? (
                         <Banknote className="h-4 w-4" />

@@ -209,7 +209,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
                     type="button"
                     onClick={() => updateItemQuantity(item.id, item.quantity - 1)}
                     aria-label={t('common.decrease', 'Decrease')}
-                    className="w-8 h-8 rounded-full bg-red-100/50 dark:bg-red-900/30 text-red-600 dark:text-red-400 active:bg-red-200/50 dark:active:bg-red-900/50 transition-transform duration-150 active:scale-95 flex items-center justify-center"
+                    className="w-8 h-8 rounded-full bg-(--pos-s-surface-2) dark:bg-zinc-800 text-red-800 dark:text-red-400 active:bg-(--pos-s-surface-2) dark:active:bg-zinc-800 transition-transform duration-150 active:scale-95 flex items-center justify-center"
                   >
                     -
                   </button>
@@ -226,7 +226,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
                     type="button"
                     onClick={() => updateItemQuantity(item.id, item.quantity + 1)}
                     aria-label={t('common.increase', 'Increase')}
-                    className="w-8 h-8 rounded-full bg-green-100/50 dark:bg-green-900/30 text-green-600 dark:text-green-400 active:bg-green-200/50 dark:active:bg-green-900/50 transition-transform duration-150 active:scale-95 flex items-center justify-center"
+                    className="w-8 h-8 rounded-full bg-(--pos-s-surface-2) dark:bg-zinc-800 text-green-800 dark:text-green-400 active:bg-(--pos-s-surface-2) dark:active:bg-zinc-800 transition-transform duration-150 active:scale-95 flex items-center justify-center"
                   >
                     +
                   </button>
@@ -235,7 +235,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
                     type="button"
                     onClick={() => removeItem(item.id)}
                     aria-label={t('common.remove', 'Remove')}
-                    className="w-8 h-8 rounded-full bg-gray-500/20 active:bg-red-500/20 liquid-glass-modal-text active:text-red-600 transition-transform duration-150 active:scale-95 flex items-center justify-center"
+                    className="w-8 h-8 rounded-full bg-gray-500/20 active:bg-(--pos-s-surface-2) liquid-glass-modal-text active:text-red-600 transition-transform duration-150 active:scale-95 flex items-center justify-center"
                   >
                     x
                   </button>

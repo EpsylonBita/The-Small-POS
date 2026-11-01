@@ -19,11 +19,12 @@ export const ThemeSwitcher: React.FC = () => {
   return (
     <button
       onClick={handleToggle}
+      type="button"
       className={`w-10 h-10 rounded-xl flex items-center justify-center transition-transform duration-150 active:scale-95 ${
-        resolvedTheme === 'light'
-          ? 'text-slate-900 hover:text-yellow-500'
-          : 'text-gray-300 hover:text-yellow-400'
+        resolvedTheme === 'light' ? 'text-slate-900' : 'text-gray-300'
       }`}
+      // The name lived only in title, which touch never shows; aria-label names the icon button.
+      aria-label={resolvedTheme === 'light' ? t('theme.switchToDark') : t('theme.switchToLight')}
       title={resolvedTheme === 'light' ? t('theme.switchToDark') : t('theme.switchToLight')}
     >
       <span className="inline-flex items-center justify-center">

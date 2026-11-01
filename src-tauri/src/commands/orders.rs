@@ -10005,6 +10005,44 @@ pub(crate) fn cancel_refusal_code(
     if !store_collectable || payments::order_is_folio_charged(conn, local_order_id)? {
         return Ok(None);
     }
+    // A completed check whose original money was returned is not missing its
+    // ledger. Older/cross-till mirrors may still carry the paid header. Require
+    // full original principal coverage so a single returned portion cannot hide
+    // another missing receipt. Voids/placeholders/platform settlements do not
+    // prove a customer return.
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM orders WHERE id=?1",
+            [local_order_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if matches!(status.as_str(), "completed" | "delivered") {
+        let financial = payments::financial_payment_status_sql(conn, "op")?;
+        let placeholder = payments::placeholder_payment_sql("op");
+        let platform = payments::platform_settlement_row_sql("op");
+        let (principal, tips): (i64, i64) = conn.query_row(&format!(
+            "SELECT COALESCE(SUM(MAX(gross-tip,0)),0),COALESCE(SUM(MIN(tip,gross)),0) FROM (
+                SELECT MAX(COALESCE(op.amount_cents,CAST(ROUND(op.amount*100) AS INTEGER),0),0) AS gross,
+                       MAX(COALESCE(op.tip_amount_cents,CAST(ROUND(op.tip_amount*100) AS INTEGER),0),0) AS tip
+                FROM order_payments op WHERE op.order_id=?1
+                  AND ({financial}) IN ('completed','refunded') AND NOT {placeholder} AND NOT {platform}
+                  AND (({financial})='refunded' OR
+                       COALESCE((SELECT SUM(COALESCE(a.amount_cents,CAST(ROUND(a.amount*100) AS INTEGER),0))
+                                 FROM payment_adjustments a WHERE a.payment_id=op.id AND a.adjustment_type='refund'
+                                   AND COALESCE(a.adjustment_context,'manual') <> 'edit_settlement'),0)
+                           >= COALESCE(op.amount_cents,CAST(ROUND(op.amount*100) AS INTEGER),0))
+            )"), [local_order_id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?;
+        if principal
+            + tips.min(payments::load_order_tip_inside_total_cents(
+                conn,
+                local_order_id,
+            )?)
+            >= total_cents
+        {
+            return Ok(None);
+        }
+    }
     Ok(Some(ORDER_PAYMENT_NOT_RECORDED))
 }
 

@@ -41,24 +41,24 @@ const CARD_COLORS: Record<DashboardCardColor, {
   text: { light: string; dark: string };
 }> = {
   blue: {
-    bg: { light: 'bg-amber-50', dark: 'bg-amber-900/30' },
-    icon: { light: 'text-amber-700', dark: 'text-amber-300' },
-    text: { light: 'text-amber-800', dark: 'text-amber-200' },
+    bg: { light: 'bg-(--pos-s-surface-2)', dark: 'bg-(--pos-s-surface-2)' },
+    icon: { light: 'text-amber-700', dark: 'text-amber-800 dark:text-amber-300' },
+    text: { light: 'text-amber-800', dark: 'text-amber-800 dark:text-amber-200' },
   },
   brown: {
-    bg: { light: 'bg-amber-50', dark: 'bg-amber-900/40' },
-    icon: { light: 'text-amber-700', dark: 'text-amber-400' },
-    text: { light: 'text-amber-800', dark: 'text-amber-300' },
+    bg: { light: 'bg-(--pos-s-surface-2)', dark: 'bg-(--pos-s-surface-2)' },
+    icon: { light: 'text-amber-700', dark: 'text-amber-700 dark:text-amber-400' },
+    text: { light: 'text-amber-800', dark: 'text-amber-800 dark:text-amber-300' },
   },
   green: {
-    bg: { light: 'bg-green-50', dark: 'bg-green-900/40' },
-    icon: { light: 'text-green-600', dark: 'text-green-400' },
-    text: { light: 'text-green-700', dark: 'text-green-300' },
+    bg: { light: 'bg-(--pos-s-surface-2)', dark: 'bg-(--pos-s-surface-2)' },
+    icon: { light: 'text-green-600', dark: 'text-green-700 dark:text-green-400' },
+    text: { light: 'text-green-700', dark: 'text-green-800 dark:text-green-300' },
   },
   red: {
-    bg: { light: 'bg-red-50', dark: 'bg-red-900/40' },
-    icon: { light: 'text-red-600', dark: 'text-red-400' },
-    text: { light: 'text-red-700', dark: 'text-red-300' },
+    bg: { light: 'bg-(--pos-s-surface-2)', dark: 'bg-(--pos-s-surface-2)' },
+    icon: { light: 'text-red-600', dark: 'text-red-700 dark:text-red-400' },
+    text: { light: 'text-red-700', dark: 'text-red-800 dark:text-red-300' },
   },
   purple: {
     bg: { light: 'bg-zinc-100', dark: 'bg-zinc-800/60' },
@@ -66,9 +66,9 @@ const CARD_COLORS: Record<DashboardCardColor, {
     text: { light: 'text-zinc-900', dark: 'text-zinc-100' },
   },
   amber: {
-    bg: { light: 'bg-amber-50', dark: 'bg-amber-900/40' },
-    icon: { light: 'text-amber-600', dark: 'text-amber-400' },
-    text: { light: 'text-amber-700', dark: 'text-amber-300' },
+    bg: { light: 'bg-(--pos-s-surface-2)', dark: 'bg-(--pos-s-surface-2)' },
+    icon: { light: 'text-amber-600', dark: 'text-amber-700 dark:text-amber-400' },
+    text: { light: 'text-amber-700', dark: 'text-amber-800 dark:text-amber-300' },
   },
 };
 
@@ -185,7 +185,7 @@ export const DashboardCard = memo<DashboardCardProps>(({
 
       {/* Optional Subtitle */}
       {subtitle && (
-        <div className={`text-xs mt-2 ${isDark ? 'text-gray-500' : 'text-gray-500'}`}>
+        <div className={`text-xs mt-2 ${isDark ? 'text-gray-500' : 'text-gray-600'}`}>
           {subtitle}
         </div>
       )}

@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { getBridge, offEvent, onEvent } from '../../../lib'
 import { requireSettingsSuccess } from '../../utils/settings-operation'
-import { renderModalPortal } from '../../utils/render-modal-portal'
 import { myDataVoucherCodeIssue } from '../../utils/mydata-device-setup'
 import {
   type EcrDeviceAdmission,
@@ -24,16 +23,15 @@ import {
   Plus,
   Trash2,
   RefreshCw,
-  Settings,
-  ChevronDown,
   Pencil,
   AlertCircle,
   CheckCircle,
   XCircle,
   Loader2,
-  X,
 } from 'lucide-react'
-import { POSGlassSwitch } from '../ui/pos-glass-components'
+import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components'
+import { solidButton, SettingsRow } from '../settings/SettingsKit'
+import { ConfirmDialog } from '../ui/ConfirmDialog'
 
 // ============================================================
 // TYPES
@@ -443,7 +441,7 @@ const StatusIndicator: React.FC<{ status?: DeviceStatus; error?: string }> = ({ 
   }
   if (!status || status === 'disconnected') {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-500/20 text-gray-400">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium liquid-glass-modal-text-muted">
         <XCircle className="w-3 h-3" />
         {t('settings.workflow.disconnected', 'Disconnected')}
       </span>
@@ -451,14 +449,14 @@ const StatusIndicator: React.FC<{ status?: DeviceStatus; error?: string }> = ({ 
   }
   if (status === 'error') {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400" aria-label={error}>
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 dark:bg-red-950 text-red-400" aria-label={error}>
         <AlertCircle className="w-3 h-3" />
         {t('settings.workflow.deviceError', 'Error')}
       </span>
     )
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-50 dark:bg-green-950 text-green-400">
       <CheckCircle className="w-3 h-3" />
       {t('settings.workflow.connected', 'Connected')}
     </span>
@@ -490,7 +488,6 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
   const [loadError, setLoadError] = useState('')
   const [registeredConnections, setRegisteredConnections] = useState<Set<string>>(new Set())
   const [probeResults, setProbeResults] = useState<Record<string, boolean>>({})
-  const [showDevices, setShowDevices] = useState(true)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   const [fiscalPrintEnabled, setFiscalPrintEnabled] = useState(true)
 
@@ -663,17 +660,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
     setViewMode('add')
   }, [setupIntent?.token])
 
-  // Escape closes the Add/Edit device submodal (close-only — never saves).
-  useEffect(() => {
-    if (viewMode !== 'add' && viewMode !== 'edit') return
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      closeForm()
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [viewMode, closeForm])
+  // Escape closes the Add/Edit window through LiquidGlassModal (topmost only; close-only, never saves).
 
   // Open edit form
   const handleEdit = (device: ECRCashDevice) => {
@@ -950,42 +937,30 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
 
   const renderListView = () => (
     <div className="space-y-3">
-      {/* Section Header (collapsible) */}
-      <div
-        className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 transition-all ${
-          showDevices ? 'bg-white/10 dark:bg-gray-800/20' : ''
-        }`}
-      >
-        <button
-          onClick={() => setShowDevices(!showDevices)}
-          className="w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text"
-        >
-          <div className="flex items-center gap-3">
-            <CreditCard className="w-5 h-5 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
-            <div className="text-left">
-              <span className="font-medium block">
-                {t('settings.peripherals.cashRegister.title', 'Cash Register / Fiscal Printer')}
-              </span>
-              <span className="text-xs liquid-glass-modal-text-muted">
-                {t('settings.peripherals.cashRegister.helpText', 'Configure fiscal devices and tax settings')}
-              </span>
-            </div>
-            {devices.length > 0 && (
-              <span className="px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-400">
-                {devices.length}
-              </span>
-            )}
+      {/* Kit group (wave 7Δ): same shape as «Μηχανές καρτών» above it; always open. */}
+      <section className="pos-group" data-cash-register-group>
+        <header className="pos-group__head flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="pos-group__title">
+              {t('settings.peripherals.cashRegister.title', 'Cash Register / Fiscal Printer')}
+            </h3>
+            <p className="pos-group__desc">
+              {t('settings.peripherals.cashRegister.helpText', 'Configure fiscal devices and tax settings')}
+            </p>
           </div>
-          <ChevronDown className={`w-5 h-5 transition-transform ${showDevices ? 'rotate-180' : ''}`} />
-        </button>
+          {devices.length > 0 && (
+            <span className="pos-badge shrink-0">
+              {devices.length}
+            </span>
+          )}
+        </header>
 
-        {showDevices && (
-          <div className="px-4 pb-4 space-y-3 border-t liquid-glass-modal-border">
+          <div className="px-5 pb-4 space-y-3">
             {/* Add Button */}
-            <div className="pt-3 flex gap-2">
+            <div className="pt-1 flex gap-2">
               <button
                 onClick={handleAdd}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-transform duration-150 active:scale-95 bg-emerald-600 border border-emerald-500 text-white shadow-xs shadow-emerald-600/30 active:bg-emerald-700"
+                className={solidButton('primary', 'sm')}
               >
                 <Plus className="w-4 h-4" />
                 {t('settings.peripherals.cashRegister.addDevice', 'Add Device')}
@@ -994,41 +969,40 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                 onClick={() => void loadDevices()}
                 disabled={loading}
                 aria-label={t('common.refresh', 'Refresh')}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all bg-white/10 border border-white/20 text-gray-300 active:bg-white/20"
+                className="pos-icon-btn"
               >
                 <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
               </button>
             </div>
 
-            {/* Fiscal Print Toggle */}
-            <div className="flex items-center justify-between rounded-2xl bg-white/5 dark:bg-gray-800/10 border liquid-glass-modal-border px-3 py-2.5">
-              <div className="flex items-center gap-2">
-                <Printer className="w-4 h-4 text-amber-400" />
-                <div>
-                  <span className="text-sm font-medium liquid-glass-modal-text">
-                    {t('settings.peripherals.cashRegister.fiscalPrintLabel', 'Auto Fiscal Print')}
-                  </span>
-                  <span className="block text-xs liquid-glass-modal-text-muted">
-                    {t('settings.peripherals.cashRegister.fiscalPrintHelp', 'Send fiscal receipt to cash register on each order')}
-                  </span>
-                </div>
-              </div>
-              <POSGlassSwitch
-                checked={fiscalPrintEnabled}
-                onChange={handleFiscalPrintToggle}
-                aria-label={t('settings.peripherals.cashRegister.fiscalPrintLabel', 'Auto Fiscal Print')}
+            {/* Fiscal Print Toggle — wave 7Δ2: shown only once a register exists. terminal/fiscal_print_enabled
+                is read only by the four checkout paths before ecr.fiscalPrint, which skips without a default
+                cash register; with none, an ON switch above «no registers» only confuses. Value and default
+                are unchanged. */}
+            {devices.length > 0 && (
+              <SettingsRow
+                className="rounded-2xl border border-zinc-200 dark:border-zinc-700 px-4!"
+                title={t('settings.peripherals.cashRegister.fiscalPrintLabel', 'Auto Fiscal Print')}
+                help={t('settings.peripherals.cashRegister.fiscalPrintHelp', 'Send fiscal receipt to cash register on each order')}
+                control={
+                  <POSGlassSwitch
+                    checked={fiscalPrintEnabled}
+                    onChange={handleFiscalPrintToggle}
+                    aria-label={t('settings.peripherals.cashRegister.fiscalPrintLabel', 'Auto Fiscal Print')}
+                  />
+                }
               />
-            </div>
+            )}
 
             {/* Device List */}
             {loading ? (
               <div className="flex items-center justify-center py-8">
-                <Loader2 className="w-6 h-6 animate-spin text-amber-400" />
+                <Loader2 className="w-6 h-6 animate-spin liquid-glass-modal-text-muted" />
               </div>
             ) : loadError ? (
               <div role="alert" className="space-y-2 text-sm text-red-600 dark:text-red-300">
                 <p>{t('settings.workflow.cashDevicesLoadFailed', 'Could not load devices.')} {loadError}</p>
-                <button type="button" onClick={() => void loadDevices()} className="rounded-lg border px-3 py-2">{t('common.actions.retry', 'Retry')}</button>
+                <button type="button" onClick={() => void loadDevices()} className={solidButton('secondary', 'sm')}>{t('common.actions.retry', 'Retry')}</button>
               </div>
             ) : devices.length === 0 ? (
               <div className="text-center py-6">
@@ -1042,15 +1016,15 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                 {devices.map((device) => (
                   <div
                     key={device.id}
-                    className="p-3 rounded-2xl bg-white/5 border border-white/10 space-y-2"
+                    className="p-3 rounded-2xl border border-zinc-200 dark:border-zinc-700 space-y-2"
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3 min-w-0">
                         <div className="shrink-0">
                           {device.device_type === 'cash_register' ? (
-                            <CreditCard className="w-4 h-4 text-amber-400" />
+                            <CreditCard className="w-4 h-4 liquid-glass-modal-text-muted" />
                           ) : (
-                            <CreditCard className="w-4 h-4 text-emerald-400" />
+                            <CreditCard className="w-4 h-4 liquid-glass-modal-text-muted" />
                           )}
                         </div>
                         <div className="min-w-0">
@@ -1059,12 +1033,12 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                               {device.name}
                             </span>
                             {device.is_default && (
-                              <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-sm shrink-0">
+                              <span className="pos-badge shrink-0">
                                 {t('settings.peripherals.cashRegister.default', 'Default')}
                               </span>
                             )}
                             {!device.enabled && (
-                              <span className="text-xs bg-gray-500/20 text-gray-400 px-2 py-0.5 rounded-sm shrink-0">
+                              <span className="text-xs liquid-glass-modal-text-muted px-2 py-0.5 rounded-sm shrink-0">
                                 {t('settings.peripherals.cashRegister.disabled', 'Disabled')}
                               </span>
                             )}
@@ -1081,16 +1055,16 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                       { deviceType: device.device_type, admitted: device.native_admitted },
                       admission ?? null
                     ) && (
-                      <div role="status" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2">
-                        <p className="flex items-start gap-1.5 text-xs text-amber-800 dark:text-amber-200">
-                          <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                      <div role="status" className="pos-notice pos-notice--warn pos-notice--row">
+                        <p className="flex items-start gap-2 text-sm">
+                          <AlertCircle className="pos-notice__icon h-4 w-4" aria-hidden="true" />
                           <span>{ecrNeedsPluginMessage(t, device.device_type)}</span>
                         </p>
                         {device.enabled && (
                           <button
                             type="button"
                             onClick={() => void handleDisable(device.id)}
-                            className="inline-flex min-h-[36px] items-center rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 text-xs font-medium text-amber-800 dark:text-amber-200 active:bg-amber-500/25"
+                            className={solidButton('secondary', 'sm')}
                           >
                             {t('ecr.admission.disable', { defaultValue: 'Disable' })}
                           </button>
@@ -1107,14 +1081,14 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                     </p>}
                     <div className="flex gap-1.5 pt-1">
                       <button type="button" onClick={() => void handleConnect(device.id)} disabled={Boolean(isTesting || isConnecting || isPrinting)}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-white/10 border liquid-glass-modal-border liquid-glass-modal-text disabled:opacity-50">
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border liquid-glass-modal-border liquid-glass-modal-text disabled:opacity-50">
                         {isConnecting === device.id && <Loader2 className="w-3 h-3 animate-spin" />}
                         {registeredConnections.has(device.id) ? t('settings.workflow.disconnect', 'Disconnect') : t('settings.workflow.connect', 'Connect')}
                       </button>
                       <button
                         onClick={() => handleTestConnection(device.id)}
                         disabled={Boolean(isTesting || isConnecting || isPrinting)}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all bg-amber-500/20 border border-amber-500/50 text-amber-900 dark:text-amber-200 active:bg-amber-500/30 disabled:opacity-50"
+                        className={solidButton('secondary', 'sm')}
                       >
                         {isTesting === device.id ? (
                           <Loader2 className="w-3 h-3 animate-spin" />
@@ -1126,7 +1100,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                       <button
                         onClick={() => handleTestPrint(device.id)}
                         disabled={!registeredConnections.has(device.id) || Boolean(isTesting || isConnecting || isPrinting)}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all bg-amber-500/20 border border-amber-500/50 text-amber-900 dark:text-amber-200 active:bg-amber-500/30"
+                        className={solidButton('secondary', 'sm')}
                       >
                         <Printer className="w-3 h-3" />
                         {t('settings.peripherals.cashRegister.testPrint', 'Test Print')}
@@ -1135,14 +1109,14 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                       <button
                         onClick={() => handleEdit(device)}
                         aria-label={t('common.actions.edit', 'Edit')}
-                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-xs transition-transform duration-150 active:scale-95 bg-white/10 border border-white/20 text-gray-300 active:bg-white/20"
+                        className="pos-icon-btn"
                       >
                         <Pencil className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={() => setDeleteConfirmId(device.id)}
                         aria-label={t('common.actions.delete', 'Delete')}
-                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-xs transition-transform duration-150 active:scale-95 bg-red-500/10 border border-red-500/30 text-red-400 active:bg-red-500/20"
+                        className="pos-icon-btn pos-icon-btn--danger"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -1152,44 +1126,20 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
               </div>
             )}
           </div>
-        )}
-      </div>
+      </section>
 
-      {/* Delete confirmation overlay */}
-      {deleteConfirmId && (
-        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-gray-900/95 border border-white/15 rounded-3xl p-6 mx-6 max-w-sm w-full shadow-2xl">
-            <div className="flex items-center gap-3 mb-4">
-              <Trash2 className="w-5 h-5 text-red-400 shrink-0" />
-              <div>
-                <h3 className="text-sm font-semibold text-white">
-                  {t('settings.peripherals.cashRegister.confirmDeleteTitle', 'Delete Device')}
-                </h3>
-                <p className="text-xs text-gray-400 mt-0.5">
-                  {devices.find((d) => d.id === deleteConfirmId)?.name || 'Device'}
-                </p>
-              </div>
-            </div>
-            <p className="text-sm text-gray-300 mb-5">
-              {t('settings.peripherals.cashRegister.confirmDeleteMessage', 'Are you sure you want to delete this device? This action cannot be undone.')}
-            </p>
-            <div className="flex gap-2 justify-end">
-              <button
-                onClick={() => setDeleteConfirmId(null)}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-white/10 border border-white/20 text-gray-300 active:bg-white/20 transition-all"
-              >
-                {t('common.actions.cancel', 'Cancel')}
-              </button>
-              <button
-                onClick={handleDeleteConfirm}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-red-600 active:bg-red-700 text-white transition-colors"
-              >
-                {t('common.actions.delete', 'Delete')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Delete confirmation: the shared themed dialog, above Settings (wave 7Δ). */}
+      <ConfirmDialog
+        isOpen={Boolean(deleteConfirmId)}
+        onClose={() => setDeleteConfirmId(null)}
+        onConfirm={() => { void handleDeleteConfirm() }}
+        variant="error"
+        title={t('settings.peripherals.cashRegister.confirmDeleteTitle', 'Delete Device')}
+        message={t('settings.peripherals.cashRegister.confirmDeleteMessage', 'Are you sure you want to delete this device? This action cannot be undone.')}
+        details={devices.find((d) => d.id === deleteConfirmId)?.name}
+        confirmText={t('common.actions.delete', 'Delete')}
+        cancelText={t('common.actions.cancel', 'Cancel')}
+      />
     </div>
   )
 
@@ -1197,44 +1147,45 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
   // RENDER: ADD / EDIT FORM
   // ============================================================
 
-  // Add/Edit fiscal device runs in a focused glass submodal (portaled to body) so it never inherits
-  // the settings page scroll offset or appears mid-form. It has its own scroll body + a sticky glass
-  // footer, so fields and actions never overlap at short heights (e.g. 1282x802).
-  const renderFormModal = () => renderModalPortal(
-    // z-[20050] sits ABOVE the Settings LiquidGlassModal viewport (.liquid-glass-modal-viewport,
-    // z-index: 20000) — matching the codebase's nested-above-glass-modal overlays (MenuItemModal,
-    // TableCheckManagerModal). z-[1200] rendered behind Settings (live QA, Round 241).
-    <div className="fixed inset-0 z-20050 flex items-center justify-center bg-black/70 backdrop-blur-sm p-3 sm:p-6">
-      {/* Backdrop — click closes (close-only, never saves) */}
-      <div className="absolute inset-0" onClick={closeForm} aria-hidden="true" />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="cash-register-device-form-title"
-        className="relative w-full max-w-2xl rounded-3xl border ring-1 shadow-[0_30px_90px_rgba(0,0,0,0.55)] max-h-[calc(100%-1.5rem)] sm:max-h-[calc(100%-3rem)] flex flex-col overflow-hidden bg-white/90 dark:bg-zinc-950/85 backdrop-blur-2xl border-black/10 dark:border-white/10 ring-black/5 dark:ring-white/10"
-      >
-        {/* Header (shrink-0) */}
-        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b shrink-0 border-black/10 dark:border-white/10">
-          <div className="flex items-center gap-3">
-            <Settings className="w-5 h-5 text-amber-400" />
-            <h3 id="cash-register-device-form-title" className="font-medium liquid-glass-modal-text">
-              {viewMode === 'edit'
-                ? t('settings.peripherals.cashRegister.editDevice', 'Edit Device')
+  // Add/Edit fiscal device: the shared glass window (wave 7Δ), like every other window. It inherits
+  // the Settings layer, so it opens above Settings; the old body portal at z-20050 sat under Settings'
+  // cashier-recovery layer and could not be seen. Own scroll body; the actions stay in the footer;
+  // Escape, the backdrop and × close it without saving.
+  const renderFormModal = () => (
+    <LiquidGlassModal
+      isOpen={viewMode === 'add' || viewMode === 'edit'}
+      onClose={closeForm}
+      title={viewMode === 'edit'
+        ? t('settings.peripherals.cashRegister.editDevice', 'Edit Device')
+        : t('settings.peripherals.cashRegister.addDevice', 'Add Device')}
+      size="md"
+      footer={
+        <div className="px-8 py-4 border-t pos-glass-footer">
+          <div className="flex gap-2 justify-end">
+            {/* Cancel: neutral; closes without saving */}
+            <button
+              onClick={closeForm}
+              className={solidButton('secondary', 'md')}
+            >
+              {t('common.actions.cancel', 'Cancel')}
+            </button>
+            {/* Save / Add: the yellow primary, disabled until the name is filled */}
+            <button
+              onClick={handleSave}
+              disabled={isSaving || !form.name.trim()}
+              className={solidButton('primary', 'md')}
+            >
+              {isSaving
+                ? t('common.actions.saving', 'Saving...')
+                : viewMode === 'edit'
+                ? t('common.actions.save', 'Save')
                 : t('settings.peripherals.cashRegister.addDevice', 'Add Device')}
-            </h3>
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={closeForm}
-            aria-label={t('common.actions.close', 'Close')}
-            className="inline-flex h-11 w-11 items-center justify-center rounded-xl border transition-transform duration-150 active:scale-95 bg-white/10 border-white/20 text-gray-300 active:bg-white/20"
-          >
-            <X className="w-5 h-5" />
-          </button>
         </div>
-
-        {/* Body — own scroll + min-h-0 so the sticky footer always keeps its reserved space. */}
-        <div className="px-5 py-4 overflow-y-auto flex-1 min-h-0 scrollbar-hide space-y-3">
+      }
+    >
+      <div className="space-y-3 [&_.liquid-glass-modal-input]:w-full" data-cash-register-form>
       {/* Name */}
       <div>
         <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
@@ -1249,7 +1200,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
       </div>
 
       {/* Brand & Protocol */}
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 gap-3 *:min-w-0">
         <div>
           <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
             {t('settings.peripherals.cashRegister.brand', 'Brand')}
@@ -1324,7 +1275,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
 
       {/* Connection Details: Serial */}
       {form.connection_type === 'serial_usb' && (
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-2 gap-3 *:min-w-0">
           <div>
             <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
               {t('settings.peripherals.cashRegister.comPort', 'COM Port')} *
@@ -1355,7 +1306,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
 
       {/* Connection Details: Network */}
       {form.connection_type === 'network' && (
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-2 gap-3 *:min-w-0">
           <div>
             <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
               {t('settings.peripherals.cashRegister.ipAddress', 'IP Address')} *
@@ -1384,7 +1335,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
             />
           </div>
           {form.brand === 'RBS' && (
-            <div className="col-span-2 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            <div className="col-span-2 pos-notice text-sm">
               {t(
                 'settings.peripherals.cashRegister.rbsNetworkHint',
                 'For ELIO/EDO devices using the vendor CAP Driver, use the cashier ERP IP/port and select CAP Driver. The Windows service owns the authenticated device connection.'
@@ -1410,7 +1361,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
       )}
 
       {form.protocol === 'cap_driver' && (
-        <div className="space-y-3 rounded-2xl border border-purple-500/20 bg-purple-500/10 p-3">
+        <div className="space-y-3 rounded-2xl border border-purple-300 dark:border-purple-800 bg-purple-50 dark:bg-purple-950 p-3">
           <div>
             <div className="text-sm font-medium liquid-glass-modal-text">
               {t('settings.peripherals.cashRegister.capDriverSettings', 'CAP Driver service')}
@@ -1473,7 +1424,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                 className="liquid-glass-modal-input"
               />
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3 *:min-w-0">
               <div>
                 <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
                   {t('settings.peripherals.cashRegister.capCashCode', 'Cash code')}
@@ -1633,7 +1584,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
               onChange={() => updateForm({ print_mode: 'register_prints' })}
               className="sr-only peer"
             />
-            <div className="flex min-h-touch items-center justify-center rounded-xl border-2 border-white/15 bg-white/5 px-3 py-2.5 text-center text-sm liquid-glass-modal-text transition-colors peer-checked:border-yellow-500 peer-checked:bg-yellow-400/15 peer-checked:text-yellow-900 dark:peer-checked:text-yellow-200 peer-focus:outline-hidden peer-focus:ring-2 peer-focus:ring-yellow-500/50">
+            <div className={`pos-choice-card pos-choice-card--row min-h-touch justify-center text-center text-sm peer-focus-visible:ring-2 peer-focus-visible:ring-yellow-500 ${form.print_mode === 'register_prints' ? 'is-selected' : ''}`}>
               {t('settings.peripherals.cashRegister.registerPrints', 'Register prints receipt')}
             </div>
           </label>
@@ -1645,7 +1596,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
               onChange={() => updateForm({ print_mode: 'pos_sends_receipt' })}
               className="sr-only peer"
             />
-            <div className="flex min-h-touch items-center justify-center rounded-xl border-2 border-white/15 bg-white/5 px-3 py-2.5 text-center text-sm liquid-glass-modal-text transition-colors peer-checked:border-yellow-500 peer-checked:bg-yellow-400/15 peer-checked:text-yellow-900 dark:peer-checked:text-yellow-200 peer-focus:outline-hidden peer-focus:ring-2 peer-focus:ring-yellow-500/50">
+            <div className={`pos-choice-card pos-choice-card--row min-h-touch justify-center text-center text-sm peer-focus-visible:ring-2 peer-focus-visible:ring-yellow-500 ${form.print_mode === 'pos_sends_receipt' ? 'is-selected' : ''}`}>
               {t('settings.peripherals.cashRegister.posSendsReceipt', 'POS sends receipt data')}
             </div>
           </label>
@@ -1660,7 +1611,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
         <div className="rounded-2xl border liquid-glass-modal-border overflow-hidden">
           <table className="w-full text-sm">
             <thead>
-              <tr className="bg-white/5">
+              <tr className="">
                 <th className="px-3 py-1.5 text-left text-xs font-medium liquid-glass-modal-text-muted">
                   {t('settings.peripherals.cashRegister.taxCode', 'Code')}
                 </th>
@@ -1682,7 +1633,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                     <input
                       value={row.code}
                       onChange={(e) => updateTaxRate(i, 'code', e.target.value)}
-                      className="w-12 px-1.5 py-1 rounded-sm bg-white/5 border border-white/10 text-center liquid-glass-modal-text text-xs"
+                      className="w-12 min-h-11 px-2 py-1 rounded-lg border border-zinc-200 dark:border-zinc-700 text-center liquid-glass-modal-text text-xs"
                       maxLength={2}
                     />
                   </td>
@@ -1690,7 +1641,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                     <input
                       value={row.rate}
                       onChange={(e) => updateTaxRate(i, 'rate', e.target.value)}
-                      className="w-16 px-1.5 py-1 rounded-sm bg-white/5 border border-white/10 text-center liquid-glass-modal-text text-xs"
+                      className="w-16 min-h-11 px-2 py-1 rounded-lg border border-zinc-200 dark:border-zinc-700 text-center liquid-glass-modal-text text-xs"
                       type="number"
                       min="0"
                       max="100"
@@ -1701,14 +1652,14 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                     <input
                       value={row.label}
                       onChange={(e) => updateTaxRate(i, 'label', e.target.value)}
-                      className="w-full px-1.5 py-1 rounded-sm bg-white/5 border border-white/10 liquid-glass-modal-text text-xs"
+                      className="w-full min-h-11 px-2 py-1 rounded-lg border border-zinc-200 dark:border-zinc-700 liquid-glass-modal-text text-xs"
                     />
                   </td>
                   <td className="px-3 py-1.5">
                     <input
                       value={row.department}
                       onChange={(e) => updateTaxRate(i, 'department', e.target.value)}
-                      className="w-16 px-1.5 py-1 rounded-sm bg-white/5 border border-white/10 text-center liquid-glass-modal-text text-xs"
+                      className="w-16 min-h-11 px-2 py-1 rounded-lg border border-zinc-200 dark:border-zinc-700 text-center liquid-glass-modal-text text-xs"
                       type="number"
                       min="1"
                       max="99"
@@ -1737,7 +1688,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
 
       {/* Default & Enabled */}
       <div className="flex flex-wrap items-center gap-3 pt-1">
-        <div className="inline-flex items-center gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2.5">
+        <div className="inline-flex items-center gap-3 rounded-xl border liquid-glass-modal-border px-3 py-2.5">
           <span className="text-sm liquid-glass-modal-text">
             {t('settings.peripherals.cashRegister.setAsDefault', 'Set as default')}
           </span>
@@ -1747,7 +1698,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
             aria-label={t('settings.peripherals.cashRegister.setAsDefault', 'Set as default')}
           />
         </div>
-        <div className="inline-flex items-center gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2.5">
+        <div className="inline-flex items-center gap-3 rounded-xl border liquid-glass-modal-border px-3 py-2.5">
           <span className="text-sm liquid-glass-modal-text">
             {t('settings.peripherals.cashRegister.enabled', 'Enabled')}
           </span>
@@ -1759,40 +1710,13 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
         </div>
       </div>
       {admission !== undefined && !cashRegisterAdmitted && formNeedsAdmission && (
-        <p role="status" className="text-xs font-medium text-amber-700 dark:text-amber-300">
+        <p role="status" className="pos-notice pos-notice--warn text-sm">
           {ecrNotAdmittedMessage(t, 'cash_register')}
         </p>
       )}
 
         </div>
-
-        {/* Footer — sticky glass bar (shrink-0); reserved by the flex column so it never overlaps
-            the fields, and the actions are always reachable without scrolling the page. */}
-        <div className="px-5 py-4 border-t shrink-0 backdrop-blur-xl border-black/10 dark:border-white/10 bg-white/70 dark:bg-zinc-950/70">
-          <div className="flex gap-2 justify-end">
-            {/* Cancel = soft destructive red */}
-            <button
-              onClick={closeForm}
-              className="px-4 py-2 rounded-lg text-sm font-medium border transition-transform duration-150 active:scale-95 border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-300 active:bg-red-500/20"
-            >
-              {t('common.actions.cancel', 'Cancel')}
-            </button>
-            {/* Save / Add = green primary with a clear disabled state */}
-            <button
-              onClick={handleSave}
-              disabled={isSaving || !form.name.trim()}
-              className="px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 text-white border border-emerald-500 shadow-xs shadow-emerald-600/30 transition-transform duration-150 active:scale-95 active:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
-            >
-              {isSaving
-                ? t('common.actions.saving', 'Saving...')
-                : viewMode === 'edit'
-                ? t('common.actions.save', 'Save')
-                : t('settings.peripherals.cashRegister.addDevice', 'Add Device')}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    </LiquidGlassModal>
   )
 
   // ============================================================
@@ -1804,7 +1728,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
   return (
     <>
       {renderListView()}
-      {(viewMode === 'add' || viewMode === 'edit') && renderFormModal()}
+      {renderFormModal()}
     </>
   )
 }

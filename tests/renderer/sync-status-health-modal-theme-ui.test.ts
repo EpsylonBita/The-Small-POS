@@ -41,17 +41,22 @@ const LIGHT_SURFACE =
   /(?:^|\s)bg-(?:white(?:\/(?:[8-9]\d))?|(?:slate|zinc|neutral)-(?:50|100)(?:\/\d+)?|(?:red|rose|amber|yellow|emerald|green)-(?:50|100)(?:\/\d+)?)(?=\s|$)/;
 const LIGHT_TEXT =
   /(?:^|\s)text-(?:(?:slate|zinc|neutral)-(?:700|800|900|950)|(?:red|rose|amber|yellow|emerald|green)-(?:700|800|900)|black)(?=\s|$)/;
+// Wave ΣΤ1: the kit tokens (--pos-s-*) switch with the theme, so they count as a light value and
+// a dark override at once.
+const KIT_SURFACE = /(?:^|\s)bg-\(--pos-s-(?:surface|surface-2|warn-bg|bad-bg|ok-bg)\)(?=\s|$)/;
+const KIT_TEXT = /(?:^|\s)text-\(--pos-s-(?:fg|muted|warn|bad|ok)\)(?=\s|$)/;
+const KIT_BORDER = /(?:^|\s)border-\(--pos-s-(?:border|warn|bad|ok)\)(?=\s|$)/;
 const DARK_SURFACE = /(?:^|\s)dark:bg-\S+/;
 const DARK_TEXT = /(?:^|\s)dark:text-\S+/;
 const DARK_BORDER = /(?:^|\s)dark:border-\S+/;
 
 const describeMissingThemePairs = (classes: string, label: string): string[] => {
   const failures: string[] = [];
-  if (!LIGHT_SURFACE.test(classes)) failures.push(`${label}: missing readable light background`);
-  if (!LIGHT_TEXT.test(classes)) failures.push(`${label}: missing readable light text`);
-  if (!DARK_SURFACE.test(classes)) failures.push(`${label}: missing dark background override`);
-  if (!DARK_TEXT.test(classes)) failures.push(`${label}: missing dark text override`);
-  if (!DARK_BORDER.test(classes)) failures.push(`${label}: missing dark border override`);
+  if (!LIGHT_SURFACE.test(classes) && !KIT_SURFACE.test(classes)) failures.push(`${label}: missing readable light background`);
+  if (!LIGHT_TEXT.test(classes) && !KIT_TEXT.test(classes)) failures.push(`${label}: missing readable light text`);
+  if (!DARK_SURFACE.test(classes) && !KIT_SURFACE.test(classes)) failures.push(`${label}: missing dark background override`);
+  if (!DARK_TEXT.test(classes) && !KIT_TEXT.test(classes)) failures.push(`${label}: missing dark text override`);
+  if (!DARK_BORDER.test(classes) && !KIT_BORDER.test(classes)) failures.push(`${label}: missing dark border override`);
   return failures;
 };
 
@@ -68,7 +73,15 @@ test('Health Status modal shell, state cards, and sections opt into light-first 
 
   const mainShell = healthModal.match(/className="([^"]*max-w-4xl[^"]*)"/)?.[1];
   assert.ok(mainShell, 'main Health Status modal shell class must be present');
-  failures.push(...describeMissingThemePairs(mainShell, 'main shell'));
+  // Founder 31/10 («αυτό δεν έχει κάτι σε glass»): the shell is the shared glass shell, whose frost
+  // and rim switch with the theme, over the shared glass scrim; its words use the kit fg.
+  assert.match(mainShell, /(?:^|\s)liquid-glass-modal-shell(?=\s|$)/, 'Health uses the shared glass modal shell');
+  assert.match(mainShell, KIT_TEXT, 'the glass shell words use the kit fg');
+  assert.match(healthModal, /className="pos-glass-scrim absolute inset-0"/, 'the page behind is dimmed and blurred like every glass modal');
+  assert.doesNotMatch(mainShell, /(?:^|\s)(?:dark:)?bg-/, 'no opaque or tinted shell fill over the glass');
+  for (const card of ["cn('pos-frost rounded-3xl border p-5', visual.shell)", "cn('pos-frost mt-4 rounded-2xl border', liquidGlassModalTone('neutral'))", 'pos-frost rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2']) {
+    assert.ok(healthModal.includes(card), `card frosts inside the glass shell: ${card}`);
+  }
 
   assert.match(
     healthModal,
@@ -124,10 +137,11 @@ test('Health Status modal neutral controls have light bases and dark overrides',
   const failures = neutralControls.flatMap((classes, index) => {
     const label = `neutral control ${index + 1}`;
     const result: string[] = [];
-    if (!LIGHT_SURFACE.test(classes)) result.push(`${label}: missing readable light background`);
-    if (!LIGHT_TEXT.test(classes)) result.push(`${label}: missing readable light text`);
-    if (!DARK_SURFACE.test(classes)) result.push(`${label}: missing dark background override`);
-    if (!DARK_TEXT.test(classes)) result.push(`${label}: missing dark text override`);
+    // Wave ΣΤ1: kit tokens switch with the theme (the solid footer buttons use them).
+    if (!LIGHT_SURFACE.test(classes) && !KIT_SURFACE.test(classes)) result.push(`${label}: missing readable light background`);
+    if (!LIGHT_TEXT.test(classes) && !KIT_TEXT.test(classes)) result.push(`${label}: missing readable light text`);
+    if (!DARK_SURFACE.test(classes) && !KIT_SURFACE.test(classes)) result.push(`${label}: missing dark background override`);
+    if (!DARK_TEXT.test(classes) && !KIT_TEXT.test(classes)) result.push(`${label}: missing dark text override`);
     return result;
   });
 

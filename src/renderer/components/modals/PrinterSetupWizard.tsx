@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { AlertTriangle, CheckCircle2, ChevronRight, Info, Printer, SlidersHorizontal, Wand2 } from 'lucide-react'
 import { liquidGlassModalButton, liquidGlassModalTone } from '../../styles/designSystem'
+import { POSGlassSwitch } from '../ui/pos-glass-components'
 import { getBridge } from '../../../lib'
 import { usePrintQueue } from '../../hooks/usePrintQueue'
 import {
@@ -131,7 +132,8 @@ const createWizardSessionId = (): string => {
   return `printer-wizard-${Date.now().toString(36)}`
 }
 
-const readabilityPreset: Record<ReadabilitySize, { fontType: FontType; layoutDensity: LayoutDensity; headerEmphasis: HeaderEmphasis }> = {
+// Shared with the printer form's "Text size" choice, so both write the same three fields.
+export const readabilityPreset: Record<ReadabilitySize, { fontType: FontType; layoutDensity: LayoutDensity; headerEmphasis: HeaderEmphasis }> = {
   small: { fontType: 'b', layoutDensity: 'compact', headerEmphasis: 'normal' },
   normal: { fontType: 'a', layoutDensity: 'compact', headerEmphasis: 'strong' },
   large: { fontType: 'a', layoutDensity: 'balanced', headerEmphasis: 'strong' },
@@ -310,6 +312,16 @@ const verificationTone = (value: unknown): string => {
   if (status === 'verified') return liquidGlassModalTone('success')
   if (status === 'degraded' || status === 'candidate') return liquidGlassModalTone('warning')
   return liquidGlassModalTone('neutral')
+}
+
+// How a cashier would describe the connection ("USB", "On the network"), never "SYSTEM".
+export const plainPrinterTypeLabel = (value: unknown, t: TFunction): string => {
+  const type = normalizePrinterType(value)
+  if (type === 'usb') return t('settings.printer.typeShort.usb', 'USB')
+  if (type === 'bluetooth') return t('settings.printer.typeShort.bluetooth', 'Bluetooth')
+  if (type === 'wifi') return t('settings.printer.typeShort.wifi', 'Wi-Fi')
+  if (type === 'system') return t('settings.printer.typeShort.system', 'Installed in Windows')
+  return t('settings.printer.typeShort.network', 'On the network')
 }
 
 const mergeCapabilities = (...values: Array<PrinterCapabilities | undefined | null>): PrinterCapabilities => {
@@ -1025,15 +1037,17 @@ const PrinterSetupWizard: React.FC<Props> = ({
     setCurrentStep(steps[stepIndex - 1])
   }
 
+  // Step 1 in plain words: pick the printer you see in the list, or enter it by hand.
+  // Technical detail (address, brand guess, confidence) stays out of the way.
   const renderDetectStep = () => (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="font-medium liquid-glass-modal-text">
-            {t('settings.printer.quickWizardDetectTitle', 'Step 1: Detect Printers')}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-base font-semibold liquid-glass-modal-text">
+            {t('settings.printer.quickWizardDetectTitle', 'Choose your printer')}
           </h3>
-          <p className="text-xs liquid-glass-modal-text-muted">
-            {t('settings.printer.quickWizardDetectHint', 'We detect nearby and installed printers first, but nothing is treated as printable until verification succeeds.')}
+          <p className="text-sm liquid-glass-modal-text-muted">
+            {t('settings.printer.quickWizardDetectHint', 'Printers connected to this computer or found on the network appear here.')}
           </p>
         </div>
         <button
@@ -1042,18 +1056,11 @@ const PrinterSetupWizard: React.FC<Props> = ({
             if (requestTokenRef.current || saveTokenRef.current || sampleInteractionLocked) return
             void discoverCandidates()
           }}
-          className={liquidGlassModalButton('secondary', 'sm')}
+          className={`${liquidGlassModalButton('secondary', 'sm')} min-h-touch shrink-0`}
           disabled={discovering || sampleInteractionLocked}
         >
-          {discovering ? t('settings.printer.scanning', 'Scanning...') : t('settings.printer.refresh', 'Refresh')}
+          {discovering ? t('settings.printer.scanning', 'Scanning...') : t('settings.printer.searchAgain', 'Search again')}
         </button>
-      </div>
-
-      <div className={`p-3 rounded-2xl border text-xs ${liquidGlassModalTone('warning')}`}>
-        {t(
-          'settings.printer.quickWizardDraftOnlyHint',
-          'Compatibility-first setup: the wizard tests transport and encoding using an unsaved draft profile. No temporary printer profiles are created.',
-        )}
       </div>
 
       {candidates.length === 0 ? (
@@ -1077,48 +1084,38 @@ const PrinterSetupWizard: React.FC<Props> = ({
                   setTemplate('classic')
                   setReadability(guessReadabilityFromRecommended(candidate.recommended))
                 }}
-                className={`min-h-touch w-full text-left p-3 rounded-lg border transition-all active:scale-[0.99] ${
-                  selected
-                    ? 'bg-amber-50 border-amber-400 text-amber-950 dark:bg-amber-500/15 dark:border-amber-400/50 dark:text-amber-100'
-                    : 'bg-slate-50 border-slate-200 text-slate-800 dark:bg-slate-900/60 dark:border-white/10 dark:text-slate-100'
-                }`}
+                className={`pos-choice-card min-h-14${selected ? ' is-selected' : ''}`}
               >
                 <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-medium liquid-glass-modal-text">{candidate.name}</div>
-                    <div className="text-xs liquid-glass-modal-text-muted">
-                      {candidate.type.toUpperCase()} • {candidate.address}
-                      {candidate.port ? `:${candidate.port}` : ''}
-                    </div>
-                    <div className="mt-1 text-[11px] liquid-glass-modal-text-muted">
-                      {t('settings.printer.quickWizardCandidateState', 'Discovered only. Verify before using.')}{' '}
-                      {candidate.isConfigured
-                        ? t('settings.printer.quickWizardAlreadyConfigured', 'Existing profile found.')
-                        : t('settings.printer.quickWizardNotConfiguredYet', 'No saved profile yet.')}
+                  <div className="flex min-w-0 items-center gap-3">
+                    <Printer className="h-5 w-5 shrink-0 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+                    <div className="min-w-0">
+                      <div className="font-semibold liquid-glass-modal-text">{candidate.name}</div>
+                      <div className="text-sm liquid-glass-modal-text-muted">{plainPrinterTypeLabel(candidate.type, t)}</div>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className={`text-xs px-2 py-0.5 rounded ${
-                      candidate.confidence >= 80
-                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-100'
-                        : 'bg-amber-100 text-amber-900 dark:bg-amber-500/20 dark:text-amber-100'
-                    }`}>
-                      {candidate.confidence >= 80
-                        ? t('settings.printer.quickWizardHighConfidence', 'High confidence')
-                        : t('settings.printer.quickWizardNeedsReview', 'Needs review')}
-                    </div>
-                    <div className="text-[11px] liquid-glass-modal-text-muted mt-1">
-                      {candidate.detectedBrand === 'Unknown'
-                        ? t('settings.printer.unknown', 'Unknown')
-                        : candidate.detectedBrand}
-                    </div>
-                  </div>
+                  {candidate.isConfigured && (
+                    <span className={`shrink-0 rounded-full border px-2.5 py-0.5 text-xs font-medium ${liquidGlassModalTone('success')}`}>
+                      {t('settings.printer.quickWizardAlreadySetUp', 'Already set up')}
+                    </span>
+                  )}
                 </div>
               </button>
             )
           })}
         </div>
       )}
+
+      <button
+        type="button"
+        disabled={saving}
+        onClick={() => {
+          if (!saveTokenRef.current) onOpenExpert()
+        }}
+        className={`${liquidGlassModalButton('secondary', 'md')} min-h-touch w-full`}
+      >
+        {t('settings.printer.quickWizardManualEntry', "I can't see my printer: enter it by hand")}
+      </button>
     </div>
   )
 
@@ -1160,7 +1157,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
             <div className="font-medium liquid-glass-modal-text">
               {t(stage.titleKey, stage.defaultTitle)}
               {stage.optional && (
-                <span className="ml-2 rounded-sm bg-slate-200 px-1.5 py-0.5 text-[11px] text-slate-700 dark:bg-white/10 dark:text-slate-200">
+                <span className="ml-2 rounded-sm bg-slate-200 px-1.5 py-0.5 text-[11px] text-slate-700 dark:bg-zinc-800 dark:text-slate-200">
                   {t('settings.printer.optional', 'Optional')}
                 </span>
               )}
@@ -1257,16 +1254,16 @@ const PrinterSetupWizard: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={() => handleConfirmStage(stage.kind, true)}
-                className={`${liquidGlassModalButton('primary', 'sm')} min-h-touch min-w-touch`}
+                className={`${liquidGlassModalButton('primary', 'md')} min-h-touch min-w-touch`}
               >
-                {t('common.actions.yes', 'Yes')}
+                {t('settings.printer.quickWizardPrintedOk', 'Yes, it printed correctly')}
               </button>
               <button
                 type="button"
                 onClick={() => handleConfirmStage(stage.kind, false)}
-                className={`${liquidGlassModalButton('secondary', 'sm')} min-h-touch min-w-touch`}
+                className={`${liquidGlassModalButton('secondary', 'md')} min-h-touch min-w-touch`}
               >
-                {t('common.actions.no', 'No')}
+                {t('settings.printer.quickWizardPrintedWrong', 'No, something is wrong')}
               </button>
             </div>
           </fieldset>
@@ -1280,11 +1277,30 @@ const PrinterSetupWizard: React.FC<Props> = ({
         )}
 
         {state.phase === 'rejected' && (
-          <div role="alert" className={`flex items-center gap-2 rounded-xl border p-2 text-xs ${liquidGlassModalTone('warning')}`}>
-            <AlertTriangle className="w-4 h-4" />
-            <span>{sample === 'branding' && !state.logoIncluded
-              ? t('settings.printer.quickWizardLogoNotIncluded', 'The sample did not include logo raster data, so logo support was not confirmed.')
-              : t('settings.printer.quickWizardStageRejected', 'This stage is not trusted yet. Adjust settings and retry.')}</span>
+          <div role="alert" className={`space-y-2 rounded-xl border p-3 text-sm ${liquidGlassModalTone('warning')}`}>
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              {/* What to try next, in the cashier's words, for each kind of test. */}
+              <span>{sample === 'branding' && !state.logoIncluded
+                ? t('settings.printer.quickWizardLogoNotIncluded', 'The sample did not include logo raster data, so logo support was not confirmed.')
+                : sample === 'transport'
+                  ? t('settings.printer.quickWizardTransportRejectedHelp', 'Check that the printer is on, has paper and is connected, then print the test again.')
+                  : sample === 'encoding'
+                    ? t('settings.printer.quickWizardEncodingRejectedHelp', 'If Greek letters or € came out wrong, the printer needs the "image-like receipt" print style. A technician can set it under Settings for technicians.')
+                    : t('settings.printer.quickWizardStageRejected', 'This stage is not trusted yet. Adjust settings and retry.')}</span>
+            </div>
+            {sample === 'encoding' && (
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => {
+                  if (!saveTokenRef.current) onOpenExpert()
+                }}
+                className={`${liquidGlassModalButton('secondary', 'sm')} min-h-touch`}
+              >
+                {t('settings.printer.forTechnicians', 'Settings for technicians')}
+              </button>
+            )}
           </div>
         )}
 
@@ -1339,38 +1355,42 @@ const PrinterSetupWizard: React.FC<Props> = ({
 
   const renderVerifyStep = () => (
     <div className="space-y-4">
-      <h3 className="font-medium liquid-glass-modal-text">
-        {t('settings.printer.quickWizardVerifyTitle', 'Step 2: Verify Compatibility')}
-      </h3>
+      <div>
+        <h3 className="text-base font-semibold liquid-glass-modal-text">
+          {t('settings.printer.quickWizardVerifyTitle', 'Print a test receipt')}
+        </h3>
+        <p className="text-sm liquid-glass-modal-text-muted">
+          {t('settings.printer.quickWizardVerifyIntro', 'Each test prints a short slip. Look at the paper and tell us how it came out. Nothing is saved until the last step.')}
+        </p>
+      </div>
       {selectedCandidate ? (
         <div className="space-y-3">
-          <div className={`p-3 rounded-2xl border ${liquidGlassModalTone('neutral')}`}>
-            <div className="flex items-center gap-2 text-sm liquid-glass-modal-text">
-              <Printer className="w-4 h-4" />
-              <span className="font-medium">{selectedCandidate.name}</span>
-            </div>
-            <div className="text-xs liquid-glass-modal-text-muted mt-1">
-              {selectedCandidate.type.toUpperCase()} • {selectedCandidate.address}
-            </div>
-            <div className="text-xs liquid-glass-modal-text-muted mt-2">
-              {t('settings.printer.quickWizardVerifyDraftHint', 'Each stage uses a draft profile only. The printer is not saved until the last step.')}
+          <div className={`flex items-center gap-3 p-3 rounded-2xl border ${liquidGlassModalTone('neutral')}`}>
+            <Printer className="h-5 w-5 shrink-0" aria-hidden="true" />
+            <div className="min-w-0">
+              <div className="font-semibold liquid-glass-modal-text">{selectedCandidate.name}</div>
+              <div className="text-sm liquid-glass-modal-text-muted">{plainPrinterTypeLabel(selectedCandidate.type, t)}</div>
             </div>
           </div>
 
           <div>
-            <label htmlFor="quick-wizard-paper-size" className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
-              {t('settings.printer.paperSize', 'Paper Size')}
-            </label>
-            <select
-              id="quick-wizard-paper-size"
-              value={paperSize}
-              onChange={e => setPaperSize(normalizePaperSize(e.target.value))}
-              className="liquid-glass-modal-input"
-            >
-              <option value="58mm">58mm</option>
-              <option value="80mm">80mm</option>
-              <option value="112mm">112mm</option>
-            </select>
+            <div id="quick-wizard-paper-size-label" className="mb-1.5 text-sm font-medium liquid-glass-modal-text">
+              {t('settings.printer.paperWidth', 'Paper width')}
+            </div>
+            <div role="radiogroup" aria-labelledby="quick-wizard-paper-size-label" className="grid grid-cols-3 gap-2">
+              {(['58mm', '80mm', '112mm'] as const).map(size => (
+                <button
+                  key={size}
+                  type="button"
+                  role="radio"
+                  aria-checked={paperSize === size}
+                  onClick={() => setPaperSize(normalizePaperSize(size))}
+                  className={`pos-choice min-h-touch${paperSize === size ? ' is-selected' : ''}`}
+                >
+                  {size.replace('mm', ' mm')}
+                </button>
+              ))}
+            </div>
           </div>
 
           {sampleErrorCode && (
@@ -1432,55 +1452,27 @@ const PrinterSetupWizard: React.FC<Props> = ({
             && effectiveLogoConfigured
             && verification.encoding.phase === 'confirmed'
             && verification.branding.phase !== 'confirmed' && (
-              <label className={`flex min-h-touch items-center gap-2 rounded-2xl border p-3 text-sm ${liquidGlassModalTone('warning')}`}>
-                <input
-                  type="checkbox"
+              <div className={`flex min-h-touch items-center justify-between gap-3 rounded-2xl border p-3 text-sm ${liquidGlassModalTone('warning')}`}>
+                <span id="quick-wizard-continue-without-logo">
+                  {t('settings.printer.quickWizardContinueWithoutLogo', 'Continue without verified logo output')}
+                </span>
+                <POSGlassSwitch
+                  aria-labelledby="quick-wizard-continue-without-logo"
                   checked={verification.continueWithoutLogo}
-                  onChange={(event) => dispatchVerification({
-                    type: 'continue_without_logo',
-                    value: event.target.checked,
-                  })}
-                  className="h-5 w-5 rounded-sm"
+                  onChange={(value) => dispatchVerification({ type: 'continue_without_logo', value })}
                 />
-                {t('settings.printer.quickWizardContinueWithoutLogo', 'Continue without verified logo output')}
-              </label>
+              </div>
             )}
 
-          <div className={`rounded-2xl border p-3 ${verificationTone(verificationStatus)}`}>
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-xs font-medium">
-                  {t('settings.printer.quickWizardVerificationSummary', 'Verification summary')}
-                </div>
-                <div className="text-sm mt-1">
-                  {verificationLabel(verificationStatus, t)}
-                </div>
-              </div>
-              <div className="text-right text-xs">
-                <div>{transportLabel(resolvedTransport, t)}</div>
-                {resolvedAddress ? <div className="mt-1">{resolvedAddress}</div> : null}
-              </div>
-            </div>
+          {/* One plain status line; transport, address and probe details stay in Diagnostics. */}
+          <div data-wizard-test-summary className={`flex items-center gap-2 rounded-2xl border p-3 text-sm font-medium ${verificationTone(verificationStatus)}`}>
+            {verificationStatus === 'verified'
+              ? <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+              : <Info className="h-4 w-4 shrink-0" aria-hidden="true" />}
+            {verificationStatus === 'verified'
+              ? t('settings.printer.quickWizardReadyVerifiedTitle', 'Ready to save as verified')
+              : t('settings.printer.quickWizardTestsPending', 'Finish the tests above to continue.')}
           </div>
-
-          {selectedCandidate.reasons.length > 0 && (
-            <div className={`p-3 rounded-2xl border ${liquidGlassModalTone('warning')}`}>
-              <div className="mb-1 text-xs font-medium">
-                {t('settings.printer.quickWizardWhyTitle', 'Why this recommendation')}
-              </div>
-              <ul className="space-y-1 text-xs">
-                {selectedCandidate.reasons.slice(0, 3).map(reason => (
-                  <li key={reason}>• {reason}</li>
-                ))}
-              </ul>
-              {selectedCandidate.probeHints?.preferredEmulationOrder?.length ? (
-                <div className="mt-2 text-[11px] opacity-80">
-                  {t('settings.printer.quickWizardProbeOrder', 'Probe order')}:{' '}
-                  {selectedCandidate.probeHints.preferredEmulationOrder.join(' → ')}
-                </div>
-              ) : null}
-            </div>
-          )}
         </div>
       ) : (
         <div className="text-sm liquid-glass-modal-text-muted">
@@ -1492,34 +1484,41 @@ const PrinterSetupWizard: React.FC<Props> = ({
 
   const renderStyleStep = () => (
     <div className="space-y-4">
-      <h3 className="font-medium liquid-glass-modal-text">
-        {t('settings.printer.quickWizardStyleTitle', 'Step 3: Defaults & Readability')}
+      <h3 className="text-base font-semibold liquid-glass-modal-text">
+        {t('settings.printer.quickWizardStyleTitle', 'How the receipt looks')}
       </h3>
 
-      <div className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('neutral')}`}>
-        {t(
-          'settings.printer.quickWizardCompatibilityDefaults',
-          'Safe defaults for new profiles: Classic template, text render mode, and automatic protocol selection. Optional logo / raster support is only trusted after confirmation.',
-        )}
-      </div>
-
       <div>
-        <label htmlFor="quick-wizard-receipt-template" className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+        <div id="quick-wizard-receipt-template-label" className="mb-1.5 text-sm font-medium liquid-glass-modal-text">
           {t('settings.printer.receiptTemplate', 'Receipt Template')}
-        </label>
-        <select
-          id="quick-wizard-receipt-template"
-          value={template}
-          onChange={e => setTemplate((e.target.value === 'modern' ? 'modern' : 'classic'))}
-          className="liquid-glass-modal-input"
-        >
-          <option value="classic">{t('settings.printer.receiptTemplateClassic', 'Classic')}</option>
-          <option value="modern">{t('settings.printer.receiptTemplateModern', 'Modern')}</option>
-        </select>
+        </div>
+        <div role="radiogroup" aria-labelledby="quick-wizard-receipt-template-label" className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {(['classic', 'modern'] as const).map(value => (
+            <button
+              key={value}
+              type="button"
+              role="radio"
+              aria-checked={template === value}
+              onClick={() => setTemplate(value)}
+              className={`pos-choice-card min-h-touch${template === value ? ' is-selected' : ''}`}
+            >
+              <span className="block text-sm font-semibold">
+                {value === 'classic'
+                  ? t('settings.printer.receiptTemplateClassic', 'Classic')
+                  : t('settings.printer.receiptTemplateModern', 'Modern')}
+              </span>
+              <span className="block text-xs opacity-80">
+                {value === 'classic'
+                  ? t('settings.printer.receiptTemplateClassicHint', 'Simple and fast, fits the most on the paper')
+                  : t('settings.printer.receiptTemplateModernHint', 'Bigger titles, with your logo')}
+              </span>
+            </button>
+          ))}
+        </div>
       </div>
 
       <div>
-        <div id="quick-wizard-readability-label" className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">
+        <div id="quick-wizard-readability-label" className="block text-sm font-medium mb-1.5 liquid-glass-modal-text">
           {t('settings.printer.quickWizardReadability.label', 'Readability')}
         </div>
         <div role="radiogroup" aria-labelledby="quick-wizard-readability-label" className="grid grid-cols-3 gap-2">
@@ -1567,7 +1566,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
       <p className="text-xs liquid-glass-modal-text-muted">
         {t(
           'settings.printer.quickWizardReadabilityHint',
-          'Fine-tuning stays available in Expert Settings. Changing protocol, render mode, or connection details later will reset verification.',
+          'You can change this later under the printer\'s Changes.',
         )}
       </p>
     </div>
@@ -1575,8 +1574,8 @@ const PrinterSetupWizard: React.FC<Props> = ({
 
   const renderSaveStep = () => (
     <div className="space-y-4">
-      <h3 className="font-medium liquid-glass-modal-text">
-        {t('settings.printer.quickWizardSaveTitle', 'Step 4: Save & Assign')}
+      <h3 className="text-base font-semibold liquid-glass-modal-text">
+        {t('settings.printer.quickWizardSaveTitle', 'Save the printer')}
       </h3>
 
       {renderLogoSettingsRecovery()}
@@ -1602,42 +1601,45 @@ const PrinterSetupWizard: React.FC<Props> = ({
         </div>
       </div>
 
-      <label className={`flex min-h-touch items-center gap-2 text-sm cursor-pointer ${defaultReceiptAllowed ? 'liquid-glass-modal-text' : 'liquid-glass-modal-text-muted'}`}>
-        <input
-          type="checkbox"
+      <div className={`flex min-h-touch items-center justify-between gap-3 text-sm ${defaultReceiptAllowed ? 'liquid-glass-modal-text' : 'liquid-glass-modal-text-muted'}`}>
+        <span id="quick-wizard-default-receipt">
+          {defaultReceiptAllowed
+            ? t('settings.printer.quickWizardMainReceiptPrinter', 'Main printer for customer receipts')
+            : t('settings.printer.quickWizardDefaultLocked', 'Default remains disabled until transport verification succeeds')}
+        </span>
+        <POSGlassSwitch
+          aria-labelledby="quick-wizard-default-receipt"
           checked={defaultReceiptAllowed ? setDefaultReceipt : false}
-          onChange={e => setSetDefaultReceipt(e.target.checked)}
+          onChange={setSetDefaultReceipt}
           disabled={!defaultReceiptAllowed}
-          className="rounded-sm"
         />
-        {defaultReceiptAllowed
-          ? t('settings.printer.setAsDefault', 'Set as default')
-          : t('settings.printer.quickWizardDefaultLocked', 'Default remains disabled until transport verification succeeds')}
-      </label>
-
-      <div className="space-y-2">
-        <div className="text-xs liquid-glass-modal-text-muted">
-          {t('settings.printer.quickWizardAssignOtherRoles', 'Assign this printer to other roles (optional)')}
-        </div>
-        <label className="flex min-h-touch items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
-          <input type="checkbox" checked={assignKitchen} onChange={e => setAssignKitchen(e.target.checked)} className="rounded-sm" />
-          {t('settings.printer.roleKitchen', 'Kitchen')}
-        </label>
-        <label className="flex min-h-touch items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
-          <input type="checkbox" checked={assignBar} onChange={e => setAssignBar(e.target.checked)} className="rounded-sm" />
-          {t('settings.printer.roleBar', 'Bar')}
-        </label>
-        <label className="flex min-h-touch items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
-          <input type="checkbox" checked={assignLabel} onChange={e => setAssignLabel(e.target.checked)} className="rounded-sm" />
-          {t('settings.printer.roleLabel', 'Label')}
-        </label>
       </div>
 
-      <div className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('neutral')}`}>
-        <div>{t('settings.printer.quickWizardSavedTemplate', 'Template')}: {template}</div>
-        <div>{t('settings.printer.quickWizardSavedRenderMode', 'Render mode')}: {derivedCapabilities.renderMode || 'text'}</div>
-        <div>{t('settings.printer.quickWizardSavedEmulation', 'Emulation')}: {derivedCapabilities.emulation || 'auto'}</div>
-        {resolvedAddress ? <div>{t('settings.printer.quickWizardSavedAddress', 'Resolved address')}: {resolvedAddress}</div> : null}
+      <div className="space-y-1">
+        <div className="text-sm font-medium liquid-glass-modal-text">
+          {t('settings.printer.quickWizardAlsoPrints', 'This printer also prints (optional)')}
+        </div>
+        {([
+          ['kitchen', assignKitchen, setAssignKitchen, t('settings.printer.roleKitchen', 'Kitchen')],
+          ['bar', assignBar, setAssignBar, t('settings.printer.roleBar', 'Bar')],
+          ['label', assignLabel, setAssignLabel, t('settings.printer.roleLabel', 'Label')],
+        ] as const).map(([role, checked, setChecked, label]) => (
+          <div key={role} className="flex min-h-touch items-center justify-between gap-3 text-sm liquid-glass-modal-text">
+            <span id={`quick-wizard-also-${role}`}>{label}</span>
+            <POSGlassSwitch aria-labelledby={`quick-wizard-also-${role}`} checked={checked} onChange={setChecked} />
+          </div>
+        ))}
+      </div>
+
+      <div className={`rounded-2xl border p-3 text-sm ${liquidGlassModalTone('neutral')}`}>
+        {t('settings.printer.quickWizardSaveSummary', {
+          defaultValue: 'Saved as: {{name}}, {{paper}}, {{style}}',
+          name: selectedCandidate?.name || '',
+          paper: paperSize.replace('mm', ' mm'),
+          style: template === 'modern'
+            ? t('settings.printer.receiptTemplateModern', 'Modern')
+            : t('settings.printer.receiptTemplateClassic', 'Classic'),
+        })}
       </div>
     </div>
   )
@@ -1658,14 +1660,9 @@ const PrinterSetupWizard: React.FC<Props> = ({
                   onClick={() => {
                     if (!saving && !saveTokenRef.current) setCurrentStep(step)
                   }}
-                  className={`min-h-touch min-w-touch px-2.5 py-1.5 text-xs rounded-md transition active:scale-95 ${
-                    active
-                      ? 'bg-amber-100 text-amber-900 dark:bg-amber-500/20 dark:text-amber-100'
-                      : passed
-                        ? 'text-emerald-700 dark:text-emerald-200'
-                        : 'liquid-glass-modal-text-muted'
-                  }`}
+                  className={`pos-choice min-h-touch min-w-touch${active ? ' is-selected' : ''}${!active && passed ? ' text-emerald-800 dark:text-emerald-200' : ''}`}
                 >
+                  <span aria-hidden="true">{passed ? '✓ ' : `${steps.indexOf(step) + 1} `}</span>
                   {t(`settings.printer.quickWizardStep.${step}`, step)}
                 </button>
               </li>
@@ -1682,12 +1679,14 @@ const PrinterSetupWizard: React.FC<Props> = ({
         </button>
       </div>
 
-      {currentStep === 'detect' && renderDetectStep()}
-      {currentStep === 'verify' && renderVerifyStep()}
-      {currentStep === 'style' && renderStyleStep()}
-      {currentStep === 'save' && renderSaveStep()}
+      <div key={currentStep} className="pos-enter">
+        {currentStep === 'detect' && renderDetectStep()}
+        {currentStep === 'verify' && renderVerifyStep()}
+        {currentStep === 'style' && renderStyleStep()}
+        {currentStep === 'save' && renderSaveStep()}
+      </div>
 
-      <div className="flex items-center justify-between border-t border-slate-200 pt-2 dark:border-white/10">
+      <div className="flex items-center justify-between border-t border-slate-200 pt-2 dark:border-zinc-700">
         <button disabled={saving} onClick={() => {
           if (!saveTokenRef.current) onCancel()
         }} className={`${liquidGlassModalButton('secondary', 'md')} min-h-touch min-w-touch`} type="button">

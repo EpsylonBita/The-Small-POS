@@ -243,8 +243,6 @@ export const ErrorDisplay: React.FC<ErrorDisplayProps> = ({
               cursor: 'pointer',
               transition: 'opacity 0.2s'
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.9')}
-            onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
           >
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
               <RefreshCw className="w-4 h-4" aria-hidden="true" />
@@ -266,8 +264,6 @@ export const ErrorDisplay: React.FC<ErrorDisplayProps> = ({
               cursor: 'pointer',
               transition: 'background-color 0.2s'
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#e0e0e0')}
-            onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#f5f5f5')}
           >
             Dismiss
           </button>

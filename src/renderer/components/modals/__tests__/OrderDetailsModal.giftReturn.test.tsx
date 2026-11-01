@@ -767,3 +767,36 @@ describe('OrderDetailsModal with RefundVoidModal: original-card gift returns', (
     expect(mocks.bridge.giftReturns.status).toHaveBeenCalledTimes(1);
   });
 });
+
+
+describe('cancel after an earlier complete return', () => {
+  it.each(['completed', 'delivered'])('offers Cancel on a fully returned %s order', async status => {
+    const onRequestCancellation = vi.fn(async () => true);
+    const onClose = vi.fn();
+    mocks.bridge.payments.getSettlementSnapshot.mockResolvedValue(settlement(0, 15));
+    mocks.bridge.payments.getOrderPayments.mockResolvedValue([{ id: 'cash', method: 'cash', status: 'refunded', amount: 15 }]);
+    render(<OrderDetailsModal isOpen orderId={ORDER_ID} order={{ ...orderRow('pending'), status }}
+      onClose={onClose} onRequestCancellation={onRequestCancellation} />);
+    const cancel = await screen.findByTestId('order-details-cancel-returned');
+    expect(screen.queryByRole('button', { name: tr('payment.split.title') })).toBeNull();
+    await act(async () => { fireEvent.click(cancel); });
+    expect(onRequestCancellation).toHaveBeenCalledExactlyOnceWith(ORDER_ID);
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(mocks.bridge.refunds.refundPayment).not.toHaveBeenCalled();
+  });
+  it('keeps collection available when a failed receipt is the only zero-balance evidence', async () => {
+    mocks.bridge.payments.getSettlementSnapshot.mockResolvedValue(settlement(0, 15));
+    mocks.bridge.payments.getOrderPayments.mockResolvedValue([{ id: 'failed', method: 'cash', status: 'failed', amount: 15 }]);
+    render(<OrderDetailsModal isOpen orderId={ORDER_ID} order={orderRow('pending')} onClose={() => {}}
+      onRequestCancellation={async () => true} />);
+    expect(await screen.findByRole('button', { name: tr('payment.split.title') })).toBeTruthy();
+    expect(screen.queryByTestId('order-details-cancel-returned')).toBeNull();
+  });
+  it('offers no zero-money Cancel when the settlement could not be read', async () => {
+    mocks.bridge.payments.getSettlementSnapshot.mockRejectedValue(new Error('read failed'));
+    render(<OrderDetailsModal isOpen orderId={ORDER_ID} order={orderRow()} onClose={() => {}}
+      onRequestCancellation={async () => true} />);
+    await flush();
+    expect(screen.queryByTestId('order-details-cancel-returned')).toBeNull();
+  });
+});

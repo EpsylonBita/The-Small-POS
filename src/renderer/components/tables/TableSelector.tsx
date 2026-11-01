@@ -152,32 +152,32 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
   const statusConfig: Record<TableStatus, { label: string; bgClass: string; textClass: string }> = {
     available: {
       label: t('tableSelector.status.available', { defaultValue: 'Available' }),
-      bgClass: 'border-green-500/50 bg-green-500/10',
-      textClass: 'text-green-500'
+      bgClass: 'border-green-600 bg-(--pos-s-surface-2)',
+      textClass: 'text-green-800 dark:text-green-400'
     },
     reserved: {
       label: t('tableSelector.status.reserved', { defaultValue: 'Reserved' }),
-      bgClass: 'border-yellow-500/50 bg-yellow-500/10',
-      textClass: 'text-yellow-500'
+      bgClass: 'border-(--pos-s-yellow) bg-(--pos-s-surface-2)',
+      textClass: 'text-yellow-700 dark:text-yellow-400'
     },
     occupied: {
       label: t('tableSelector.status.occupied', { defaultValue: 'Occupied' }),
-      bgClass: 'border-blue-500 bg-blue-500/10',
+      bgClass: 'border-blue-500 bg-(--pos-s-surface-2)',
       textClass: 'text-blue-500'
     },
     cleaning: {
       label: t('tableSelector.status.cleaning', { defaultValue: 'Cleaning' }),
-      bgClass: 'border-gray-500 bg-gray-500/10',
+      bgClass: 'border-gray-500 bg-(--pos-s-surface-2)',
       textClass: 'text-gray-500'
     },
     maintenance: {
       label: t('tableSelector.status.maintenance', { defaultValue: 'Maintenance' }),
-      bgClass: 'border-orange-500 bg-orange-500/10',
-      textClass: 'text-orange-500'
+      bgClass: 'border-orange-500 bg-(--pos-s-surface-2)',
+      textClass: 'text-orange-700 dark:text-orange-400'
     },
     unavailable: {
       label: t('tableSelector.status.unavailable', { defaultValue: 'Unavailable' }),
-      bgClass: 'border-slate-500 bg-slate-500/10',
+      bgClass: 'border-slate-500 bg-(--pos-s-surface-2)',
       textClass: 'text-slate-500'
     }
   };
@@ -245,7 +245,7 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
                   aria-pressed={selectedFloor === 'all'}
                   className={`inline-flex min-h-[40px] items-center justify-center rounded-full border px-3.5 text-sm font-medium transition active:scale-95 ${
                     selectedFloor === 'all'
-                      ? 'border-amber-400/50 bg-amber-400/20 text-amber-900 dark:text-amber-100'
+                      ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 dark:text-amber-100'
                       : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text dark:bg-black/20'
                   }`}
                 >
@@ -259,7 +259,7 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
                     aria-pressed={selectedFloor === floor}
                     className={`inline-flex min-h-[40px] items-center justify-center rounded-full border px-3.5 text-sm font-medium transition active:scale-95 ${
                       selectedFloor === floor
-                        ? 'border-amber-400/50 bg-amber-400/20 text-amber-900 dark:text-amber-100'
+                        ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 dark:text-amber-100'
                         : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text dark:bg-black/20'
                     }`}
                   >
@@ -282,7 +282,7 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
                 aria-pressed={selectedCapacity === 'all'}
                 className={`inline-flex min-h-[40px] items-center justify-center rounded-full border px-3.5 text-sm font-medium transition active:scale-95 ${
                   selectedCapacity === 'all'
-                    ? 'border-amber-400/50 bg-amber-400/20 text-amber-900 dark:text-amber-100'
+                    ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 dark:text-amber-100'
                     : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text dark:bg-black/20'
                 }`}
               >
@@ -296,7 +296,7 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
                   aria-pressed={selectedCapacity === capacity}
                   className={`inline-flex min-h-[40px] items-center justify-center rounded-full border px-3.5 text-sm font-medium transition active:scale-95 ${
                     selectedCapacity === capacity
-                      ? 'border-amber-400/50 bg-amber-400/20 text-amber-900 dark:text-amber-100'
+                      ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 dark:text-amber-100'
                       : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text dark:bg-black/20'
                   }`}
                 >

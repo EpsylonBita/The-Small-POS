@@ -98,7 +98,7 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
                   disabled={isSaving}
                   className={`w-full rounded-2xl border p-3 text-left transition-colors ${
                     isSelected
-                      ? 'border-amber-400/70 bg-amber-100/60 dark:border-amber-400/50 dark:bg-amber-500/20'
+                      ? 'border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg) bg-(--pos-s-surface-2) dark:bg-zinc-800'
                       : 'border-zinc-300/70 bg-white/65 active:bg-zinc-100 dark:border-white/15 dark:bg-white/6 dark:active:bg-white/10'
                   } ${isSaving ? 'cursor-not-allowed opacity-70' : ''}`}
                 >
@@ -128,8 +128,8 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
           disabled={isSaving}
           className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 liquid-glass-modal-text ${
             selectedMethod === 'cash'
-              ? 'border-green-300/70 dark:border-green-400/40 bg-green-100/50 dark:bg-green-500/20'
-              : 'border-green-200/50 dark:border-green-400/30 bg-green-50/40 dark:bg-green-500/10 active:bg-green-100/50 dark:active:bg-green-500/20'
+              ? 'border-(--pos-s-border) dark:border-zinc-700 bg-(--pos-s-surface-2) dark:bg-zinc-800'
+              : 'border-(--pos-s-border) dark:border-zinc-700 bg-(--pos-s-surface-2) dark:bg-zinc-800 active:bg-(--pos-s-surface-2) dark:active:bg-zinc-800'
           } ${isSaving ? 'opacity-70 cursor-not-allowed' : ''}`}
         >
           <div className="font-medium">{t('modals.editPaymentMethod.methods.cash')}</div>
@@ -141,8 +141,8 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
           disabled={isSaving}
           className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 liquid-glass-modal-text ${
             selectedMethod === 'card'
-              ? 'border-amber-300/70 dark:border-amber-400/40 bg-amber-100/50 dark:bg-amber-500/20'
-              : 'border-amber-200/50 dark:border-amber-400/30 bg-amber-50/40 dark:bg-amber-500/10 active:bg-amber-100/50 dark:active:bg-amber-500/20'
+              ? 'border-(--pos-s-border) dark:border-zinc-700 bg-(--pos-s-surface-2) dark:bg-zinc-800'
+              : 'border-(--pos-s-border) dark:border-zinc-700 bg-(--pos-s-surface-2) dark:bg-zinc-800 active:bg-(--pos-s-surface-2) dark:active:bg-zinc-800'
           } ${isSaving ? 'opacity-70 cursor-not-allowed' : ''}`}
         >
           <div className="font-medium">{t('modals.editPaymentMethod.methods.card')}</div>
@@ -154,8 +154,8 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
           type="button"
           onClick={onClose}
           disabled={isSaving}
-          className={`flex-1 px-4 py-2 rounded-2xl border font-medium flex items-center justify-center min-h-touch transition-colors border-red-300/70 bg-red-50 text-red-700 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200 ${
-            isSaving ? 'opacity-70 cursor-not-allowed' : 'active:bg-red-100 dark:active:bg-red-500/15'
+          className={`flex-1 px-4 py-2 rounded-2xl border font-medium flex items-center justify-center min-h-touch transition-colors border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) dark:border-zinc-700 dark:bg-zinc-800 ${
+            isSaving ? 'opacity-70 cursor-not-allowed' : 'active:bg-(--pos-s-border) dark:active:bg-zinc-800'
           }`}
         >
           {t('modals.editPaymentMethod.cancel')}
@@ -167,7 +167,7 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
           className={`flex-1 px-4 py-2 rounded-2xl font-medium flex items-center justify-center min-h-touch transition-colors ${
             !hasChanged || isSaving
               ? 'bg-zinc-100 text-zinc-400 border border-zinc-200/80 dark:bg-white/6 dark:text-zinc-500 dark:border-white/10 cursor-not-allowed'
-              : 'bg-green-600 active:bg-green-700 text-white'
+              : 'bg-(--pos-s-yellow) active:bg-yellow-500 text-black'
           }`}
         >
           {isSaving ? t('modals.editPaymentMethod.saving') : t('modals.editPaymentMethod.save')}

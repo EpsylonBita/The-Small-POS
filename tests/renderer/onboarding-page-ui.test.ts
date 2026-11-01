@@ -11,9 +11,9 @@ const source = readFileSync(
 
 test('OnboardingPage uses touch-first yellow setup styling without mojibake', () => {
   assert.match(source, /text-yellow-300/);
-  assert.match(source, /border-yellow-400 bg-yellow-400\/15 text-yellow-200/);
+  assert.match(source, /language === option\.code \? 'border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)'/);
   assert.match(source, /focus-visible:ring-yellow-400/);
-  assert.match(source, /focus:ring-yellow-400/);
+  assert.match(source, /focus:ring-\(--pos-s-fg\)/);
   assert.match(source, /bg-yellow-400 text-black font-semibold/);
   assert.match(source, /rounded-3xl/);
   assert.match(source, /rounded-2xl/);

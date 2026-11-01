@@ -139,7 +139,7 @@ export function TableAttemptRecoveryNotice({ onReviewEdit }: { onReviewEdit?: (c
     };
   }, [refresh]);
   if (!attempts.length && !unavailable) return null;
-  return <section role="status" className="shrink-0 rounded-xl border border-amber-400/40 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-500/10 dark:text-amber-100">
+  return <section role="status" className="shrink-0 rounded-xl border border-(--pos-s-warn) bg-(--pos-s-warn-bg) p-3 text-sm text-(--pos-s-fg)">
     <h3 className="font-semibold">{t('checkoutRecovery.title')}</h3>
     <p>{t('checkoutRecovery.guidance')}</p>
     {unavailable && <p>{t('checkoutRecovery.unavailable')}</p>}

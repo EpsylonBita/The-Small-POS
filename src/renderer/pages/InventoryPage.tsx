@@ -430,25 +430,25 @@ const InventoryPage: React.FC = () => {
           type="button"
           onClick={() => void fetchInventory(true)}
           aria-label={t('common.refresh', 'Refresh')}
-          className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${isDark ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25' : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+          className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
         >
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
       {error && !loading && (
-        <div className={`mb-6 rounded-2xl border px-4 py-4 ${isDark ? 'bg-red-950/30 border-red-900 text-red-100' : 'bg-red-50 border-red-200 text-red-700'}`}>
+        <div className={`mb-6 rounded-2xl border px-4 py-4 ${isDark ? 'bg-(--pos-s-bad-bg) border-(--pos-s-bad) text-red-800 dark:text-red-200' : 'bg-(--pos-s-bad-bg) border-(--pos-s-bad) text-red-700'}`}>
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 mt-0.5" />
               <div>
                 <p className="font-semibold">{t('inventory.errors.loadFailedTitle', 'Inventory unavailable')}</p>
-                <p className={`text-sm ${isDark ? 'text-red-200/80' : 'text-red-600'}`}>{error}</p>
+                <p className={`text-sm ${isDark ? 'text-red-200' : 'text-red-600'}`}>{error}</p>
               </div>
             </div>
             <button
               onClick={() => void fetchInventory(true)}
-              className={`shrink-0 rounded-2xl px-3 py-2 text-sm font-medium border transition-transform active:scale-[0.98] ${isDark ? 'border-red-700 active:bg-red-900/40' : 'border-red-300 active:bg-red-100'}`}
+              className={`shrink-0 rounded-2xl px-3 py-2 text-sm font-medium border transition-transform active:scale-[0.98] ${isDark ? 'border-red-700 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) active:bg-(--pos-s-surface-2)'}`}
             >
               {t('common.retry', 'Retry')}
             </button>
@@ -492,7 +492,7 @@ const InventoryPage: React.FC = () => {
             <CheckCircle className={`w-5 h-5 shrink-0 ${isDark ? 'text-emerald-300' : 'text-green-500'}`} />
             <div>
               <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.inStock', 'In Stock')}</p>
-              <p className={`text-xl font-bold ${isDark ? 'text-emerald-300' : 'text-green-500'}`}>{stats.good}</p>
+              <p className={`text-xl font-bold ${isDark ? 'text-emerald-300' : 'text-green-700'}`}>{stats.good}</p>
             </div>
           </div>
         </motion.div>
@@ -527,29 +527,27 @@ const InventoryPage: React.FC = () => {
               className={`px-4 py-2 rounded-2xl font-medium transition-transform active:scale-[0.98] border ${
                 status === 'all'
                   ? statusFilter === status
-                    ? isDark
-                      ? 'bg-zinc-100 text-black border-zinc-200'
-                      : 'bg-black text-white border-black'
+                    ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                     : isDark
                     ? 'bg-zinc-900 text-zinc-400 border-zinc-700'
                     : 'bg-white text-gray-600 border-gray-300'
                   : status === 'critical'
                   ? statusFilter === status
-                    ? 'bg-red-500 text-white border-red-500'
+                    ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                     : isDark
-                    ? 'bg-zinc-900 text-red-300 border-red-500/40 active:bg-red-500/10'
-                    : 'bg-white text-red-600 border-red-300 active:bg-red-50'
+                    ? 'bg-zinc-900 text-red-800 dark:text-red-300 border-(--pos-s-border) active:bg-(--pos-s-surface-2)'
+                    : 'bg-white text-red-600 border-(--pos-s-border) active:bg-(--pos-s-surface-2)'
                   : status === 'low'
                   ? statusFilter === status
-                    ? 'bg-amber-500 text-black border-amber-500'
+                    ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                     : isDark
-                    ? 'bg-zinc-900 text-amber-300 border-amber-500/40 active:bg-amber-500/10'
-                    : 'bg-white text-amber-600 border-amber-300 active:bg-amber-50'
+                    ? 'bg-zinc-900 text-amber-800 dark:text-amber-300 border-(--pos-s-border) active:bg-(--pos-s-surface-2)'
+                    : 'bg-white text-amber-700 border-(--pos-s-border) active:bg-(--pos-s-surface-2)'
                   : statusFilter === status
-                  ? 'bg-emerald-500 text-black border-emerald-500'
+                  ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                   : isDark
-                  ? 'bg-zinc-900 text-emerald-300 border-emerald-500/40 active:bg-emerald-500/10'
-                  : 'bg-white text-emerald-600 border-emerald-300 active:bg-emerald-50'
+                  ? 'bg-zinc-900 text-emerald-800 dark:text-emerald-300 border-(--pos-s-border) active:bg-(--pos-s-surface-2)'
+                  : 'bg-white text-emerald-700 border-(--pos-s-border) active:bg-(--pos-s-surface-2)'
               }`}
             >
               {t(`inventory.filter.${status}`, status.charAt(0).toUpperCase() + status.slice(1))}
@@ -597,13 +595,13 @@ const InventoryPage: React.FC = () => {
                   >
                     <td className="px-4 py-3"><StatusIcon status={status} /></td>
                     <td className="px-4 py-3 font-medium">{name}</td>
-                    <td className={`px-4 py-3 ${isDark ? 'text-zinc-400' : 'text-gray-400'}`}>{item.category_name || '-'}</td>
+                    <td className={`px-4 py-3 ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{item.category_name || '-'}</td>
                     <td className="px-4 py-3 text-right">
                       <span className={status === 'critical' ? (isDark ? 'text-zinc-200 font-bold' : 'text-red-500 font-bold') : status === 'low' ? (isDark ? 'text-zinc-300' : 'text-yellow-500') : ''}>
                         {item.stock_quantity} {item.unit_of_measurement}
                       </span>
                     </td>
-                    <td className={`px-4 py-3 text-right ${isDark ? 'text-zinc-400' : 'text-gray-400'}`}>{item.min_stock_level}</td>
+                    <td className={`px-4 py-3 text-right ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{item.min_stock_level}</td>
                     <td className="px-4 py-3 text-right font-medium">{formatMoney(item.stock_quantity * item.cost_per_unit)}</td>
                     <td className="px-4 py-3 text-center">
                       <button
@@ -624,7 +622,7 @@ const InventoryPage: React.FC = () => {
             </tbody>
           </table>
           {filteredInventory.length === 0 && (
-            <div className="text-center py-12 text-gray-400">
+            <div className="text-center py-12 text-gray-600 dark:text-gray-400">
               <Package className="w-12 h-12 mx-auto mb-4 opacity-50" />
               <p>{t('inventory.noItems', 'No inventory items found')}</p>
             </div>
@@ -649,12 +647,12 @@ const InventoryPage: React.FC = () => {
           >
             <div className="flex shrink-0 items-start justify-between gap-4 border-b border-inherit p-5">
               <div className="min-w-0">
-                <div className={`mb-2 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${isDark ? 'bg-amber-500/15 text-amber-200' : 'bg-amber-50 text-amber-700'}`}>
+                <div className={`mb-2 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${isDark ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'bg-(--pos-s-surface-2) text-amber-700'}`}>
                   <History className="h-3.5 w-3.5" />
                   {t('inventory.history.title', 'Price and movement history')}
                 </div>
                 <h3 id={historyTitleId} className="truncate text-2xl font-bold">{isGreek ? historyItem.name_el : historyItem.name_en}</h3>
-                <p className={`mt-1 truncate text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                <p className={`mt-1 truncate text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
                   {historyItem.category_name || t('inventory.noCategory', 'No category')}
                 </p>
               </div>
@@ -675,7 +673,7 @@ const InventoryPage: React.FC = () => {
                   ))}
                 </div>
               ) : historyError ? (
-                <div className={`rounded-xl border p-4 ${isDark ? 'border-red-900 bg-red-950/30 text-red-100' : 'border-red-200 bg-red-50 text-red-700'}`}>
+                <div className={`rounded-xl border p-4 ${isDark ? 'border-red-900 bg-(--pos-s-surface-2) text-red-800 dark:text-red-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-700'}`}>
                   {historyError}
                 </div>
               ) : historyData ? (
@@ -688,7 +686,7 @@ const InventoryPage: React.FC = () => {
                       { label: t('inventory.history.used', 'Used / removed'), value: `${formatQuantity(historyData.summary.used_quantity)} ${historyData.item.unit_of_measurement}` },
                     ].map((tile) => (
                       <div key={tile.label} className={`rounded-xl border p-3 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
-                        <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{tile.label}</p>
+                        <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{tile.label}</p>
                         <p className="mt-1 truncate text-lg font-bold">{tile.value}</p>
                       </div>
                     ))}
@@ -698,14 +696,14 @@ const InventoryPage: React.FC = () => {
                     <div className="mb-3 flex items-center justify-between gap-3">
                       <div>
                         <h4 className="font-bold">{t('inventory.history.priceHistory', 'Supplier price history')}</h4>
-                        <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                        <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
                           {t('inventory.history.priceHistoryDescription', 'Each supplier invoice purchase is kept here so cost changes are visible.')}
                         </p>
                       </div>
                     </div>
 
                     {historyData.price_history.length === 0 ? (
-                      <div className={`rounded-xl border p-6 text-center ${isDark ? 'border-zinc-800 bg-zinc-900/50 text-zinc-400' : 'border-gray-200 bg-gray-50 text-gray-500'}`}>
+                      <div className={`rounded-xl border p-6 text-center ${isDark ? 'border-zinc-800 bg-zinc-900/50 text-zinc-400' : 'border-gray-200 bg-gray-50 text-gray-600'}`}>
                         {t('inventory.history.noPriceHistory', 'No supplier purchase history yet.')}
                       </div>
                     ) : (
@@ -734,7 +732,7 @@ const InventoryPage: React.FC = () => {
                                     <td className={`px-3 py-3 text-sm ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>{entry.supplier_name || '-'}</td>
                                     <td className="px-3 py-3 text-right text-sm">{formatQuantity(entry.quantity)} {entry.unit || historyData.item.unit_of_measurement}</td>
                                     <td className="px-3 py-3 text-right text-sm font-semibold">{formatMoney(entry.cost_per_unit)}</td>
-                                    <td className={`px-3 py-3 text-right text-sm font-semibold ${isUp ? 'text-red-400' : isDown ? 'text-emerald-400' : isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                                    <td className={`px-3 py-3 text-right text-sm font-semibold ${isUp ? 'text-red-400' : isDown ? 'text-emerald-400' : isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
                                       <span className="inline-flex items-center justify-end gap-1">
                                         <ChangeIcon className="h-4 w-4" />
                                         {entry.price_change === 'initial'
@@ -757,7 +755,7 @@ const InventoryPage: React.FC = () => {
                   <section>
                     <h4 className="mb-3 font-bold">{t('inventory.history.movements', 'Stock movements')}</h4>
                     {historyData.movements.length === 0 ? (
-                      <div className={`rounded-xl border p-6 text-center ${isDark ? 'border-zinc-800 bg-zinc-900/50 text-zinc-400' : 'border-gray-200 bg-gray-50 text-gray-500'}`}>
+                      <div className={`rounded-xl border p-6 text-center ${isDark ? 'border-zinc-800 bg-zinc-900/50 text-zinc-400' : 'border-gray-200 bg-gray-50 text-gray-600'}`}>
                         {t('inventory.history.noMovements', 'No stock movements recorded yet.')}
                       </div>
                     ) : (
@@ -767,18 +765,18 @@ const InventoryPage: React.FC = () => {
                             <div className="flex flex-wrap items-start justify-between gap-3">
                               <div>
                                 <p className="font-semibold">{t(`inventory.history.movementTypes.${movement.movement_type}`, movement.movement_type)}</p>
-                                <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                                <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
                                   {formatHistoryDate(movement.created_at)}
                                   {movement.invoice?.invoice_number ? ` · ${t('inventory.history.invoice', 'Invoice')} ${movement.invoice.invoice_number}` : ''}
                                 </p>
                               </div>
                               <div className="text-right">
                                 <p className="font-bold">{formatQuantity(movement.quantity)} {movement.unit || historyData.item.unit_of_measurement}</p>
-                                <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{movement.cost_per_unit ? formatMoney(movement.cost_per_unit) : '-'}</p>
+                                <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{movement.cost_per_unit ? formatMoney(movement.cost_per_unit) : '-'}</p>
                               </div>
                             </div>
                             {movement.reason_notes && (
-                              <p className={`mt-2 text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{movement.reason_notes}</p>
+                              <p className={`mt-2 text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{movement.reason_notes}</p>
                             )}
                           </div>
                         ))}
@@ -860,11 +858,11 @@ const InventoryPage: React.FC = () => {
               />
             </div>
             <div className="flex gap-3">
-              <button onClick={closeAdjustModal} className={`flex-1 py-3 rounded-xl border inline-flex items-center justify-center active:scale-95 ${isDark ? 'border-red-500/40 bg-red-500/10 text-red-300 active:bg-red-500/20' : 'border-red-300 bg-red-50 text-red-600 active:bg-red-100'}`}>
+              <button onClick={closeAdjustModal} className={`flex-1 py-3 rounded-xl border inline-flex items-center justify-center active:scale-95 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'}`}>
                 {t('common.cancel', 'Cancel')}
               </button>
               <button onClick={() => void handleAdjustStock()} disabled={adjustmentQty === 0 || adjustAction.disabled} aria-label={adjustAction.message ? `${t('common.save', 'Save')}: ${adjustAction.message}` : t('common.save', 'Save')} className={`flex-1 py-3 rounded-xl border font-medium inline-flex items-center justify-center active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed ${
-                isDark ? 'border-emerald-500/40 bg-emerald-500/20 text-emerald-200 active:bg-emerald-500/30' : 'border-emerald-600 bg-emerald-600 text-white active:bg-emerald-700'
+                isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500' : 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500'
               }`}>
                 {t('common.save', 'Save')}
               </button>

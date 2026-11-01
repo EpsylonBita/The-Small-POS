@@ -13,13 +13,13 @@
  * server-side while the modal is open.
  */
 
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
-import { Smartphone, RefreshCw, Loader2, ShieldAlert, AlertTriangle, Users, ListChecks } from 'lucide-react'
+import { Loader2, ShieldAlert, AlertTriangle, Users, ListChecks } from 'lucide-react'
 import { posApiGet, posApiPut } from '../../utils/api-helpers'
 import { POSGlassSwitch } from '../ui/pos-glass-components'
-import { liquidGlassModalButton } from '../../styles/designSystem'
+import { DirtyFooter, StatusLine, solidButton, useReportSettingsDirty } from './SettingsKit'
 import { formatDate } from '../../utils/format'
 import { SERVICE_OVERVIEW_OPEN_EVENT } from '../../../../../shared/pos/tables/WaiterServiceInbox'
 
@@ -95,13 +95,16 @@ const buildDraft = (device: WaiterDevice): ManagedFeatureDraft => ({
 const isDraftDirty = (device: WaiterDevice, draft: ManagedFeatureDraft): boolean =>
   MANAGED_FEATURE_KEYS.some((key) => draft[key] !== (device.enabledFeatures?.[key] === true))
 
+const WAITER_DEVICES_REFRESH_MS = 30_000
+
 export const WaiterDevicesSection: React.FC = () => {
   const { t } = useTranslation()
   const [devices, setDevices] = useState<WaiterDevice[]>([])
   const [drafts, setDrafts] = useState<Record<string, ManagedFeatureDraft>>({})
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
-  const [savingTerminalId, setSavingTerminalId] = useState<string | null>(null)
+  // One save for every changed phone (wave 7Δ2); switches wait while it runs.
+  const [saving, setSaving] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [mainOnlyDenied, setMainOnlyDenied] = useState(false)
 
@@ -143,6 +146,23 @@ export const WaiterDevicesSection: React.FC = () => {
     void loadDevices()
   }, [loadDevices])
 
+  // Quiet refresh every 30 s instead of a Refresh button (one less thing to press).
+  // It waits while the operator has unsaved access changes or a save is running,
+  // because a reload replaces the drafts.
+  const draftsDirty = devices.some((device) =>
+    JSON.stringify(drafts[device.terminalId] ?? null) !== JSON.stringify(buildDraft(device)))
+  // The settings shell asks before these unsaved permission changes are dropped.
+  useReportSettingsDirty('waiter-devices', draftsDirty)
+  const quietRefreshBlockedRef = useRef(false)
+  quietRefreshBlockedRef.current = draftsDirty || saving
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (quietRefreshBlockedRef.current || document.visibilityState === 'hidden') return
+      void loadDevices({ refresh: true })
+    }, WAITER_DEVICES_REFRESH_MS)
+    return () => window.clearInterval(timer)
+  }, [loadDevices])
+
   const setDraftFeature = (terminalId: string, key: ManagedFeatureKey, next: boolean) => {
     setDrafts((current) => {
       const device = devices.find((entry) => entry.terminalId === terminalId)
@@ -152,7 +172,9 @@ export const WaiterDevicesSection: React.FC = () => {
     })
   }
 
-  const handleSave = async (device: WaiterDevice) => {
+  type SaveOutcome = { kind: 'saved' } | { kind: 'denied' } | { kind: 'failed'; message: string }
+
+  const saveDevice = async (device: WaiterDevice): Promise<SaveOutcome> => {
     const draft = drafts[device.terminalId] ?? buildDraft(device)
     // Send the full record with the managed keys applied so unmanaged keys
     // (cash_drawer, discounts, ...) are preserved verbatim.
@@ -182,45 +204,78 @@ export const WaiterDevicesSection: React.FC = () => {
       }
     }
 
-    setSavingTerminalId(device.terminalId)
-    try {
-      const response = await posApiPut<WaiterDeviceUpdateBody>(
-        `/api/pos/terminals/waiter-devices/${encodeURIComponent(device.terminalId)}`,
-        { enabled_features: nextFeatures },
-      )
-      const body = response.data
+    const response = await posApiPut<WaiterDeviceUpdateBody>(
+      `/api/pos/terminals/waiter-devices/${encodeURIComponent(device.terminalId)}`,
+      { enabled_features: nextFeatures },
+    )
+    const body = response.data
 
-      if (response.success && body?.success !== false) {
-        const savedFeatures =
-          body?.data?.enabled_features && typeof body.data.enabled_features === 'object'
-            ? body.data.enabled_features
-            : nextFeatures
-        setDevices((current) =>
-          current.map((entry) =>
-            entry.terminalId === device.terminalId
-              ? { ...entry, enabledFeatures: savedFeatures }
-              : entry,
-          ),
-        )
-        setDrafts((current) => ({
-          ...current,
-          [device.terminalId]: buildDraft({ ...device, enabledFeatures: savedFeatures }),
-        }))
-        toast.success(t('settings.waiterDevices.saved', 'Waiter device updated'))
-        return
-      }
-
-      const message = body?.error || response.error || ''
-      if (isWaiterMgmtMainOnlyError(message) || body?.code === 'WAITER_MGMT_MAIN_ONLY') {
-        setMainOnlyDenied(true)
-        return
-      }
-      toast.error(
-        message || t('settings.waiterDevices.saveFailed', 'Could not save changes'),
+    if (response.success && body?.success !== false) {
+      const savedFeatures =
+        body?.data?.enabled_features && typeof body.data.enabled_features === 'object'
+          ? body.data.enabled_features
+          : nextFeatures
+      setDevices((current) =>
+        current.map((entry) =>
+          entry.terminalId === device.terminalId
+            ? { ...entry, enabledFeatures: savedFeatures }
+            : entry,
+        ),
       )
-    } finally {
-      setSavingTerminalId(null)
+      setDrafts((current) => ({
+        ...current,
+        [device.terminalId]: buildDraft({ ...device, enabledFeatures: savedFeatures }),
+      }))
+      return { kind: 'saved' }
     }
+
+    const message = body?.error || response.error || ''
+    if (isWaiterMgmtMainOnlyError(message) || body?.code === 'WAITER_MGMT_MAIN_ONLY') {
+      return { kind: 'denied' }
+    }
+    return { kind: 'failed', message }
+  }
+
+  // One «Αποθήκευση» for every changed phone, one PUT each, in order. A phone that fails keeps its
+  // draft (the footer stays) so the operator can try again; the others are saved.
+  const handleSaveAll = async () => {
+    const changed = devices.filter((device) =>
+      isDraftDirty(device, drafts[device.terminalId] ?? buildDraft(device)))
+    if (changed.length === 0 || saving) return
+    setSaving(true)
+    let savedCount = 0
+    const failures = new Set<string>()
+    try {
+      for (const device of changed) {
+        let outcome: SaveOutcome
+        try {
+          outcome = await saveDevice(device)
+        } catch (error) {
+          outcome = { kind: 'failed', message: error instanceof Error ? error.message : '' }
+        }
+        if (outcome.kind === 'denied') {
+          setMainOnlyDenied(true)
+          return
+        }
+        if (outcome.kind === 'saved') savedCount += 1
+        else failures.add(outcome.message)
+      }
+    } finally {
+      setSaving(false)
+    }
+    if (savedCount > 0) {
+      toast.success(savedCount === 1
+        ? t('settings.waiterDevices.saved', 'Waiter device updated')
+        : t('settings.waiterDevices.savedMany', 'Waiter phones updated'))
+    }
+    for (const message of failures) {
+      toast.error(message || t('settings.waiterDevices.saveFailed', 'Could not save changes'))
+    }
+  }
+
+  // Cancel: every phone back to what is saved.
+  const resetDrafts = () => {
+    setDrafts(Object.fromEntries(devices.map((device) => [device.terminalId, buildDraft(device)])))
   }
 
   const formatLastSeen = (value: string | null): string => {
@@ -256,54 +311,26 @@ export const WaiterDevicesSection: React.FC = () => {
   }
 
   return (
-    <div
-      id="settings-section-waiter-devices"
-      className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all"
-    >
-      {/* Header row — mirrors the modal's sectionHeader chip, plus Refresh. */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-yellow-400 text-black ring-1 ring-yellow-500/55 shadow-[0_8px_20px_rgba(250,204,21,0.22)]">
-            <Smartphone className="h-5 w-5 text-black" />
-          </span>
-          <div className="min-w-0">
-            <span className="block font-semibold liquid-glass-modal-text">
-              {t('settings.waiterDevices.title', 'Waiter Devices')}
-            </span>
-            <span className="block text-xs liquid-glass-modal-text-muted">
-              {t(
-                'settings.waiterDevices.helpText',
-                'Mobile waiter devices paired to this register',
-              )}
-            </span>
-          </div>
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
-          {/* The full service request list lives here; the floating chip only
-              appears while a request needs someone (founder, 13/10/2026). */}
-          <button
-            type="button"
-            data-testid="waiter-devices-service-requests"
-            onClick={() => window.dispatchEvent(new CustomEvent(SERVICE_OVERVIEW_OPEN_EVENT))}
-            className={liquidGlassModalButton('secondary', 'md')}
-          >
-            <span className="inline-flex items-center gap-2">
-              <ListChecks className="h-4 w-4" />
-              {t('waiterService.requests')}
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => void loadDevices({ refresh: true })}
-            disabled={isLoading || isRefreshing}
-            className={liquidGlassModalButton('secondary', 'md')}
-          >
-            <span className="inline-flex items-center gap-2">
-              <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-              {t('settings.waiterDevices.refresh', 'Refresh')}
-            </span>
-          </button>
-        </div>
+    <div id="settings-section-waiter-devices" className="space-y-4">
+      {/* The pane title (the rail label) names the section; this line only explains it. */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="min-w-0 text-sm liquid-glass-modal-text-muted">
+          {t(
+            'settings.waiterDevices.helpText',
+            'Mobile waiter devices paired to this register',
+          )}
+        </p>
+        {/* The full service request list lives here; the floating chip only
+            appears while a request needs someone (founder, 13/10/2026). */}
+        <button
+          type="button"
+          data-testid="waiter-devices-service-requests"
+          onClick={() => window.dispatchEvent(new CustomEvent(SERVICE_OVERVIEW_OPEN_EVENT))}
+          className={solidButton('secondary', 'md')}
+        >
+          <ListChecks className="h-4 w-4" />
+          {t('waiterService.requests')}
+        </button>
       </div>
 
       {isLoading ? (
@@ -312,8 +339,8 @@ export const WaiterDevicesSection: React.FC = () => {
           {t('settings.waiterDevices.loading', 'Loading waiter devices...')}
         </div>
       ) : mainOnlyDenied ? (
-        <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
-          <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
+        <div className="pos-notice pos-notice--warn">
+          <ShieldAlert className="pos-notice__icon h-5 w-5" />
           <span className="text-sm liquid-glass-modal-text">
             {t(
               'settings.waiterDevices.mainOnly',
@@ -322,143 +349,108 @@ export const WaiterDevicesSection: React.FC = () => {
           </span>
         </div>
       ) : loadError ? (
-        <div className="flex items-start gap-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3">
-          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-500" />
-          <span className="text-sm liquid-glass-modal-text">{loadError}</span>
+        <div role="alert" className="pos-notice pos-notice--bad">
+          <AlertTriangle className="pos-notice__icon h-5 w-5" />
+          <span className="text-sm">{loadError}</span>
         </div>
       ) : devices.length === 0 ? (
-        <div className="rounded-xl border liquid-glass-modal-border bg-white/5 px-4 py-8 text-center dark:bg-black/10">
-          <Smartphone className="mx-auto mb-2 h-8 w-8 opacity-40 liquid-glass-modal-text-muted" />
-          <p className="text-sm font-medium liquid-glass-modal-text">
-            {t('settings.waiterDevices.empty', 'No waiter devices paired')}
-          </p>
-          <p className="mt-1 text-xs liquid-glass-modal-text-muted">
-            {t(
-              'settings.waiterDevices.emptyHelp',
-              'Pair a mobile waiter device from the admin dashboard to manage it here.',
-            )}
-          </p>
-        </div>
+        <section className="pos-group">
+          <div className="pos-row">
+            <div className="pos-row__label">
+              <span className="pos-row__title">{t('settings.waiterDevices.empty', 'No waiter devices paired')}</span>
+              <span className="pos-row__help">
+                {t(
+                  'settings.waiterDevices.emptyHelp',
+                  'Pair a mobile waiter device from the admin dashboard to manage it here.',
+                )}
+              </span>
+            </div>
+          </div>
+        </section>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-4">
           {devices.map((device) => {
             const draft = drafts[device.terminalId] ?? buildDraft(device)
-            const dirty = isDraftDirty(device, draft)
-            const saving = savingTerminalId === device.terminalId
             return (
-              <div
-                key={device.terminalId}
-                className={`rounded-xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-3 dark:bg-gray-800/10 ${
-                  device.isActive ? '' : 'opacity-50'
-                }`}
-              >
-                {/* Identity + liveness */}
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <span className="block truncate font-medium liquid-glass-modal-text">
-                      {device.name?.trim() || device.terminalId}
+              <section key={device.terminalId} className="pos-group" data-waiter-device={device.terminalId}>
+                {/* Identity, liveness and who is checked in */}
+                <div className="pos-row">
+                  <div className="pos-row__label">
+                    <span className="pos-row__title flex min-w-0 flex-wrap items-center gap-2">
+                      <span className="truncate">{device.name?.trim() || device.terminalId}</span>
                       {device.shortCode?.trim() ? (
-                        <span className="ml-2 inline-flex items-center rounded-full border border-sky-300/40 bg-sky-500/15 px-2 py-0.5 text-[11px] font-semibold text-sky-200 align-middle">
-                          {device.shortCode.trim().toUpperCase()}
-                        </span>
+                        <span className="pos-badge">{device.shortCode.trim().toUpperCase()}</span>
                       ) : null}
+                      {!device.isActive && (
+                        <span className="pos-badge">{t('settings.waiterDevices.inactive', 'Inactive')}</span>
+                      )}
                     </span>
                     {device.location?.trim() ? (
-                      <span className="block truncate text-xs liquid-glass-modal-text-muted">
-                        {device.location}
-                      </span>
+                      <span className="pos-row__help truncate">{device.location}</span>
                     ) : null}
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    {!device.isActive && (
-                      <span className="rounded-full border border-gray-500/40 bg-gray-500/10 px-2 py-0.5 text-xs liquid-glass-modal-text-muted">
-                        {t('settings.waiterDevices.inactive', 'Inactive')}
-                      </span>
-                    )}
-                    <span
-                      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs ${
-                        device.online
-                          ? 'border-green-500/40 bg-green-500/10 text-green-600 dark:text-green-400'
-                          : 'border-gray-500/30 bg-gray-500/10 liquid-glass-modal-text-muted'
-                      }`}
-                    >
-                      <span
-                        className={`h-2 w-2 rounded-full ${
-                          device.online ? 'bg-green-500' : 'bg-gray-400'
-                        }`}
-                      />
+                    <StatusLine tone={device.online ? 'ok' : 'idle'}>
                       {device.online
                         ? t('settings.waiterDevices.online', 'Online')
-                        : t('settings.waiterDevices.offline', 'Offline')}
+                        : `${t('settings.waiterDevices.offline', 'Offline')} · ${t('settings.waiterDevices.lastSeen', {
+                            time: formatLastSeen(device.lastSeenAt),
+                            defaultValue: 'Last seen {{time}}',
+                          })}`}
+                    </StatusLine>
+                    <span className="pos-row__help mt-1 flex items-start gap-2">
+                      <Users className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                      <span className="min-w-0 wrap-break-word">
+                        {device.activeStaff.length > 0
+                          ? t('settings.waiterDevices.activeStaff', {
+                              names: device.activeStaff.map(describeStaff).join(', '),
+                              defaultValue: 'Checked in: {{names}}',
+                            })
+                          : t('settings.waiterDevices.noActiveStaff', 'No staff checked in')}
+                      </span>
                     </span>
                   </div>
                 </div>
-                {!device.online && (
-                  <div className="text-xs liquid-glass-modal-text-muted">
-                    {t('settings.waiterDevices.lastSeen', {
-                      time: formatLastSeen(device.lastSeenAt),
-                      defaultValue: 'Last seen {{time}}',
-                    })}
-                  </div>
-                )}
 
-                {/* Currently checked-in staff */}
-                <div className="flex items-start gap-2 text-xs liquid-glass-modal-text-muted">
-                  <Users className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span className="min-w-0 wrap-break-word">
-                    {device.activeStaff.length > 0
-                      ? t('settings.waiterDevices.activeStaff', {
-                          names: device.activeStaff.map(describeStaff).join(', '),
-                          defaultValue: 'Checked in: {{names}}',
-                        })
-                      : t('settings.waiterDevices.noActiveStaff', 'No staff checked in')}
-                  </span>
-                </div>
-
-                {/* Allowed-action toggles */}
-                <div className="space-y-1 border-t border-white/10 pt-2">
-                  <span className="block pb-1 text-xs font-semibold uppercase tracking-wide liquid-glass-modal-text-muted">
+                {/* Allowed actions: one kit row each; saved together by the footer below. */}
+                <div className="border-t border-(--pos-s-border) [&>.pos-row:first-of-type]:border-t-0">
+                  <p className="px-5 pt-3 text-sm font-semibold liquid-glass-modal-text-muted">
                     {t('settings.waiterDevices.features.title', 'Allowed actions')}
-                  </span>
+                  </p>
                   {MANAGED_FEATURE_KEYS.map((key) => (
-                    <div key={key} className="flex items-center justify-between gap-3">
+                    <div key={key} className="pos-row">
                       <span
                         id={`waiter-device-${device.terminalId}-${key}-label`}
-                        className="text-sm liquid-glass-modal-text"
+                        className="pos-row__title"
                       >
                         {featureLabels[key]}
                       </span>
-                      <POSGlassSwitch
-                        aria-labelledby={`waiter-device-${device.terminalId}-${key}-label`}
-                        checked={draft[key]}
-                        disabled={saving}
-                        onChange={(next) => setDraftFeature(device.terminalId, key, next)}
-                      />
+                      <div className="pos-row__control">
+                        <POSGlassSwitch
+                          aria-labelledby={`waiter-device-${device.terminalId}-${key}-label`}
+                          checked={draft[key]}
+                          disabled={saving}
+                          onChange={(next) => setDraftFeature(device.terminalId, key, next)}
+                        />
+                      </div>
                     </div>
                   ))}
                 </div>
-
-                {/* Save */}
-                <div className="flex justify-end">
-                  <button
-                    type="button"
-                    onClick={() => void handleSave(device)}
-                    disabled={!dirty || saving}
-                    className={liquidGlassModalButton('primary', 'md')}
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-                      {saving
-                        ? t('settings.waiterDevices.saving', 'Saving...')
-                        : t('settings.waiterDevices.save', 'Save')}
-                    </span>
-                  </button>
-                </div>
-              </div>
+              </section>
             )
           })}
         </div>
       )}
+
+      <DirtyFooter
+        visible={draftsDirty}
+        note={<span role="status">{t('settings.waiterDevices.unsavedNote', 'Unsaved access changes')}</span>}
+        saveLabel={saving
+          ? t('settings.waiterDevices.saving', 'Saving...')
+          : t('settings.waiterDevices.save', 'Save')}
+        cancelLabel={t('common.actions.cancel', 'Cancel')}
+        onSave={() => void handleSaveAll()}
+        onCancel={resetDrafts}
+        saving={saving}
+      />
     </div>
   )
 }

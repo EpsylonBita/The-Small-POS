@@ -127,11 +127,11 @@ const OnboardingPage: React.FC = () => {
 
     const errorContent = error && (
         <div ref={errorPanel} id="onboarding-error" role="alert" tabIndex={-1}
-            className="flex gap-3 rounded-2xl border border-red-400/30 bg-red-400/10 p-4 text-sm text-red-200 outline-hidden focus-visible:ring-2 focus-visible:ring-red-300">
+            className="flex gap-3 rounded-2xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-4 text-sm text-red-800 dark:text-red-200 outline-hidden focus-visible:ring-2 focus-visible:ring-red-300">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
             <div className="min-w-0">
                 <p className="wrap-break-word font-medium">{error.message}</p>
-                {step === 2 && <p className="mt-1 text-red-200/80">{error.syncing
+                {step === 2 && <p className="mt-1 text-red-800 dark:text-red-200">{error.syncing
                     ? t('onboarding.syncRetryHint', { defaultValue: 'Check your internet connection and try again to finish syncing.' })
                     : t('onboarding.retryHint', { defaultValue: 'Check your internet connection and confirm the code is current, then try again.' })}</p>}
             </div>
@@ -143,7 +143,7 @@ const OnboardingPage: React.FC = () => {
             {/* Auto margins keep the top reachable when a short POS window must scroll. */}
             <div className="my-auto w-full max-w-4xl py-2">
                 <div className="mb-5 flex items-center gap-3 px-1">
-                    <span className="flex h-10 w-10 items-center justify-center rounded-xl border border-yellow-400/30 bg-yellow-400/10 text-yellow-300">
+                    <span className="flex h-10 w-10 items-center justify-center rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200">
                         <Monitor className="h-5 w-5" aria-hidden="true" />
                     </span>
                     <div>
@@ -166,7 +166,7 @@ const OnboardingPage: React.FC = () => {
                         <ol className="mt-5 grid grid-cols-2 gap-4" aria-label={t('onboarding.secureSetup', { defaultValue: 'Terminal setup' })}>
                             {[t('onboarding.languageStep', { defaultValue: 'Language' }), t('onboarding.connectionStep', { defaultValue: 'Connect terminal' })].map((label, index) => (
                                 <li key={index} aria-current={step === index + 1 ? 'step' : undefined} className="min-w-0">
-                                    <div className={`flex items-center gap-2 text-sm ${step >= index + 1 ? 'text-yellow-200' : 'text-zinc-500'}`}>
+                                    <div className={`flex items-center gap-2 text-sm ${step >= index + 1 ? 'text-yellow-800 dark:text-yellow-200' : 'text-zinc-500'}`}>
                                         <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${step >= index + 1 ? 'bg-yellow-400 text-zinc-950' : 'bg-zinc-800 text-zinc-400'}`}>
                                             {step > index + 1 || phase === 'complete' ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : index + 1}
                                         </span>
@@ -184,7 +184,7 @@ const OnboardingPage: React.FC = () => {
                         {step === 1 && (
                             <section aria-labelledby="onboarding-language-heading" className="space-y-5" aria-busy={savingLanguage}>
                                 <div className="flex items-start gap-3">
-                                    <Globe2 className="mt-1 h-5 w-5 shrink-0 text-yellow-300" aria-hidden="true" />
+                                    <Globe2 className="mt-1 h-5 w-5 shrink-0 text-yellow-800 dark:text-yellow-300" aria-hidden="true" />
                                     <div>
                                         <h2 id="onboarding-language-heading" className="text-xl font-semibold">{t('onboarding.selectLanguage', { defaultValue: 'Select Language' })}</h2>
                                         <p className="mt-1 text-sm leading-relaxed text-zinc-400">{t('onboarding.languageHelp', { defaultValue: 'Choose the language for this terminal. You can change it later in Settings.' })}</p>
@@ -195,7 +195,7 @@ const OnboardingPage: React.FC = () => {
                                         <motion.button key={option.code} type="button" lang={option.code} aria-label={option.name} aria-pressed={language === option.code}
                                             onClick={() => void handleLanguageSelect(option.code)} disabled={isSubmitting}
                                             whileTap={reduceMotion ? undefined : { scale: 0.985 }} transition={transition}
-                                            className={`flex min-h-16 items-center gap-3 rounded-2xl border px-4 py-3 text-left outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-wait disabled:opacity-60 ${index === languages.length - 1 && languages.length % 2 === 1 ? 'sm:col-span-2' : ''} ${language === option.code ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200' : 'border-zinc-700 bg-zinc-950/40 text-zinc-200 active:bg-zinc-800'}`}>
+                                            className={`flex min-h-16 items-center gap-3 rounded-2xl border px-4 py-3 text-left outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-wait disabled:opacity-60 ${index === languages.length - 1 && languages.length % 2 === 1 ? 'sm:col-span-2' : ''} ${language === option.code ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)' : 'border-zinc-700 bg-zinc-950/40 text-zinc-200 active:bg-zinc-800'}`}>
                                             <span className="flex h-8 w-9 shrink-0 items-center justify-center rounded-lg border border-current/15 text-xs font-semibold uppercase tracking-wide" aria-hidden="true">{option.code === 'el' ? 'GR' : option.code}</span>
                                             <span className="flex-1 text-base font-medium">{option.name}</span>
                                             {language === option.code ? <Check className="h-5 w-5" aria-hidden="true" /> : <ArrowRight className="h-4 w-4 text-zinc-500" aria-hidden="true" />}
@@ -223,11 +223,11 @@ const OnboardingPage: React.FC = () => {
                                             aria-invalid={Boolean(inputError || (error && !decoded))}
                                             aria-describedby={`onboarding-code-help onboarding-key-hint${inputError && !error ? ' onboarding-code-invalid' : ''}${error ? ' onboarding-error' : ''}`}
                                             autoComplete="off" autoCapitalize="none" spellCheck={false}
-                                            className="min-h-28 w-full flex-1 resize-y rounded-2xl border border-zinc-600 bg-zinc-950 px-4 py-3 font-mono text-sm text-zinc-200 outline-hidden placeholder:font-sans placeholder:text-zinc-500 focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/30 disabled:opacity-60"
+                                            className="min-h-28 w-full flex-1 resize-y rounded-2xl border border-zinc-600 bg-zinc-950 px-4 py-3 font-mono text-sm text-zinc-200 outline-hidden placeholder:font-sans placeholder:text-zinc-500 focus:border-yellow-400 focus:ring-2 focus:ring-(--pos-s-fg) disabled:opacity-60"
                                             placeholder={t('onboarding.connectionStringPlaceholder', { defaultValue: 'Paste your full connection code here' })} />
                                     </div>
                                     <div className="flex flex-col">
-                                        <div id="onboarding-preview-title" className="mb-2 flex items-center gap-2 text-sm font-medium text-zinc-200"><Monitor className="h-4 w-4 text-yellow-300" aria-hidden="true" />{t('onboarding.previewTitle', { defaultValue: 'Review your connection' })}</div>
+                                        <div id="onboarding-preview-title" className="mb-2 flex items-center gap-2 text-sm font-medium text-zinc-200"><Monitor className="h-4 w-4 text-yellow-800 dark:text-yellow-300" aria-hidden="true" />{t('onboarding.previewTitle', { defaultValue: 'Review your connection' })}</div>
                                         <aside aria-labelledby="onboarding-preview-title" className="min-h-28 flex-1 rounded-2xl border border-zinc-700/80 bg-zinc-950/40 px-4 py-3">
                                             {decoded ? (
                                                 <motion.div key="decoded" initial={entry} animate={{ opacity: 1, y: 0 }} transition={transition}>
@@ -238,7 +238,7 @@ const OnboardingPage: React.FC = () => {
                                                     </dl>
                                                 </motion.div>
                                             ) : <p className="text-sm leading-relaxed text-zinc-500">{t('onboarding.previewPending', { defaultValue: 'Your terminal and server will appear here when you paste a valid code.' })}</p>}
-                                            <p aria-live="polite" className="mt-3 text-xs font-medium text-yellow-200">{decoded ? t('onboarding.codeReady', { defaultValue: 'Code ready' }) : ''}</p>
+                                            <p aria-live="polite" className="mt-3 text-xs font-medium text-yellow-800 dark:text-yellow-200">{decoded ? t('onboarding.codeReady', { defaultValue: 'Code ready' }) : ''}</p>
                                         </aside>
                                     </div>
                                 </div>
@@ -246,11 +246,11 @@ const OnboardingPage: React.FC = () => {
                                     <p id="onboarding-code-help" className="text-xs leading-relaxed text-zinc-400">{t('onboarding.connectionStringHelp', { defaultValue: 'In the Admin Dashboard, open Branches → POS and copy this terminal’s full connection code.' })}</p>
                                     <p id="onboarding-key-hint" className="mt-2 text-xs leading-relaxed text-zinc-400">{t('onboarding.rawKeyHint', { defaultValue: 'Use the full connection code, not the API key shown separately.' })}</p>
                                 </div>
-                                {inputError && !error && <p id="onboarding-code-invalid" role="status" className="flex items-start gap-2 text-sm text-amber-200"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />{inputError}</p>}
+                                {inputError && !error && <p id="onboarding-code-invalid" role="status" className="flex items-start gap-2 text-sm text-amber-800 dark:text-amber-200"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />{inputError}</p>}
                                 {errorContent}
                                 {(phase === 'validating' || phase === 'syncing') && (
-                                    <div className="rounded-2xl border border-yellow-400/20 bg-yellow-400/5 px-4 py-3" role="status" aria-live="polite">
-                                        <p className="text-sm font-medium text-yellow-200">{phase === 'validating' ? t('onboarding.validating', { defaultValue: 'Checking connection…' }) : t('onboarding.syncing', { defaultValue: 'Syncing terminal settings…' })}</p>
+                                    <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3" role="status" aria-live="polite">
+                                        <p className="text-sm font-medium text-yellow-800 dark:text-yellow-200">{phase === 'validating' ? t('onboarding.validating', { defaultValue: 'Checking connection…' }) : t('onboarding.syncing', { defaultValue: 'Syncing terminal settings…' })}</p>
                                         <div className="mt-3 flex gap-2" aria-hidden="true">{[1, 2].map((index) => <div key={index} className="h-1 flex-1 overflow-hidden rounded-full bg-zinc-700"><motion.div initial={false} animate={{ scaleX: phase === 'syncing' || index === 1 ? 1 : 0 }} transition={transition} className="h-full origin-left bg-yellow-400" /></div>)}</div>
                                     </div>
                                 )}
@@ -271,7 +271,7 @@ const OnboardingPage: React.FC = () => {
 
                         {phase === 'complete' && (
                             <section role="status" aria-live="polite" className="flex flex-col items-center py-8 text-center">
-                                <motion.div initial={reduceMotion ? false : { scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={transition} className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-yellow-400/30 bg-yellow-400/15 text-yellow-300"><ShieldCheck className="h-8 w-8" aria-hidden="true" /></motion.div>
+                                <motion.div initial={reduceMotion ? false : { scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={transition} className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200"><ShieldCheck className="h-8 w-8" aria-hidden="true" /></motion.div>
                                 <h2 className="text-2xl font-semibold">{t('onboarding.ready', { defaultValue: 'Your terminal is ready' })}</h2>
                                 <p className="mt-2 text-sm text-zinc-400">{t('onboarding.opening', { defaultValue: 'Opening your POS…' })}</p>
                             </section>

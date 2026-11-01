@@ -6,6 +6,7 @@ import { useOperationalShift } from '../contexts/cashier-gate-context';
 import { useModules, type NavigationModule } from '../contexts/module-context';
 import { isModuleComingSoon } from '../../shared/constants/pos-modules';
 import { resolveNavigationLabel } from '../utils/i18nLabels';
+import { loadNavigationOrder, saveNavigationOrder } from '../utils/navigation-order-storage';
 import {
   Clock,
   LogOut,
@@ -54,6 +55,8 @@ import {
   Wrench,
   Store,
 } from 'lucide-react';
+import { DeliveryScooterIcon } from './icons/OrderTypeGlyphs';
+import { DELIVERY_NAV_ICON, moduleNavIconName } from '../../../../shared/pos/module-nav-icon';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 import { useEfoodPartner } from '../hooks/useEfoodPartner';
 import { EFOOD_PARTNER_VIEW } from '../services/efoodPartner';
@@ -67,14 +70,13 @@ export const NavigationModuleIcon: React.FC<{ iconName: string }> = ({ iconName 
 
 const NAVIGATION_DRAG_HOLD_MS = 280;
 const NAVIGATION_DRAG_SCROLL_CANCEL_THRESHOLD_PX = 8;
-const NAVIGATION_ORDER_STORAGE_PREFIX = 'pos-navigation-module-order';
 // Round 302: base focus reset shared by every sidebar icon button -- the native focus rectangle is ALWAYS
 // removed (it lingered after a pointer/touch tap and read like a selected state on this touchscreen POS).
 // The yellow keyboard ring is appended IN-COMPONENT only while keyboard modality is active (see
 // sidebarFocusRing below); `rounded-xl` just shapes that ring (the icon buttons have no background, so the
 // inactive/active icon appearance is unchanged). No hover.
 const SIDEBAR_FOCUS_BASE = 'rounded-xl focus:outline-hidden';
-const SIDEBAR_FOCUS_RING_KEYBOARD = `${SIDEBAR_FOCUS_BASE} focus-visible:ring-2 focus-visible:ring-yellow-400/70`;
+const SIDEBAR_FOCUS_RING_KEYBOARD = `${SIDEBAR_FOCUS_BASE} focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)`;
 
 interface NavigationDragSession {
   pointerId: number;
@@ -238,28 +240,20 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
   // yellow keyboard ring class while keyboard modality is active. focus:outline-none stays on always.
   const [keyboardMode, setKeyboardMode] = useState(false);
 
-  const navigationOrderStorageKey = useMemo(() => {
-    const organizationKey = staff?.organizationId ?? 'unknown-organization';
-    const terminalKey = staff?.terminalId ?? 'unknown-terminal';
-    const staffKey = staff?.staffId ?? 'unknown-staff';
-
-    return `${NAVIGATION_ORDER_STORAGE_PREFIX}:${organizationKey}:${terminalKey}:${staffKey}`;
-  }, [staff?.organizationId, staff?.staffId, staff?.terminalId]);
-
   const navigationModuleIds = useMemo(
     () => navigationModules.map(({ module }) => module.id),
     [navigationModules],
   );
 
+  // Founder 31/10: one order per till -- the store's arrangement -- for every staff member and every
+  // restart (it was keyed by the staff on shift, and a restored shift lost its organization).
+  const legacyTerminalId = staff?.terminalId ?? null;
+  const legacyStaffId = staff?.staffId ?? null;
   useEffect(() => {
     let storedOrder: string[] = [];
 
     try {
-      const rawStoredOrder = localStorage.getItem(navigationOrderStorageKey);
-      const parsedOrder = rawStoredOrder ? JSON.parse(rawStoredOrder) : [];
-      if (Array.isArray(parsedOrder)) {
-        storedOrder = parsedOrder.filter((value): value is string => typeof value === 'string');
-      }
+      storedOrder = loadNavigationOrder(localStorage, { terminalId: legacyTerminalId, staffId: legacyStaffId });
     } catch (error) {
       console.warn('[NavigationSidebar] Failed to load navigation order:', error);
     }
@@ -269,7 +263,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     setModuleOrder((currentOrder) => (
       areStringArraysEqual(currentOrder, nextOrder) ? currentOrder : nextOrder
     ));
-  }, [navigationModuleIds, navigationOrderStorageKey]);
+  }, [legacyStaffId, legacyTerminalId, navigationModuleIds]);
 
   const orderedNavigationModules = useMemo(() => {
     if (moduleOrder.length === 0) {
@@ -464,6 +458,9 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
         return <FileText className={iconClass} strokeWidth={2} />;
       case 'ShoppingCart':
         return <ShoppingCart className={iconClass} strokeWidth={2} />;
+      case DELIVERY_NAV_ICON:
+        // Founder 31/10: the delivery modules show his scooter rider, a size up for its detail.
+        return <DeliveryScooterIcon className="h-6 w-6" />;
       case 'Truck':
         return <Truck className={iconClass} strokeWidth={2} />;
       case 'Link':
@@ -562,7 +559,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
 
   const persistNavigationOrder = (nextOrder: string[]) => {
     try {
-      localStorage.setItem(navigationOrderStorageKey, JSON.stringify(nextOrder));
+      saveNavigationOrder(localStorage, nextOrder);
     } catch (error) {
       console.warn('[NavigationSidebar] Failed to save navigation order:', error);
     }
@@ -802,16 +799,16 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     }
     switch (color) {
       case 'green':
-        return 'text-green-500 drop-shadow-[0_0_10px_rgba(34,197,94,0.9)]';
+        return 'text-green-500';
       case 'purple':
-        return 'text-[#a855f7] drop-shadow-[0_0_10px_rgba(168,85,247,0.9)]';
+        return 'text-[#a855f7]';
       case 'orange':
-        return 'text-[#f97316] drop-shadow-[0_0_10px_rgba(251,146,60,0.9)]';
+        return 'text-[#f97316]';
       case 'yellow':
-        return 'text-yellow-500 drop-shadow-[0_0_10px_rgba(234,179,8,0.9)]';
+        return 'text-yellow-500';
       case 'blue':
       default:
-        return 'text-[#3b82f6] drop-shadow-[0_0_10px_rgba(59,130,246,0.9)]';
+        return 'text-[#3b82f6]';
     }
   };
 
@@ -845,8 +842,8 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
         onClickCapture={handleClickCapture}
       >
         <div className={`${resolvedTheme === 'dark'
-          ? 'bg-black backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(255,221,0,0.6)] border-r border-amber-400/25'
-          : 'bg-white/90 backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(255,221,0,0.34)] border-r border-amber-200/70'} flex max-h-full flex-col overflow-hidden`}
+          ? 'bg-black backdrop-blur-xl rounded-r-3xl p-4 border-r border-(--pos-s-border)'
+          : 'bg-white/90 backdrop-blur-xl rounded-r-3xl p-4 border-r border-(--pos-s-border)'} pos-shell-glow-nav flex max-h-full flex-col overflow-hidden`}
           style={{
             maxHeight: availableHeight ?? undefined,
           }}>
@@ -854,7 +851,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
             {/* Top persistent action area: Check In stays reachable without scrolling the module list. */}
             <div data-navigation-top-actions className="flex shrink-0 flex-col gap-4">
               {/* Divider */}
-              <div className="w-8 h-px mx-auto bg-linear-to-r from-transparent via-amber-400/60 to-transparent"></div>
+              <div className="w-8 h-px mx-auto bg-(--pos-s-border)"></div>
 
               {/* Check In Button - Always shows staff list */}
               <button
@@ -867,7 +864,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
               </button>
 
               {/* Divider */}
-              <div className="w-8 h-px mx-auto bg-linear-to-r from-transparent via-amber-400/60 to-transparent"></div>
+              <div className="w-8 h-px mx-auto bg-(--pos-s-border)"></div>
             </div>
 
             {/* Module scroll region: ONLY the module list scrolls/drags; the utility actions below stay
@@ -956,7 +953,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                 return (
                   <React.Fragment key={module.id}>
                   {dropSlotBeforeModuleId === module.id && (
-                    <div className="navigation-drop-slot -my-2 mx-auto h-1 w-8 rounded-full bg-amber-400/85 shadow-[0_0_12px_rgba(250,204,21,0.78)]" />
+                    <div className="navigation-drop-slot -my-2 mx-auto h-1 w-8 rounded-full bg-(--pos-s-yellow)" />
                   )}
                   <button
                     ref={(element) => {
@@ -984,18 +981,18 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                         ? ''
                         : isDraggingThisModule
                           ? resolvedTheme === 'dark'
-                            ? 'cursor-grabbing rounded-2xl bg-amber-400/10 opacity-25'
-                            : 'cursor-grabbing rounded-2xl bg-amber-100/60 opacity-25'
+                            ? 'cursor-grabbing rounded-2xl bg-(--pos-s-surface-2) opacity-25'
+                            : 'cursor-grabbing rounded-2xl bg-(--pos-s-surface-2) opacity-25'
                           : 'cursor-grab active:cursor-grabbing'
                       } ${isDraggingAnotherModule ? 'duration-150 ease-out' : ''}`}
                     style={{ touchAction: isComingSoon ? 'pan-y' : 'none' }}
                     aria-label={accessibleLabel}
                     aria-current={isActive ? 'page' : undefined}
                   >
-                    {getModuleIcon(module.icon || 'Package')}
+                    {getModuleIcon(moduleNavIconName(module.id, module.icon))}
                     {/* Coming Soon badge for unimplemented modules */}
                     {isComingSoon && (
-                      <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-blue-600/90 flex items-center justify-center">
+                      <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-blue-700 flex items-center justify-center">
                         <Hourglass className="w-2.5 h-2.5 text-white" />
                       </div>
                     )}
@@ -1010,7 +1007,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                 );
               })}
               {dropSlotBeforeModuleId === '__navigation_drop_end__' && (
-                <div className="navigation-drop-slot -my-2 mx-auto h-1 w-8 rounded-full bg-amber-400/85 shadow-[0_0_12px_rgba(250,204,21,0.78)]" />
+                <div className="navigation-drop-slot -my-2 mx-auto h-1 w-8 rounded-full bg-(--pos-s-yellow)" />
               )}
             </>
           )}
@@ -1037,7 +1034,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           >
             <span className="font-bold text-base">Z</span>
             {hasPendingLocalSubmit && (
-              <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.8)]" />
+              <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-amber-400 " />
             )}
           </button>
 
@@ -1051,12 +1048,12 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           </button>
 
           {/* Divider */}
-          <div className="w-8 h-px mx-auto bg-linear-to-r from-transparent via-amber-400/60 to-transparent"></div>
+          <div className="w-8 h-px mx-auto bg-(--pos-s-border)"></div>
 
           {/* Logout Button */}
           <button
             onClick={onLogout}
-            className={`w-12 h-12 flex items-center justify-center border border-red-500/70 bg-transparent text-red-500 transition-transform active:scale-95 ${sidebarFocusRing}`}
+            className={`w-12 h-12 flex items-center justify-center border border-red-600 bg-transparent text-red-500 transition-transform active:scale-95 ${sidebarFocusRing}`}
             aria-label={t('navigation.logout')}>
             <LogOut className="w-5 h-5 text-red-500" strokeWidth={2} />
           </button>
@@ -1076,8 +1073,8 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           <div
             aria-hidden="true"
             className={`navigation-dragging-icon pointer-events-none fixed z-2147483000 flex h-12 w-12 items-center justify-center rounded-2xl border transition-none ${getNeonClass(color, isActive, resolvedTheme)} ${resolvedTheme === 'dark'
-              ? 'border-amber-300/45 bg-black/95 shadow-[0_0_24px_rgba(250,204,21,0.45)]'
-              : 'border-amber-300/70 bg-white/95 shadow-[0_0_24px_rgba(250,204,21,0.34)]'
+              ? 'border-(--pos-s-border) bg-black/95'
+              : 'border-(--pos-s-border) bg-white/95'
             }`}
             style={{
               left: dragPosition.x,
@@ -1085,9 +1082,9 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
               touchAction: 'none',
             }}
           >
-            {getModuleIcon(module.icon || 'Package')}
+            {getModuleIcon(moduleNavIconName(module.id, module.icon))}
             {isComingSoon && (
-              <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-blue-600/90 flex items-center justify-center">
+              <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-blue-700 flex items-center justify-center">
                 <Hourglass className="w-2.5 h-2.5 text-white" />
               </div>
             )}

@@ -30,8 +30,8 @@ test('ProductCatalogModal cart and checkout controls are touch-first with semant
   assert.match(source, /aria-label=\{t\('common\.remove', 'Remove'\)\}/);
   assert.match(source, /text-red-400 active:text-red-300 ml-2 transition-transform duration-150 active:scale-95/);
   assert.match(source, /bg-white\/10 active:bg-white\/20 flex items-center justify-center transition-transform duration-150 active:scale-95/);
-  assert.match(source, /rounded-full bg-emerald-500\/10 px-2 py-1 text-sm font-medium text-emerald-300/);
+  assert.match(source, /rounded-full bg-\(--pos-s-surface-2\) px-2 py-1 text-sm font-medium text-emerald-800 dark:text-emerald-200/);
   assert.match(source, /focus:ring-2 focus:ring-yellow-400/);
-  assert.match(source, /bg-green-600 active:bg-green-700 disabled:bg-gray-600/);
+  assert.match(source, /bg-\(--pos-s-yellow\) active:bg-yellow-500 disabled:bg-gray-600/);
   assert.doesNotMatch(source, /focus:ring-blue-500|hover:bg-green-700/);
 });

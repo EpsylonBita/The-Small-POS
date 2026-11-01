@@ -317,7 +317,8 @@ pub(crate) fn validate_snapshot(
     let canonical = data["payments"]
         .as_array()
         .ok_or("CANCELLATION_PAYMENT_CHANGED")?;
-    let mut statement=conn.prepare("SELECT remote_payment_id,method,status,currency,COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER)),id FROM order_payments WHERE order_id=?1 AND status IN ('completed','refunded')").map_err(|e|e.to_string())?;
+    let financial_status = crate::payments::financial_payment_status_sql(conn, "op")?;
+    let mut statement = conn.prepare(&format!("SELECT remote_payment_id,method,({financial_status}),currency,COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER)),id FROM order_payments op WHERE order_id=?1 AND ({financial_status}) IN ('completed','refunded')")).map_err(|e|e.to_string())?;
     let local = statement
         .query_map([order], |r| {
             Ok((
@@ -1182,6 +1183,91 @@ mod tests {
                 "status":"delivered","total_amount":10.5,"table_session_id":SESSION},
             "payments":payments,"adjustments":[],"staff_cash_returns":[],
             "table_sessions":[{"id":SESSION,"active_order_id":remote,"status":"closed"}]}})
+    }
+
+    #[test]
+    fn table_manual_cancellation_fully_returned_closed_check_needs_no_refund() {
+        let conn = fixture();
+        conn.execute_batch("DELETE FROM order_payments WHERE id='cash-payment';
+            UPDATE orders SET total_amount=6,total_amount_cents=600,payment_status='paid';
+            UPDATE order_payments SET metadata=json_set(COALESCE(metadata,'{}'),'$.canonical_return_status','refunded');
+            INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,sync_state,created_at,updated_at) VALUES('returned','payment','order','refund',6,600,'Returned elsewhere','applied','now','now');").unwrap();
+        let plan = crate::manual_order_cancellation::prepare_validated(
+            &conn,
+            "order",
+            &crate::manual_order_cancellation::tests::admitted(&conn),
+        )
+        .unwrap();
+        assert_eq!(plan["requiresReturn"], false);
+        assert_eq!(plan["requiresHandback"], false);
+        assert_eq!(plan["amountCents"], 0);
+        let mut snapshot = preflight_snapshot(&conn);
+        snapshot["data"]["order"]["total_amount"] = json!(6);
+        snapshot["data"]["payments"][0]["status"] = json!("refunded");
+        let remote = snapshot["data"]["payments"][0]["id"].clone();
+        snapshot["data"]["adjustments"] =
+            json!([{"payment_id":remote,"adjustment_type":"refund","amount_cents":600}]);
+        assert_eq!(snapshot["data"]["table_sessions"][0]["status"], "closed");
+        validate_snapshot(&conn, &plan, SESSION, &snapshot).unwrap();
+        conn.execute(
+            "UPDATE orders SET total_amount=10.5,total_amount_cents=1050",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::manual_order_cancellation::prepare_validated(
+                &conn,
+                "order",
+                &crate::manual_order_cancellation::tests::admitted(&conn),
+            )
+            .unwrap_err(),
+            "ORDER_PAYMENT_NOT_RECORDED"
+        );
+    }
+
+    #[test]
+    fn table_manual_cancellation_snapshot_accepts_cross_till_return_status() {
+        let conn = fixture();
+        let plan = crate::manual_order_cancellation::prepare_validated(
+            &conn,
+            "order",
+            &crate::manual_order_cancellation::tests::admitted(&conn),
+        )
+        .unwrap();
+        let mut snapshot = preflight_snapshot(&conn);
+        conn.execute("UPDATE order_payments SET metadata=json_set(COALESCE(metadata,'{}'),'$.canonical_return_status','refunded') WHERE id='payment'", []).unwrap();
+        conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,sync_state,created_at,updated_at) VALUES('remote-refund','payment','order','refund',6,600,'Returned elsewhere','applied','now','now')", []).unwrap();
+        let remote: String = conn
+            .query_row(
+                "SELECT remote_payment_id FROM order_payments WHERE id='payment'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let receipt = snapshot["data"]["payments"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|p| p["id"] == remote)
+            .unwrap();
+        receipt["status"] = json!("refunded");
+        snapshot["data"]["adjustments"] =
+            json!([{"payment_id":remote,"adjustment_type":"refund","amount_cents":600}]);
+        validate_snapshot(&conn, &plan, SESSION, &snapshot).unwrap();
+        let physical: String = conn
+            .query_row(
+                "SELECT status FROM order_payments WHERE id='payment'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(physical, "completed");
+        // The financial override must not hide a real discrepancy.
+        snapshot["data"]["adjustments"][0]["amount_cents"] = json!(599);
+        assert_eq!(
+            validate_snapshot(&conn, &plan, SESSION, &snapshot).unwrap_err(),
+            "CANCELLATION_PAYMENT_CHANGED"
+        );
     }
 
     #[test]

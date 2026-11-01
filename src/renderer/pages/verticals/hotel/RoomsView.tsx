@@ -32,8 +32,10 @@ import {
 import { 
   Bed, RefreshCw, Users, Wrench, Sparkles, Calendar, X, 
   CreditCard, Receipt, User, Phone, Mail, DollarSign,
-  ChevronDown, Filter, Search
 } from 'lucide-react';
+import {
+  RoomBedIcon, WorkspaceChips, WorkspaceGroup, WorkspaceHeader, WorkspaceIconButton, WorkspaceSearch, WorkspaceSelect,
+} from '../../../components/tables/TableWorkspace';
 import type { Room, RoomStatus, RoomFilters } from '../../../services/RoomsService';
 import { getRoomEffectiveStatus } from '../../../services/RoomsService';
 import { FloatingActionButton } from '../../../components/ui/FloatingActionButton';
@@ -46,11 +48,11 @@ import {
 import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 const statusConfig: Record<RoomStatus, { color: string; bgClass: string; icon: typeof Bed; label: string }> = {
-  available: { color: 'text-emerald-500', bgClass: 'bg-emerald-500/10 border-emerald-500/30', icon: Sparkles, label: 'Available' },
-  occupied: { color: 'text-orange-500', bgClass: 'bg-orange-500/10 border-orange-500/30', icon: Users, label: 'Occupied' },
-  cleaning: { color: 'text-amber-500', bgClass: 'bg-amber-500/10 border-amber-500/30', icon: Sparkles, label: 'Cleaning' },
-  maintenance: { color: 'text-red-500', bgClass: 'bg-red-500/10 border-red-500/30', icon: Wrench, label: 'Maintenance' },
-  reserved: { color: 'text-yellow-500', bgClass: 'bg-yellow-500/10 border-yellow-500/30', icon: Calendar, label: 'Reserved' },
+  available: { color: 'text-emerald-700 dark:text-emerald-400', bgClass: 'bg-(--pos-s-surface-2) border-(--pos-s-border)', icon: Sparkles, label: 'Available' },
+  occupied: { color: 'text-orange-700 dark:text-orange-400', bgClass: 'bg-(--pos-s-surface-2) border-(--pos-s-border)', icon: Users, label: 'Occupied' },
+  cleaning: { color: 'text-amber-700 dark:text-amber-400', bgClass: 'bg-(--pos-s-surface-2) border-(--pos-s-border)', icon: Sparkles, label: 'Cleaning' },
+  maintenance: { color: 'text-red-700 dark:text-red-400', bgClass: 'bg-(--pos-s-surface-2) border-(--pos-s-border)', icon: Wrench, label: 'Maintenance' },
+  reserved: { color: 'text-yellow-700 dark:text-yellow-400', bgClass: 'bg-(--pos-s-surface-2) border-(--pos-s-border)', icon: Calendar, label: 'Reserved' },
 };
 
 type ModalType = 'none' | 'checkin' | 'reservation' | 'checkoutPayment' | 'charge' | 'action' | 'chooseCreate';
@@ -141,7 +143,6 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
   const [statusFilter, setStatusFilter] = useState<RoomStatus | 'all'>('all');
   const [floorFilter, setFloorFilter] = useState<number | 'all'>('all');
   const [searchTerm, setSearchTerm] = useState('');
-  const [showFilters, setShowFilters] = useState(false);
   
   // Modal states
   const [modalType, setModalType] = useState<ModalType>('none');
@@ -227,6 +228,13 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
     filters,
     enableRealtime: true,
   });
+
+  // Each status chip counts the whole branch, not the filtered grid.
+  const roomStatusCounts = useMemo(() => {
+    const counts: Record<RoomStatus, number> = { available: 0, occupied: 0, cleaning: 0, maintenance: 0, reserved: 0 };
+    for (const room of allRooms) counts[getRoomEffectiveStatus(room)] += 1;
+    return counts;
+  }, [allRooms]);
 
   // Handlers
   const handleRoomClick = (room: Room) => {
@@ -488,118 +496,85 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
   }
 
   return (
-    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex flex-col p-3 sm:p-4 overflow-hidden">
-      {/* Stats Bar - Responsive */}
-      <motion.div variants={pageMotionContainer} className="grid grid-cols-3 sm:grid-cols-5 gap-2 sm:gap-3 mb-3 sm:mb-4">
-        <StatCard label={t('roomsView.stats.total', { defaultValue: 'Total' })} value={stats.totalRooms} isDark={isDark} />
-        <StatCard label={t('roomsView.stats.available', { defaultValue: 'Available' })} value={stats.availableRooms} color="text-emerald-500" isDark={isDark} />
-        <StatCard label={t('roomsView.stats.occupied', { defaultValue: 'Occupied' })} value={stats.occupiedRooms} color="text-orange-500" isDark={isDark} />
-        <StatCard label={t('roomsView.stats.cleaning', { defaultValue: 'Cleaning' })} value={stats.cleaningRooms} color="text-amber-500" isDark={isDark} className="hidden sm:block" />
-        <StatCard label={t('roomsView.stats.occupancy', { defaultValue: 'Occupancy' })} value={`${stats.occupancyRate}%`} isDark={isDark} className="hidden sm:block" />
-      </motion.div>
-
-      {/* Search & Filter Bar */}
-      <motion.div variants={pageMotionItem} data-rooms-filter-bar className="flex flex-col gap-2 sm:gap-3 mb-3 sm:mb-4">
-        {/* Search — its own full-width row so long localized placeholders are never clipped */}
-        <div data-rooms-search className={`relative w-full ${isDark ? 'text-white' : 'text-gray-900'}`}>
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 opacity-50" />
-          <input
-            type="text"
-            placeholder={t('roomsView.searchPlaceholder', { defaultValue: 'Search room or guest...' })}
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className={`w-full pl-9 pr-4 py-2.5 rounded-xl text-sm ${
-              isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'
-            } border focus:ring-2 focus:ring-yellow-400 focus:border-transparent`}
+    // Founder 31/10: the shared workspace -- title with plain figures, search and refresh on one row,
+    // status chips with counts, the app's floor dropdown, floor groups and the same tile as a table.
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="table-workspace h-full" data-theme={isDark ? 'dark' : 'light'} data-rooms-workspace>
+      <div className="table-workspace-controls">
+        <WorkspaceHeader
+          heading={t('dashboard.tabs.rooms', { defaultValue: 'Rooms' })}
+          stats={[
+            { key: 'available', label: t('roomsView.stats.available', { defaultValue: 'Available' }), value: stats.availableRooms, sub: `/${stats.totalRooms}` },
+            { key: 'occupied', label: t('roomsView.stats.occupied', { defaultValue: 'Occupied' }), value: stats.occupiedRooms },
+            { key: 'cleaning', label: t('roomsView.stats.cleaning', { defaultValue: 'Cleaning' }), value: stats.cleaningRooms },
+            { key: 'occupancy', label: t('roomsView.stats.occupancy', { defaultValue: 'Occupancy' }), value: `${stats.occupancyRate}%` },
+          ]}
+        >
+          <WorkspaceSearch value={searchTerm} onChange={setSearchTerm} placeholder={t('roomsView.searchPlaceholder', { defaultValue: 'Search room or guest...' })} />
+          <WorkspaceIconButton label={t('common.refresh', { defaultValue: 'Refresh' })} onClick={() => refetch()}>
+            <RefreshCw className={isLoading ? 'animate-spin' : undefined} />
+          </WorkspaceIconButton>
+        </WorkspaceHeader>
+        <div className="table-workspace-toolbar" data-rooms-filter-bar>
+          <WorkspaceChips<RoomStatus | 'all'>
+            label={t('dashboard.tabs.rooms', { defaultValue: 'Rooms' })}
+            value={statusFilter}
+            onChange={handleManualStatusFilterChange}
+            items={[
+              { key: 'all', label: t('roomsView.all', { defaultValue: 'All' }), count: allRooms.length },
+              ...(Object.keys(statusConfig) as RoomStatus[]).map((status) => ({ key: status, label: getStatusLabel(status), count: roomStatusCounts[status] })),
+            ]}
           />
-        </div>
-        
-        {/* Filters + refresh — wrap on their own row below the search so they never squeeze it */}
-        <div data-rooms-filter-controls className="flex flex-wrap items-center gap-2">
-          {/* Filter Toggle (Mobile) */}
-          <button
-            onClick={() => setShowFilters(!showFilters)}
-            className={`sm:hidden flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl ${
-              isDark ? 'bg-gray-800' : 'bg-white border border-gray-200'
-            }`}
-          >
-            <Filter className="w-4 h-4" />
-            <span className="text-sm">{t('roomsView.filters', { defaultValue: 'Filters' })}</span>
-            <ChevronDown className={`w-4 h-4 transition-transform ${showFilters ? 'rotate-180' : ''}`} />
-          </button>
-
-          {/* Desktop Filters */}
-          <div className="hidden sm:flex flex-wrap gap-2">
-            <StatusFilterButtons statusFilter={statusFilter} setStatusFilter={handleManualStatusFilterChange} isDark={isDark} getStatusLabel={getStatusLabel} />
-            {floors.length > 1 && (
-              <FloorSelect floorFilter={floorFilter} setFloorFilter={setFloorFilter} floors={floors} isDark={isDark} />
-            )}
-          </div>
-
-          {/* Refresh Button */}
-          <button
-            onClick={() => refetch()}
-            className={`hidden sm:flex items-center justify-center w-10 h-10 rounded-xl ${
-              isDark ? 'bg-gray-800 active:bg-gray-700' : 'bg-white border border-gray-200 active:bg-gray-50'
-            }`}
-          >
-            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
-      </motion.div>
-
-      {/* Mobile Filters (Collapsible) */}
-      {showFilters && (
-        <motion.div variants={pageMotionItem} className={`sm:hidden flex flex-wrap gap-2 mb-3 p-3 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-gray-50'}`}>
-          <StatusFilterButtons statusFilter={statusFilter} setStatusFilter={handleManualStatusFilterChange} isDark={isDark} getStatusLabel={getStatusLabel} />
+          <span className="table-workspace-spacer" aria-hidden="true" />
           {floors.length > 1 && (
-            <FloorSelect floorFilter={floorFilter} setFloorFilter={setFloorFilter} floors={floors} isDark={isDark} />
+            <WorkspaceSelect
+              label={t('roomsView.allFloors', { defaultValue: 'All Floors' })}
+              value={String(floorFilter)}
+              onChange={(value) => setFloorFilter(value === 'all' ? 'all' : Number(value))}
+              options={[
+                { value: 'all', label: t('roomsView.allFloors', { defaultValue: 'All Floors' }) },
+                ...floors.map((floor) => ({ value: String(floor), label: t('roomsView.floor', { floor, defaultValue: 'Floor {{floor}}' }) })),
+              ]}
+            />
           )}
-        </motion.div>
-      )}
+        </div>
+      </div>
 
       {/* Loading State */}
       {isLoading && rooms.length === 0 && (
-        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+        <div className="flex flex-1 items-center justify-center" style={{ color: 'var(--table-muted)' }}>
           <RefreshCw className="w-6 h-6 animate-spin mr-2" />
           {t('roomsView.loading', { defaultValue: 'Loading rooms...' })}
-        </motion.div>
+        </div>
       )}
 
-      {/* Rooms Grid */}
+      {/* Rooms Grid, one group per floor */}
       {!isLoading && (
-        <motion.div
-          variants={pageMotionContainer}
-          /* Round 236: scroll stays (overflow-y-auto); when embedded in the Orders hub the native
-             scrollbar is hidden (scrollbar-hide) so the rooms grid matches the hub's chrome. */
-          className={`flex-1 overflow-y-auto space-y-4 pb-20 ${embedded ? 'scrollbar-hide' : ''}`}
-        >
-          {floors.map(floor => {
-            const floorRooms = rooms.filter(r => r.floor === floor);
-            if (floorRooms.length === 0) return null;
-            
-            return (
-              <motion.div key={floor} variants={pageMotionItem}>
-                <h3 className={`text-xs font-semibold uppercase tracking-wider mb-2 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-                  {t('roomsView.floor', { floor, defaultValue: 'Floor {{floor}}' })}
-                </h3>
-                <motion.div variants={pageMotionContainer} className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 sm:gap-3">
-                  {floorRooms.map(room => (
-                    <RoomCard key={room.id} room={room} isDark={isDark} onClick={() => handleRoomClick(room)} />
-                  ))}
-                </motion.div>
-              </motion.div>
-            );
-          })}
+        <div className="mt-3 min-h-0 flex-1 overflow-hidden">
+          {/* Round 236: when embedded in the Orders hub the native scrollbar stays hidden. */}
+          <div className={`table-workspace-scroll ${embedded ? 'scrollbar-hide' : ''}`}>
+            {floors.map(floor => {
+              const floorRooms = rooms.filter(r => r.floor === floor);
+              if (floorRooms.length === 0) return null;
+              return (
+                <WorkspaceGroup key={floor} heading={t('roomsView.floor', { floor, defaultValue: 'Floor {{floor}}' })} count={floorRooms.length}>
+                  <motion.div variants={pageMotionContainer} className="table-workspace-grid">
+                    {floorRooms.map(room => (
+                      <RoomCard key={room.id} room={room} onClick={() => handleRoomClick(room)} />
+                    ))}
+                  </motion.div>
+                </WorkspaceGroup>
+              );
+            })}
 
-          {rooms.length === 0 && !isLoading && (
-            <motion.div variants={pageMotionItem} className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-              <Bed className="w-16 h-16 mx-auto mb-4 opacity-30" />
-              <p className="text-lg font-medium mb-2">{t('roomsView.noRooms', { defaultValue: 'No rooms found' })}</p>
-              <p className="text-sm">{t('roomsView.noRoomsHint', { defaultValue: 'Try adjusting your filters' })}</p>
-            </motion.div>
-          )}
-        </motion.div>
+            {rooms.length === 0 && (
+              <div className="text-center py-12" style={{ color: 'var(--table-muted)' }}>
+                <Bed className="w-16 h-16 mx-auto mb-4 opacity-30" />
+                <p className="text-lg font-medium mb-2">{t('roomsView.noRooms', { defaultValue: 'No rooms found' })}</p>
+                <p className="text-sm">{t('roomsView.noRoomsHint', { defaultValue: 'Try adjusting your filters' })}</p>
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
       {/* Floating Action Button - offers a check-in/reservation choice when
@@ -651,34 +626,34 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
             {/* Room Info */}
             <div className={`p-4 rounded-2xl ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
               <div className="flex items-center justify-between mb-2">
-                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('roomsView.fields.status', { defaultValue: 'Status' })}</span>
+                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.status', { defaultValue: 'Status' })}</span>
                 <span className={`font-medium ${statusConfig[getRoomEffectiveStatus(actionRoom)].color}`}>
                   {getStatusLabel(getRoomEffectiveStatus(actionRoom))}
                 </span>
               </div>
               <div className="flex items-center justify-between mb-2">
-                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('roomsView.fields.type', { defaultValue: 'Type' })}</span>
+                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.type', { defaultValue: 'Type' })}</span>
                 <span className={`font-medium capitalize ${isDark ? 'text-white' : 'text-gray-900'}`}>{translateRoomType(t, actionRoom.roomType)}</span>
               </div>
               <div className="flex items-center justify-between mb-2">
-                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('roomsView.fields.capacity', { defaultValue: 'Capacity' })}</span>
+                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.capacity', { defaultValue: 'Capacity' })}</span>
                 <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{t('roomsView.fields.guestsCount', { count: actionRoom.capacity, defaultValue: '{{count}} guests' })}</span>
               </div>
               {actionRoom.ratePerNight && (
                 <div className="flex items-center justify-between">
-                  <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('roomsView.fields.ratePerNight', { defaultValue: 'Rate/Night' })}</span>
+                  <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.ratePerNight', { defaultValue: 'Rate/Night' })}</span>
                   <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{formatMoney(actionRoom.ratePerNight)}</span>
                 </div>
               )}
               {getRoomGuestName(actionRoom) && (
                 <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-600">
-                  <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('roomsView.fields.guest', { defaultValue: 'Guest' })}</span>
+                  <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.guest', { defaultValue: 'Guest' })}</span>
                   <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{getRoomGuestName(actionRoom)}</span>
                 </div>
               )}
               {actionRoom.activeFolio && (
                 <div className="flex items-center justify-between mt-2">
-                  <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('roomsView.fields.folioBalance', { defaultValue: 'Folio Balance' })}</span>
+                  <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.folioBalance', { defaultValue: 'Folio Balance' })}</span>
                   <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
                     {formatMoney(actionRoom.activeFolio.balanceCents / 100, actionRoom.activeFolio.currency ?? null)}
                   </span>
@@ -711,7 +686,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
 
             {/* Quick Status Change */}
             <div>
-              <p className={`text-xs font-medium mb-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('roomsView.changeStatus', { defaultValue: 'Change Status' })}</p>
+              <p className={`text-xs font-medium mb-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.changeStatus', { defaultValue: 'Change Status' })}</p>
               <div className="grid grid-cols-3 gap-2">
                 {(Object.keys(statusConfig) as RoomStatus[]).map(status => (
                   <button
@@ -773,14 +748,14 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               <button
                 onClick={() => setModalType('action')}
                 className={`flex-1 py-3 rounded-2xl font-medium ${
-                  isDark ? 'bg-red-500/15 text-red-200 active:bg-red-500/25' : 'bg-red-50 text-red-700 active:bg-red-100'
+                  isDark ? 'bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'
                 }`}
               >
                 {t('common.actions.cancel', { defaultValue: 'Cancel' })}
               </button>
               <button
                 onClick={handleCheckoutPayment}
-                className="flex-1 py-3 rounded-xl font-medium bg-emerald-500 text-white active:bg-emerald-600"
+                className="flex-1 py-3 rounded-xl font-medium bg-(--pos-s-yellow) text-black active:bg-yellow-500"
               >
                 {t('roomsView.postPaymentCheckout', { defaultValue: 'Post Payment & Checkout' })}
               </button>
@@ -808,7 +783,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
                     onClick={() => setFolioChargeData(prev => prev ? { ...prev, chargeType: type } : prev)}
                     className={`py-2.5 px-3 rounded-xl text-sm font-medium capitalize transition-all ${
                       folioChargeData.chargeType === type
-                        ? 'bg-amber-500 text-white'
+                        ? 'bg-(--pos-s-yellow) text-black'
                         : isDark ? 'bg-gray-700 text-gray-300 active:bg-gray-600' : 'bg-gray-100 text-gray-600 active:bg-gray-200'
                     }`}
                   >
@@ -874,7 +849,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               </button>
               <button
                 onClick={handleAddFolioCharge}
-                className="flex-1 py-3 rounded-xl font-medium bg-amber-500 text-white active:bg-amber-600"
+                className="flex-1 py-3 rounded-xl font-medium bg-(--pos-s-yellow) text-black active:bg-yellow-500"
               >
                 {t('roomsView.actions.addCharge', { defaultValue: 'Add Charge' })}
               </button>
@@ -901,99 +876,43 @@ export default RoomsView;
 
 
 // Helper Components
-const StatCard: React.FC<{ label: string; value: string | number; color?: string; isDark: boolean; className?: string }> = 
-  ({ label, value, color, isDark, className }) => (
-  <motion.div variants={pageMotionItem} className={`px-3 py-2 sm:px-4 sm:py-3 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'} ${className || ''}`}>
-    <div className={`text-xs sm:text-sm ${color || (isDark ? 'text-gray-400' : 'text-gray-500')}`}>{label}</div>
-    <div className={`text-lg sm:text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{value}</div>
-  </motion.div>
-);
-
-const RoomCard: React.FC<{ room: Room; isDark: boolean; onClick: () => void }> = ({ room, isDark, onClick }) => {
+// Founder 31/10: the same tile as a table -- a double bed with sparkles glowing in the status colour,
+// the number, the room type and the status word on every room (it used to show only when it differed
+// from the stored status). A guest and an open folio add their line underneath.
+const RoomCard: React.FC<{ room: Room; onClick: () => void }> = ({ room, onClick }) => {
   const { t } = useTranslation();
   const effectiveStatus = getRoomEffectiveStatus(room);
-  const config = statusConfig[effectiveStatus];
-  const Icon = config.icon;
+  const statusLabel = t(`roomsView.status.${effectiveStatus}`, { defaultValue: statusConfig[effectiveStatus].label });
   const guestName = getRoomGuestName(room);
-  
   return (
     <motion.button
       variants={pageMotionItem}
+      type="button"
       onClick={onClick}
-      className={`p-3 sm:p-4 rounded-2xl border-2 text-left transition-all active:scale-[0.98] ${config.bgClass}`}
+      className="table-workspace-card"
+      data-status={effectiveStatus}
+      data-room-id={room.id}
+      aria-label={`${room.roomNumber} · ${statusLabel}`}
     >
-      <div className="flex items-center justify-between mb-1">
-        <span className={`font-bold text-sm sm:text-base ${isDark ? 'text-white' : 'text-gray-900'}`}>{room.roomNumber}</span>
-        <Icon className={`w-4 h-4 ${config.color}`} />
-      </div>
-      <div className={`text-xs capitalize ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{translateRoomType(t, room.roomType)}</div>
-      {effectiveStatus !== room.status && (
-        <div className={`text-xs mt-1 font-medium ${config.color}`}>
-          {t(`roomsView.status.${effectiveStatus}`, { defaultValue: statusConfig[effectiveStatus].label })}
-        </div>
-      )}
-      {guestName && (
-        <div className={`text-xs truncate mt-1 ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
-          <Users className="w-3 h-3 inline mr-1" />
-          {guestName}
-        </div>
-      )}
-      {room.activeFolio && (
-        <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-          <DollarSign className="w-3 h-3 inline mr-1" />
-          {formatMoney(room.activeFolio.balanceCents / 100, room.activeFolio.currency ?? null)}
-        </div>
+      <span className="table-workspace-tile">
+        <RoomBedIcon />
+        <span className="table-workspace-tile-info">
+          <strong className="table-workspace-number">{room.roomNumber}</strong>
+          <span className="table-workspace-meta">{translateRoomType(t, room.roomType)}</span>
+          <span className="table-workspace-status"><i aria-hidden="true" />{statusLabel}</span>
+        </span>
+      </span>
+      {(guestName || room.activeFolio) && (
+        <span className="table-workspace-check">
+          <span className="table-workspace-check-meta">
+            {guestName && <span><Users aria-hidden="true" />{guestName}</span>}
+            {room.activeFolio && (
+              <span><DollarSign aria-hidden="true" />{formatMoney(room.activeFolio.balanceCents / 100, room.activeFolio.currency ?? null)}</span>
+            )}
+          </span>
+        </span>
       )}
     </motion.button>
-  );
-};
-
-const StatusFilterButtons: React.FC<{
-  statusFilter: RoomStatus | 'all';
-  setStatusFilter: (s: RoomStatus | 'all') => void;
-  isDark: boolean;
-  getStatusLabel: (s: RoomStatus) => string;
-}> = ({ statusFilter, setStatusFilter, isDark, getStatusLabel }) => {
-  const { t } = useTranslation();
-  return (
-  <div className="flex flex-wrap gap-1.5">
-    {(['all', ...Object.keys(statusConfig)] as const).map(f => (
-      <button
-        key={f}
-        onClick={() => setStatusFilter(f as RoomStatus | 'all')}
-        className={`px-3 py-1.5 rounded-2xl text-xs sm:text-sm font-medium transition-transform active:scale-95 ${
-          statusFilter === f 
-            ? 'bg-yellow-400 text-black'
-            : isDark ? 'bg-gray-700 text-gray-300 active:bg-gray-600' : 'bg-gray-100 text-gray-600 active:bg-gray-200'
-        }`}
-      >
-        {f === 'all' ? t('roomsView.all', { defaultValue: 'All' }) : getStatusLabel(f as RoomStatus)}
-      </button>
-    ))}
-  </div>
-  );
-};
-
-const FloorSelect: React.FC<{
-  floorFilter: number | 'all';
-  setFloorFilter: (f: number | 'all') => void;
-  floors: number[];
-  isDark: boolean;
-}> = ({ floorFilter, setFloorFilter, floors, isDark }) => {
-  const { t } = useTranslation();
-  return (
-  <select
-    value={floorFilter}
-    onChange={(e) => setFloorFilter(e.target.value === 'all' ? 'all' : parseInt(e.target.value))}
-    className={`px-3 py-1.5 rounded-2xl text-xs sm:text-sm ${
-      isDark ? 'bg-gray-700 text-white border-gray-600' : 'bg-white text-gray-900 border-gray-200'
-    } border`}
-  >
-    <option value="all">{t('roomsView.allFloors', { defaultValue: 'All Floors' })}</option>
-    {floors.map(floor => (
-      <option key={floor} value={floor}>{t('roomsView.floor', { floor, defaultValue: 'Floor {{floor}}' })}</option>
-    ))}
-  </select>
   );
 };
 
@@ -1072,8 +991,8 @@ const ActionButton: React.FC<{
   className?: string;
 }> = ({ icon, label, color, onClick, className }) => {
   const colorClasses: Record<string, string> = {
-    emerald: 'bg-emerald-500/10 text-emerald-500 active:bg-emerald-500/20',
-    amber: 'bg-amber-500/10 text-amber-500 active:bg-amber-500/20',
+    emerald: 'bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-300 active:bg-(--pos-s-surface-2)',
+    amber: 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300 active:bg-(--pos-s-surface-2)',
   };
   
   return (

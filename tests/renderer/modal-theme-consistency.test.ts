@@ -64,16 +64,19 @@ test('light theme clears a stale dark class from html and body portal roots', ()
   assert.equal(body.getAttribute('data-theme'), 'light');
 });
 
-test('shared liquid-glass modals use one translucent, contrast-safe light and dark surface contract', () => {
-  assert.match(glassStyles, /--modal-surface:\s*rgba\(248,\s*250,\s*252,\s*0\.72\)/);
-  assert.match(glassStyles, /--modal-surface-elevated:\s*rgba\(255,\s*255,\s*255,\s*0\.64\)/);
-  assert.match(glassStyles, /--modal-surface-subtle:\s*rgba\(241,\s*245,\s*249,\s*0\.56\)/);
-  assert.match(glassStyles, /--modal-border:\s*rgba\(15,\s*23,\s*42,\s*0\.14\)/);
-  assert.match(glassStyles, /\.dark\s*\{[\s\S]*?--modal-surface:\s*rgba\(9,\s*9,\s*11,\s*0\.72\)/);
+// UI audit wave 7 (founder-approved 30/10/2026): the shared modal surface is solid, not translucent.
+test('shared liquid-glass modals use one neutral glass shell over opaque, contrast-safe controls', () => {
+  // Founder 30/10 («γυαλί σε όλα»): the «Νέο ραντεβού» glass for every shared modal.
+  assert.match(glassStyles, /--modal-glass:\s*rgba\(255, 255, 255, 0\.18\);/);
+  assert.match(glassStyles, /\.dark\s*\{[\s\S]*?--modal-glass:\s*rgba\(9, 9, 11, 0\.55\);/);
   assert.match(
     glassStyles,
-    /\.liquid-glass-modal-shell\s*\{[\s\S]*?background:\s*var\(--modal-surface\)[\s\S]*?border:\s*1px solid var\(--modal-border\)/,
+    /\.liquid-glass-modal-shell\s*\{[\s\S]*?background:\s*var\(--modal-glass\)[\s\S]*?border:\s*1px solid var\(--modal-glass-border\)[\s\S]*?backdrop-filter:\s*blur\(40px\)/,
   );
+  // Controls stay opaque so text and fields read the same over any page.
+  assert.match(glassStyles, /--modal-surface:\s*#ffffff;/);
+  assert.match(glassStyles, /--modal-border:\s*#d4d4d8;/);
+  assert.match(glassStyles, /\.dark\s*\{[\s\S]*?--modal-surface:\s*#18181b;/);
   assert.match(
     globalStyles,
     /\.liquid-glass-modal-input\s*\{[\s\S]*?background:\s*var\(--modal-control-bg\)[\s\S]*?border:\s*1px solid var\(--modal-border\)/,
@@ -118,10 +121,12 @@ test('Z report has distinct light and dark text, panel and control tokens', () =
     /\? 'z-report-glass-content overflow-hidden! p-4! text-white'\s*:\s*'z-report-glass-content overflow-hidden! p-4! text-slate-950'/,
   );
   assert.match(zReportModal, /const strongTextClass = isDarkTheme \? 'text-white' : 'text-slate-950'/);
-  assert.match(zReportModal, /const modalInsetClassName = isDarkTheme[\s\S]*?: 'border-yellow-500\/25 bg-white\/70/);
+  // Founder 31/10 («όχι μόνο το γυαλί»): the Z is glass like every modal -- the shared frost shell and
+  // frost cards on it, from the modal tokens (which follow the theme), never white panels piled up.
+  assert.match(zReportModal, /const modalInsetClassName = 'border-\(--modal-glass-card-border\) bg-\(--modal-glass-card\)';/);
   assert.match(
     glassStyles,
-    /\.liquid-glass-modal-shell\.z-report-glass-shell\s*\{[\s\S]*?background:\s*rgba\(248,\s*250,\s*252,\s*0\.74\) !important/,
+    /\.liquid-glass-modal-shell\.z-report-glass-shell\s*\{[\s\S]*?background:\s*var\(--modal-glass\) !important/,
   );
 });
 
@@ -153,40 +158,42 @@ test('printer list verification, role, row and transport surfaces use shared sem
     printerSettingsModal,
     /rolePrinters\.length > 0[\s\S]*?liquidGlassModalTone\('success'\)[\s\S]*?liquidGlassModalTone\('warning'\)[\s\S]*?liquidGlassModalTone\('neutral'\)/,
   );
-  assert.match(printerSettingsModal, /p-3 rounded-lg[^`]*\$\{liquidGlassModalTone\('neutral'\)\}/);
-  assert.match(printerSettingsModal, /liquidGlassModalTone\('warning'\)[\s\S]{0,300}settings\.printer\.default/);
-  assert.match(printerSettingsModal, /liquidGlassModalTone\('neutral'\)[\s\S]{0,300}transportLabel\(resolvedTransport, t\)/);
-  assert.match(printerSettingsModal, /liquidGlassModalTone\('warning'\)[\s\S]{0,300}transportUnreachable/);
+  // UI audit wave 7Γ: each printer is a kit row with one status line and a neutral default badge.
+  assert.match(printerSettingsModal, /data-printer-card className="pos-row"/);
+  assert.match(printerSettingsModal, /<span className="pos-badge ms-2">\{t\('settings\.printer\.default'\)\}<\/span>/);
+  // Audit 30/10: the card states readiness in plain words with a shared tone; transport, resolved
+  // address and "transport unreachable" moved to Diagnostics.
+  assert.match(printerSettingsModal, /<StatusLine tone=\{toneOf\(plain\.tone\)\}>\{plain\.label\}<\/StatusLine>/);
 
   const listStart = printerSettingsModal.indexOf('// Render printer list view');
-  const listEnd = printerSettingsModal.indexOf('// Render discovery view', listStart);
+  const listEnd = printerSettingsModal.indexOf('// Render add/edit form', listStart);
   const printerList = printerSettingsModal.slice(listStart, listEnd);
+  assert.doesNotMatch(printerList, /transportLabel|getResolvedAddress|transportUnreachable/);
   assert.doesNotMatch(printerList, /className="p-3 rounded-lg bg-white\/5 border border-white\/10 flex items-center justify-between"/);
   assert.doesNotMatch(printerList, /className="px-2 py-0\.5 rounded-sm border border-white\/10 liquid-glass-modal-text-muted"/);
   assert.doesNotMatch(printerList, /className="px-2 py-0\.5 rounded-sm border border-amber-500\/30 text-amber-200"/);
 });
 
 test('printer setup selector and onboarding surfaces use shared light and dark tones', () => {
+  // Audit 30/10: one clear way in. The list opens with "Add printer" (the guided setup) and a
+  // secondary manual entry; no Quick/Expert segment and no technical warning box above the list.
   const selectorStart = printerSettingsModal.indexOf('const renderListView', printerSettingsModal.indexOf('// Render printer list view'));
-  const selectorEnd = printerSettingsModal.indexOf('<PrinterSupportEntryPoint', selectorStart);
+  // UI audit wave 7Γ: "Add printer" is the yellow primary; manual entry sits under technicians.
+  const selectorEnd = printerSettingsModal.indexOf('// Automatic printing: grouped by moment of the day', selectorStart);
   const selectorAndHint = printerSettingsModal.slice(selectorStart, selectorEnd);
-  assert.match(selectorAndHint, /liquidGlassModalTone\('neutral'\)/);
-  assert.match(selectorAndHint, /liquidGlassModalTone\('warning'\)/);
-  assert.doesNotMatch(selectorAndHint, /bg-white\/5|border-white\/10|text-amber-100/);
+  assert.match(selectorAndHint, /solidButton\('primary', 'md'\)[\s\S]*?settings\.printer\.addPrinter'/);
+  assert.match(selectorAndHint, /settings\.printer\.addPrinterManually/);
+  assert.doesNotMatch(selectorAndHint, /verificationFirstHint|setupMode === 'quick' \?|bg-white\/5|border-white\/10|text-amber-100/);
 
-  const discoveryStart = printerSettingsModal.indexOf('const renderDiscoverView');
-  const discoveryEnd = printerSettingsModal.indexOf('const renderFormView', discoveryStart);
-  const discoveryOnboarding = printerSettingsModal.slice(discoveryStart, discoveryEnd);
-  assert.match(discoveryOnboarding, /liquidGlassModalTone\('warning'\)[\s\S]*?settings\.printer\.discoveredOnlyHint/);
-  assert.match(discoveryOnboarding, /discoveredPrinters\.map[\s\S]*?liquidGlassModalTone\('neutral'\)/);
-  assert.doesNotMatch(discoveryOnboarding, /bg-white\/5|border-white\/10|text-amber-100/);
+  // Discovery lives in the guided setup only; the separate discovery list is gone.
+  assert.doesNotMatch(printerSettingsModal, /const renderDiscoverView|discoveredOnlyHint/);
 
-  const expertStart = printerSettingsModal.indexOf("t('settings.printer.quickSetupFirstTitle");
-  const expertCardStart = printerSettingsModal.lastIndexOf('<div className={`rounded-2xl', expertStart);
-  const expertCardEnd = printerSettingsModal.indexOf('</div>', printerSettingsModal.indexOf('</button>', expertStart)) + '</div>'.length;
-  const expertOnboarding = printerSettingsModal.slice(expertCardStart, expertCardEnd);
-  assert.match(expertOnboarding, /liquidGlassModalTone\('warning'\)/);
-  assert.doesNotMatch(expertOnboarding, /text-amber-100|bg-amber-500\/10/);
+  // Manual entry explains itself in one neutral line with a way back to the guided setup.
+  const manualStart = printerSettingsModal.indexOf("t('settings.printer.manualEntryHint");
+  assert.ok(manualStart > 0, 'manual entry hint must exist');
+  const manualCard = printerSettingsModal.slice(printerSettingsModal.lastIndexOf('<div className={`', manualStart), manualStart);
+  assert.match(manualCard, /liquidGlassModalTone\('neutral'\)/);
+  assert.doesNotMatch(printerSettingsModal, /quickSetupFirstTitle|(?<!dark:)text-amber-100/);
 });
 
 test('printer wizard save busy state gates every modal-owned dismissal path', () => {

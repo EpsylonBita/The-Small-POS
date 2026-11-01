@@ -8,6 +8,7 @@ import { ReservationInfoPanel } from './ReservationInfoPanel';
 import { TableFloorPlanView } from './TableFloorPlanView';
 import { TableFloorPlanModal } from './TableFloorPlanModal';
 import { FloatingActionButton } from '../ui/FloatingActionButton';
+import { DeliveryScooterIcon } from '../icons/OrderTypeGlyphs';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable, TablesDashboardTab, TabConfig, TableStatus } from '../../types/tables';
 import { sumTableCheckDue } from '../../utils/table-check-total';
@@ -24,7 +25,6 @@ import {
   Plus,
   ReceiptText,
   RefreshCw,
-  Truck,
   UserCheck,
   Users,
   WalletCards,
@@ -252,12 +252,12 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
               <span className={`text-[10px] sm:text-xs font-bold px-1.5 py-0.5 rounded-full transition-all duration-200 ${
                 activeTab === tab.id
                   ? tab.color === 'green'
-                    ? 'bg-green-500/20 text-green-500'
+                    ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300'
                     : tab.color === 'orange'
-                      ? 'bg-amber-500/20 text-amber-500'
+                      ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300'
                       : tab.color === 'red'
-                        ? 'bg-red-500/20 text-red-500'
-                        : 'bg-yellow-500/20 text-yellow-600 dark:text-yellow-300'
+                        ? 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-300'
+                        : 'bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-300'
                   : isDark
                     ? 'bg-white/10 text-white/70'
                     : 'bg-gray-200 text-gray-600'
@@ -343,18 +343,18 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
     switch (status) {
       case 'pending':
         return isDark 
-          ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
-          : 'bg-yellow-100 text-yellow-700 border-yellow-300';
+          ? 'bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-300 border-(--pos-s-border)'
+          : 'bg-(--pos-s-surface-2) text-yellow-700 border-(--pos-s-border)';
       case 'preparing':
         return isDark
-          ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
-          : 'bg-amber-100 text-amber-800 border-amber-300';
+          ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border-(--pos-s-border)'
+          : 'bg-(--pos-s-surface-2) text-amber-800 border-(--pos-s-border)';
       case 'ready':
       case 'completed':
       case 'delivered':
         return isDark
-          ? 'bg-green-500/20 text-green-400 border-green-500/30'
-          : 'bg-green-100 text-green-700 border-green-300';
+          ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 border-(--pos-s-border)'
+          : 'bg-(--pos-s-surface-2) text-green-700 border-(--pos-s-border)';
       default:
         return isDark
           ? 'bg-gray-500/20 text-gray-400 border-gray-500/30'
@@ -562,8 +562,8 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
             key={order.id}
             className={`rounded-xl p-4 border transition-all duration-200 ${
               isDark
-                ? 'bg-green-500/5 border-green-500/20 active:bg-green-500/10'
-                : 'bg-green-50 border-green-200 active:bg-green-100 shadow-xs'
+                ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) active:bg-(--pos-s-surface-2)'
+                : 'bg-(--pos-s-surface-2) border-(--pos-s-border) active:bg-(--pos-s-surface-2) shadow-xs'
             }`}
           >
             <div className="flex items-center justify-between">
@@ -587,7 +587,7 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
                     )}
                     {showDeliveredDriver && (
                       <div className={`inline-flex items-center gap-1.5 text-xs font-medium ${isDark ? 'text-green-300' : 'text-green-700'}`}>
-                        <Truck className="w-3 h-3" />
+                        <DeliveryScooterIcon className="h-5 w-5" />
                         {t('tablesDashboard.deliveredBy', { defaultValue: 'Delivered by {{name}}', name: driverName })}
                       </div>
                     )}
@@ -598,8 +598,8 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
               {/* Center: Completed badge */}
               <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium ${
                 isDark
-                  ? 'bg-green-500/20 text-green-400 border border-green-500/30'
-                  : 'bg-green-100 text-green-700 border border-green-300'
+                  ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 border border-(--pos-s-border)'
+                  : 'bg-(--pos-s-surface-2) text-green-700 border border-(--pos-s-border)'
               }`}>
                 <CheckCircle className="w-3 h-3" />
                 {t('tablesDashboard.status.delivered', { defaultValue: 'Delivered' })}
@@ -627,7 +627,7 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
 
             {/* Items summary */}
             {order.items && order.items.length > 0 && (
-              <div className={`mt-3 pt-3 border-t ${isDark ? 'border-white/10' : 'border-green-100'}`}>
+              <div className={`mt-3 pt-3 border-t ${isDark ? 'border-white/10' : 'border-(--pos-s-border)'}`}>
                 <div className={`text-xs ${isDark ? 'text-white/50' : 'text-gray-500'}`}>
                   {order.items.length} {t('tablesDashboard.items', { defaultValue: 'items' })} -{' '}
                   {order.items.slice(0, 2).map((item, idx) => (
@@ -711,8 +711,8 @@ const CanceledTabContent: React.FC<CanceledTabContentProps> = memo(({ orders, to
             key={order.id}
             className={`rounded-xl p-4 border transition-all duration-200 ${
               isDark
-                ? 'bg-red-500/5 border-red-500/20 active:bg-red-500/10'
-                : 'bg-red-50 border-red-200 active:bg-red-100 shadow-xs'
+                ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) active:bg-(--pos-s-surface-2)'
+                : 'bg-(--pos-s-surface-2) border-(--pos-s-border) active:bg-(--pos-s-surface-2) shadow-xs'
             }`}
           >
             <div className="flex items-center justify-between">
@@ -737,8 +737,8 @@ const CanceledTabContent: React.FC<CanceledTabContentProps> = memo(({ orders, to
               {/* Center: Canceled badge */}
               <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium ${
                 isDark
-                  ? 'bg-red-500/20 text-red-400 border border-red-500/30'
-                  : 'bg-red-100 text-red-700 border border-red-300'
+                  ? 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 border border-(--pos-s-border)'
+                  : 'bg-(--pos-s-surface-2) text-red-700 border border-(--pos-s-border)'
               }`}>
                 <XCircle className="w-3 h-3" />
                 {t('tablesDashboard.status.canceled', { defaultValue: 'Canceled' })}
@@ -758,8 +758,8 @@ const CanceledTabContent: React.FC<CanceledTabContentProps> = memo(({ orders, to
             </div>
 
             {/* Cancellation reason */}
-            <div className={`mt-3 pt-3 border-t ${isDark ? 'border-white/10' : 'border-red-100'}`}>
-              <div className={`flex items-start gap-2 text-sm ${isDark ? 'text-red-400/80' : 'text-red-600'}`}>
+            <div className={`mt-3 pt-3 border-t ${isDark ? 'border-white/10' : 'border-(--pos-s-border)'}`}>
+              <div className={`flex items-start gap-2 text-sm ${isDark ? 'text-red-400' : 'text-red-600'}`}>
                 <span className="font-medium">{t('tablesDashboard.reason', { defaultValue: 'Reason' })}:</span>
                 <span className={isDark ? 'text-white/60' : 'text-gray-600'}>{cancellationReason}</span>
               </div>
@@ -826,7 +826,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
   const textMuted = isDark ? 'text-slate-300/75' : 'text-slate-600';
   const shellClass = isDark
     ? 'border-white/10 bg-slate-950/55 shadow-[0_18px_45px_rgba(0,0,0,0.35)]'
-    : 'border-slate-200/80 bg-white/85 shadow-[0_18px_45px_rgba(15,23,42,0.08)]';
+    : 'border-slate-200/80 bg-white/85';
   const subtleClass = isDark
     ? 'border-white/10 bg-white/4.5'
     : 'border-slate-200/90 bg-slate-50/90';
@@ -898,67 +898,51 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
   }> = {
     available: {
       label: t('tablesDashboard.tableStatus.available', { defaultValue: 'Available' }),
-      cardClass: isDark
-        ? 'border-emerald-400/35 bg-emerald-500/10'
-        : 'border-emerald-300 bg-emerald-50/90',
+      cardClass: 'border-(--pos-s-border) bg-(--pos-s-surface-2)',
       badgeClass: isDark
-        ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
-        : 'border-emerald-200 bg-emerald-100 text-emerald-700',
+        ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200'
+        : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700',
       iconClass: 'text-emerald-500',
       progressClass: 'bg-emerald-500',
     },
     occupied: {
       label: t('tablesDashboard.tableStatus.occupied', { defaultValue: 'Occupied' }),
-      cardClass: isDark
-        ? 'border-yellow-400/45 bg-yellow-500/10'
-        : 'border-yellow-300 bg-yellow-50/95',
+      cardClass: 'border-(--pos-s-border) bg-(--pos-s-surface-2)',
       badgeClass: isDark
-        ? 'border-yellow-400/30 bg-yellow-400/10 text-yellow-200'
-        : 'border-yellow-200 bg-yellow-100 text-yellow-800',
+        ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200'
+        : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-yellow-800',
       iconClass: 'text-yellow-500',
       progressClass: 'bg-yellow-500',
     },
     reserved: {
       label: t('tablesDashboard.tableStatus.reserved', { defaultValue: 'Reserved' }),
-      cardClass: isDark
-        ? 'border-amber-400/40 bg-amber-500/10'
-        : 'border-amber-300 bg-amber-50',
+      cardClass: 'border-(--pos-s-border) bg-(--pos-s-surface-2)',
       badgeClass: isDark
-        ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-        : 'border-amber-200 bg-amber-100 text-amber-700',
+        ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200'
+        : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700',
       iconClass: 'text-amber-500',
       progressClass: 'bg-amber-500',
     },
     cleaning: {
       label: t('tablesDashboard.tableStatus.cleaning', { defaultValue: 'Cleaning' }),
-      cardClass: isDark
-        ? 'border-slate-400/25 bg-white/4.5'
-        : 'border-slate-300 bg-slate-50',
-      badgeClass: isDark
-        ? 'border-slate-400/25 bg-slate-400/10 text-slate-200'
-        : 'border-slate-200 bg-slate-100 text-slate-700',
+      cardClass: 'border-(--pos-s-border) bg-(--pos-s-surface-2)',
+      badgeClass: 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-muted)',
       iconClass: 'text-slate-500',
       progressClass: 'bg-slate-500',
     },
     maintenance: {
       label: t('tablesDashboard.tableStatus.maintenance', { defaultValue: 'Maintenance' }),
-      cardClass: isDark
-        ? 'border-red-400/35 bg-red-500/10'
-        : 'border-red-300 bg-red-50',
+      cardClass: 'border-(--pos-s-border) bg-(--pos-s-surface-2)',
       badgeClass: isDark
-        ? 'border-red-400/25 bg-red-400/10 text-red-200'
-        : 'border-red-200 bg-red-100 text-red-700',
+        ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200'
+        : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-700',
       iconClass: 'text-red-500',
       progressClass: 'bg-red-500',
     },
     unavailable: {
       label: t('tablesDashboard.tableStatus.unavailable', { defaultValue: 'Unavailable' }),
-      cardClass: isDark
-        ? 'border-slate-500/25 bg-slate-800/35'
-        : 'border-slate-300 bg-slate-100',
-      badgeClass: isDark
-        ? 'border-slate-500/25 bg-slate-500/10 text-slate-300'
-        : 'border-slate-300 bg-slate-200 text-slate-700',
+      cardClass: 'border-(--pos-s-border) bg-(--pos-s-surface-2)',
+      badgeClass: 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-muted)',
       iconClass: 'text-slate-500',
       progressClass: 'bg-slate-500',
     },
@@ -1105,7 +1089,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                   onClick={() => setTableViewMode('list')}
                   className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold transition-colors ${
                     tableViewMode === 'list'
-                      ? 'bg-yellow-400 text-black'
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                       : isDark
                         ? 'text-slate-200 active:bg-white/8'
                         : 'text-slate-700 active:bg-white'
@@ -1119,7 +1103,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                   onClick={() => setFloorPlanModalOpen(true)}
                   className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold transition-colors ${
                     floorPlanModalOpen
-                      ? 'bg-yellow-400 text-black'
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                       : isDark
                         ? 'text-slate-200 active:bg-white/8'
                         : 'text-slate-700 active:bg-white'
@@ -1136,7 +1120,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                   onClick={() => setFilter(status)}
                   className={`rounded-xl px-3 py-2 text-sm font-semibold transition-all ${
                     filter === status
-                      ? 'bg-yellow-400 text-black shadow-lg shadow-yellow-500/20'
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                       : isDark
                         ? 'bg-white/6 text-slate-200 active:bg-white/10'
                         : 'bg-white text-slate-700 shadow-xs ring-1 ring-slate-200 active:bg-slate-50'
@@ -1169,7 +1153,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
               onClick={() => setFloorFilter('all')}
               className={`rounded-xl px-3 py-2 text-sm font-semibold transition-colors ${
                 floorFilter === 'all'
-                  ? 'bg-yellow-400 text-black'
+                  ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                   : isDark
                     ? 'text-slate-200 active:bg-white/8'
                     : 'text-slate-700 active:bg-white'
@@ -1184,7 +1168,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                 onClick={() => setFloorFilter(floor)}
                 className={`rounded-xl px-3 py-2 text-sm font-semibold transition-colors ${
                   floorFilter === floor
-                    ? 'bg-yellow-400 text-black'
+                    ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                     : isDark
                       ? 'text-slate-200 active:bg-white/8'
                       : 'text-slate-700 active:bg-white'
@@ -1260,9 +1244,9 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                   tabIndex={0}
                   onClick={() => handleTableClick(table)}
                   onKeyDown={(event) => handleTableKeyDown(event, table)}
-                  className={`group min-h-[205px] cursor-pointer rounded-2xl border p-4 backdrop-blur-xl transition-all duration-200 active:scale-[0.99] focus:outline-hidden focus:ring-2 focus:ring-yellow-400/45 ${
+                  className={`group min-h-[205px] cursor-pointer rounded-2xl border p-4 transition-all duration-200 active:scale-[0.99] focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg) ${
                     visual.cardClass
-                  } ${isSelected ? 'ring-2 ring-yellow-500/70' : ''}`}
+                  } ${isSelected ? 'ring-2 ring-(--pos-s-sel-bg)' : ''}`}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -1320,7 +1304,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                       </div>
                     </div>
                   ) : needsAttention ? (
-                    <div className={`mt-4 rounded-2xl border px-3 py-3 ${isDark ? 'border-amber-400/25 bg-amber-400/10' : 'border-amber-200 bg-amber-50/80'}`}>
+                    <div className={`mt-4 rounded-2xl border px-3 py-3 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2)'}`}>
                       <div className="flex items-center gap-2 text-sm font-semibold text-amber-700 dark:text-amber-300">
                         <AlertTriangle className="h-4 w-4" />
                         {displayStatus === 'cleaning'
@@ -1329,7 +1313,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                       </div>
                     </div>
                   ) : (
-                    <div className={`mt-4 rounded-2xl border px-3 py-3 ${isDark ? 'border-emerald-400/20 bg-emerald-400/10' : 'border-emerald-200 bg-white/70'}`}>
+                    <div className={`mt-4 rounded-2xl border px-3 py-3 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-white/70'}`}>
                       <div className="flex items-center gap-2 text-sm font-semibold text-emerald-700 dark:text-emerald-300">
                         <CheckCircle className="h-4 w-4" />
                         {t('tablesDashboard.readyForGuests', { defaultValue: 'Ready for guests' })}
@@ -1339,7 +1323,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
 
                   <div className={`mt-4 flex flex-wrap items-center gap-2 text-xs ${textMuted}`}>
                     {occupiedInfo ? (
-                      <span className="inline-flex items-center gap-1 rounded-xl border border-yellow-400/20 bg-yellow-500/10 px-2 py-1 font-semibold text-yellow-800 dark:text-yellow-200">
+                      <span className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-2 py-1 font-semibold text-yellow-800 dark:text-yellow-200">
                         <Clock3 className="h-3.5 w-3.5" />
                         {occupiedInfo.since} · {occupiedInfo.duration}
                       </span>
@@ -1364,7 +1348,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                     <span className={`inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm font-bold transition-colors ${
                       hasOpenCheck
                         ? 'bg-yellow-400 text-black group-active:bg-yellow-300'
-                        : 'bg-emerald-600 text-white group-active:bg-emerald-500'
+                        : 'bg-yellow-400 text-black group-active:bg-yellow-300'
                     }`}>
                       {hasOpenCheck ? <WalletCards className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
                       {hasOpenCheck
@@ -1468,7 +1452,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                       </span>
                     </div>
                     {occupiedInfo ? (
-                      <div className="mt-2 inline-flex items-center gap-1.5 rounded-xl border border-yellow-400/20 bg-yellow-500/10 px-2 py-1 text-xs font-semibold text-yellow-800 dark:text-yellow-200">
+                      <div className="mt-2 inline-flex items-center gap-1.5 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-2 py-1 text-xs font-semibold text-yellow-800 dark:text-yellow-200">
                         <Clock3 className="h-3.5 w-3.5" />
                         {occupiedInfo.since} · {occupiedInfo.duration}
                       </div>

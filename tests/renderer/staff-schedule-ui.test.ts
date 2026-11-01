@@ -119,11 +119,11 @@ test('StaffScheduleView uses a responsive calendar without visible scrollbars', 
 test('StaffScheduleView uses yellow accents for selected controls instead of blue chrome', () => {
   const source = readScheduleSource();
 
-  assert.match(source, /focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400\/25/);
+  assert.match(source, /focus:border-yellow-400 focus:ring-2 focus:ring-\(--pos-s-fg\)/);
   assert.match(source, /bg-yellow-400 px-4 py-3 text-sm font-semibold text-black/);
   assert.match(source, /bg-yellow-400 border-yellow-400 text-black/);
-  assert.match(source, /bg-yellow-950\/20 border-yellow-500/);
-  assert.match(source, /bg-yellow-100 border-yellow-200 text-yellow-800/);
+  assert.match(source, /bg-\(--pos-s-surface-2\) border-yellow-500/);
+  assert.match(source, /bg-\(--pos-s-surface-2\) border-\(--pos-s-yellow\) text-yellow-800/);
   assert.match(source, /active:border-yellow-500 active:text-yellow-200/);
   assert.doesNotMatch(source, /staffSchedule\.actions\.addShift/);
   assert.match(source, /staffSchedule\.addShiftForDay/);

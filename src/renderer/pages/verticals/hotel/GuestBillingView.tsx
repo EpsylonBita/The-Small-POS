@@ -224,7 +224,7 @@ const FolioActionModal: React.FC<{
         >
           <div>
             <h2 id={titleId} className={`text-lg font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{title}</h2>
-            <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
               {folio.guestName} - {t('guestBilling.room', { defaultValue: 'Room' })} {folio.roomNumber}
             </p>
           </div>
@@ -318,14 +318,14 @@ const FolioActionModal: React.FC<{
           </div>}
 
           {kind === 'payment' && (
-            <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
               {t('guestBilling.outstandingBalanceLabel', { defaultValue: 'Outstanding balance' })}:{' '}
               <span className="font-medium">{formatCurrency(folio.balance, folio.currency ?? null)}</span>
             </p>
           )}
 
           {formError && (
-            <div className="flex items-start gap-2 p-2 rounded-xl bg-red-500/10 text-red-500 text-sm">
+            <div className="flex items-start gap-2 p-2 rounded-xl bg-(--pos-s-bad-bg) text-red-800 dark:text-red-300 text-sm">
               <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
               <span>{formError}</span>
             </div>
@@ -336,7 +336,7 @@ const FolioActionModal: React.FC<{
               type="button"
               onClick={onClose}
               disabled={submitting}
-              className={`flex-1 py-2.5 rounded-xl border font-medium transition-transform active:scale-95 ${isDark ? 'border-red-400/40 bg-red-500/15 text-red-200 active:bg-red-500/25' : 'border-red-500/40 bg-red-50 text-red-700 active:bg-red-100'} disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100`}
+              className={`flex-1 py-2.5 rounded-xl border font-medium transition-transform active:scale-95 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'} disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100`}
             >
               {t('common.cancel', { defaultValue: 'Cancel' })}
             </button>
@@ -347,7 +347,7 @@ const FolioActionModal: React.FC<{
               className={`flex-1 py-2.5 rounded-xl border font-medium transition-transform active:scale-95 ${
                 kind === 'charge'
                   ? 'border-yellow-500 bg-yellow-400 text-black active:bg-yellow-500'
-                  : 'border-green-600 bg-green-600 text-white active:bg-green-700'
+                  : 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500'
               } disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100`}
             >
               {submitting
@@ -576,8 +576,8 @@ export const GuestBillingView: React.FC = memo(() => {
     return (
       <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex items-center justify-center">
         <motion.div variants={pageMotionItem} className="text-center">
-          <RefreshCw className={`w-8 h-8 animate-spin mx-auto mb-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
-          <p className={isDark ? 'text-gray-400' : 'text-gray-500'}>
+          <RefreshCw className={`w-8 h-8 animate-spin mx-auto mb-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`} />
+          <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>
             {t('common.loading', { defaultValue: 'Loading...' })}
           </p>
         </motion.div>
@@ -594,7 +594,7 @@ export const GuestBillingView: React.FC = memo(() => {
           <p className={`font-medium mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
             {t('guestBilling.error.title', { defaultValue: 'Failed to load guest folios' })}
           </p>
-          <p className={`text-sm mb-4 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{error}</p>
+          <p className={`text-sm mb-4 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{error}</p>
           <button
             type="button"
             onClick={() => fetchFolios()}
@@ -616,7 +616,7 @@ export const GuestBillingView: React.FC = memo(() => {
           <p className={`font-medium mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
             {t('guestBilling.empty.title', { defaultValue: 'No guest folios' })}
           </p>
-          <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+          <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
             {t('guestBilling.empty.description', { defaultValue: 'Guest folios will appear here when created.' })}
           </p>
         </motion.div>
@@ -637,19 +637,19 @@ export const GuestBillingView: React.FC = memo(() => {
         {/* Stats */}
         <motion.div variants={pageMotionContainer} className="flex gap-4 mb-4">
           <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-white/10' : 'bg-white/80 border-gray-200 shadow-xs'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
               {t('guestBilling.stats.activeFolios', { defaultValue: 'Active Folios' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.activeCount}</div>
           </motion.div>
           <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-white/10' : 'bg-white/80 border-gray-200 shadow-xs'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
               {t('guestBilling.stats.outstandingBalance', { defaultValue: 'Outstanding Balance' })}
             </div>
             <div className={`text-xl font-bold text-amber-500`}>{formatMoney(stats.activeBalance, commonFolioCurrency(folios.filter(folio => folio.status === 'active')))}</div>
           </motion.div>
           <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-white/10' : 'bg-white/80 border-gray-200 shadow-xs'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
               {t('guestBilling.stats.disputed', { defaultValue: 'Disputed' })}
             </div>
             <div className={`text-xl font-bold text-red-500`}>{stats.disputedCount}</div>
@@ -676,7 +676,7 @@ export const GuestBillingView: React.FC = memo(() => {
               onClick={() => setStatusFilter(status)}
               className={`px-3 py-2 rounded-xl text-sm transition-transform active:scale-95 ${
                 statusFilter === status
-                  ? 'bg-yellow-400 text-black border border-yellow-500'
+                  ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border border-(--pos-s-sel-bg)'
                   : isDark ? 'bg-zinc-900/70 text-gray-300 border border-white/10 active:bg-white/10' : 'bg-gray-100 text-gray-600 border border-gray-200 active:bg-white'
               }`}
             >
@@ -694,12 +694,12 @@ export const GuestBillingView: React.FC = memo(() => {
               type="button"
               onClick={() => setSelectedFolio(folio)}
               className={`w-full p-4 rounded-2xl text-left transition-transform active:scale-[0.99] border ${
-                selectedFolio?.id === folio.id ? 'ring-2 ring-yellow-400' : ''
+                selectedFolio?.id === folio.id ? 'ring-2 ring-(--pos-s-sel-bg)' : ''
               } ${isDark ? 'bg-zinc-900/70 border-white/10 active:bg-white/10' : 'bg-white border-gray-200 shadow-xs active:bg-gray-50'}`}
             >
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
-                  <User className={`w-4 h-4 ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
+                  <User className={`w-4 h-4 ${isDark ? 'text-gray-400' : 'text-gray-600'}`} />
                   <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{folio.guestName}</span>
                 </div>
                 <span className={`px-2 py-1 rounded-sm text-xs ${statusBadgeClass(folio.status)}`}>
@@ -707,7 +707,7 @@ export const GuestBillingView: React.FC = memo(() => {
                 </span>
               </div>
               <div className="flex items-center justify-between text-sm">
-                <span className={isDark ? 'text-gray-400' : 'text-gray-500'}>
+                <span className={isDark ? 'text-gray-400' : 'text-gray-600'}>
                   {t('guestBilling.room', { defaultValue: 'Room' })} {folio.roomNumber}
                 </span>
                 <span className={`font-bold ${folio.balance > 0 ? 'text-amber-500' : 'text-green-500'}`}>
@@ -730,7 +730,7 @@ export const GuestBillingView: React.FC = memo(() => {
               type="button"
               onClick={() => setSelectedFolio(null)}
               aria-label={t('common.close', { defaultValue: 'Close' })}
-              className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition-transform active:scale-95 ${isDark ? 'text-gray-400 active:bg-white/10' : 'text-gray-500 active:bg-black/5'}`}
+              className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition-transform active:scale-95 ${isDark ? 'text-gray-400 active:bg-white/10' : 'text-gray-600 active:bg-black/5'}`}
             >
               <X className="w-4 h-4" />
             </button>
@@ -744,7 +744,7 @@ export const GuestBillingView: React.FC = memo(() => {
                 {statusLabel(selectedFolio.status)}
               </span>
             </div>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
               {t('guestBilling.room', { defaultValue: 'Room' })} {selectedFolio.roomNumber}
             </div>
             {selectedFolio.guestEmail && (
@@ -758,7 +758,7 @@ export const GuestBillingView: React.FC = memo(() => {
               </div>
             )}
             <div className="flex items-center gap-4 mt-2 text-xs">
-              <span className={`flex items-center gap-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+              <span className={`flex items-center gap-1 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                 <Calendar className="w-3 h-3" />
                 {selectedFolio.checkIn} - {selectedFolio.checkOut || t('guestBilling.ongoing', { defaultValue: 'Ongoing' })}
               </span>
@@ -769,7 +769,7 @@ export const GuestBillingView: React.FC = memo(() => {
           <div className="flex-1 overflow-y-auto scrollbar-hide">
             <div className="space-y-3 mb-4">
               <div className="flex items-center justify-between">
-                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                   {t('guestBilling.totalCharges', { defaultValue: 'Total Charges' })}
                 </span>
                 <span className={isDark ? 'text-white' : 'text-gray-900'}>
@@ -777,7 +777,7 @@ export const GuestBillingView: React.FC = memo(() => {
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                   {t('guestBilling.totalPayments', { defaultValue: 'Total Payments' })}
                 </span>
                 <span className="text-green-500">
@@ -787,7 +787,7 @@ export const GuestBillingView: React.FC = memo(() => {
             </div>
             {selectedFolio.notes && (
               <div className={`p-2 rounded-xl text-sm ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
-                <div className={`text-xs font-medium mb-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                <div className={`text-xs font-medium mb-1 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                   {t('guestBilling.notes', { defaultValue: 'Notes' })}
                 </div>
                 <div className={isDark ? 'text-gray-300' : 'text-gray-600'}>{selectedFolio.notes}</div>
@@ -798,7 +798,7 @@ export const GuestBillingView: React.FC = memo(() => {
           {/* Balance & Actions */}
           <div className={`pt-4 border-t ${isDark ? 'border-gray-700' : 'border-gray-200'}`}>
             {outstandingNotice && outstandingNotice.folioId === selectedFolio.id && (
-              <div className="flex items-start gap-2 p-2 mb-3 rounded-xl bg-amber-500/10 text-amber-500 text-sm">
+              <div className="flex items-start gap-2 p-2 mb-3 rounded-xl bg-(--pos-s-warn-bg) text-amber-800 dark:text-amber-300 text-sm">
                 <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
                 <span>
                   {t('guestBilling.checkoutModal.outstanding', {
@@ -834,7 +834,7 @@ export const GuestBillingView: React.FC = memo(() => {
                       setPaymentPrefill(selectedFolio.balance > 0 ? selectedFolio.balance : null);
                       setActionModal('payment');
                     }}
-                    className="flex items-center justify-center gap-2 py-2 rounded-xl bg-green-600 text-white font-medium transition-transform active:scale-95 active:bg-green-700"
+                    className="flex items-center justify-center gap-2 py-2 rounded-xl bg-(--pos-s-yellow) text-black font-medium transition-transform active:scale-95 active:bg-yellow-500"
                   >
                     <CreditCard className="w-4 h-4" />
                     {t('guestBilling.payment', { defaultValue: 'Payment' })}
@@ -844,7 +844,7 @@ export const GuestBillingView: React.FC = memo(() => {
                   type="button"
                   onClick={() => handleCheckout(selectedFolio)}
                   disabled={checkoutBusy}
-                  className={`w-full mt-2 py-2 rounded-xl flex items-center justify-center gap-2 bg-amber-600 text-white font-medium transition-transform active:scale-95 active:bg-amber-700 ${
+                  className={`w-full mt-2 py-2 rounded-xl flex items-center justify-center gap-2 bg-amber-700 text-white font-medium transition-transform active:scale-95 active:bg-amber-800 ${
                     checkoutBusy ? 'opacity-60' : ''
                   }`}
                 >

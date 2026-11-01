@@ -23,7 +23,7 @@ const orderApproval = () =>
 test('PrintQueuePanel delegates live refresh and request sequencing to usePrintQueue', () => {
   const source = panel();
 
-  assert.match(source, /usePrintQueue\(\{ limit, offset: 0 \}\)/);
+  assert.match(source, /usePrintQueue\(jobFilter === 'failed' \? \{ limit, offset: 0, status: 'failed' \} : \{ limit, offset: 0 \}\)/);
   assert.doesNotMatch(source, /setInterval\(|clearInterval\(|getBridge\(|loadSeqRef/);
 
   const hook = printQueueHook();
@@ -97,7 +97,7 @@ test('usePrintQueue drops out-of-order load responses (last-write-wins)', () => 
 test('the panel expands the live queue from offset zero without rewriting native totals', () => {
   const source = panel();
 
-  assert.match(source, /usePrintQueue\(\{ limit, offset: 0 \}\)/);
+  assert.match(source, /usePrintQueue\(jobFilter === 'failed' \? \{ limit, offset: 0, status: 'failed' \} : \{ limit, offset: 0 \}\)/);
   assert.match(source, /Math\.min\(MAX_LIMIT, current \+ LIMIT_STEP\)/);
   assert.match(source, /queue\.pagination\.total/);
   assert.doesNotMatch(source, /offset:\s*limit|setJobs\(|\.concat\(/);

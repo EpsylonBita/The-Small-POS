@@ -21,6 +21,7 @@ import {
 } from '../../utils/cart-line-discounts';
 import { getBridge } from '../../../lib';
 import toast from 'react-hot-toast';
+import { ChangingValue } from '../ui/ChangingValue';
 import {
   desktopRetailStockVerdict,
   loadBlockOverselling,
@@ -1021,10 +1022,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
   return (
     <div
-      className="flex h-full w-full flex-col overflow-hidden rounded-[28px] border border-black/15 bg-transparent shadow-[0_10px_28px_rgba(15,23,42,0.06)] dark:border-white/60 dark:shadow-[0_12px_32px_rgba(0,0,0,0.08)]"
+      className="flex h-full w-full flex-col overflow-hidden rounded-[28px] border border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) shadow-[0_12px_32px_rgba(0,0,0,0.18)]"
     >
       {/* Header - shrink-0 keeps it fixed size */}
-      <div className="shrink-0 border-b border-black/10 dark:border-white/10">
+      <div className="shrink-0 border-b border-(--pos-s-border)">
         <div className="flex items-center justify-between px-4 py-3">
           <h3 className="text-lg font-semibold liquid-glass-modal-title text-base!">
             {t('menu.cart.header', { count: uniqueCartItems.length })}
@@ -1032,7 +1033,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           <div className="flex items-center gap-2">
             {isSelectionMode && (
               <>
-                <span className="rounded-full bg-amber-500/15 px-2.5 py-1 text-xs font-semibold text-amber-700 dark:text-amber-300">
+                <span className="rounded-full bg-(--pos-s-surface-2) px-2.5 py-1 text-xs font-semibold text-amber-800 dark:text-amber-300">
                   {t('menu.cart.selectedCount', '{{count}} selected', {
                     count: selectedCartItemIdsArray.length,
                   })}
@@ -1052,7 +1053,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 onClick={() => setShowManualInput((prev) => !prev)}
                 className={`flex items-center justify-center p-1.5 rounded-lg transition-colors ${
                   showManualInput
-                    ? 'bg-yellow-400 text-black active:bg-yellow-300'
+                    ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                     : 'liquid-glass-modal-text-muted active:bg-black/5 dark:active:bg-white/10'
                 }`}
                 aria-label={t('menu.cart.addManualItem', 'Manual Item')}
@@ -1105,7 +1106,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         )}
         {ghostModeArmed && (
           <div className="px-4 pb-3">
-            <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-700 dark:text-amber-200">
+            <div className="rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-xs font-medium text-amber-800 dark:text-amber-200">
               {t(
                 'menu.cart.ghostModeBanner',
                 'Ghost order armed. This cart will print only, stay hidden in POS, and be saved as a ghost reference order.'
@@ -1195,10 +1196,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               <div
                 key={item.id}
                 aria-selected={isSelectionMode ? isSelectedLine : undefined}
-                className={`p-3 rounded-xl border transition-all duration-200 ${
+                // pos-enter: a newly added line fades in once (CSS only, keyed by line id).
+                className={`pos-enter p-3 rounded-xl border transition-all duration-200 ${
                   isSelectionMode && isSelectedLine
-                    ? 'bg-yellow-400/15 border-yellow-500/60 shadow-[0_0_0_1px_rgba(234,179,8,0.35)]'
-                    : 'bg-black/3 dark:bg-white/6 border-black/8 dark:border-white/10 active:bg-black/5 dark:active:bg-white/9'
+                    ? 'bg-(--pos-s-surface-2) border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg)'
+                    : 'bg-(--pos-s-surface-2) border-(--pos-s-border) active:bg-(--pos-s-border)'
                 } ${isSelectionMode && canSelectLine ? 'cursor-pointer' : onEditItem && !isRewardLine ? 'cursor-pointer' : ''}`}
                 onPointerDown={(event) => {
                   if (!isSelectionMode && canSelectLine) {
@@ -1235,7 +1237,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                       <span
                         className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border ${
                           isSelectedLine
-                            ? 'border-amber-400 bg-amber-500 text-black'
+                            ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                             : 'border-black/15 bg-black/5 text-black/45 dark:border-white/20 dark:bg-white/10 dark:text-white/55'
                         }`}
                       >
@@ -1249,7 +1251,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     <div className="min-w-0 flex-1">
                     {/* Category label */}
                     {item.categoryName && (
-                      <div className="text-[10px] uppercase tracking-wider font-medium mb-0.5 antialiased liquid-glass-modal-text-muted">
+                      <div className="text-[11px] uppercase tracking-wider font-semibold mb-0.5 antialiased liquid-glass-modal-text-muted">
                         {item.categoryName}
                       </div>
                     )}
@@ -1259,7 +1261,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     </h4>
                     {isRewardLine && (
                       <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-(--pos-s-surface-2) px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
                           <Gift className="h-3 w-3" />
                           {t('menu.cart.autoOfferReward', 'Auto reward')}
                         </span>
@@ -1274,11 +1276,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="text-right">
-                      <span className="font-semibold antialiased text-emerald-600 dark:text-emerald-400">
+                      <span className="font-semibold antialiased text-emerald-800 dark:text-emerald-400">
                         {formatCurrency(item.totalPrice || 0)}
                       </span>
                       {lineDiscountAmount > 0 && (
-                        <div className="text-[11px] font-semibold text-green-600 dark:text-green-400">
+                        <div className="text-[11px] font-semibold text-green-800 dark:text-green-400">
                           -{formatCurrency(lineDiscountAmount)}
                         </div>
                       )}
@@ -1291,7 +1293,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           e.stopPropagation();
                           onRemoveItem(item.id);
                         }}
-                        className="p-1.5 rounded-full active:bg-red-500/20 transition-colors ml-2 text-red-600 dark:text-red-400"
+                        className="p-1.5 rounded-full active:bg-(--pos-s-surface-2) transition-colors ml-2 text-red-600 dark:text-red-400"
                         aria-label={t('common.actions.delete')}
                       >
                         <Trash2 className="w-4 h-4" />
@@ -1349,7 +1351,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         }
                       }}
                       disabled={isRewardLine}
-                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors bg-black/8 dark:bg-white/12 active:bg-black/15 dark:active:bg-white/20 liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40"
+                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors border border-(--pos-s-border) bg-(--pos-s-surface) active:bg-(--pos-s-border) liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       −
                     </button>
@@ -1405,13 +1407,13 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         onUpdateCart(increase(cartItems));
                       }}
                       disabled={isRewardLine}
-                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors bg-black/8 dark:bg-white/12 active:bg-black/15 dark:active:bg-white/20 liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40"
+                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors border border-(--pos-s-border) bg-(--pos-s-surface) active:bg-(--pos-s-border) liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       +
                     </button>
                   </div>
                   {isRewardLine ? (
-                    <span className="rounded-md bg-emerald-500/10 px-2.5 py-1 text-sm font-medium text-emerald-700 dark:text-emerald-300">
+                    <span className="rounded-md bg-(--pos-s-surface-2) px-2.5 py-1 text-sm font-medium text-emerald-700 dark:text-emerald-300">
                       {t('menu.cart.freeLabel', 'Free')}
                     </span>
                   ) : (
@@ -1432,14 +1434,14 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                       onClick={(event) => event.stopPropagation()}
                       className={`relative overflow-hidden px-2.5 py-1 rounded-md text-sm font-medium antialiased transition-colors ${
                         isHoldingLinePrice
-                          ? 'bg-amber-500/15 text-amber-600 dark:text-amber-300'
+                          ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300'
                           : 'liquid-glass-modal-text active:bg-black/8 dark:active:bg-white/10'
                       }`}
                     >
                       <span className="relative z-1">× {formatCurrency(itemUnitPrice || 0)}</span>
                       {isHoldingLinePrice && (
                         <span
-                          className="absolute left-0 bottom-0 h-[2px] bg-amber-500/70 rounded-full"
+                          className="absolute left-0 bottom-0 h-[2px] bg-(--pos-s-yellow) rounded-full"
                           style={{ width: `${linePriceHoldProgress}%` }}
                         />
                       )}
@@ -1449,19 +1451,19 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 {(lineDiscountAmount > 0 || isPriceOverridden) && (
                   <div className="mt-2 flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
                     {lineDiscountAmount > 0 && (
-                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-green-500/15 text-green-600 dark:text-green-300">
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-(--pos-s-surface-2) text-green-800 dark:text-green-300">
                         {t('menu.cart.lineDiscountBadge', 'Line discount')}
                       </span>
                     )}
                     {isPriceOverridden && (
-                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-300">
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300">
                         {t('menu.cart.priceOverridden', 'Overridden')}
                       </span>
                     )}
                   </div>
                 )}
                 {item.customizations && item.customizations.length > 0 && (
-                  <div className="mt-2 pt-2 border-t border-black/8 dark:border-white/10">
+                  <div className="mt-2 pt-2 border-t border-(--pos-s-border)">
                     {/* Separate "with" and "without" ingredients */}
                     {(() => {
                       const withIngredients = item.customizations.filter(c => !c.isWithout);
@@ -1484,7 +1486,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                                   return (
                                     <span
                                       key={`${item.id}-customization-${c.ingredient.id}-${idx}`}
-                                      className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased bg-slate-500/15 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200"
+                                      className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased border border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg)"
                                     >
                                       + {ingredientName}
                                       {quantityText && (
@@ -1505,7 +1507,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           {/* Without ingredients */}
                           {withoutIngredients.length > 0 && (
                             <>
-                              <div className={`text-xs font-semibold mb-1 antialiased text-red-500 dark:text-red-400 ${withIngredients.length > 0 ? 'mt-2' : ''}`}>
+                              <div className={`text-xs font-semibold mb-1 antialiased text-red-700 dark:text-red-400 ${withIngredients.length > 0 ? 'mt-2' : ''}`}>
                                 <span className="inline-flex items-center gap-1">
                                   <Ban className="w-3 h-3" aria-hidden="true" />
                                   {t('menu.cart.without', { defaultValue: 'Without' })}:
@@ -1518,7 +1520,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                                   return (
                                     <span
                                       key={`${item.id}-without-${c.ingredient.id}-${idx}`}
-                                      className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased bg-red-500/15 text-red-700 dark:bg-red-500/25 dark:text-red-200 line-through"
+                                      className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased bg-(--pos-s-surface-2) text-red-700 dark:bg-zinc-800 dark:text-red-200 line-through"
                                     >
                                       {ingredientName}
                                     </span>
@@ -1534,8 +1536,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 )}
                 {/* Special Notes */}
                 {item.notes && item.notes.trim() && (
-                  <div className="mt-2 pt-2 border-t border-black/8 dark:border-white/10">
-                    <div className="text-xs font-semibold mb-1 antialiased text-amber-600 dark:text-amber-400">
+                  <div className="mt-2 pt-2 border-t border-(--pos-s-border)">
+                    <div className="text-xs font-semibold mb-1 antialiased text-amber-800 dark:text-amber-400">
                       📝 {t('menu.cart.specialNotes') || t('menu.itemModal.specialInstructions')}:
                     </div>
                     <p className="text-xs italic antialiased liquid-glass-modal-text-muted">
@@ -1562,7 +1564,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   aria-label={appliedCoupon
                     ? t('menu.cart.couponApplied', 'Coupon applied')
                     : t('menu.cart.couponButton', 'Coupon')}
-                  className={`${cartActionIconButtonBaseClass} text-yellow-500 focus:ring-yellow-400 dark:text-yellow-300`}
+                  className={`${cartActionIconButtonBaseClass} text-amber-800 focus:ring-yellow-400 dark:text-yellow-300`}
                 >
                   {isValidatingCoupon ? (
                     <Loader2 className="h-8 w-8 animate-spin shrink-0" />
@@ -1581,8 +1583,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   aria-label={loyaltyActionTitle}
                   className={`${cartActionIconButtonBaseClass} ${
                     loyaltyRedeemAvailable
-                      ? 'text-yellow-500 focus:ring-yellow-400 dark:text-yellow-300'
-                      : 'cursor-not-allowed text-yellow-700/35 dark:text-yellow-200/35'
+                      ? 'text-amber-800 focus:ring-yellow-400 dark:text-yellow-300'
+                      : 'cursor-not-allowed text-zinc-500 dark:text-zinc-400'
                   }`}
                 >
                   {loyaltyRedeemLoading ? (
@@ -1599,7 +1601,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   type="button"
                   onClick={openDiscountModal}
                   aria-label={discountActionTitle}
-                  className={`${cartActionIconButtonBaseClass} text-yellow-500 focus:ring-yellow-400 dark:text-yellow-300`}
+                  className={`${cartActionIconButtonBaseClass} text-amber-800 focus:ring-yellow-400 dark:text-yellow-300`}
                 >
                   <Percent className="h-8 w-8 shrink-0" aria-hidden="true" />
                   <span className="sr-only">{t('menu.cart.discountAmount', 'Discount')}</span>
@@ -1618,14 +1620,14 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             )}
 
             {onApplyCoupon && appliedCoupon && (
-              <div className="flex items-center justify-between rounded-lg px-3 py-2 bg-emerald-500/10 dark:bg-emerald-500/20 border border-emerald-500/20 dark:border-emerald-500/30">
+              <div className="flex items-center justify-between rounded-lg px-3 py-2 bg-(--pos-s-surface-2) dark:bg-zinc-800 border border-(--pos-s-border) dark:border-zinc-700">
                 <div className="flex items-center gap-2">
-                  <Ticket className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                  <Ticket className="w-4 h-4 text-emerald-800 dark:text-emerald-400" />
                   <div>
                     <span className="text-sm font-semibold antialiased text-emerald-700 dark:text-emerald-400">
                       {appliedCoupon.code}
                     </span>
-                    <span className="text-xs ml-2 antialiased text-emerald-600/70 dark:text-emerald-300/70">
+                    <span className="text-xs ml-2 antialiased text-emerald-600 dark:text-emerald-300">
                       {appliedCoupon.discount_type === 'percentage'
                         ? `${appliedCoupon.discount_value}%`
                         : formatCurrency(appliedCoupon.discount_value)
@@ -1636,7 +1638,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 {onRemoveCoupon && (
                   <button
                     onClick={onRemoveCoupon}
-                    className="p-1 rounded-full transition-colors text-emerald-600 dark:text-emerald-400 active:bg-emerald-500/20"
+                    className="p-1 rounded-full transition-colors text-emerald-800 dark:text-emerald-400 active:bg-(--pos-s-surface-2)"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -1645,16 +1647,16 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             )}
 
             {loyaltyRedemption && (
-              <div className="flex items-center justify-between rounded-lg px-3 py-2 bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/20 dark:border-amber-500/30">
+              <div className="flex items-center justify-between rounded-lg px-3 py-2 bg-(--pos-s-surface-2) dark:bg-zinc-800 border border-(--pos-s-border) dark:border-zinc-700">
                 <div className="flex items-center gap-2">
-                  <Award className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                  <Award className="w-4 h-4 text-amber-800 dark:text-amber-400" />
                   <div>
-                    <span className="text-sm font-semibold antialiased text-amber-700 dark:text-amber-300">
+                    <span className="text-sm font-semibold antialiased text-amber-800 dark:text-amber-300">
                       {t('menu.cart.loyaltyRedemption', '{{points}} pts', {
                         points: loyaltyRedemption.pointsRedeemed,
                       })}
                     </span>
-                    <span className="text-xs ml-2 antialiased text-amber-600/70 dark:text-amber-300/70">
+                    <span className="text-xs ml-2 antialiased text-amber-800 dark:text-amber-300">
                       {formatCurrency(loyaltyDiscountAmount)} {t('menu.cart.loyaltyOff', 'off')}
                     </span>
                   </div>
@@ -1662,7 +1664,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 {onRemoveLoyaltyRedemption && (
                   <button
                     onClick={onRemoveLoyaltyRedemption}
-                    className="p-1 rounded-full transition-colors text-amber-600 dark:text-amber-300 active:bg-amber-500/20"
+                    className="p-1 rounded-full transition-colors text-amber-800 dark:text-amber-300 active:bg-(--pos-s-surface-2)"
                     aria-label={t('menu.cart.removeLoyaltyRedemption', 'Remove loyalty redemption')}
                   >
                     <X className="w-3.5 h-3.5" />
@@ -1678,14 +1680,12 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           <span className="liquid-glass-modal-text-muted">
             {t('menu.cart.subtotal')}
           </span>
-          <span className="liquid-glass-modal-text">
-            {formatCurrency(subtotal)}
-          </span>
+          <ChangingValue className="liquid-glass-modal-text" value={formatCurrency(subtotal)} />
         </div>
 
         {offerDiscountAmount > 0 && (
           <div className="flex justify-between items-center text-sm font-medium antialiased">
-            <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+            <span className="flex items-center gap-1 text-emerald-800 dark:text-emerald-400">
               <Gift className="w-3.5 h-3.5" />
               {matchedOfferNames.length > 0
                 ? t('menu.cart.offerDiscountWithNames', 'Offers ({{names}})', {
@@ -1694,7 +1694,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 : t('menu.cart.offerDiscount', 'Offers')}
               :
             </span>
-            <span className="text-emerald-600 dark:text-emerald-400">
+            <span className="text-emerald-800 dark:text-emerald-400">
               -{formatCurrency(offerDiscountAmount)}
             </span>
           </div>
@@ -1703,12 +1703,12 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         {/* Discount Display */}
         {discountAmount > 0 && (
           <div className="flex justify-between items-center text-sm font-medium antialiased">
-            <span className="text-green-600 dark:text-green-400">
+            <span className="text-green-800 dark:text-green-400">
               {effectiveDiscountMode === 'percentage'
                 ? t('menu.cart.discount', { percent: effectiveDiscountPercentage })
                 : t('menu.cart.discountAmount', 'Discount')}:
             </span>
-            <span className="text-green-600 dark:text-green-400">
+            <span className="text-green-800 dark:text-green-400">
               -{formatCurrency(discountAmount)}
             </span>
           </div>
@@ -1717,11 +1717,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         {/* Coupon Discount Display */}
         {couponDiscount > 0 && appliedCoupon && (
           <div className="flex justify-between items-center text-sm font-medium antialiased">
-            <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+            <span className="flex items-center gap-1 text-emerald-800 dark:text-emerald-400">
               <Ticket className="w-3.5 h-3.5" />
               {t('menu.cart.couponDiscount', 'Coupon')} ({appliedCoupon.code}):
             </span>
-            <span className="text-emerald-600 dark:text-emerald-400">
+            <span className="text-emerald-800 dark:text-emerald-400">
               -{formatCurrency(couponDiscount)}
             </span>
           </div>
@@ -1729,11 +1729,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
         {loyaltyDiscountAmount > 0 && loyaltyRedemption && (
           <div className="flex justify-between items-center text-sm font-medium antialiased">
-            <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+            <span className="flex items-center gap-1 text-amber-800 dark:text-amber-400">
               <Award className="w-3.5 h-3.5" />
               {t('menu.cart.loyaltyDiscount', 'Loyalty')}:
             </span>
-            <span className="text-amber-600 dark:text-amber-400">
+            <span className="text-amber-800 dark:text-amber-400">
               -{formatCurrency(loyaltyDiscountAmount)}
             </span>
           </div>
@@ -1768,9 +1768,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           <span className="text-lg font-semibold liquid-glass-modal-text">
             {t('menu.cart.total')}
           </span>
-          <span className="text-xl font-bold text-emerald-600 dark:text-emerald-400">
-            {formatCurrency(totalWithDeliveryFee)}
-          </span>
+          <ChangingValue
+            className="text-xl font-bold text-emerald-800 dark:text-emerald-400"
+            value={formatCurrency(totalWithDeliveryFee)}
+          />
         </div>
 
         {/* Offline: the cashier chooses the zone of an address that cannot be located */}
@@ -1788,9 +1789,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           <div
             role="status"
             data-testid="menu-cart-zone-not-checked"
-            className="flex items-start gap-2 p-3 rounded-lg mb-3 bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/25 dark:border-amber-400/30"
+            className="flex items-start gap-2 p-3 rounded-lg mb-3 bg-(--pos-s-surface-2) dark:bg-zinc-800 border border-(--pos-s-border) dark:border-zinc-700"
           >
-            <MapPin className="w-5 h-5 shrink-0 text-amber-600 dark:text-amber-300" aria-hidden="true" />
+            <MapPin className="w-5 h-5 shrink-0 text-amber-800 dark:text-amber-300" aria-hidden="true" />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium antialiased text-amber-800 dark:text-amber-200">
                 {t('menu.cart.deliveryZoneNotCheckedNotice')}
@@ -1800,7 +1801,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   type="button"
                   onClick={onRepickDeliveryAddress}
                   data-testid="menu-cart-zone-repick"
-                  className="mt-2 min-h-[40px] rounded-lg border border-amber-600/40 dark:border-amber-300/40 px-3 py-1.5 text-sm font-semibold antialiased text-amber-800 dark:text-amber-100 active:bg-amber-500/15 dark:active:bg-amber-400/20"
+                  className="mt-2 min-h-[40px] rounded-lg border border-(--pos-s-border) dark:border-zinc-700 px-3 py-1.5 text-sm font-semibold antialiased text-amber-800 dark:text-amber-100 active:bg-(--pos-s-surface-2) dark:active:bg-zinc-800"
                 >
                   {t('menu.cart.repickDeliveryAddress')}
                 </button>
@@ -1811,13 +1812,13 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
         {/* Minimum Order Warning for Delivery */}
         {isBelowMinimum && !editMode && (
-          <div className="flex items-center gap-2 p-3 rounded-lg mb-3 bg-orange-500/10 dark:bg-orange-500/20 border border-orange-500/20 dark:border-orange-500/30">
+          <div className="flex items-center gap-2 p-3 rounded-lg mb-3 bg-(--pos-s-surface-2) dark:bg-zinc-800 border border-(--pos-s-border) dark:border-zinc-700">
             <AlertTriangle className="w-5 h-5 shrink-0 text-orange-500 dark:text-orange-400" />
             <div className="flex-1">
               <p className="text-sm font-medium antialiased text-orange-600 dark:text-orange-400">
                 {t('menu.cart.minimumNotMet', 'Minimum order not met')}
               </p>
-              <p className="text-xs antialiased text-orange-500/80 dark:text-orange-300/80">
+              <p className="text-xs antialiased text-orange-500 dark:text-orange-300">
                 {t('menu.cart.addMoreToOrder', 'Add {{amount}} more to complete order', { amount: formatCurrency(shortfall) })}
               </p>
             </div>
@@ -1827,12 +1828,12 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         <button
           onClick={handleCheckoutClick}
           disabled={isCheckoutBlocked}
-          className={`w-full py-3 rounded-xl font-semibold antialiased transition-all duration-300 ${
+          className={`w-full py-3 rounded-xl font-semibold antialiased transition-all duration-150 ${
             isCheckoutBlocked
               ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
               : editMode
-                ? 'bg-green-600 text-white active:bg-green-700 active:scale-[1.02]'
-                : 'bg-yellow-400 text-black active:bg-yellow-300 active:scale-[1.02]'
+                ? 'bg-(--pos-s-yellow) text-black active:bg-yellow-500 active:scale-[0.97]'
+                : 'bg-yellow-400 text-black active:bg-yellow-300 active:scale-[0.97]'
           }`}
         >
           {isSaving ? (
@@ -1893,7 +1894,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   }}
                   className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
                     lineDiscountModeDraft === 'percentage'
-                      ? 'bg-amber-500 border-amber-400 text-black'
+                      ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                       : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
                   }`}
                 >
@@ -1907,7 +1908,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   }}
                   className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
                     lineDiscountModeDraft === 'fixed'
-                      ? 'bg-amber-500 border-amber-400 text-black'
+                      ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                       : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
                   }`}
                 >
@@ -1947,7 +1948,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           disabled
                             ? 'opacity-45 cursor-not-allowed'
                             : selected
-                              ? 'bg-amber-500 border-amber-400 text-black'
+                              ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                               : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
                         }`}
                       >
@@ -2038,7 +2039,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   disabled={!canApplyLineDiscount}
                   className={`px-5 py-2 rounded-lg text-sm font-semibold ${
                     canApplyLineDiscount
-                      ? 'bg-amber-500 text-black active:bg-amber-600'
+                      ? 'bg-(--pos-s-yellow) text-black active:bg-yellow-500'
                       : 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
                   }`}
                 >
@@ -2110,7 +2111,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 disabled={!isLinePriceDraftValid}
                 className={`px-3 py-1.5 text-xs font-semibold rounded-md ${
                   isLinePriceDraftValid
-                    ? 'bg-amber-500 text-black active:bg-amber-600'
+                    ? 'bg-(--pos-s-yellow) text-black active:bg-yellow-500'
                     : 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
                 }`}
               >
@@ -2195,7 +2196,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 className={`px-3 py-1.5 text-xs font-semibold rounded-md ${
                   !couponInput.trim() || isValidatingCoupon
                     ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
-                    : 'bg-amber-500 text-black active:bg-amber-600'
+                    : 'bg-(--pos-s-yellow) text-black active:bg-yellow-500'
                 }`}
               >
                 {isValidatingCoupon ? (
@@ -2248,7 +2249,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   }}
                   className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
                     discountModeDraft === 'percentage'
-                      ? 'bg-amber-500 border-amber-400 text-black'
+                      ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                       : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
                   }`}
                 >
@@ -2262,7 +2263,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   }}
                   className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
                     discountModeDraft === 'fixed'
-                      ? 'bg-amber-500 border-amber-400 text-black'
+                      ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                       : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
                   }`}
                 >
@@ -2297,7 +2298,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           disabled
                             ? 'opacity-45 cursor-not-allowed'
                             : selected
-                              ? 'bg-amber-500 border-amber-400 text-black'
+                              ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
                               : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
                         }`}
                       >
@@ -2388,7 +2389,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   className={`px-5 py-2 rounded-lg text-sm font-semibold ${
                     isDraftOverMax
                       ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
-                      : 'bg-amber-500 text-black active:bg-amber-600'
+                      : 'bg-(--pos-s-yellow) text-black active:bg-yellow-500'
                   }`}
                 >
                   {t('menu.cart.applyDiscount', 'Apply discount')}

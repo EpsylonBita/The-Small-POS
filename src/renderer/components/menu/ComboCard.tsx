@@ -85,10 +85,10 @@ export const ComboCard: React.FC<ComboCardProps> = ({ combo, orderType = 'pickup
     <div
       onClick={() => onSelect(combo)}
       className={`relative flex flex-col rounded-xl border transition-all duration-200 cursor-pointer
-        hover:scale-[1.02] active:scale-[0.98] overflow-hidden
+         active:scale-[0.98] overflow-hidden
         ${resolvedTheme === 'dark'
-          ? 'bg-gray-800 border-gray-700 hover:border-blue-500'
-          : 'bg-white border-gray-200 hover:border-blue-400 hover:shadow-md'
+          ? 'bg-gray-800 border-gray-700 '
+          : 'bg-white border-gray-200 '
         }`}
     >
       {/* Image or gradient header */}
@@ -104,10 +104,10 @@ export const ComboCard: React.FC<ComboCardProps> = ({ combo, orderType = 'pickup
       ) : (
         <div className={`h-16 flex items-center justify-center ${
           combo.combo_type === 'bogo'
-            ? 'bg-linear-to-r from-amber-500/20 to-orange-500/20'
+            ? ''
             : combo.combo_type === 'choice'
-              ? 'bg-linear-to-r from-blue-500/20 to-indigo-500/20'
-              : 'bg-linear-to-r from-emerald-500/20 to-teal-500/20'
+              ? ''
+              : ''
         }`}>
           {React.cloneElement(getTypeIcon() as React.ReactElement<{ className?: string }>, { className: 'w-8 h-8 opacity-40' })}
         </div>
@@ -116,10 +116,10 @@ export const ComboCard: React.FC<ComboCardProps> = ({ combo, orderType = 'pickup
       {/* Type badge */}
       <div className={`absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold
         ${combo.combo_type === 'bogo'
-          ? 'bg-amber-500 text-white'
+          ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300'
           : combo.combo_type === 'choice'
-            ? 'bg-blue-500 text-white'
-            : 'bg-emerald-500 text-white'
+            ? 'bg-(--pos-s-surface-2) text-(--pos-s-fg)'
+            : 'bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-300'
         }`}
       >
         {getTypeIcon()}
@@ -154,8 +154,8 @@ export const ComboCard: React.FC<ComboCardProps> = ({ combo, orderType = 'pickup
         {combo.combo_type === 'bogo' && (
           <div className={`mt-2 px-2 py-1 rounded text-xs font-semibold text-center ${
             resolvedTheme === 'dark'
-              ? 'bg-amber-500/20 text-amber-400'
-              : 'bg-amber-50 text-amber-700'
+              ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300'
+              : 'bg-(--pos-s-surface-2) text-amber-800'
           }`}>
             {getBogoLabel()}
           </div>

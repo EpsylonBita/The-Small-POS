@@ -199,3 +199,31 @@ describe('OrderCard platform payment ownership', () => {
     expect(resolvePlatformPaymentPresentation(platformOrder(null, { ghost_metadata }))).toBeNull();
   });
 });
+
+
+describe('partial customer return badge', () => {
+  it.each(['completed', 'delivered', 'pending'])('marks a partial return on %s without changing paid status', status => {
+    const order = makeOrder({ status, payment_status: 'paid', received_amount_cents: 900, refunded_amount_cents: 200 });
+    renderCard(order);
+    const badge = screen.getByTestId('order-card-partial-refund');
+    expect(badge.textContent).toBe('Partly refunded');
+    expect(badge.getAttribute('role')).toBe('status');
+    expect(badge.className).toContain('border-zinc-300');
+    expect(badge.className).toContain('bg-zinc-100');
+    expect(badge.className).not.toMatch(/hover:|glow|amber|red|green|\/\d+/);
+    expect(order.payment_status).toBe('paid');
+    expect(screen.queryByTestId('order-card-payment-pending')).toBeNull();
+  });
+  it('reads camelCase cents too', () => {
+    renderCard(makeOrder({ receivedAmountCents: 900, refundedAmountCents: 200, payment_status: 'paid' }));
+    expect(screen.getByTestId('order-card-partial-refund')).toBeTruthy();
+  });
+  it.each([
+    { status: 'cancelled', received_amount_cents: 900, refunded_amount_cents: 200 },
+    { status: 'completed', received_amount_cents: 900, refunded_amount_cents: 900 },
+    { status: 'completed', received_amount_cents: 900, refunded_amount_cents: 0 },
+  ])('does not mark cancelled, full or absent refunds: %j', extra => {
+    renderCard(makeOrder(extra));
+    expect(screen.queryByTestId('order-card-partial-refund')).toBeNull();
+  });
+});

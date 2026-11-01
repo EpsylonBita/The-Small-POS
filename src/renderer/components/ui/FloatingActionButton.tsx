@@ -384,7 +384,7 @@ const FloatingActionButton = React.forwardRef<HTMLButtonElement, FloatingActionB
           className={cn(
             'w-full h-full rounded-full',
             'flex items-center justify-center isolate',
-            'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300/55 focus-visible:ring-offset-0',
+            'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg) focus-visible:ring-offset-2',
             'touch-action-manipulation',
             'text-white',
             'pos-fab',

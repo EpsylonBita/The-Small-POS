@@ -334,7 +334,7 @@ export const MenuManagementPage: React.FC = () => {
 
   const getTabClass = (tab: typeof activeTab) => `px-4 py-2 rounded-2xl transition-transform active:scale-[0.98] ${
     activeTab === tab
-      ? 'bg-yellow-500 text-black font-semibold border border-yellow-400'
+      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) font-semibold border border-(--pos-s-sel-bg)'
       : resolvedTheme === 'dark'
         ? 'bg-zinc-900 text-zinc-200 active:bg-zinc-800'
         : 'bg-gray-100 text-gray-700 active:bg-gray-200'
@@ -534,8 +534,8 @@ export const MenuManagementPage: React.FC = () => {
             <span
               className={`inline-flex h-14 w-14 items-center justify-center rounded-2xl border ${
                 resolvedTheme === 'dark'
-                  ? 'border-amber-400/30 bg-amber-400/10 text-amber-300'
-                  : 'border-amber-400/40 bg-amber-400/15 text-amber-600'
+                  ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200'
+                  : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300'
               }`}
             >
               <BadgePercent className="w-7 h-7" />
@@ -556,8 +556,8 @@ export const MenuManagementPage: React.FC = () => {
                 onClick={() => setSearchTerm('')}
                 className={`mt-1 inline-flex min-h-touch items-center justify-center gap-2 rounded-2xl border px-5 transition active:scale-95 ${
                   resolvedTheme === 'dark'
-                    ? 'border-amber-400/30 bg-amber-400/10 text-amber-200 active:bg-amber-400/20'
-                    : 'border-amber-400/40 bg-amber-400/15 text-amber-700 active:bg-amber-400/25'
+                    ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)'
+                    : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700 active:bg-(--pos-s-surface-2)'
                 }`}
               >
                 {t('menu.offersEmpty.clearSearch', 'Clear search')}
@@ -616,7 +616,7 @@ export const MenuManagementPage: React.FC = () => {
           onClick={loadData}
           disabled={loading}
           aria-label={refreshLabel}
-          className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl border backdrop-blur-xl transition shadow-xs shadow-amber-500/10 ${resolvedTheme === 'dark' ? 'border-amber-400/30 bg-white/10 text-amber-300 active:bg-white/20' : 'border-amber-400/40 bg-black/5 text-amber-600 active:bg-black/10'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+          className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl border backdrop-blur-xl transition shadow-xs ${resolvedTheme === 'dark' ? 'border-(--pos-s-border) bg-white/10 text-amber-300 active:bg-white/20' : 'border-(--pos-s-border) bg-black/5 text-amber-600 active:bg-black/10'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
         >
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
         </button>

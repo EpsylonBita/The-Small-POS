@@ -60,12 +60,12 @@ test('TableSelector uses no hover utilities and no native title tooltips (touch-
 
 test('TableSelector keeps semantic green/amber status colours and drops the old blue accents', () => {
   // available -> green, reserved -> amber/yellow (status fill + legend dot). Not everything yellow.
-  assert.match(source, /available:\s*\{[\s\S]*?bgClass: 'border-green-500\/50 bg-green-500\/10'/);
-  assert.match(source, /reserved:\s*\{[\s\S]*?bgClass: 'border-yellow-500\/50 bg-yellow-500\/10'/);
+  assert.match(source, /available:\s*\{[\s\S]*?bgClass: 'border-green-600 bg-\(--pos-s-surface-2\)'/);
+  assert.match(source, /reserved:\s*\{[\s\S]*?bgClass: 'border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\)'/);
   assert.match(source, /status === 'available' \? 'bg-green-500' : 'bg-yellow-500'/);
 
   // The min-capacity active state is amber (the app accent), not the old blue button / blue focus ring.
-  assert.match(source, /border-amber-400\/50 bg-amber-400\/20/);
+  assert.match(source, /border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\)/);
   assert.doesNotMatch(source, /bg-blue-600/);
   assert.doesNotMatch(source, /focus:ring-blue/);
   assert.doesNotMatch(source, /focus:border-blue/);

@@ -73,12 +73,12 @@ test('update dialog keeps update states on the POS palette without hover-only co
   assert.match(source, /border-4 border-amber-400 border-t-transparent/);
   assert.match(source, /text-amber-300/);
   assert.match(source, /h-full bg-amber-400/);
-  assert.match(source, /bg-green-600/);
-  assert.match(source, /active:bg-green-700/);
+  assert.match(source, /bg-\(--pos-s-yellow\)/);
+  assert.match(source, /active:bg-yellow-500/);
   assert.match(source, /bg-gray-600/);
   assert.match(source, /active:bg-gray-700/);
   assert.match(source, /rounded-2xl/);
-  assert.match(source, /focus-visible:ring-amber-300\/80/);
+  assert.match(source, /focus-visible:ring-\(--pos-s-fg\)/);
 });
 
 test('secondary update surfaces use amber glass styling instead of cyan alerts', () => {
@@ -98,10 +98,10 @@ test('secondary update surfaces use amber glass styling instead of cyan alerts',
   // orange and washed out on the till.
   assert.match(toastSource, /bg-amber-300/);
   assert.match(toastSource, /text-zinc-950/);
-  assert.match(toastSource, /border-amber-500\/45/);
+  assert.match(toastSource, /border-\(--pos-s-border\)/);
   assert.doesNotMatch(toastSource, /bg-zinc-950/);
   assert.doesNotMatch(toastSource, /text-white/);
   assert.match(toastSource, /active:scale-\[0\.98\]/);
-  assert.match(toastSource, /focus-visible:ring-amber-300\/80/);
+  assert.match(toastSource, /focus-visible:ring-\(--pos-s-fg\)/);
   assert.match(toastSource, /e\.preventDefault\(\)/);
 });

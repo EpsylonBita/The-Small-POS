@@ -1034,7 +1034,7 @@ export const StaffScheduleView: React.FC = memo(() => {
     ? 'bg-black/60 border-white/10 ring-1 ring-white/15 text-zinc-100 backdrop-blur-2xl shadow-2xl shadow-black/50'
     : 'bg-white/60 border-white/70 ring-1 ring-white/60 text-slate-950 backdrop-blur-2xl shadow-2xl shadow-black/30';
   const mutedTextClass = isDark ? 'text-zinc-400' : 'text-slate-600';
-  const inputClass = `w-full rounded-xl border px-3 py-3 text-base outline-hidden transition-colors focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/25 ${
+  const inputClass = `w-full rounded-xl border px-3 py-3 text-base outline-hidden transition-colors focus:border-yellow-400 focus:ring-2 focus:ring-(--pos-s-fg) ${
     isDark
       ? 'bg-zinc-900 border-zinc-700 text-zinc-100'
       : 'bg-white border-slate-300 text-slate-950'
@@ -1044,7 +1044,7 @@ export const StaffScheduleView: React.FC = memo(() => {
       ? 'bg-zinc-900 border-zinc-700 text-zinc-100 active:bg-zinc-800'
       : 'bg-white border-slate-300 text-slate-800 active:bg-slate-100'
   }`;
-  const primaryButtonClass = 'inline-flex items-center justify-center gap-2 rounded-xl bg-yellow-400 px-4 py-3 text-sm font-semibold text-black transition-colors active:bg-yellow-300 disabled:bg-yellow-400/60 disabled:text-black/60';
+  const primaryButtonClass = 'inline-flex items-center justify-center gap-2 rounded-xl bg-yellow-400 px-4 py-3 text-sm font-semibold text-black transition-colors active:bg-yellow-300 disabled:bg-(--pos-s-yellow) disabled:text-black/60';
   const secondaryButtonClass = `inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-3 text-sm font-semibold transition-colors disabled:opacity-60 ${
     isDark
       ? 'bg-zinc-900 border-zinc-700 text-zinc-100 active:bg-zinc-800'
@@ -1070,9 +1070,9 @@ export const StaffScheduleView: React.FC = memo(() => {
     return (
       <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex items-center justify-center p-6">
         <motion.div variants={pageMotionItem} className={`w-full max-w-xl flex flex-col items-center gap-4 p-6 rounded-2xl border ${
-          isDark ? 'bg-red-950/20 border-red-900/40' : 'bg-red-50 border-red-200'
+          isDark ? 'bg-(--pos-s-bad-bg) border-(--pos-s-bad)' : 'bg-(--pos-s-bad-bg) border-(--pos-s-bad)'
         }`}>
-          <AlertCircle className="w-10 h-10 text-red-500" />
+          <AlertCircle className="w-10 h-10 text-(--pos-s-bad)" />
           <p className={`text-sm ${isDark ? 'text-red-300' : 'text-red-700'}`}>{error}</p>
           <button
             onClick={fetchStaffData}
@@ -1131,7 +1131,7 @@ export const StaffScheduleView: React.FC = memo(() => {
               <div className={`inline-flex h-11 items-center gap-2 rounded-xl border px-4 text-sm font-semibold ${
                 isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-slate-300'
               }`}>
-                <Calendar className="h-4 w-4 text-yellow-400" />
+                <Calendar className="h-4 w-4 text-yellow-700 dark:text-yellow-400" />
                 {weekLabel}
               </div>
               <button
@@ -1195,7 +1195,7 @@ export const StaffScheduleView: React.FC = memo(() => {
             <motion.div variants={pageMotionItem} className={`rounded-2xl border p-3 ${softPanelClass}`}>
               <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.totalStaff', 'Total Staff')}</p>
               <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
-                <Users className="h-5 w-5 text-yellow-400" />
+                <Users className="h-5 w-5 text-yellow-700 dark:text-yellow-400" />
                 {filteredStaff.length}
               </p>
             </motion.div>
@@ -1280,19 +1280,19 @@ export const StaffScheduleView: React.FC = memo(() => {
                       className={`flex min-h-64 overflow-hidden flex-col rounded-2xl border transition-colors ${
                         today
                           ? isDark
-                            ? 'bg-yellow-950/20 border-yellow-500 shadow-[0_0_0_1px_rgba(250,204,21,0.35)]'
-                            : 'bg-yellow-50 border-yellow-300 shadow-[0_0_0_1px_rgba(250,204,21,0.24)]'
+                            ? 'bg-(--pos-s-surface-2) border-yellow-500'
+                            : 'bg-(--pos-s-surface-2) border-(--pos-s-border)'
                           : softPanelClass
                       }`}
                     >
-                      <div className={`border-b px-3 py-3 ${today ? (isDark ? 'border-yellow-700/70' : 'border-yellow-200') : (isDark ? 'border-zinc-800' : 'border-slate-200')}`}>
+                      <div className={`border-b px-3 py-3 ${today ? (isDark ? 'border-(--pos-s-yellow)' : 'border-(--pos-s-yellow)') : (isDark ? 'border-zinc-800' : 'border-slate-200')}`}>
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
                               <p className="text-base font-bold">{getDayLabel(day)}</p>
                               {today && (
                                 <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${
-                                  isDark ? 'bg-yellow-400/20 border-yellow-400/50 text-yellow-100' : 'bg-yellow-100 border-yellow-200 text-yellow-800'
+                                  isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-yellow) text-yellow-800 dark:text-yellow-200' : 'bg-(--pos-s-surface-2) border-(--pos-s-yellow) text-yellow-800'
                                 }`}>
                                   {t('staffSchedule.today', 'Today')}
                                 </span>
@@ -1305,7 +1305,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                           <div className="flex shrink-0 items-center gap-1.5">
                             <span className={`inline-flex h-7 min-w-7 items-center justify-center rounded-full px-1.5 text-xs font-semibold ${
                               dayShifts.length > 0
-                                ? isDark ? 'bg-emerald-900/50 text-emerald-300' : 'bg-emerald-100 text-emerald-700'
+                                ? isDark ? 'bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200' : 'bg-(--pos-s-surface-2) text-emerald-700'
                                 : isDark ? 'bg-zinc-800 text-zinc-400' : 'bg-slate-200 text-slate-600'
                             }`}>
                               {dayShifts.length}
@@ -1333,8 +1333,8 @@ export const StaffScheduleView: React.FC = memo(() => {
                             onClick={() => openCreateModal(day)}
                             className={`flex h-full min-h-28 w-full flex-col items-center justify-center rounded-2xl border border-dashed px-3 py-6 text-center text-sm transition-colors ${
                               isDark
-                                ? 'border-zinc-700 text-zinc-500 active:border-yellow-500 active:text-yellow-200'
-                                : 'border-slate-300 text-slate-500 active:border-yellow-300 active:text-yellow-700'
+                                ? 'border-zinc-700 text-zinc-400 active:border-yellow-500 active:text-yellow-200'
+                                : 'border-slate-300 text-slate-600 active:border-yellow-300 active:text-yellow-700'
                             }`}
                           >
                             <Plus className="mb-2 h-5 w-5" />
@@ -1446,7 +1446,7 @@ export const StaffScheduleView: React.FC = memo(() => {
 
             <div className="min-h-0 overflow-y-auto scrollbar-hide p-4 md:p-5">
               {weeklyPreviewRows.length === 0 ? (
-                <div className={`flex min-h-48 items-center justify-center rounded-2xl border border-dashed text-center text-sm ${isDark ? 'border-zinc-700 text-zinc-400' : 'border-slate-300 text-slate-500'}`}>
+                <div className={`flex min-h-48 items-center justify-center rounded-2xl border border-dashed text-center text-sm ${isDark ? 'border-zinc-700 text-zinc-400' : 'border-slate-300 text-slate-600'}`}>
                   {t('staffSchedule.previewWeek.empty', 'No active staff are scheduled for this week.')}
                 </div>
               ) : (
@@ -1498,7 +1498,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                               key={`${row.staff.id}-${dayKey}`}
                               className={`min-h-24 border-r last:border-r-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'} ${
                                 dayShifts.length === 0
-                                  ? isDark ? 'bg-amber-950/40' : 'bg-amber-50'
+                                  ? isDark ? 'bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2)'
                                   : isDark ? 'bg-zinc-950/30' : 'bg-white'
                               }`}
                             >
@@ -1621,7 +1621,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                       >
                         {HOURS.map(hour => <option key={`start-hour-${hour}`} value={hour}>{hour}</option>)}
                       </select>
-                      <span className={`text-xl font-bold ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>:</span>
+                      <span className={`text-xl font-bold ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>:</span>
                       <select
                         value={createStartMinute}
                         onChange={e => setCreateStartMinute(e.target.value)}
@@ -1652,7 +1652,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                       >
                         {HOURS.map(hour => <option key={`end-hour-${hour}`} value={hour}>{hour}</option>)}
                       </select>
-                      <span className={`text-xl font-bold ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>:</span>
+                      <span className={`text-xl font-bold ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>:</span>
                       <select
                         value={createEndMinute}
                         onChange={e => setCreateEndMinute(e.target.value)}
@@ -1692,13 +1692,13 @@ export const StaffScheduleView: React.FC = memo(() => {
 
               <div className={`rounded-xl border px-3 py-2 ${
                 shiftPreview.valid
-                  ? isDark ? 'bg-emerald-950/30 border-emerald-900/50 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                  : isDark ? 'bg-amber-950/30 border-amber-900/50 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-700'
+                  ? isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-emerald-800 dark:text-emerald-200' : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-emerald-700'
+                  : isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-amber-800 dark:text-amber-200' : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-amber-700'
               }`}>
                 <p className="text-sm font-medium">{shiftPreview.valid ? t('staffSchedule.preview', 'Preview') : t('staffSchedule.validationLabel', 'Validation')}</p>
                 <p className="text-sm mt-0.5">{shiftPreview.message}</p>
               </div>
-              <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>
+              <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-600'}`}>
                 {t('staffSchedule.overnightHint', 'For overnight shifts, choose the next day as end date.')}
               </p>
 

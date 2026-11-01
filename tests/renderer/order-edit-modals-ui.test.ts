@@ -34,7 +34,7 @@ for (const [name, source] of [
 
 test('EditPaymentMethodModal: green save, soft-red cancel, amber/non-blue card, neutral-grey disabled save', () => {
   // Save = semantic green primary when enabled.
-  assert.match(editPayment, /bg-green-600 active:bg-green-700 text-white/);
+  assert.match(editPayment, /bg-\(--pos-s-yellow\) active:bg-yellow-500 text-black/);
   assert.doesNotMatch(editPayment, /bg-blue-500/);
 
   // Disabled save = explicit neutral zinc / white-transparent glass that cannot read blue in light or
@@ -45,20 +45,17 @@ test('EditPaymentMethodModal: green save, soft-red cancel, amber/non-blue card, 
   );
   assert.doesNotMatch(editPayment, /bg-gray-300|dark:bg-gray-600/, 'disabled save must not use the blue-leaning grey tokens');
 
-  // Cancel/back = soft red glass per the app rule.
-  assert.match(
-    editPayment,
-    /border-red-300\/70 bg-red-50 text-red-700 dark:border-red-500\/25 dark:bg-red-500\/10 dark:text-red-200/,
-  );
-  assert.match(editPayment, /active:bg-red-100 dark:active:bg-red-500\/15/);
+  // Wave ΣΤ7: Cancel / back is the neutral secondary (red stays for destructive actions only).
+  assert.match(editPayment, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\)/);
+  assert.doesNotMatch(editPayment, /bg-red-50 text-red-700/);
 
   // Card option is amber glass (cash stays green); neither uses blue.
   assert.match(
     editPayment,
-    /selectedMethod === 'card'[\s\S]*?border-amber-300\/70 dark:border-amber-400\/40 bg-amber-100\/50 dark:bg-amber-500\/20/,
+    /selectedMethod === 'card'[\s\S]*?border-\(--pos-s-border\) dark:border-zinc-700 bg-\(--pos-s-surface-2\) dark:bg-zinc-800/,
   );
-  assert.match(editPayment, /active:bg-amber-100\/50 dark:active:bg-amber-500\/20/);
-  assert.match(editPayment, /selectedMethod === 'cash'[\s\S]*?border-green-300\/70/);
+  assert.match(editPayment, /active:bg-\(--pos-s-surface-2\) dark:active:bg-zinc-800/);
+  assert.match(editPayment, /selectedMethod === 'cash'[\s\S]*?border-\(--pos-s-border\)/);
 
   // Touch-safe buttons: rounded smooth, centered, min touch height.
   assert.match(editPayment, /rounded-2xl font-medium flex items-center justify-center min-h-touch(?![\w.-])/); // save

@@ -116,7 +116,7 @@ export function DeliveryValidationTestPage() {
                   variants={pageMotionItem}
                   key={index}
                   onClick={() => loadTestAddress(testAddr)}
-                  className="p-3 bg-amber-500/15 active:bg-amber-500/25 border border-amber-400/30 rounded-2xl text-white text-left transition-transform active:scale-[0.98]"
+                  className="p-3 bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl text-(--pos-s-fg) text-left transition-transform active:scale-[0.98]"
                 >
                   <div className="font-medium">{testAddr.name}</div>
                   <div className="text-sm text-white/70">{testAddr.address}</div>
@@ -154,14 +154,14 @@ export function DeliveryValidationTestPage() {
                 <span className="text-white/70">Status:</span>
                 <span className={`px-3 py-1 rounded-full text-sm font-medium ${
                   validationResult.deliveryAvailable 
-                    ? 'bg-green-600/20 text-green-400 border border-green-400/30'
-                    : 'bg-red-600/20 text-red-400 border border-red-400/30'
+                    ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 border border-(--pos-s-border)'
+                    : 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 border border-(--pos-s-border)'
                 }`}>
                   {validationResult.deliveryAvailable ? 'Available' : 'Not Available'}
                 </span>
                 
                 {validationResult.override?.applied && (
-                  <span className="px-3 py-1 rounded-full text-sm font-medium bg-orange-600/20 text-orange-400 border border-orange-400/30">
+                  <span className="px-3 py-1 rounded-full text-sm font-medium bg-(--pos-s-surface-2) text-orange-800 dark:text-orange-300 border border-(--pos-s-border)">
                     Override Applied
                   </span>
                 )}

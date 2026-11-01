@@ -153,11 +153,7 @@ const AnalyticsPage: React.FC = () => {
             onClick={() => void fetchAnalytics()}
             disabled={loading}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
-              isDark
-                ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
-                : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
-            } ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -284,7 +280,7 @@ const AnalyticsPage: React.FC = () => {
         >
           <div className="grid grid-cols-2 gap-4">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-2xl bg-amber-500/20">
+              <div className="p-2 rounded-2xl bg-(--pos-s-surface-2)">
                 <Clock className="w-5 h-5 text-amber-500" />
               </div>
               <div>
@@ -295,7 +291,7 @@ const AnalyticsPage: React.FC = () => {
               </div>
             </div>
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-2xl bg-yellow-500/20">
+              <div className="p-2 rounded-2xl bg-(--pos-s-surface-2)">
                 <BarChart3 className="w-5 h-5 text-yellow-500" />
               </div>
               <div>
@@ -331,13 +327,13 @@ const AnalyticsPage: React.FC = () => {
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <p className="font-semibold">{zone.zoneName}</p>
-                      <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                      <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                         {zone.totalOrders} {t('analytics.orders', 'orders')} • {zone.averageDeliveryTime} min
                       </p>
                     </div>
                     <div className="text-right">
                       <p className="font-semibold">{formatMoney(zone.totalRevenue)}</p>
-                      <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                      <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                         {zone.successRate.toFixed(1)}% {t('analytics.successRate', 'success')}
                       </p>
                     </div>

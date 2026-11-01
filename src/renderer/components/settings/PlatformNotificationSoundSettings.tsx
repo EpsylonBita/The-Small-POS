@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Volume2, Upload, Play, Square, AlertTriangle } from 'lucide-react'
-import { liquidGlassModalButton } from '../../styles/designSystem'
+import { Upload, Play, Square, AlertTriangle } from 'lucide-react'
+import { solidButton } from './SettingsKit'
 import { useAppAudioEnabled } from '../../services/appAudio'
 import {
   PLATFORM_SOUND_PRESETS,
@@ -102,26 +102,22 @@ export const PlatformNotificationSoundSettings: React.FC = () => {
   ]
 
   return (
-    <div className="rounded-xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-3 dark:bg-black/10">
-      <div className="flex items-center gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-400/20 text-indigo-600 dark:text-indigo-300">
-          <Volume2 className="h-4 w-4" />
-        </span>
-        <div className="min-w-0">
-          <span className="block text-sm font-semibold liquid-glass-modal-text">
-            {t('settings.platforms.sound.title', 'Order alert sound')}
-          </span>
-          <span className="block text-xs liquid-glass-modal-text-muted">
-            {t(
-              'settings.platforms.sound.help',
-              'Choose the sound played on this register when a new platform order needs approval.',
-            )}
-          </span>
-        </div>
-      </div>
+    <section className="pos-group">
+      <header className="pos-group__head">
+        <h3 className="pos-group__title">
+          {t('settings.platforms.sound.title', 'Order alert sound')}
+        </h3>
+        <p className="pos-group__desc">
+          {t(
+            'settings.platforms.sound.help',
+            'Choose the sound played on this register when a new platform order needs approval.',
+          )}
+        </p>
+      </header>
+      <div className="space-y-3 px-5 pb-4 pt-2">
 
       {!audioEnabled && (
-        <p className="text-xs liquid-glass-modal-text-muted">
+        <p className="text-sm liquid-glass-modal-text-muted">
           {t(
             'settings.platforms.sound.mutedNote',
             'App sound is muted, so preview is unavailable. Alerts will resume when sound is re-enabled.',
@@ -130,9 +126,9 @@ export const PlatformNotificationSoundSettings: React.FC = () => {
       )}
 
       {error && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
-          <span className="text-xs liquid-glass-modal-text">{t(error)}</span>
+        <div role="alert" className="pos-notice pos-notice--bad">
+          <AlertTriangle className="pos-notice__icon h-4 w-4" aria-hidden="true" />
+          <span className="text-sm">{t(error)}</span>
         </div>
       )}
 
@@ -143,10 +139,11 @@ export const PlatformNotificationSoundSettings: React.FC = () => {
           return (
             <div
               key={option.id}
-              className="flex items-center justify-between gap-3 rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2 dark:bg-gray-800/10"
+              className={`pos-choice-row${isSelected ? ' is-selected' : ''}`}
             >
-              <label className="flex min-w-0 flex-1 items-center gap-2 cursor-pointer">
+              <label className="flex min-h-11 min-w-0 flex-1 items-center gap-3 cursor-pointer">
                 <input
+                  className="pos-radio"
                   type="radio"
                   name="platform-notification-sound"
                   checked={isSelected}
@@ -155,25 +152,23 @@ export const PlatformNotificationSoundSettings: React.FC = () => {
                     option.id === 'custom' ? handleSelectImported() : handleSelectPreset(option.id)
                   }
                 />
-                <span className="truncate text-sm liquid-glass-modal-text">{option.label}</span>
+                <span className="truncate text-base liquid-glass-modal-text">{option.label}</span>
               </label>
               <button
                 type="button"
                 onClick={() => handlePreview(option.id)}
                 disabled={!audioEnabled || busy}
-                className={liquidGlassModalButton('secondary', 'sm')}
+                className={solidButton('secondary', 'sm')}
                 aria-label={
                   isPreviewing
                     ? t('settings.platforms.sound.stop', 'Stop')
                     : t('settings.platforms.sound.preview', 'Preview')
                 }
               >
-                <span className="inline-flex items-center gap-1.5">
-                  {isPreviewing ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-                  {isPreviewing
-                    ? t('settings.platforms.sound.stop', 'Stop')
-                    : t('settings.platforms.sound.preview', 'Preview')}
-                </span>
+                {isPreviewing ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                {isPreviewing
+                  ? t('settings.platforms.sound.stop', 'Stop')
+                  : t('settings.platforms.sound.preview', 'Preview')}
               </button>
             </div>
           )
@@ -184,7 +179,7 @@ export const PlatformNotificationSoundSettings: React.FC = () => {
         <label
           htmlFor="platform-notification-sound-file"
           aria-disabled={busy}
-          className={`${liquidGlassModalButton('secondary', 'md')} inline-flex items-center gap-2 ${
+          className={`${solidButton('secondary', 'md')} ${
             busy ? 'pointer-events-none opacity-60' : 'cursor-pointer'
           }`}
         >
@@ -199,14 +194,15 @@ export const PlatformNotificationSoundSettings: React.FC = () => {
           disabled={busy}
           onChange={handleFileChosen}
         />
-        <p className="mt-1 text-xs liquid-glass-modal-text-muted">
+        <p className="mt-1 text-sm liquid-glass-modal-text-muted">
           {t(
             'settings.platforms.sound.fileHelp',
             'MP3 or WAV, up to 5 MB and 30 seconds long.',
           )}
         </p>
       </div>
-    </div>
+      </div>
+    </section>
   )
 }
 

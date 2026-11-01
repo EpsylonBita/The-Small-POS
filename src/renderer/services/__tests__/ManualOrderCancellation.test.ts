@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { prepareManualOrderCancellation, commitManualOrderCancellation, manualCancellationFailureKey, manualCancellationFailureOptions } from '../ManualOrderCancellation';
+import { prepareManualOrderCancellation, commitManualOrderCancellation, applyPreparedOrderCancellation, manualCancellationFailureKey, manualCancellationFailureOptions } from '../ManualOrderCancellation';
 
 describe('manual return and cancellation IPC', () => {
   it('retains the same original plan and request on retry; no payment or provider call', async () => {
@@ -62,4 +62,41 @@ it('names the platform, mirrored-receipt and saved-attempt refusals', () => {
   // Existing codes keep their messages.
   expect(key('ORIGINAL_PROVIDER_RETURN_REQUIRED')).toBe('modals.orderCancellation.originalReturnRequired');
   expect(key('PAYMENT_CONNECTION_STATUS_UNAVAILABLE')).toBe('modals.orderCancellation.connectionUnavailable');
+});
+
+
+it('accepts a reason-only cancellation plan when all ordinary money was returned', async () => {
+  const invoke = vi.fn().mockResolvedValue({ success: true, orderId: 'order', requiresReturn: false,
+    requiresHandback: false, amountCents: 0, currency: null, generation: 'returned-1' });
+  const plan = await prepareManualOrderCancellation({ invoke }, 'order');
+  expect(plan).toMatchObject({ requiresReturn: false, amountCents: 0, generation: 'returned-1' });
+});
+
+
+describe('shared dashboard/history cancellation commit', () => {
+  const base = { orderId: 'order', requestId: 'event', requiresReturn: false, amountCents: 0, currency: null, generation: 'returned-1' } as unknown as import('../ManualOrderCancellation').ManualCancellationPlan;
+  it('sends plain whole-order cancellation for an already returned closed table check', async () => {
+    const invoke = vi.fn();
+    const cancelWithApproval = vi.fn().mockResolvedValue({ success: true });
+    const bridge = { invoke, orders: { cancelWithApproval } } as any;
+    await applyPreparedOrderCancellation(bridge, { ...base, tableSessionId: 'closed-session' }, 'Already returned', 'cash_drawer', '1234');
+    expect(cancelWithApproval).toHaveBeenCalledExactlyOnceWith({ orderId: 'order', reason: 'Already returned',
+      tableSessionId: 'closed-session', clientEventId: 'event', managerPin: '1234' });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+  it('keeps money in the canonical table transaction while any return remains', async () => {
+    const invoke = vi.fn();
+    const cancelWithApproval = vi.fn().mockResolvedValue({ success: true });
+    await applyPreparedOrderCancellation({ invoke, orders: { cancelWithApproval } } as any,
+      { ...base, tableSessionId: 'session', requiresReturn: true, amountCents: 400, currency: 'EUR' }, 'Return', 'bank');
+    expect(cancelWithApproval.mock.calls[0][0].manualCancellation).toEqual({ generation: 'returned-1', returnChannel: 'bank' });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+  it('cancels an already returned ordinary order without another refund command', async () => {
+    const invoke = vi.fn();
+    const updateStatus = vi.fn().mockResolvedValue({ success: true });
+    await applyPreparedOrderCancellation({ invoke, orders: { updateStatus } } as any, base, 'Returned', 'cash_drawer');
+    expect(updateStatus).toHaveBeenCalledExactlyOnceWith('order', 'cancelled', { cancellationReason: 'Returned' });
+    expect(invoke).not.toHaveBeenCalled();
+  });
 });

@@ -182,6 +182,8 @@ interface SyncStatusIndicatorProps {
   className?: string;
   showDetails?: boolean;
   onOpenRecovery?: (context: SyncRecoveryOpenContext) => void;
+  /** 'rail' (founder 31/10): stacked in the right utility rail; offline and backlog become icons. */
+  layout?: 'inline' | 'rail';
 }
 
 type QueueFailureClassification =
@@ -601,11 +603,11 @@ const getSyncHealthPresentation = (
       return {
         label: t('sync.health.error', { defaultValue: 'Sync Error' }),
         badgeClassName:
-          'bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-300',
+          'bg-(--pos-s-surface-2) border border-(--pos-s-border) text-red-700 dark:text-red-300',
         textClassName: 'text-red-700 dark:text-red-300',
         dotClassName: 'bg-red-500',
         panelClassName:
-          'border-red-200/80 bg-red-50/80 dark:border-red-400/25 dark:bg-red-500/10',
+          'border-(--pos-s-border) bg-(--pos-s-surface-2)',
         iconClassName: 'text-red-600 dark:text-red-300',
         detail: t('sync.health.errorDetail', {
           defaultValue: 'Failed sync rows are blocking a clean state.',
@@ -615,11 +617,11 @@ const getSyncHealthPresentation = (
       return {
         label: t('sync.health.blocked', { defaultValue: 'Blocked' }),
         badgeClassName:
-          'bg-orange-500/10 border border-orange-500/30 text-orange-700 dark:text-orange-300',
+          'bg-(--pos-s-surface-2) border border-(--pos-s-border) text-orange-700 dark:text-orange-300',
         textClassName: 'text-orange-700 dark:text-orange-300',
         dotClassName: 'bg-orange-500',
         panelClassName:
-          'border-orange-200/80 bg-orange-50/80 dark:border-orange-400/25 dark:bg-orange-500/10',
+          'border-(--pos-s-border) bg-(--pos-s-surface-2)',
         iconClassName: 'text-orange-600 dark:text-orange-300',
         detail: t('sync.health.blockedDetail', {
           defaultValue: 'A queue item is stuck and needs intervention.',
@@ -629,11 +631,11 @@ const getSyncHealthPresentation = (
       return {
         label: t('sync.health.pending', { defaultValue: 'Pending' }),
         badgeClassName:
-          'bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300',
+          'bg-(--pos-s-surface-2) border border-(--pos-s-border) text-amber-700 dark:text-amber-300',
         textClassName: 'text-amber-700 dark:text-amber-300',
         dotClassName: 'bg-amber-500',
         panelClassName:
-          'border-amber-200/80 bg-amber-50/80 dark:border-amber-400/25 dark:bg-amber-500/10',
+          'border-(--pos-s-border) bg-(--pos-s-surface-2)',
         iconClassName: 'text-amber-600 dark:text-amber-300',
         detail: t('sync.health.pendingDetail', {
           defaultValue: 'Sync work is queued or currently processing.',
@@ -659,11 +661,11 @@ const getSyncHealthPresentation = (
       return {
         label: t('sync.health.healthy', { defaultValue: 'Healthy' }),
         badgeClassName:
-          'bg-green-500/10 border border-green-500/30 text-green-700 dark:text-green-300',
+          'bg-(--pos-s-surface-2) border border-(--pos-s-border) text-green-700 dark:text-green-300',
         textClassName: 'text-green-700 dark:text-green-300',
         dotClassName: 'bg-green-500',
         panelClassName:
-          'border-emerald-200/80 bg-emerald-50/80 dark:border-emerald-400/25 dark:bg-emerald-500/10',
+          'border-(--pos-s-border) bg-(--pos-s-surface-2)',
         iconClassName: 'text-emerald-600 dark:text-emerald-300',
         detail: t('sync.health.healthyDetail', {
           defaultValue: 'No local sync backlog or failures are currently visible.',
@@ -805,7 +807,7 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
 
   return (
     <section
-      className={cn('rounded-2xl border p-4', liquidGlassModalTone('warning'), className)}
+      className={cn('pos-frost rounded-2xl border p-4', liquidGlassModalTone('warning'), className)}
       data-testid="z-gate-panel"
       aria-live="polite"
     >
@@ -832,7 +834,7 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
             {localZs.map((z) => (
               <li
                 key={z.zReportId}
-                className="rounded-xl border border-current/15 p-3 text-sm"
+                className="rounded-xl border border-(--pos-s-border) p-3 text-sm"
                 data-testid={`z-gate-local-z-${z.zReportId}`}
               >
                 <p className="font-bold">
@@ -848,10 +850,10 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
                   })}
                 </p>
                 {z.waitsFor === 'server_refusal' && z.serverMessage && (
-                  <p className="mt-1 wrap-break-word opacity-80">{z.serverMessage}</p>
+                  <p className="mt-1 wrap-break-word text-(--pos-s-muted)">{z.serverMessage}</p>
                 )}
                 {z.errorCode && (
-                  <details className="mt-1 text-xs opacity-80">
+                  <details className="mt-1 text-xs text-(--pos-s-muted)">
                     <summary className="min-h-touch cursor-pointer py-2">
                       {t('sync.zGate.details', { defaultValue: 'Details for support' })}
                     </summary>
@@ -884,7 +886,7 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
               return (
                 <li
                   key={row.queueId}
-                  className="flex flex-col gap-2 rounded-xl border border-current/15 p-3 text-sm sm:flex-row sm:items-start sm:justify-between"
+                  className="flex flex-col gap-2 rounded-xl border border-(--pos-s-border) p-3 text-sm sm:flex-row sm:items-start sm:justify-between"
                   data-testid={`z-gate-row-${row.queueId}`}
                 >
                   <div className="min-w-0">
@@ -900,7 +902,7 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
                         })}
                       </p>
                     )}
-                    <details className="mt-1 text-xs opacity-80">
+                    <details className="mt-1 text-xs text-(--pos-s-muted)">
                       <summary className="min-h-touch cursor-pointer py-2">
                         {t('sync.zGate.details', { defaultValue: 'Details for support' })}
                       </summary>
@@ -943,7 +945,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   className = '',
   showDetails = false,
   onOpenRecovery,
+  layout = 'inline',
 }) => {
+  const inRail = layout === 'rail';
   const bridge = getBridge();
   const { t, i18n } = useTranslation();
   const { staff, isShiftActive } = useShift();
@@ -2266,10 +2270,10 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         : 'attention';
   const heartStatusClass =
     heartTone === 'healthy'
-      ? 'text-green-400 drop-shadow-[0_0_8px_rgba(34,197,94,0.6)]'
+      ? 'text-green-400 '
       : heartTone === 'error'
-        ? 'text-red-400 drop-shadow-[0_0_8px_rgba(239,68,68,0.6)]'
-        : 'text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.55)]';
+        ? 'text-red-400 '
+        : 'text-amber-400 ';
   // The colour is not the only signal: the heart's label says it too.
   const heartLabel = printingStallActive
     ? `${getStatusText()} | ${t(healthImpactKey('printingStopped'))}`
@@ -2342,16 +2346,16 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   useBackgroundAccessibilityIsolation(showDetailPanel);
 
   const modalSurfaceClass =
-    'rounded-[28px] border border-slate-200/80 bg-white/92 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/4 dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]';
+    'rounded-[28px] border border-slate-200/80 bg-white/92 p-5 dark:border-white/10 dark:bg-white/4 ';
   const modalInsetClass =
-    'rounded-[22px] border border-slate-200/80 bg-slate-50/90 p-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] dark:border-white/10 dark:bg-black/20 dark:shadow-none';
+    'rounded-[22px] border border-slate-200/80 bg-slate-50/90 p-4 dark:border-white/10 dark:bg-black/20 dark:shadow-none';
   const modalEyebrowClass =
     'text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400';
   const modalMutedTextClass = 'text-sm text-slate-600 dark:text-slate-300/80';
   const metaChipClass =
     'inline-flex items-center gap-2 rounded-full border border-slate-200/90 bg-white/88 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/4 dark:text-slate-200';
   const footerClass =
-    'sticky bottom-0 z-10 mt-5 border-t border-slate-200/80 bg-white/88 px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-[#071018]/88';
+    'sticky bottom-0 z-10 mt-5 border-t border-(--pos-s-border) bg-(--pos-s-surface) px-6 py-4';
   const detailPanelBlockerMetadata = useMemo(
     () => ({
       advancedExpanded,
@@ -2445,13 +2449,13 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 {syncHealthDetail}
               </p>
               {capacityWarning && (
-                <div className="mt-3 flex max-w-3xl items-start gap-2.5 rounded-[18px] border border-orange-500/30 bg-orange-500/10 px-4 py-3">
+                <div className="mt-3 flex max-w-3xl items-start gap-2.5 rounded-[18px] border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-orange-600 dark:text-orange-300" />
                   <div className="min-w-0 text-sm text-orange-800 dark:text-orange-200">
                     <p className="font-semibold">
                       {t('sync.capacity.title', { defaultValue: 'Sync backlog growing' })}
                     </p>
-                    <p className="mt-1 text-xs text-orange-700/90 dark:text-orange-200/80">
+                    <p className="mt-1 text-xs text-orange-700 dark:text-orange-200">
                       {t('sync.capacity.detail', {
                         defaultValue:
                           'New sales stop when the offline queue is full. Reconnect this terminal so the backlog can drain.',
@@ -2543,7 +2547,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           className={cn(
             'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold',
             isSynced
-              ? 'border border-emerald-200/90 bg-emerald-50 text-emerald-700 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-200'
+              ? 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 dark:text-emerald-200'
               : syncHealthPresentation.badgeClassName,
           )}
         >
@@ -2630,7 +2634,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       </div>
 
       {queueFailure && hasBlockedQueue && (
-        <div className="rounded-[22px] border border-orange-200/90 bg-orange-50/90 p-4 dark:border-orange-400/30 dark:bg-orange-500/10">
+        <div className="rounded-[22px] border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4">
           <div className="flex flex-col gap-3">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
@@ -2649,7 +2653,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               </span>
             </div>
 
-            <p className="wrap-break-word text-sm font-medium text-orange-800 dark:text-orange-100/90">
+            <p className="wrap-break-word text-sm font-medium text-orange-800 dark:text-orange-100">
               {queueFailure.lastError}
             </p>
 
@@ -2683,7 +2687,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       )}
 
       {queueFailure && hasScheduledRetryableQueueFailure && (
-        <div className="rounded-[22px] border border-amber-200/90 bg-amber-50/90 p-4 dark:border-amber-400/30 dark:bg-amber-500/10">
+        <div className="rounded-[22px] border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className={modalEyebrowClass}>{t('sync.blocker.recoveryTitle')}</div>
@@ -2701,14 +2705,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       )}
 
       {syncErrorDisplay && (
-        <div className="rounded-[22px] border border-red-200/90 bg-red-50/90 p-4 dark:border-red-400/30 dark:bg-red-500/10">
+        <div className="rounded-[22px] border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4">
           <div className="flex items-start gap-3">
             <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600 dark:text-red-300" />
             <div>
               <div className="text-sm font-semibold text-red-700 dark:text-red-300">
                 {t('sync.labels.error')}
               </div>
-              <p className="mt-1 text-sm text-red-700 dark:text-red-200/90">
+              <p className="mt-1 text-sm text-red-700 dark:text-red-200">
                 {syncErrorDisplay}
               </p>
             </div>
@@ -2782,7 +2786,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   );
                 }
               }}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-emerald-200/90 bg-emerald-50 text-emerald-700 transition-colors active:bg-emerald-100 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-200 dark:active:bg-emerald-500/16"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 transition-colors active:bg-(--pos-s-surface-2) dark:text-emerald-200"
               aria-label={t('sync.actions.refresh', { defaultValue: 'Refresh' })}
             >
               <RefreshCw className="h-4 w-4" />
@@ -2814,10 +2818,10 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 className={cn(
                   'rounded-[18px] border px-4 py-3',
                   hasFailed
-                    ? 'border-red-200/90 bg-red-50/85 dark:border-red-400/30 dark:bg-red-500/10'
+                    ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
                     : hasPendingItems
-                      ? 'border-amber-200/90 bg-amber-50/85 dark:border-amber-400/30 dark:bg-amber-500/10'
-                      : 'border-emerald-200/90 bg-emerald-50/85 dark:border-emerald-400/30 dark:bg-emerald-500/10',
+                      ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
+                      : 'border-(--pos-s-border) bg-(--pos-s-surface-2)',
                 )}
               >
                 <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
@@ -2856,8 +2860,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             className={cn(
               'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold',
               advancedIssueCount > 0 || advancedUnavailableOnly
-                ? 'border border-amber-200/90 bg-amber-50 text-amber-700 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200'
-                : 'border border-emerald-200/90 bg-emerald-50 text-emerald-700 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-200',
+                ? 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700 dark:text-amber-200'
+                : 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 dark:text-emerald-200',
             )}
           >
             {advancedIssueCount > 0
@@ -2910,11 +2914,11 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                         className={cn(
                           'rounded-[18px] border px-4 py-3',
                           issue.status === 'recovering'
-                            ? 'border-sky-200/80 bg-sky-50/80 dark:border-sky-400/25 dark:bg-sky-500/10'
+                            ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
                             : issue.severity === 'critical'
-                              ? 'border-red-200/80 bg-red-50/80 dark:border-red-400/25 dark:bg-red-500/10'
+                              ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
                               : issue.severity === 'error'
-                                ? 'border-amber-200/80 bg-amber-50/80 dark:border-amber-400/25 dark:bg-amber-500/10'
+                                ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
                                 : 'border-slate-200/80 bg-slate-50/80 dark:border-white/10 dark:bg-black/20',
                         )}
                       >
@@ -3018,7 +3022,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       return (
                         <div
                           key={`${blocker.queueId}-${blocker.entityType}-${blocker.entityId}`}
-                          className="rounded-[18px] border border-amber-200/80 bg-amber-50/80 px-4 py-3 text-sm dark:border-amber-400/25 dark:bg-amber-500/10"
+                          className="rounded-[18px] border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-sm"
                         >
                           <div className="flex items-center justify-between gap-3">
                             <div className="font-semibold text-slate-900 dark:text-white">
@@ -3044,7 +3048,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               )}
 
               {(systemHealth.invalidOrders?.count ?? 0) > 0 && (
-                <div className="rounded-[22px] border border-red-200/90 bg-red-50/90 p-4 dark:border-red-400/30 dark:bg-red-500/10">
+                <div className="rounded-[22px] border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div className={modalEyebrowClass}>{t('sync.system.invalidOrders')}</div>
                     <span className="text-sm font-semibold text-red-700 dark:text-red-300">
@@ -3054,7 +3058,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       })}
                     </span>
                   </div>
-                  <p className="mt-3 text-sm text-red-700 dark:text-red-100/90">
+                  <p className="mt-3 text-sm text-red-700 dark:text-red-100">
                     {t('sync.system.invalidOrdersDesc')}
                   </p>
                   <button
@@ -3065,7 +3069,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   </button>
                   <div className="mt-4 space-y-2">
                     {systemHealth.invalidOrders!.details.slice(0, 5).map((order) => (
-                      <div key={order.order_id} className="flex items-center justify-between text-xs text-red-700 dark:text-red-200/90">
+                      <div key={order.order_id} className="flex items-center justify-between text-xs text-red-700 dark:text-red-200">
                         <span className="font-mono">{order.order_id.substring(0, 8)}...</span>
                         <span>{order.invalid_menu_items.length} {t('sync.system.items')}</span>
                       </div>
@@ -3202,14 +3206,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               )}
             </>
           ) : (
-            <div className="xl:col-span-2 rounded-[22px] border border-amber-200/90 bg-amber-50/90 p-5 dark:border-amber-400/30 dark:bg-amber-500/10">
+            <div className="xl:col-span-2 rounded-[22px] border border-(--pos-s-border) bg-(--pos-s-surface-2) p-5">
               <div className="flex items-start gap-3">
                 <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
                 <div>
                   <div className="text-sm font-semibold text-amber-700 dark:text-amber-300">
                     {t('sync.dashboard.advancedTitle')}
                   </div>
-                  <p className="mt-1 text-sm text-amber-700 dark:text-amber-100/90">
+                  <p className="mt-1 text-sm text-amber-700 dark:text-amber-100">
                     {t('sync.system.retry')}
                   </p>
                 </div>
@@ -3228,7 +3232,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       healthy: {
         icon: CheckCircle2,
         shell: liquidGlassModalTone('success'),
-        iconBox: 'bg-emerald-600 text-white ring-1 ring-emerald-300/70 dark:bg-emerald-400 dark:text-slate-950',
+        iconBox: 'bg-emerald-700 text-white ring-1 ring-(--pos-s-border) dark:bg-emerald-400 dark:text-slate-950',
         title: t('sync.healthModal.states.healthy.title'),
       },
       attention: {
@@ -3305,7 +3309,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         data-cashier-recovery="true"
       >
         <div
-          className="absolute inset-0 bg-black/45 backdrop-blur-md"
+          className="pos-glass-scrim absolute inset-0"
           aria-hidden="true"
           onClick={() => setShowDetailPanel(false)}
         />
@@ -3317,7 +3321,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           <div
             ref={healthDialogRef}
             id={`${healthDialogTitleId}-dialog`}
-            className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-slate-200/90 bg-white/95 text-slate-900 shadow-2xl shadow-slate-950/20 dark:border-yellow-400/25 dark:bg-[#050505]/95 dark:text-white dark:shadow-black/70"
+            className="liquid-glass-modal-shell flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden text-(--pos-s-fg)"
             onClick={(event) => event.stopPropagation()}
             role="dialog"
             aria-modal="true"
@@ -3325,9 +3329,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             aria-describedby={describedBy}
             tabIndex={-1}
           >
-            <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4 dark:border-yellow-400/15">
+            <div className="flex shrink-0 items-center justify-between border-b border-(--modal-glass-line) px-5 py-4">
               <div className="min-w-0">
-                <div className="text-xs font-bold uppercase tracking-[0.18em] text-amber-700 dark:text-yellow-200/70">
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-amber-800 dark:text-yellow-200">
                   {t('sync.healthModal.eyebrow')}
                 </div>
                 <h2 id={healthDialogTitleId} className="truncate text-xl font-black text-slate-950 dark:text-white">
@@ -3337,7 +3341,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               <button
                 ref={closeButtonRef}
                 onClick={() => setShowDetailPanel(false)}
-                className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-300 bg-slate-100 text-slate-800 active:bg-slate-200 dark:border-white/15 dark:bg-white/6 dark:text-white dark:active:bg-white/12"
+                className="flex h-11 w-11 items-center justify-center rounded-full border border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"
                 aria-label={t('sync.healthModal.close')}
               >
                 <X className="h-5 w-5" />
@@ -3347,30 +3351,30 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6">
               {healthAvailability === 'unavailable' && (
                 <section
-                  className={cn('mb-5 rounded-3xl border p-5', liquidGlassModalTone('danger'))}
+                  className={cn('pos-frost mb-5 rounded-3xl border p-5', liquidGlassModalTone('danger'))}
                   role="alert"
                 >
                   <h3 className="text-xl font-black">
                     {t('sync.healthModal.states.unavailable.title')}
                   </h3>
-                  <p id={healthDialogDescriptionId} className="mt-2 text-sm leading-6 opacity-80">
+                  <p id={healthDialogDescriptionId} className="mt-2 text-sm leading-6 text-(--pos-s-muted)">
                     {t('sync.healthModal.states.unavailable.message')}
                   </p>
                 </section>
               )}
               {healthAvailability === 'unavailable' && showPrimaryAction && (
                 <div
-                  className={cn('mb-5 rounded-2xl border p-4', liquidGlassModalTone('neutral'))}
+                  className={cn('pos-frost mb-5 rounded-2xl border p-4', liquidGlassModalTone('neutral'))}
                   data-testid="health-primary-action"
                 >
-                  <h4 className="text-xs font-bold uppercase tracking-wide opacity-70">
+                  <h4 className="text-xs font-bold uppercase tracking-wide text-(--pos-s-muted)">
                     {t('sync.healthModal.sections.recommendedActions')}
                   </h4>
                   <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="min-w-0 space-y-1">
                       {!runPrimaryAction && <p className="text-base font-black">{t(primaryAction.labelKey)}</p>}
                       <p className="text-sm font-semibold leading-6">{t(primaryAction.detailKey)}</p>
-                      <p className="text-sm leading-6 opacity-80">{t(primaryAction.verificationKey)}</p>
+                      <p className="text-sm leading-6 text-(--pos-s-muted)">{t(primaryAction.verificationKey)}</p>
                     </div>
                     {runPrimaryAction && (
                       <button
@@ -3378,7 +3382,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                         onClick={runPrimaryAction}
                         disabled={primaryActionIsBusy}
                         aria-busy={primaryActionIsBusy}
-                        className="inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-yellow-300 bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
+                        className="inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
                       >
                         <PrimaryActionIcon className={cn('h-5 w-5', primaryActionIsBusy && primaryActionBusyMotion)} aria-hidden="true" />
                         {t(primaryAction.labelKey)}
@@ -3390,7 +3394,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               {healthAvailability === 'stale' && (
                 <div
                   id={`${healthDialogDescriptionId}-stale`}
-                  className={cn('mb-5 rounded-2xl border p-3 text-sm', liquidGlassModalTone('warning'))}
+                  className={cn('pos-frost mb-5 rounded-2xl border p-3 text-sm', liquidGlassModalTone('warning'))}
                   role="status"
                 >
                   {t('sync.healthModal.stale.message')}
@@ -3399,7 +3403,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               {healthAvailability === 'loading' && !systemHealth && (
                 <div
                   id={healthDialogDescriptionId}
-                  className={cn('mb-5 rounded-2xl border p-3 text-sm', liquidGlassModalTone('warning'))}
+                  className={cn('pos-frost mb-5 rounded-2xl border p-3 text-sm', liquidGlassModalTone('warning'))}
                   role="status"
                   aria-live="polite"
                 >
@@ -3407,7 +3411,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 </div>
               )}
               {systemHealth !== null && healthAvailability !== 'unavailable' && (
-              <section className={cn('rounded-3xl border p-5', visual.shell)}>
+              <section className={cn('pos-frost rounded-3xl border p-5', visual.shell)}>
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
                   <div className={cn('flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl', visual.iconBox)}>
                     <StatusIcon className="h-6 w-6" aria-hidden="true" />
@@ -3417,7 +3421,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                     <p id={healthDialogDescriptionId} className="mt-2 max-w-2xl text-sm leading-6">{summary.state === 'healthy' ? localizedHealthSummary.message : localizedHealthSummary.problem}</p>
                     {/* "Start a shift" is already the recommended action below. */}
                     {summary.primaryAction !== 'startShift' && (
-                      <div className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-xl border border-current/15 bg-white/60 px-4 text-sm font-black text-current dark:bg-white/10">
+                      <div className="pos-frost mt-3 inline-flex min-h-10 items-center gap-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 text-sm font-black text-current">
                         {summary.canContinueOrders ? (
                           <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-300" />
                         ) : summary.state === 'support_needed' ? (
@@ -3435,7 +3439,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                         ))}
                       </ul>
                     )}
-                    <div className="mt-3 text-sm opacity-80">
+                    <div className="mt-3 text-sm text-(--pos-s-muted)">
                       {t('sync.healthModal.lastChecked', { value: lastChecked })}
                     </div>
                   </div>
@@ -3443,17 +3447,17 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
                 {showPrimaryAction && (
                   <div
-                    className="mt-4 rounded-2xl border border-current/15 bg-white/70 p-4 dark:bg-white/10"
+                    className="pos-frost mt-4 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4"
                     data-testid="health-primary-action"
                   >
-                    <h4 className="text-xs font-bold uppercase tracking-wide opacity-70">
+                    <h4 className="text-xs font-bold uppercase tracking-wide text-(--pos-s-muted)">
                       {t('sync.healthModal.sections.recommendedActions')}
                     </h4>
                     <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0 space-y-1">
                         {!runPrimaryAction && <p className="text-base font-black">{t(primaryAction.labelKey)}</p>}
                         <p className="text-sm font-semibold leading-6">{t(primaryAction.detailKey)}</p>
-                        <p className="text-sm leading-6 opacity-80">{t(primaryAction.verificationKey)}</p>
+                        <p className="text-sm leading-6 text-(--pos-s-muted)">{t(primaryAction.verificationKey)}</p>
                       </div>
                       {runPrimaryAction && (
                         <button
@@ -3461,7 +3465,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                           onClick={runPrimaryAction}
                           disabled={primaryActionIsBusy}
                           aria-busy={primaryActionIsBusy}
-                          className="inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-yellow-300 bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
+                          className="inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
                         >
                           <PrimaryActionIcon className={cn('h-5 w-5', primaryActionIsBusy && primaryActionBusyMotion)} aria-hidden="true" />
                           {t(primaryAction.labelKey)}
@@ -3472,7 +3476,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       <button
                         type="button"
                         onClick={handleOpenExportDir}
-                        className="mt-3 inline-flex min-h-[48px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"
+                        className="mt-3 inline-flex min-h-[48px] items-center gap-2 rounded-xl border px-4 text-sm font-bold border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"
                       >
                         <FolderOpen className="h-4 w-4" />
                         {t('sync.healthModal.actions.openFolder')}
@@ -3486,9 +3490,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                     <div
                       key={item.key}
                       data-testid={`health-service-${item.key}`}
-                      className="rounded-2xl border border-current/10 bg-white/55 px-3 py-2 dark:bg-white/8"
+                      className="pos-frost rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2"
                     >
-                      <div className="text-xs font-bold uppercase tracking-wide opacity-70">{item.label}</div>
+                      <div className="text-xs font-bold uppercase tracking-wide text-(--pos-s-muted)">{item.label}</div>
                       <div className="mt-1 text-sm font-black">{item.value}</div>
                     </div>
                   ))}
@@ -3498,9 +3502,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
               <ZGateSetAsidePanel className="mt-4" />
 
-              <details className={cn('mt-4 rounded-2xl border', liquidGlassModalTone('neutral'))}>
+              <details className={cn('pos-frost mt-4 rounded-2xl border', liquidGlassModalTone('neutral'))}>
                 <summary className="min-h-touch cursor-pointer px-4 py-3 text-sm font-bold">{t('sync.healthModal.sections.supportActions')}</summary>
-                <div className="space-y-4 border-t border-slate-200 p-4 dark:border-white/15">
+                <div className="space-y-4 border-t border-(--modal-glass-line) p-4">
                   <ul className="list-inside list-disc space-y-2 text-sm">{localizedHealthSummary.recommendedActions.map(action => <li key={action}>{action}</li>)}</ul>
                   {visibleSyncFailures.length > 0 && <h4 className="text-sm font-bold">{t('sync.healthModal.syncDetails', {defaultValue: 'Sync details'})}</h4>}
                   {visibleSyncFailures.map(failure => <div key={failure.id} className="rounded-xl border border-slate-300 p-3 text-sm dark:border-white/15"><strong>{failure.title} · {statusLabel(failure.status)}</strong><p className="mt-1">{t('sync.healthModal.failure.safeError')}</p>{failure.recordId && <p className="mt-2 break-all text-xs">{t('sync.healthModal.failure.recordValue', {id: failure.recordId})}</p>}{failure.nextRetryAt && <p className="mt-2 text-xs">{t('sync.healthModal.failure.nextRetryValue', {value: formatHealthDateTime(failure.nextRetryAt)})}</p>}</div>)}
@@ -3509,7 +3513,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                     onClick={handleSendDiagnosticsToSupport}
                     disabled={sendingSupport}
                     aria-busy={sendingSupport}
-                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border border-yellow-300 bg-yellow-400 px-4 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
+                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-yellow-400 px-4 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
                   >
                     <Send className={cn('h-5 w-5', sendingSupport && 'animate-pulse')} />
                     {sendingSupport
@@ -3519,24 +3523,24 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   <button
                     onClick={handleExport}
                     disabled={exporting}
-                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 text-sm font-black text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"
+                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-black disabled:opacity-50 border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"
                   >
                     <Download className={cn('h-5 w-5', exporting && 'animate-bounce')} />
                     {t('sync.healthModal.actions.export')}
                   </button>
                   </div>
-                  <p className="text-sm opacity-75">{t('sync.healthModal.support.safeLocal')}</p>
+                  <p className="text-sm text-(--pos-s-muted)">{t('sync.healthModal.support.safeLocal')}</p>
                   {incidentReport?.success && <p role="status">{t(!incidentReport.bundleStored ? 'sync.healthModal.support.reportReceived' : incidentReport.alertSent || incidentReport.alertStatus === 'throttled' ? 'sync.healthModal.support.received' : 'sync.healthModal.support.notificationFailed')}</p>}
                   {incidentReport?.error && <p role="alert">{t('sync.healthModal.support.sendFailed')}</p>}
-                  {exportPath && <button onClick={handleOpenExportDir} className="inline-flex min-h-touch items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"><FolderOpen className="h-4 w-4" />{t('sync.healthModal.actions.openFolder')}</button>}
-                  <button onClick={() => setAdvancedExpanded(value => !value)} aria-expanded={advancedExpanded} aria-controls={healthAdvancedId} className="inline-flex min-h-touch items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"><ChevronDown className="h-4 w-4" />{advancedExpanded ? t('sync.healthModal.actions.closeAdvanced') : t('sync.healthModal.actions.openAdvanced')}</button>
+                  {exportPath && <button onClick={handleOpenExportDir} className="inline-flex min-h-touch items-center gap-2 rounded-xl border px-4 border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"><FolderOpen className="h-4 w-4" />{t('sync.healthModal.actions.openFolder')}</button>}
+                  <button onClick={() => setAdvancedExpanded(value => !value)} aria-expanded={advancedExpanded} aria-controls={healthAdvancedId} className="inline-flex min-h-touch items-center gap-2 rounded-xl border px-4 border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"><ChevronDown className="h-4 w-4" />{advancedExpanded ? t('sync.healthModal.actions.closeAdvanced') : t('sync.healthModal.actions.openAdvanced')}</button>
 
               {advancedExpanded && (
-                <section id={healthAdvancedId} className={cn('mt-5 space-y-4 rounded-3xl border p-5', liquidGlassModalTone('neutral'))}>
+                <section id={healthAdvancedId} className={cn('pos-frost mt-5 space-y-4 rounded-3xl border p-5', liquidGlassModalTone('neutral'))}>
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <h4 className="text-lg font-black text-slate-950 dark:text-white">{t('sync.healthModal.advanced.title')}</h4>
-                      <p className="mt-1 text-sm text-slate-600 dark:text-white/55">{t('sync.healthModal.advanced.supportOnly')}</p>
+                      <p className="mt-1 text-sm text-(--pos-s-muted)">{t('sync.healthModal.advanced.supportOnly')}</p>
                     </div>
                   </div>
 
@@ -3548,9 +3552,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       [t('sync.healthModal.advanced.fields.printerFailures'), formatNumber(countDesktopPrinterFailures(systemHealth), {}, locale)],
                       [t('sync.healthModal.advanced.fields.crashCount'), formatNumber(systemHealth?.panicCount ?? 0, {}, locale)],
                     ].map(([label, value]) => (
-                      <div key={String(label)} className="rounded-2xl border border-slate-200 bg-white p-3 dark:border-yellow-400/10 dark:bg-white/5">
-                        <div className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-yellow-100/60">{label}</div>
-                        <div className="mt-1 wrap-break-word text-sm font-black text-slate-900 dark:text-white">{String(value)}</div>
+                      <div key={String(label)} className="pos-frost rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface) p-3">
+                        <div className="text-xs font-bold uppercase tracking-wide text-(--pos-s-muted)">{label}</div>
+                        <div className="mt-1 wrap-break-word text-sm font-black text-(--pos-s-fg)">{String(value)}</div>
                       </div>
                     ))}
                   </div>
@@ -3560,9 +3564,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 </div>
               </details>
             </div>
-            <div className="flex shrink-0 flex-wrap gap-3 border-t border-slate-200 bg-white px-5 py-3 dark:border-white/15 dark:bg-slate-950">
-              {systemHealth && healthAvailability !== 'unavailable' && needsRecovery && <button type="button" onClick={handleOpenRecovery} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-900 active:bg-slate-100 dark:border-white/20 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"><Database className="h-5 w-5" />{t('sync.dashboard.openRecovery', {defaultValue: 'Open Recovery Center'})}</button>}
-              <button type="button" onClick={loadSystemHealth} disabled={systemLoading} aria-busy={systemLoading} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/20 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"><RefreshCw className={cn('h-5 w-5', systemLoading && 'animate-spin')} />{t('sync.healthModal.actions.refresh')}</button>
+            <div className="flex shrink-0 flex-wrap gap-3 border-t border-(--modal-glass-line) px-5 py-3">
+              {systemHealth && healthAvailability !== 'unavailable' && needsRecovery && <button type="button" onClick={handleOpenRecovery} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2 text-sm font-bold text-(--pos-s-fg) active:bg-(--pos-s-border)"><Database className="h-5 w-5" />{t('sync.dashboard.openRecovery', {defaultValue: 'Open Recovery Center'})}</button>}
+              <button type="button" onClick={loadSystemHealth} disabled={systemLoading} aria-busy={systemLoading} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2 text-sm font-bold text-(--pos-s-fg) active:bg-(--pos-s-border) disabled:opacity-50"><RefreshCw className={cn('h-5 w-5', systemLoading && 'animate-spin')} />{t('sync.healthModal.actions.refresh')}</button>
             </div>
           </div>
         </div>
@@ -3577,11 +3581,11 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   // =========================================================================
 
   return (
-    <div className={`relative flex items-center gap-1.5 ${className}`}>
+    <div className={`relative flex items-center ${inRail ? 'flex-col gap-2' : 'gap-1.5'} ${className}`}>
       {/* Heart Icon Status Indicator */}
       <button
         ref={launcherRef}
-        className="group relative flex min-h-touch min-w-touch items-center justify-center rounded-full p-2 transition-all duration-200 active:bg-slate-100/80 dark:active:bg-white/10"
+        className={`group relative flex min-h-touch min-w-touch items-center justify-center p-2 transition-all duration-200 active:bg-slate-100/80 dark:active:bg-white/10 ${inRail ? 'h-12 w-12 rounded-xl' : 'rounded-full'}`}
         onClick={() => setShowDetailPanel(!showDetailPanel)}
         aria-label={heartLabel}
         data-heart-tone={heartTone}
@@ -3600,15 +3604,30 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         </svg>
 
         {syncStatus.syncInProgress && (
-          <span className="absolute inset-0 rounded-full bg-yellow-400/20 animate-ping" />
+          <span className="absolute inset-0 rounded-full bg-(--pos-s-surface-2) animate-ping" />
         )}
         {justRefreshed && (
-          <span className="absolute inset-0 rounded-full ring-2 ring-green-400/70 animate-[ping_1s_ease-out_2]" />
+          <span className="absolute inset-0 rounded-full ring-2 ring-(--pos-s-fg) animate-[ping_1s_ease-out_2]" />
+        )}
+        {/* In the rail there is no room for the word: offline is a red dot on the heart. */}
+        {inRail && !syncStatus.isOnline && (
+          <span data-health-offline-dot className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full bg-red-500" aria-hidden="true" />
         )}
       </button>
 
+      {inRail && !syncStatus.isOnline && (
+        <button
+          onClick={handleForceSync}
+          disabled={syncStatus.syncInProgress}
+          className="flex min-h-touch min-w-touch items-center justify-center rounded-xl text-red-500 transition-colors active:bg-(--pos-s-surface-2) disabled:opacity-50 dark:text-red-400"
+          aria-label={`${t('sync.labels.offline')} · ${t('sync.actions.retry', { defaultValue: 'Retry sync' })}`}
+        >
+          <RefreshCw className={`h-4 w-4 ${syncStatus.syncInProgress ? 'animate-spin' : ''}`} />
+        </button>
+      )}
+
       {/* Offline Mode Indicator — visible in collapsed view */}
-      {!syncStatus.isOnline && (
+      {!inRail && !syncStatus.isOnline && (
         <div className="flex items-center gap-1.5">
           <span className="flex items-center gap-1 text-xs font-semibold text-red-500 dark:text-red-400">
             <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />
@@ -3617,7 +3636,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           <button
             onClick={handleForceSync}
             disabled={syncStatus.syncInProgress}
-            className="flex min-h-touch min-w-touch items-center justify-center p-1 rounded-md text-red-400 active:bg-red-500/20 transition-colors disabled:opacity-50"
+            className="flex min-h-touch min-w-touch items-center justify-center p-1 rounded-md text-red-400 active:bg-(--pos-s-surface-2) transition-colors disabled:opacity-50"
             aria-label={t('sync.actions.retry', { defaultValue: 'Retry sync' })}
           >
             <RefreshCw className={`w-3.5 h-3.5 ${syncStatus.syncInProgress ? 'animate-spin' : ''}`} />
@@ -3630,11 +3649,12 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       {capacityWarning && (
         <button
           onClick={() => setShowDetailPanel(true)}
-          className="flex min-h-touch items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-orange-600 transition-colors active:bg-orange-500/15 dark:text-orange-300"
+          className="flex min-h-touch items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-orange-600 transition-colors active:bg-(--pos-s-surface-2) dark:text-orange-300"
           aria-label={t('sync.capacity.title', { defaultValue: 'Sync backlog growing' })}
         >
           <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-          {t('sync.capacity.badge', {
+          {/* The rail is too narrow for the words; the icon opens the same details. */}
+          {!inRail && t('sync.capacity.badge', {
             defaultValue: 'Backlog {{percent}}%',
             percent: capacityWarningPercent,
           })}

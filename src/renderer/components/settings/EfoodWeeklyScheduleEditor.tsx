@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { AlertTriangle, Loader2, Plus, RefreshCw, Trash2, X } from 'lucide-react'
 import { posApiGet, posApiPost } from '../../utils/api-helpers'
 import { liquidGlassModalButton } from '../../styles/designSystem'
+import { useReportSettingsDirty } from './SettingsKit'
 import {
   EFOOD_ALL_DAY_INTERVAL,
   EFOOD_WEEK_DAYS,
@@ -143,6 +144,8 @@ export const EfoodWeeklyScheduleEditor: React.FC<EfoodWeeklyScheduleEditorProps>
   // when the request was fired (which could be stale by the time it resumes
   // after `await`, e.g. if the user edited the draft or a save completed
   // meanwhile).
+  // The settings shell asks before an unsent weekly-hours draft is dropped.
+  useReportSettingsDirty('efood-schedule', dirty)
   const dirtyRef = useRef(dirty)
   dirtyRef.current = dirty
   const pendingSubmissionRef = useRef(pendingSubmission)
@@ -349,7 +352,7 @@ export const EfoodWeeklyScheduleEditor: React.FC<EfoodWeeklyScheduleEditorProps>
     <div
       role="dialog"
       aria-label={t('settings.platforms.weeklySchedule.title', 'efood weekly hours')}
-      className="rounded-xl border liquid-glass-modal-border bg-white/5 px-4 py-4 space-y-3 dark:bg-black/10"
+      className="rounded-xl border liquid-glass-modal-border px-4 py-4 space-y-3"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
@@ -380,8 +383,8 @@ export const EfoodWeeklyScheduleEditor: React.FC<EfoodWeeklyScheduleEditorProps>
       )}
 
       {waitingConfirmation && (
-        <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
-          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
+        <div className="pos-notice pos-notice--warn">
+          <AlertTriangle className="pos-notice__icon h-5 w-5" />
           <span className="text-sm liquid-glass-modal-text">
             {t(
               'settings.platforms.weeklySchedule.waitingConfirmation',
@@ -397,7 +400,7 @@ export const EfoodWeeklyScheduleEditor: React.FC<EfoodWeeklyScheduleEditorProps>
           {t('settings.platforms.weeklySchedule.loading', 'Loading efood hours...')}
         </div>
       ) : !isOnline && !draft ? null : loadFailed || !draft ? (
-        <div className="flex items-start gap-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3">
+        <div className="flex items-start gap-3 rounded-xl border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 px-4 py-3">
           <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-500" />
           <div className="space-y-2">
             <span className="block text-sm liquid-glass-modal-text">
@@ -416,8 +419,8 @@ export const EfoodWeeklyScheduleEditor: React.FC<EfoodWeeklyScheduleEditorProps>
       ) : (
         <>
           {staleServerDraft && (
-            <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
-              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
+            <div className="pos-notice pos-notice--warn">
+              <AlertTriangle className="pos-notice__icon h-5 w-5" />
               <div className="space-y-2">
                 <span className="block text-sm liquid-glass-modal-text">
                   {t(
@@ -437,7 +440,7 @@ export const EfoodWeeklyScheduleEditor: React.FC<EfoodWeeklyScheduleEditorProps>
           )}
 
           {justConfirmed && !waitingConfirmation && (
-            <div className="flex items-start gap-3 rounded-xl border border-green-500/40 bg-green-500/10 px-4 py-3">
+            <div className="flex items-start gap-3 rounded-xl border border-green-300 dark:border-green-800 bg-green-50 dark:bg-green-950 px-4 py-3">
               <span className="text-sm liquid-glass-modal-text">
                 {t('settings.platforms.weeklySchedule.confirmed', 'efood confirmed the new hours.')}
               </span>
@@ -445,14 +448,14 @@ export const EfoodWeeklyScheduleEditor: React.FC<EfoodWeeklyScheduleEditorProps>
           )}
 
           {saveError && (
-            <div className="flex items-start gap-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3">
+            <div className="flex items-start gap-3 rounded-xl border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 px-4 py-3">
               <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-500" />
               <span className="text-sm liquid-glass-modal-text">{saveError}</span>
             </div>
           )}
 
           {!validation.valid && dirty && (
-            <div className="flex items-start gap-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3">
+            <div className="flex items-start gap-3 rounded-xl border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 px-4 py-3">
               <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-500" />
               <span className="text-sm liquid-glass-modal-text">
                 {t(
@@ -471,7 +474,7 @@ export const EfoodWeeklyScheduleEditor: React.FC<EfoodWeeklyScheduleEditorProps>
                 <div
                   key={day}
                   data-testid={`efood-day-${day}`}
-                  className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2 space-y-2 dark:bg-gray-800/10"
+                  className="rounded-lg border liquid-glass-modal-border px-3 py-2 space-y-2"
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-sm font-medium liquid-glass-modal-text">
@@ -502,7 +505,7 @@ export const EfoodWeeklyScheduleEditor: React.FC<EfoodWeeklyScheduleEditorProps>
                                 value={from}
                                 aria-label={t('settings.platforms.weeklySchedule.from', 'From')}
                                 onChange={(event) => handleIntervalChange(day, index, 'from', event.target.value)}
-                                className="w-20 rounded-md border liquid-glass-modal-border bg-white/10 px-2 py-1 text-sm liquid-glass-modal-text dark:bg-black/20"
+                                className="w-20 rounded-md border liquid-glass-modal-border px-2 py-1 text-sm liquid-glass-modal-text"
                               />
                             </label>
                             <label className="flex items-center gap-1 text-xs liquid-glass-modal-text-muted">
@@ -514,7 +517,7 @@ export const EfoodWeeklyScheduleEditor: React.FC<EfoodWeeklyScheduleEditorProps>
                                 value={to}
                                 aria-label={t('settings.platforms.weeklySchedule.to', 'To')}
                                 onChange={(event) => handleIntervalChange(day, index, 'to', event.target.value)}
-                                className="w-20 rounded-md border liquid-glass-modal-border bg-white/10 px-2 py-1 text-sm liquid-glass-modal-text dark:bg-black/20"
+                                className="w-20 rounded-md border liquid-glass-modal-border px-2 py-1 text-sm liquid-glass-modal-text"
                               />
                             </label>
                             <button

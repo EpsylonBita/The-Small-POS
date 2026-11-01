@@ -1,7 +1,8 @@
 import { getStoreCurrency } from '../../utils/store-currency';
 import { canChargeFolio } from '../../utils/folio-currency';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { CreditCard, Banknote, Coins, AlertTriangle, Split, BedDouble, HandCoins, Gift } from 'lucide-react';
+import { Banknote, Coins, AlertTriangle, BedDouble, HandCoins, Gift, Plus } from 'lucide-react';
+import { CardsIcon, CashHandIcon, SplitReceiptIcon } from '../icons/PaymentMethodIcons';
 import { useTranslation } from 'react-i18next';
 import { roundMoney } from '@shared/utils/money';
 import { useFeatures } from '../../hooks/useFeatures';
@@ -27,6 +28,7 @@ import twintLogo from '../../../../../shared/payments/assets/twint-logo.png';
 import { admitTwintCollection, loadPendingTwintReceipts, saveOriginalTwintReceipt, twintAdmissionReason } from '../../services/TwintReceiptRecoveryService';
 import { useOrderStore } from '../../hooks/useOrderStore';
 import type { UnsavedChargedPaymentSummary } from '../../../lib/ipc-adapter';
+import { ChangingValue } from '../ui/ChangingValue';
 import {
   TipModal,
   type TipRecipientRole,
@@ -148,7 +150,7 @@ type CashChangeBreakdownItem = {
 const CASH_CHANGE_DENOMINATIONS = [50, 20, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05];
 const QUICK_CASH_ROUNDING_STEPS = [1, 5, 10, 20, 50, 100];
 const CASH_CHANGE_CHIP_CLASS =
-  'inline-flex min-h-8 items-center gap-1.5 whitespace-nowrap rounded-full border border-slate-200/90 bg-white/90 px-2.5 py-1 text-xs font-semibold text-slate-700 shadow-[0_4px_12px_rgba(15,23,42,0.06)] dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:shadow-none';
+  'inline-flex min-h-8 items-center gap-1.5 whitespace-nowrap rounded-full border border-slate-200/90 bg-white/90 px-2.5 py-1 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:shadow-none';
 
 // Module audit closure (2026-09-16): one rounding rule for the renderer. The local copy
 // rounded 1.005 down to 1.00 (1.005 * 100 is 100.49999999999999 in binary).
@@ -199,23 +201,24 @@ export const getCashInputVisualClasses = (
   quickAmountsPanel:
     'space-y-3 rounded-2xl border border-slate-200/80 bg-slate-50/70 p-3 dark:border-white/10 dark:bg-white/5',
   quickAmountsLabel: 'text-slate-600 dark:text-slate-300',
-  quickAmountSelected:
-    'border-yellow-400 bg-yellow-400 text-slate-950 shadow-[0_6px_16px_rgba(234,179,8,0.18)] dark:border-yellow-400/70 dark:bg-yellow-400/20 dark:text-yellow-100 dark:shadow-none',
+  quickAmountSelected: 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)',
   quickAmountIdle:
     'border-slate-200/90 bg-white/90 text-slate-900 shadow-xs active:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-white dark:shadow-none dark:active:bg-white/10',
   cashInput:
-    'border-slate-300/90 bg-white/90 text-slate-950 shadow-inner placeholder:text-slate-400 focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/20 dark:border-white/20 dark:bg-white/10 dark:text-white dark:placeholder:text-white/35 dark:focus:border-yellow-400/70',
+    'border-slate-300/90 bg-white/90 text-slate-950 shadow-inner placeholder:text-slate-400 focus:border-yellow-400 focus:ring-2 focus:ring-(--pos-s-fg) dark:border-white/20 dark:bg-white/10 dark:text-white dark:placeholder:text-white/35',
   summary: hasEnoughCash
-    ? 'border-slate-200/90 bg-white/80 shadow-[0_12px_28px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/5 dark:shadow-none'
-    : 'border-red-300/70 bg-red-50/80 dark:border-red-400/30 dark:bg-red-500/10',
+    ? 'border-slate-200/90 bg-white/80 dark:border-white/10 dark:bg-white/5 dark:shadow-none'
+    : 'border-(--pos-s-border) bg-(--pos-s-surface-2) dark:border-zinc-700 dark:bg-zinc-800',
   summaryDivider: 'border-slate-200/80 dark:border-white/10',
+  // Founder 31/10: the change keeps its green; a short amount its red.
   changeTone: hasEnoughCash
     ? 'text-emerald-700 dark:text-emerald-300'
     : 'text-red-700 dark:text-red-300',
   changeChip: CASH_CHANGE_CHIP_CLASS,
+  // Wave ΣΤ7: «Ολοκλήρωση» is the kit modal primary (yellow in both themes); short cash = neutral, muted.
   completeButton: hasEnoughCash
-    ? 'border-emerald-700! bg-emerald-700! text-white! shadow-[0_8px_20px_rgba(4,120,87,0.24)]! active:bg-emerald-800! dark:border-emerald-400/50! dark:bg-emerald-500/20! dark:text-emerald-100! dark:shadow-none!'
-    : 'border-slate-200/80! bg-slate-100/80! text-slate-400! dark:border-white/10! dark:bg-white/5! dark:text-white/35!',
+    ? 'pos-modal-primary'
+    : 'border-(--pos-s-border)! bg-(--pos-s-surface-2)! text-(--pos-s-muted)!',
 });
 
 export const CashChangeChip: React.FC<{
@@ -227,6 +230,7 @@ export const CashChangeChip: React.FC<{
   return (
     <span className={CASH_CHANGE_CHIP_CLASS}>
       <Icon
+        aria-hidden="true"
         className={
           item.type === 'bill'
             ? 'h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-300'
@@ -340,7 +344,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const paymentGridGapClass = paymentOptionCount === 3 ? 'gap-4' : 'gap-6';
   const paymentOptionPaddingClass = paymentOptionCount === 3 ? 'p-4' : 'p-6';
   const paymentMethodLabelBaseClass =
-    'w-full text-center text-sm font-bold uppercase leading-tight tracking-normal hyphens-none whitespace-normal transition-colors duration-300';
+    'w-full text-center text-base font-bold leading-tight tracking-normal hyphens-none whitespace-normal transition-colors duration-300';
   const cashVisualClasses = getPaymentOptionVisualClasses(
     'cash',
     !canUseCash || isProcessingPayment,
@@ -884,10 +888,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               )}
               {tipAmount > 0 && (
                 <div className="flex justify-between text-sm">
-                  <span className="font-medium text-emerald-400">
+                  <span className="font-medium text-emerald-700 dark:text-emerald-400">
                     {t('modals.payment.tip', 'Tip')}
                   </span>
-                  <span className="font-medium text-emerald-400">
+                  <span className="font-medium text-emerald-700 dark:text-emerald-400">
                     +{formatCurrency(tipAmount)}
                   </span>
                 </div>
@@ -898,8 +902,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           <p className="text-sm liquid-glass-modal-text-muted mb-2">
             {discountAmount > 0 ? t('modals.payment.finalAmount') : t('modals.payment.totalAmount')}
           </p>
-          <p className="text-4xl font-bold text-emerald-500 dark:text-emerald-400 tracking-tight">
-            {formatCurrency(payableTotal)}
+          {/* Founder 31/10: the amount due keeps its green. */}
+          <p className="text-4xl font-bold text-emerald-700 dark:text-emerald-400 tracking-tight tabular-nums">
+            <ChangingValue value={formatCurrency(payableTotal)} />
           </p>
         </div>
 
@@ -920,13 +925,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         </div>}
         {pendingTwintReceipts.length===0 && currentStep === 'minimum_warning' && (
           <div className="space-y-4">
-            <div className="flex items-center gap-3 p-4 rounded-2xl bg-orange-500/10 border border-orange-500/30">
-              <AlertTriangle className="w-8 h-8 text-orange-400 shrink-0" />
+            <div className="flex items-center gap-3 p-4 rounded-2xl bg-(--pos-s-warn-bg) border border-(--pos-s-warn)">
+              <AlertTriangle className="w-8 h-8 text-(--pos-s-warn) shrink-0" />
               <div>
-                <h3 className="font-semibold text-orange-400">
+                <h3 className="font-semibold text-(--pos-s-warn)">
                   {t('modals.payment.belowMinimumTitle', 'Minimum Order Not Met')}
                 </h3>
-                <p className="text-sm text-orange-300/80">
+                <p className="text-sm text-(--pos-s-fg)">
                   {t('modals.payment.belowMinimumMessage', 'Order amount is below minimum order amount of {{amount}}', { amount: formatCurrency(minimumOrderAmount) })}
                 </p>
               </div>
@@ -941,7 +946,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               </button>
               <button
                 onClick={handleSkipMinimumWarning}
-                className="liquid-glass-modal-button flex-1 font-medium bg-orange-600/20 active:bg-orange-600/30 text-orange-400 border-orange-500/30"
+                className="liquid-glass-modal-button flex-1 font-medium bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-orange-800 dark:text-orange-300 border-(--pos-s-border)"
               >
                 {t('modals.payment.skip', 'Skip')}
               </button>
@@ -957,12 +962,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               disabled={isProcessingPayment}
               className={`mb-4 flex min-h-14 w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left transition-colors ${
                 tipAmount > 0
-                  ? 'border-emerald-400/50 bg-emerald-500/15'
-                  : 'border-white/10 bg-white/5 hover:bg-white/10'
+                  ? 'border-emerald-600 bg-(--pos-s-surface-2)'
+                  : 'border-white/10 bg-white/5 '
               } ${isProcessingPayment ? 'cursor-not-allowed opacity-50' : 'active:scale-[0.99]'}`}
             >
               <span className="flex items-center gap-3">
-                <HandCoins className="h-6 w-6 shrink-0 text-emerald-500 dark:text-emerald-300" />
+                <HandCoins className="h-6 w-6 shrink-0 text-emerald-500 dark:text-emerald-300" aria-hidden="true" />
                 <span>
                   <span className="block font-bold liquid-glass-modal-text">
                     {tipAmount > 0
@@ -978,9 +983,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   </span>
                 </span>
               </span>
-              <span className="text-lg font-bold text-emerald-400">
-                {tipAmount > 0 ? formatCurrency(tipAmount) : '+'}
-              </span>
+              {tipAmount > 0 ? (
+                <span className="text-lg font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">{formatCurrency(tipAmount)}</span>
+              ) : (
+                <span aria-hidden="true" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-(--pos-s-border) bg-(--pos-s-surface) text-emerald-700 dark:text-emerald-400">
+                  <Plus className="h-5 w-5" />
+                </span>
+              )}
             </button>}
             {isFeatureLoading ? (
               <div className="flex items-center gap-3 p-4 rounded-2xl bg-white/5 border border-white/10 w-full">
@@ -995,13 +1004,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 </div>
               </div>
             ) : !hasAnyPaymentMethod ? (
-              <div className="flex items-center gap-3 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 w-full">
-                <AlertTriangle className="w-6 h-6 text-amber-400 shrink-0" />
+              <div className="flex items-center gap-3 p-4 rounded-2xl bg-(--pos-s-warn-bg) border border-(--pos-s-warn) w-full">
+                <AlertTriangle className="w-6 h-6 text-(--pos-s-warn) shrink-0" />
                 <div>
-                  <h3 className="font-semibold text-amber-400">
+                  <h3 className="font-semibold text-(--pos-s-warn)">
                     {t('settings.terminal.messages.noPaymentMethods', 'No payment methods available')}
                   </h3>
-                  <p className="text-sm text-amber-300/80">
+                  <p className="text-sm text-(--pos-s-fg)">
                     {t('settings.terminal.messages.contactManager', 'Contact your manager for configuration changes.')}
                   </p>
                 </div>
@@ -1015,20 +1024,20 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                     ${cashVisualClasses.option}`}
                 >
-                  <Banknote
-                    className={`w-20 h-20 mb-3 transition-all duration-300
+                  {/* Founder 31/10: his glyphs -- a hand with notes for cash, two cards, a torn receipt. */}
+                  <CashHandIcon
+                    className={`w-14 h-14 mb-3 transition-all duration-300
                       ${cashVisualClasses.icon}`}
-                    strokeWidth={1.5}
                   />
 
                   <span className={`${paymentMethodLabelBaseClass}
                     ${cashVisualClasses.label}`}
                   >
-                    {t('modals.payment.cashSimple', 'CASH')}
+                    {t('modals.payment.cashSimple', 'Cash')}
                   </span>
 
                   {isMobileWaiter && !canUseCash && (
-                    <p className="text-xs text-amber-400 mt-2 text-center">
+                    <p className="text-xs text-amber-700 dark:text-amber-400 mt-2 text-center">
                       {t('settings.terminal.messages.cashDrawerMainOnly', 'Cash handled by Main POS')}
                     </p>
                   )}
@@ -1041,20 +1050,19 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                     ${cardVisualClasses.option}`}
                 >
-                  <CreditCard
-                    className={`w-20 h-20 mb-3 transition-all duration-300
+                  <CardsIcon
+                    className={`w-14 h-14 mb-3 transition-all duration-300
                       ${cardVisualClasses.icon}`}
-                    strokeWidth={1.5}
                   />
 
                   <span className={`${paymentMethodLabelBaseClass}
                     ${cardVisualClasses.label}`}
                   >
-                    {t('modals.payment.cardSimple', 'CARD')}
+                    {t('modals.payment.cardSimple', 'Card')}
                   </span>
 
                   {!canUseCard && (
-                    <p className="text-xs text-amber-400 mt-2 text-center">
+                    <p className="text-xs text-amber-700 dark:text-amber-400 mt-2 text-center">
                       {t('settings.terminal.messages.featureDisabled', 'Feature disabled for this terminal')}
                     </p>
                   )}
@@ -1062,8 +1070,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
                 {canUseTwint && (
                   <button type="button" disabled={isProcessingPayment || twintAdmitting} aria-busy={twintAdmitting} onClick={() => void handleTwintSelect()}
-                    className={`flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 border-amber-400/30 bg-amber-500/10`}>
-                    <img src={twintLogo} alt="" className="h-20 max-w-full mb-3 rounded-lg" />
+                    className={`flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface-2)`}>
+                    <img src={twintLogo} alt="" className="h-14 max-w-full mb-3 rounded-lg" />
                     <span className={paymentMethodLabelBaseClass}>TWINT</span>
                   </button>
                 )}
@@ -1077,19 +1085,19 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                       ${isProcessingPayment
                         ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                        : 'border-amber-400/30 bg-linear-to-br from-amber-500/10 to-amber-600/5 active:scale-[0.98]'
+                        : 'border-(--pos-s-border) active:scale-[0.98]'
                       }`}
                   >
                     <BedDouble
-                      className={`w-20 h-20 mb-3 transition-all duration-300
-                        ${isProcessingPayment ? 'text-gray-400' : 'text-amber-400'}`}
+                      className={`w-14 h-14 mb-3 transition-all duration-300
+                        ${isProcessingPayment ? 'text-gray-400' : 'text-amber-700 dark:text-amber-400'}`}
                       strokeWidth={1.5}
                     />
 
                     <span className={`${paymentMethodLabelBaseClass}
-                      ${isProcessingPayment ? 'text-gray-400' : 'text-amber-400'}`}
+                      ${isProcessingPayment ? 'text-gray-400' : 'text-amber-700 dark:text-amber-400'}`}
                     >
-                      {t('modals.payment.roomChargeSimple', 'ROOM')}
+                      {t('modals.payment.roomChargeSimple', 'Room')}
                     </span>
                     <p className="mt-2 max-w-36 truncate text-center text-xs liquid-glass-modal-text-muted">
                       {roomChargeContext.roomNumber
@@ -1108,11 +1116,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                       ${isProcessingPayment
                         ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                        : 'border-violet-400/30 bg-linear-to-br from-violet-500/10 to-violet-600/5 active:scale-[0.98]'
+                        : 'border-(--pos-s-border) active:scale-[0.98]'
                       }`}
                   >
                     <Gift
-                      className={`w-20 h-20 mb-3 transition-all duration-300
+                      className={`w-14 h-14 mb-3 transition-all duration-300
                         ${isProcessingPayment ? 'text-gray-400' : 'text-violet-400'}`}
                       strokeWidth={1.5}
                     />
@@ -1133,16 +1141,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                       ${splitVisualClasses.option}`}
                   >
-                    <Split
-                      className={`w-20 h-20 mb-3 transition-all duration-300
+                    <SplitReceiptIcon
+                      className={`w-14 h-14 mb-3 transition-all duration-300
                         ${splitVisualClasses.icon}`}
-                      strokeWidth={1.5}
                     />
 
                     <span className={`${paymentMethodLabelBaseClass}
                       ${splitVisualClasses.label}`}
                     >
-                      {t('modals.payment.splitSimple', 'SPLIT')}
+                      {t('modals.payment.splitSimple', 'Split')}
                     </span>
                   </button>
                 )}
@@ -1159,9 +1166,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             )}
 
             {roomChargeFallback && !isProcessingPayment && (
-              <div className="mt-4 flex items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
-                <AlertTriangle className="h-5 w-5 shrink-0 text-amber-400" />
-                <p className="text-sm text-amber-300">
+              <div className="mt-4 flex items-center gap-3 rounded-2xl bg-(--pos-s-warn-bg) border border-(--pos-s-warn) p-4">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-(--pos-s-warn)" />
+                <p className="text-sm text-(--pos-s-fg)">
                   {t(
                     'modals.payment.roomChargeFallback',
                     'Room charge was not applied. Collect cash or card payment for this order.',
@@ -1227,23 +1234,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
             {cashReceived && (
               <div className={`rounded-2xl border-2 p-4 transition-colors ${cashInputVisualClasses.summary}`}>
-                <div className="flex justify-between items-center mb-2">
-                  <span className="liquid-glass-modal-text-muted">
-                    {t('modals.payment.totalAmount')}
-                  </span>
-                  <span className="font-bold liquid-glass-modal-text">
-                    {formatCurrency(payableTotal)}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center mb-2">
-                  <span className="liquid-glass-modal-text-muted">
-                    {t('modals.payment.cashReceived', 'Cash Received')}
-                  </span>
-                  <span className="font-bold liquid-glass-modal-text">
-                    {formatCurrency(cashAmount)}
-                  </span>
-                </div>
-                <div className={`mt-2 border-t pt-2 ${cashInputVisualClasses.summaryDivider}`}></div>
+                {/* Founder 31/10: only what is new -- the total is at the top, the received amount in the field. */}
                 <div className="flex justify-between items-center">
                   <span className={`font-semibold ${cashInputVisualClasses.changeTone}`}>
                     {hasEnoughCash
@@ -1251,12 +1242,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                       : t('modals.payment.amountShort', 'Amount Short')}
                   </span>
                   <span className={`text-2xl font-bold ${cashInputVisualClasses.changeTone}`}>
-                    {hasEnoughCash ? formatCurrency(changeAmount) : formatCurrency(amountShort)}
+                    <ChangingValue value={hasEnoughCash ? formatCurrency(changeAmount) : formatCurrency(amountShort)} />
                   </span>
                 </div>
                 {hasEnoughCash && changeAmount > 0 && changeBreakdown.length > 0 && (
                   <div className={`mt-3 border-t pt-3 ${cashInputVisualClasses.summaryDivider}`}>
-                    <p className="mb-2 text-xs font-semibold uppercase tracking-normal liquid-glass-modal-text-muted">
+                    <p className="mb-2 text-xs font-semibold tracking-normal liquid-glass-modal-text-muted">
                       {t('modals.payment.suggestedChange', 'Suggested change')}
                     </p>
                     <div className="flex flex-wrap gap-2">

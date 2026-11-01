@@ -18,4 +18,18 @@ describe('VarianceBadge currency', () => {
     expect(screen.getByRole('status')).toHaveTextContent(`${variance < 0 ? '-' : variance > 0 ? '+' : ''}${Math.abs(variance)},00 €`);
     expect(screen.getByRole('status').textContent).not.toContain('$');
   });
+  // UI audit wave 6: a touch till never shows a title tooltip, so the large badge says it in words.
+  it.each([
+    [0, 'modals.staffShift.varianceBalanced'],
+    [4, 'modals.staffShift.variancePositive'],
+    [-4, 'modals.staffShift.varianceNegative'],
+  ])('shows the status sentence for %s under a large badge', (variance, key) => {
+    const { container } = render(<VarianceBadge variance={variance} currency="EUR" size="lg" />);
+    expect(container.querySelector('[data-variance-status]')).toHaveTextContent(key);
+    expect(screen.getByRole('status').textContent).not.toContain(key);
+  });
+  it('keeps small and medium badges compact', () => {
+    const { container } = render(<VarianceBadge variance={-4} currency="EUR" size="md" />);
+    expect(container.querySelector('[data-variance-status]')).toBeNull();
+  });
 });

@@ -136,7 +136,7 @@ describe('PaymentModal carries the stylist to the payment', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Maria' }));
     fireEvent.click(applyButton());
     await waitFor(() => expect(screen.getByRole('button', { name: /Edit tip/ })).toHaveTextContent('Maria'));
-    fireEvent.click(screen.getByRole('button', { name: /CASH/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cash' }));
     const complete = screen.getByRole('button', { name: 'Complete' });
     fireEvent.change(screen.getByRole('textbox', { name: 'Cash Received' }), { target: { value: '55,00' } });
     fireEvent.click(complete);

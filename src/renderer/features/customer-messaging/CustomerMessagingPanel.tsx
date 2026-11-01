@@ -141,7 +141,7 @@ export function CustomerMessagingPanel(props: CustomerMessagingPanelProps) {
   return (
     <section className="space-y-3" aria-label={t('customerMessaging.title')}>
       {notice && <p role="status" className="text-sm text-slate-600 dark:text-zinc-300">{t(notice)}</p>}
-      {activeWorkspace?.operationalLocked && <p className="rounded-xl border border-amber-500/30 p-3 text-sm">{t('customerMessaging.readOnly')}</p>}
+      {activeWorkspace?.operationalLocked && <p className="rounded-xl border border-(--pos-s-border) p-3 text-sm">{t('customerMessaging.readOnly')}</p>}
       {activeWorkspace?.preference.decision !== 'allow' && activeWorkspace && (
         <p className="text-sm">{t(activeWorkspace.preference.decision === 'deny' ? 'customerMessaging.optedOut' : 'customerMessaging.noPreference')}</p>
       )}

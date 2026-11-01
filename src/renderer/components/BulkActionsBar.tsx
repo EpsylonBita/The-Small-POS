@@ -1,5 +1,5 @@
 import React, { useMemo, useCallback } from "react";
-import { useTheme } from '../contexts/theme-context';
+import { AnimatePresence, motion } from 'framer-motion';
 import { useI18n } from '../contexts/i18n-context';
 import { User, CheckCircle, Pencil, X, Map as MapIcon, Eye, RotateCcw, PackageCheck } from 'lucide-react';
 import type { TabId } from './OrderTabsBar';
@@ -27,6 +27,11 @@ interface ActionConfig {
   disabled?: boolean;
 }
 
+// Founder 31/10: the bar opens like iOS. A critically damped spring (bounce 0, no overshoot): the height
+// glides open so the list below moves smoothly, and the bar slides and fades in. MotionConfig in App.tsx
+// makes it instant under the Windows reduce-motion setting. The actions act at once; nothing waits for it.
+const IOS_SPRING = { type: 'spring', duration: 0.38, bounce: 0 } as const;
+
 const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
   selectedCount,
   selectionType = null,
@@ -36,7 +41,6 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
   onBulkAction,
   onClearSelection
 }) => {
-  const { resolvedTheme } = useTheme();
   const { t } = useI18n();
 
   // Define actions based on active tab.
@@ -73,99 +77,70 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
   const editAction = useMemo(() => actions.find(action => action.id === 'edit'), [actions]);
   const cancelAction = useMemo(() => actions.find(action => action.id === 'cancel'), [actions]);
 
+  // Wave ΣΤ2 (founder 31/10/2026): solid kit buttons. One yellow primary per selection (Reset,
+  // Restore or Delivered; Ready when Delivered is not offered), neutral secondaries (Edit, Driver,
+  // Map, View, Clear), red-text Cancel. The meaning stays in the label and icon, never a fill.
   const getButtonStyles = useCallback((
     variant: ActionConfig['variant'],
-    isCompact = false
+    _isCompact = false
   ) => {
-    const baseStyles = `
-      ${isCompact ? 'px-2 sm:px-3 py-1.5 text-xs sm:text-sm' : 'px-3 sm:px-4 py-2 sm:py-2.5'}
-      rounded-xl font-medium transition-all duration-200
-      transform active:scale-95 border backdrop-blur-sm
-      flex items-center justify-center gap-1.5 sm:gap-2 whitespace-nowrap
-      min-h-[40px] sm:min-h-touch touch-feedback
-      focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-offset-2
-      focus-visible:ring-offset-transparent
-    `;
-
-    // Neutral glass for non-semantic utility actions (Assign/Return/Map/View/Clear). On-theme
-    // black/white/grey — never off-theme blue/slate. Green/red/amber stay reserved below for
-    // success / destructive / edit-utility, so colour now encodes meaning, not chrome.
-    const neutralGlass =
-      resolvedTheme === 'light'
-        ? 'bg-white/80 text-zinc-700 border-zinc-300 shadow-xs shadow-zinc-300/20 active:bg-zinc-100 focus-visible:ring-zinc-400'
-        : 'bg-zinc-800/80 text-zinc-100 border-zinc-600/50 shadow-lg shadow-black/20 active:bg-zinc-700 focus-visible:ring-zinc-400';
+    const baseStyles =
+      'pos-solid-btn pos-solid-btn--sm min-h-[40px] sm:min-h-touch flex items-center justify-center whitespace-nowrap ' +
+      'transition-transform duration-150 active:scale-95 touch-feedback ' +
+      'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg) focus-visible:ring-offset-2';
 
     switch (variant) {
       case 'success':
-        return `${baseStyles} ${
-          resolvedTheme === 'light'
-            ? 'bg-emerald-600 text-white border-emerald-700 shadow-lg shadow-emerald-600/25 active:bg-emerald-700 focus-visible:ring-emerald-500'
-            : 'bg-emerald-500/90 text-white border-emerald-300/30 shadow-lg shadow-emerald-950/30 active:bg-emerald-400 focus-visible:ring-emerald-300'
-        }`;
-      case 'warning':
-        // Amber = utility/edit action (Edit). Not info-blue / slate.
-        return `${baseStyles} ${
-          resolvedTheme === 'light'
-            ? 'bg-amber-500 text-white border-amber-600 shadow-lg shadow-amber-500/25 active:bg-amber-600 focus-visible:ring-amber-400'
-            : 'bg-amber-500/90 text-white border-amber-300/30 shadow-lg shadow-amber-950/30 active:bg-amber-400 focus-visible:ring-amber-300'
-        }`;
-      case 'danger':
-        return `${baseStyles} ${
-          resolvedTheme === 'light'
-            ? 'bg-red-500 text-white border-red-600 shadow-lg shadow-red-500/25 active:bg-red-600 focus-visible:ring-red-400'
-            : 'bg-red-500/90 text-white border-red-300/30 shadow-lg shadow-red-950/30 active:bg-red-400 focus-visible:ring-red-300'
-        }`;
       case 'reset':
-        return `${baseStyles} ${
-          resolvedTheme === 'light'
-            ? 'bg-sky-500 text-white border-sky-600 shadow-lg shadow-sky-500/25 active:bg-sky-600 focus-visible:ring-sky-400'
-            : 'bg-sky-400/90 text-sky-950 border-sky-200/50 shadow-lg shadow-sky-950/30 active:bg-sky-300 focus-visible:ring-sky-200'
-        }`;
+        return `${baseStyles} pos-solid-btn--primary`;
+      case 'danger':
+        return `${baseStyles} pos-solid-btn--danger`;
+      case 'warning':
       case 'primary':
       case 'secondary':
       case 'info':
       case 'map':
       case 'neutral':
-        return `${baseStyles} ${neutralGlass}`;
+        return baseStyles;
       default:
         return baseStyles;
     }
-  }, [resolvedTheme]);
+  }, []);
 
-
-  if (selectedCount === 0) return null;
 
   return (
-    <div className={`
-      backdrop-blur-md rounded-2xl p-2 sm:p-4 border transition-all duration-300 relative z-10
-      ${resolvedTheme === 'light'
-        ? 'bg-white/70 border-gray-200/40 shadow-xl shadow-gray-500/10'
-        : 'bg-gray-900/40 border-white/10 shadow-xl shadow-black/20'
-      }
-    `}>
+    <AnimatePresence initial={false}>
+    {selectedCount > 0 && (
+    <motion.div
+      key="bulk-actions"
+      data-testid="bulk-actions-bar"
+      initial={{ height: 0, opacity: 0, overflow: 'hidden' }}
+      animate={{ height: 'auto', opacity: 1, transitionEnd: { overflow: 'visible' } }}
+      // A closing bar takes no taps: the selection is already gone.
+      exit={{ height: 0, opacity: 0, overflow: 'hidden', pointerEvents: 'none' }}
+      transition={IOS_SPRING}
+    >
+    <motion.div
+      initial={{ y: -12, scale: 0.97 }}
+      animate={{ y: 0, scale: 1 }}
+      exit={{ y: -12, scale: 0.97 }}
+      transition={IOS_SPRING}
+      className="relative z-10 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface) p-2 shadow-xs sm:p-4"
+    >
       {/* Main container with improved layout */}
       <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-4">
 
         {/* Left section - Selection summary with enhanced visual treatment */}
         <div className="flex items-center gap-4">
-                     <div className={`
-             flex items-center justify-center w-10 h-10 rounded-full border-2
-             ${resolvedTheme === 'light'
-               ? 'bg-zinc-100/80 border-amber-400/50 text-zinc-800'
-               : 'bg-zinc-800/60 border-amber-400/40 text-zinc-100'
-             }
-           `}>
-             {/* Selection count only — neutral chip with a subtle amber ring (on-theme). */}
+          <div className="flex h-10 w-10 items-center justify-center rounded-full border-2 border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-(--pos-s-fg)">
+             {/* Selection count only: a neutral chip with a solid yellow ring. */}
              <span className="font-bold text-sm">
                {selectedCount}
              </span>
            </div>
 
           {/* Visual separator */}
-          <div className={`
-            w-px h-8
-            ${resolvedTheme === 'light' ? 'bg-gray-300/60' : 'bg-white/20'}
-          `} />
+          <div className="h-8 w-px bg-(--pos-s-border)" />
         </div>
 
         {/* Right section - Actions based on selection type */}
@@ -190,7 +165,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
                   THEIR rider is dispatched. «Οδηγός» stays for phone orders and
                   for platform agreements served by store drivers (THE-435). */}
               {platformReadySelectionEligible && (
-                <button className={getButtonStyles('success')} onClick={(e) => { e.preventDefault(); onBulkAction('platform_ready'); }}><PackageCheck className="w-4 h-4" />{t('bulkActions.ready')}</button>
+                <button className={getButtonStyles(deliverySelectionCanBeCompleted ? 'neutral' : 'success')} onClick={(e) => { e.preventDefault(); onBulkAction('platform_ready'); }}><PackageCheck className="w-4 h-4" />{t('bulkActions.ready')}</button>
               )}
               {/* The "Set as Pickup" (Παραλαβή) shortcut used to live here.
                   Removed 2026-04-22: the EditOptionsModal now exposes the
@@ -221,7 +196,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
               {/* Platform takeaway orders need the same prepared/ready relay —
                   efood notifies the customer their pickup is ready. */}
               {platformReadySelectionEligible && (
-                <button className={getButtonStyles('success')} onClick={(e) => { e.preventDefault(); onBulkAction('platform_ready'); }}><PackageCheck className="w-4 h-4" />{t('bulkActions.ready')}</button>
+                <button className={getButtonStyles('neutral')} onClick={(e) => { e.preventDefault(); onBulkAction('platform_ready'); }}><PackageCheck className="w-4 h-4" />{t('bulkActions.ready')}</button>
               )}
               <button className={`${getButtonStyles('success')}`} onClick={(e) => { e.preventDefault(); onBulkAction('delivered'); }}><CheckCircle className="w-4 h-4" />{t('bulkActions.delivered')}</button>
               <button className={getButtonStyles('warning')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}><Pencil className="w-4 h-4" />{t('bulkActions.edit')}</button>
@@ -235,10 +210,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
           )}
 
           {/* Divider */}
-          <div className={`
-            w-px h-8 mx-2
-            ${resolvedTheme === 'light' ? 'bg-gray-300/60' : 'bg-white/20'}
-          `} />
+          <div className="mx-2 h-8 w-px bg-(--pos-s-border)" />
 
           {/* Clear selection button with enhanced styling */}
           <button
@@ -253,15 +225,10 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
           </button>
         </div>
       </div>
-
-      {/* Optional: Progress indicator for bulk operations */}
-      <div className={`
-        mt-3 h-1 rounded-full overflow-hidden opacity-0 transition-opacity duration-300
-        ${resolvedTheme === 'light' ? 'bg-gray-200' : 'bg-white/10'}
-      `}>
-        <div className="h-full bg-amber-500 transition-all duration-500" style={{ width: '0%' }} />
-      </div>
-    </div>
+    </motion.div>
+    </motion.div>
+    )}
+    </AnimatePresence>
   );
 });
 

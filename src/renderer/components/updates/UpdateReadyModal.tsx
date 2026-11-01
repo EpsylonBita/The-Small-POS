@@ -30,7 +30,7 @@ export const UpdateReadyModal: React.FC<UpdateReadyModalProps> = ({
         >
             <div className="space-y-6 text-center">
                 <div className="flex justify-center mb-4">
-                    <div className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center text-green-400">
+                    <div className="w-16 h-16 bg-(--pos-s-surface-2) rounded-full flex items-center justify-center text-green-800 dark:text-green-300">
                         <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                         </svg>
@@ -47,7 +47,7 @@ export const UpdateReadyModal: React.FC<UpdateReadyModalProps> = ({
                     {t('updates.downloaded.description')}
                 </p>
 
-                <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-2xl p-3 text-sm text-amber-800 dark:text-yellow-200 flex items-start gap-2">
+                <div className="bg-(--pos-s-warn-bg) border border-(--pos-s-warn) rounded-2xl p-3 text-sm text-amber-800 dark:text-yellow-200 flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 mt-0.5 text-amber-700 dark:text-yellow-300" />
                     <span>{t('updates.downloaded.warning')}</span>
                 </div>

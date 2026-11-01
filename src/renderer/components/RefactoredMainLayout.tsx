@@ -6,6 +6,7 @@ import { ReceiptText } from 'lucide-react';
 import { BusinessCategoryDashboard } from './dashboards/BusinessCategoryDashboard';
 import { NavigationProvider } from '../contexts/navigation-context';
 import NavigationSidebar from './NavigationSidebar';
+import { UtilityRailExpensesSlot } from './UtilityRail';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import ContentContainer from './ui/ContentContainer';
 import PageLoadMotion from './ui/PageLoadMotion';
@@ -615,7 +616,9 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
         </div>
 
         {/* Main Content Area with Container */}
-        <div className="flex-1 flex flex-col overflow-hidden min-h-0 ml-16 sm:ml-20">
+        {/* Founder 31/10: the column spans the window, so the panel's glow reaches the edges and passes
+            behind both rails. The room for the rails is ContentContainer's side padding. */}
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0">
           <ContentContainer
             className="flex-1 min-h-0 overflow-hidden relative"
             contentClassName={locksPageScroll ? 'overflow-hidden' : undefined}
@@ -625,12 +628,8 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
               <div
                 className={`mx-3 mt-3 rounded-xl border px-4 py-3 text-sm ${
                   offlineBundleStatus.hasRequiredCoreData !== false
-                    ? resolvedTheme === 'dark'
-                      ? 'border-amber-500/30 bg-amber-500/10 text-amber-100'
-                      : 'border-amber-500/30 bg-amber-50 text-amber-900'
-                    : resolvedTheme === 'dark'
-                      ? 'border-red-500/30 bg-red-500/10 text-red-100'
-                      : 'border-red-500/30 bg-red-50 text-red-900'
+                    ? 'border-(--pos-s-warn) bg-(--pos-s-warn-bg) text-(--pos-s-fg)'
+                    : 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-(--pos-s-fg)'
                 }`}
               >
                 {offlineBundleStatus.hasRequiredCoreData !== false ? (
@@ -672,11 +671,11 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
               <div
                 role="alert"
                 aria-live="assertive"
-                className={`max-w-lg w-full rounded-2xl border ${resolvedTheme === 'dark' ? 'bg-gray-800/95 border-amber-500/40 text-white' : 'bg-white/95 border-amber-500/30 text-gray-900'} shadow-2xl`}
+                className={`max-w-lg w-full rounded-2xl border ${resolvedTheme === 'dark' ? 'bg-gray-800/95 border-(--pos-s-border) text-white' : 'bg-white/95 border-(--pos-s-border) text-gray-900'} shadow-2xl`}
               >
                 <div className="p-6">
                   <div className="flex items-start gap-3">
-                    <div className="h-8 w-8 rounded-full bg-amber-500/15 text-amber-500 flex items-center justify-center font-bold">Z</div>
+                    <div className="h-8 w-8 rounded-full bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300 flex items-center justify-center font-bold">Z</div>
                     <div className="flex-1">
                       <h3 className="text-lg font-semibold">
                         {/* An issued Z is already frozen: checking in starts the next day,
@@ -722,11 +721,11 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
                 role="alert"
                 aria-live="assertive"
                 onClick={(e) => e.stopPropagation()}
-                className={`max-w-md w-full rounded-2xl border ${resolvedTheme === 'dark' ? 'bg-gray-800/95 border-red-500/40 text-white' : 'bg-white/95 border-red-500/30 text-gray-900'} shadow-2xl`}
+                className={`max-w-md w-full rounded-2xl border ${resolvedTheme === 'dark' ? 'bg-gray-800/95 border-(--pos-s-border) text-white' : 'bg-white/95 border-(--pos-s-border) text-gray-900'} shadow-2xl`}
               >
                 <div className="p-6">
                   <div className="flex items-start gap-3">
-                    <div className="h-8 w-8 rounded-full bg-red-500/15 text-red-600 flex items-center justify-center font-bold">!</div>
+                    <div className="h-8 w-8 rounded-full bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 flex items-center justify-center font-bold">!</div>
                     <div className="flex-1">
                       <h3 className="text-lg font-semibold">{t('shift.noActiveShift')}</h3>
                       <p className="mt-1 text-sm opacity-80">{t('shift.messages.shiftRequired')}</p>
@@ -750,15 +749,18 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
         </ContentContainer>
       </div>
 
-      {/* Top-right Expenses Button */}
-      <button
-        type="button"
-        onClick={() => setShowExpenses(true)}
-        className="fixed top-12 right-24 sm:right-28 z-40 rounded-full p-2 text-green-400 drop-shadow-[0_0_8px_rgba(34,197,94,0.6)] transition-all duration-200 active:scale-95"
-        aria-label={t('expense.buttonLabel')}
-      >
-        <ReceiptText className="h-6 w-6" aria-hidden="true" />
-      </button>
+      {/* Expenses: its fixed place in the right utility rail, between health and theme (founder 31/10). */}
+      <UtilityRailExpensesSlot>
+        <button
+          type="button"
+          data-utility-rail-expenses
+          onClick={() => setShowExpenses(true)}
+          className={`flex h-12 w-12 items-center justify-center rounded-xl transition-transform focus:outline-hidden active:scale-95 ${resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-black'}`}
+          aria-label={t('expense.buttonLabel')}
+        >
+          <ReceiptText className="h-5 w-5" aria-hidden="true" />
+        </button>
+      </UtilityRailExpensesSlot>
 
       {/* Expenses Modal */}
       <DeferredModal isOpen={showExpenses} onClose={() => setShowExpenses(false)}>

@@ -24,8 +24,8 @@ test('SyncRecoveryModal shell is amber/neutral, touch-first, and hides native sc
 
   assert.match(source, /liquid-glass-modal-shell/);
   assert.match(source, /overflow-y-auto scrollbar-hide/);
-  assert.match(source, /border-amber-200\/90 bg-amber-50\/90/);
-  assert.match(source, /dark:border-amber-400\/30 dark:bg-amber-500\/10/);
+  assert.match(source, /border-\(--pos-s-warn\) bg-\(--pos-s-warn-bg\)/);
+  // Wave ΣΤ6: the warn notice keeps its tint in dark (no zinc dark halves over it).
   assert.match(source, /role="status"[\s\S]*?animate-spin/);
   assert.match(source, /<summary className="min-h-touch(?![\w.-])/);
   assert.match(source, /min-h-touch min-w-touch rounded-2xl/);

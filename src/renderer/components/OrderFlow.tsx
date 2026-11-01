@@ -67,7 +67,7 @@ import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 import { usePaymentPrintPrompt, type PaymentPrintPromptContext } from '../hooks/usePaymentPrintPrompt';
 import { AlertTriangle } from 'lucide-react';
 import TableOrderIcon from './icons/TableOrderIcon';
-import PickupOrderIcon from './icons/PickupOrderIcon';
+import { DeliveryScooterIcon, PickupHandBagIcon } from './icons/OrderTypeGlyphs';
 import { deliveryZoneSelectionMetadata, resolveDeliveryFee } from '../utils/delivery-fee';
 import { toValidLatLng } from '../utils/coordinates';
 import {
@@ -2124,19 +2124,18 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
                   data-order-type-card="delivery"
                   onClick={() => handleSelectOrderType('delivery')}
                   aria-label={composeOrderTypeAriaLabel(deliveryTitle, deliveryDescription)}
-                  className="relative p-6 rounded-2xl border-2 border-[#facc15]/45 bg-[linear-gradient(135deg,rgba(250,204,21,0.16),rgba(234,179,8,0.06))] transition-transform duration-150 active:scale-95"
+                  className="relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95"
                 >
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-16 h-16 flex items-center justify-center">
-                      <svg className="w-full h-full text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="1.5">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 18.75a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h6m-9 0H3.375a1.125 1.125 0 01-1.125-1.125V14.25m17.25 4.5a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h1.125c.621 0 1.129-.504 1.09-1.124a17.902 17.902 0 00-3.213-9.193 2.056 2.056 0 00-1.58-.86H14.25M16.5 18.75h-2.25m0-11.177v-.958c0-.568-.422-1.048-.987-1.106a48.554 48.554 0 00-10.026 0 1.106 1.106 0 00-.987 1.106v7.635m12-6.677v6.677m0 4.5v-4.5m0 0h-12" />
-                      </svg>
+                      {/* Founder 31/10: his scooter rider, as on the order cards. */}
+                      <DeliveryScooterIcon className="w-full h-full text-yellow-800 dark:text-yellow-400" />
                     </div>
                     <div className="text-center">
-                      <h3 className="text-lg font-bold text-yellow-400 transition-colors mb-1">
+                      <h3 className="text-lg font-bold text-yellow-800 dark:text-yellow-400 mb-1">
                         {deliveryTitle}
                       </h3>
-                      <p className="text-sm leading-snug text-white/60 transition-colors">
+                      <p className="text-sm leading-snug text-(--pos-s-muted)">
                         {deliveryDescription}
                       </p>
                     </div>
@@ -2150,17 +2149,17 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
                 data-order-type-card="pickup"
                 onClick={() => handleSelectOrderType('pickup')}
                 aria-label={composeOrderTypeAriaLabel(pickupTitle, pickupDescription)}
-                className="relative p-6 rounded-2xl border-2 border-[#34d399]/45 bg-[linear-gradient(135deg,rgba(52,211,153,0.16),rgba(22,163,74,0.06))] transition-transform duration-150 active:scale-95"
+                className="relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95"
               >
                 <div className="flex flex-col items-center gap-3">
                   <div className="w-16 h-16 flex items-center justify-center">
-                    <PickupOrderIcon className="w-full h-full text-white" />
+                    <PickupHandBagIcon className="w-full h-full text-emerald-800 dark:text-emerald-400" />
                   </div>
                   <div className="text-center">
-                    <h3 className="text-lg font-bold text-green-400 transition-colors mb-1">
+                    <h3 className="text-lg font-bold text-emerald-800 dark:text-emerald-400 mb-1">
                       {pickupTitle}
                     </h3>
-                    <p className="text-sm leading-snug text-white/60 transition-colors">
+                    <p className="text-sm leading-snug text-(--pos-s-muted)">
                       {pickupDescription}
                     </p>
                   </div>
@@ -2174,22 +2173,22 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
                   data-order-type-card="table"
                   onClick={() => handleSelectOrderType('dine-in')}
                   aria-label={composeOrderTypeAriaLabel(tableTitle, tableDescription)}
-                  className="relative p-6 rounded-2xl border-2 border-[#60a5fa]/45 bg-[linear-gradient(135deg,rgba(96,165,250,0.16),rgba(37,99,235,0.06))] transition-transform duration-150 active:scale-95"
+                  className="relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95"
                 >
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-16 h-16 flex items-center justify-center">
                       {/* Dine-in / table order icon */}
                       <TableOrderIcon
-                        className="w-full h-full text-white"
+                        className="w-full h-full text-[#1d4ed8] dark:text-[#60a5fa]"
                         strokeWidth={1.6}
                         opticalScale={1.62}
                       />
                     </div>
                     <div className="text-center">
-                      <h3 className="text-lg font-bold text-[#60a5fa] transition-colors mb-1">
+                      <h3 className="text-lg font-bold text-[#1d4ed8] dark:text-[#60a5fa] mb-1">
                         {tableTitle}
                       </h3>
-                      <p className="text-sm leading-snug text-white/60 transition-colors">
+                      <p className="text-sm leading-snug text-(--pos-s-muted)">
                         {tableDescription}
                       </p>
                     </div>

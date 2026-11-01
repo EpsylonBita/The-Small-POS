@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { solidButton } from '../settings/SettingsKit'
 import { LifeBuoy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useI18n } from '../../contexts/i18n-context';
@@ -66,7 +67,7 @@ export const PrinterSupportEntryPoint: React.FC<PrinterSupportEntryPointProps> =
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
-        className="inline-flex min-h-touch items-center gap-2 rounded-2xl border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-700 transition-transform active:scale-[0.98] active:bg-amber-500/15 dark:text-amber-300"
+        className={solidButton('secondary', 'md')}
       >
         <LifeBuoy className="w-4 h-4" />
         {t('support.actions.troubleshoot')}

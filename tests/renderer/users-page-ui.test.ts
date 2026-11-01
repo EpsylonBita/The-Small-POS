@@ -53,13 +53,13 @@ test('users table uses yellow header neutral rows and wrapperless chips', () => 
   assert.match(source, /resolvedTheme === 'dark' \? 'bg-zinc-950' : 'bg-gray-100'/);
   assert.match(source, /resolvedTheme === 'dark' \? 'active:bg-zinc-900' : 'active:bg-gray-200'/);
   assert.match(source, /'text-orange-700 dark:text-orange-500'/);
-  assert.match(source, /'text-amber-500 dark:text-amber-300'/);
-  assert.match(source, /'text-yellow-500 dark:text-yellow-400'/);
+  assert.match(source, /'text-amber-700 dark:text-amber-300'/);
+  assert.match(source, /'text-yellow-800 dark:text-yellow-400'/);
   assert.match(source, /<Mail className="w-4 h-4 mr-2 text-yellow-500" \/>/);
   assert.match(source, /<Phone className="w-4 h-4 mr-2 text-yellow-500" \/>/);
   assert.match(source, /<ShoppingBag className="w-4 h-4 mr-2 text-green-500" \/>/);
-  assert.match(source, /inline-flex items-center text-xs font-medium text-green-500 dark:text-green-400/);
-  assert.match(source, /inline-flex items-center text-xs font-medium text-red-500 dark:text-red-400/);
+  assert.match(source, /inline-flex items-center text-xs font-medium text-green-800 dark:text-green-400/);
+  assert.match(source, /inline-flex items-center text-xs font-medium text-red-700 dark:text-red-400/);
   assert.match(source, /inline-flex items-center text-xs font-medium \$\{color\}/);
   assert.doesNotMatch(source, /bg-yellow-100 text-yellow-800 dark:bg-yellow-900\/20/);
   assert.doesNotMatch(source, /bg-green-100 text-green-800 dark:bg-green-900\/20/);
@@ -83,8 +83,7 @@ test('UsersPage has no native title tooltips; icon controls keep handlers + loca
 
   // Round 262: the header refresh button is amber glass (was a stark black/white inversion square),
   // touch-first with active press feedback and no hover. The old black/white classes are gone.
-  assert.match(source, /border border-amber-400\/30 bg-amber-500\/15 text-amber-300 active:bg-amber-500\/25/);
-  assert.match(source, /border border-amber-400\/40 bg-amber-50 text-amber-600 active:bg-amber-100/);
+  assert.match(source, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
   assert.doesNotMatch(source, /border border-white\/80 bg-white text-black/);
   assert.doesNotMatch(source, /border border-black bg-black text-white/);
   assert.doesNotMatch(source, /hover:/);

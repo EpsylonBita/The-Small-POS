@@ -62,6 +62,6 @@ describe('ConfirmDialog theme-aware destructive states', () => {
     expect(details).not.toHaveClass('liquid-glass-modal-inset');
 
     const checkbox = screen.getByRole('checkbox');
-    expect(checkbox).toHaveClass('text-red-600', 'focus:ring-red-500/70');
+    expect(checkbox).toHaveClass('text-red-600', 'focus:ring-red-500');
   });
 });

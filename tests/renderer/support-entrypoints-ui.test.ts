@@ -13,7 +13,7 @@ const printerEntry = readRendererFile('components', 'support', 'PrinterSupportEn
 const healthEntry = readRendererFile('components', 'support', 'HealthSupportEntryPoint.tsx');
 const combined = [panel, printerEntry, healthEntry].join('\n');
 
-test('support explanation surfaces use amber/neutral glass styling and no hover-era cool colors', () => {
+test('support explanation surfaces use solid amber/neutral styling and no hover-era cool colors', () => {
   assert.doesNotMatch(combined, /hover:/);
   assert.doesNotMatch(combined, /group-hover:/);
   assert.doesNotMatch(combined, /\b(?:bg|text|border|from|to|ring|shadow)-(?:blue|cyan|sky|purple|violet|indigo|fuchsia|pink|orange)-/);
@@ -21,23 +21,24 @@ test('support explanation surfaces use amber/neutral glass styling and no hover-
   assert.doesNotMatch(combined, /rounded-lg/);
 
   assert.match(panel, /liquid-glass-modal-card rounded-\[22px\]/);
-  assert.match(panel, /info:[\s\S]*?bg-amber-500\/15 text-amber-700/);
-  assert.match(panel, /high:[\s\S]*?bg-amber-500\/15 text-amber-700/);
-  assert.match(panel, /critical:[\s\S]*?bg-red-500\/15 text-red-700/);
-  assert.match(panel, /inline-flex min-h-touch(?![\w.-])[\s\S]*?active:scale-\[0\.98\]/);
-  assert.match(panel, /bg-amber-400 text-black active:bg-amber-300/);
-  assert.match(panel, /bg-white\/8[\s\S]*?active:bg-white\/\[0\.14\]/);
+  // UI audit wave 7A2: opaque severity tints in both themes (no /15 washes).
+  assert.match(panel, /info:[\s\S]*?bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300/);
+  assert.match(panel, /high:[\s\S]*?bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300/);
+  assert.match(panel, /critical:[\s\S]*?bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300/);
+  assert.doesNotMatch(panel, /\/\d{1,2}\b(?![\d.])|\/\[0?\.\d+\]/);
+  // Actions: the kit buttons (yellow primary, neutral secondary), 44 px.
+  assert.match(panel, /className=\{solidButton\(action\.variant === 'primary' \? 'primary' : 'secondary', 'sm'\)\}/);
 });
 
-test('printer and health support entry buttons are 44px amber touch controls', () => {
-  for (const source of [printerEntry, healthEntry]) {
-    assert.match(source, /inline-flex min-h-touch items-center gap-2 rounded-2xl/);
-    assert.match(source, /border-amber-500\/25 bg-amber-500\/10/);
-    assert.match(source, /text-amber-700/);
-    assert.match(source, /active:scale-\[0\.98\]/);
-    assert.match(source, /dark:text-amber-300/);
-  }
-
+test('printer and health support entry buttons are 44px touch controls', () => {
+  // UI audit wave 7A2: the printer entry lives in Settings and is the neutral kit button.
+  assert.match(printerEntry, /className=\{solidButton\('secondary', 'md'\)\}/);
+  assert.doesNotMatch(printerEntry, /bg-amber|\/\d{2}\b/);
+  // The Health entry is outside Settings and keeps its amber control until the app-wide wave.
+  assert.match(healthEntry, /inline-flex min-h-touch items-center gap-2 rounded-2xl/);
+  assert.match(healthEntry, /text-amber-800/);
+  assert.match(healthEntry, /active:scale-\[0\.98\]/);
+  assert.match(healthEntry, /dark:text-amber-300/);
   assert.match(printerEntry, /setOpen\(\(current\) => !current\)/);
   assert.match(printerEntry, /<SupportExplanationPanel/);
   assert.match(healthEntry, /setOpen\(\(current\) => !current\)/);

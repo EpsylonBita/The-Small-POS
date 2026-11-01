@@ -51,7 +51,7 @@ describe('room payment confirmation and immutable currency', () => {
   it('does not claim a folio charge succeeded when only the local order was saved', async () => {
     const onPaymentComplete = vi.fn().mockResolvedValue(true);
     render(<PaymentModal isOpen onClose={vi.fn()} orderTotal={3} allowTips={false} roomChargeContext={room} onPaymentComplete={onPaymentComplete} />);
-    fireEvent.click(screen.getByRole('button',{name:/ROOM/}));
+    fireEvent.click(screen.getByRole('button',{name:/Room/}));
     await waitFor(() => expect(onPaymentComplete).toHaveBeenCalledTimes(1));
     expect(onPaymentComplete).toHaveBeenCalledWith(expect.objectContaining({method:'room_charge',currency:'CHF',room_id:'room-1',folio_id:'folio-1'}));
     expect(notices.toast).toHaveBeenCalledWith('guestBilling.roomChargePending');
@@ -60,13 +60,13 @@ describe('room payment confirmation and immutable currency', () => {
   it('shows success only on an explicit server-applied proof', async () => {
     const onPaymentComplete = vi.fn(async payment => {payment.roomChargeApplied=true;return true;});
     render(<PaymentModal isOpen onClose={vi.fn()} orderTotal={3} allowTips={false} roomChargeContext={room} onPaymentComplete={onPaymentComplete} />);
-    fireEvent.click(screen.getByRole('button',{name:/ROOM/}));
+    fireEvent.click(screen.getByRole('button',{name:/Room/}));
     await waitFor(() => expect(notices.toast.success).toHaveBeenCalledWith('Charged to room'));
   });
   it.each([null,'EUR'])('does not admit a new charge into a %s folio under CHF', currency => {
     const onPaymentComplete=vi.fn();
     render(<PaymentModal isOpen onClose={vi.fn()} orderTotal={3} allowTips={false} roomChargeContext={{...room,currency}} onPaymentComplete={onPaymentComplete} />);
-    expect(screen.queryByRole('button',{name:/ROOM/})).toBeNull();
+    expect(screen.queryByRole('button',{name:/Room/})).toBeNull();
     expect(onPaymentComplete).not.toHaveBeenCalled();
     expect(screen.getByRole('alert')).toBeInTheDocument();
   });

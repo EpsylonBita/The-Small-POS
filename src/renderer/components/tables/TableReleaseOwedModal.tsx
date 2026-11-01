@@ -106,7 +106,7 @@ export function TableReleaseOwedModal({
                 type="button"
                 disabled={busy}
                 onClick={onCollect}
-                className="flex min-h-[48px] items-center gap-3 rounded-2xl border border-emerald-400/40 bg-emerald-500/10 px-4 py-3 text-left font-semibold transition active:bg-emerald-500/20 disabled:opacity-60"
+                className="flex min-h-[48px] items-center gap-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-left font-semibold transition active:bg-(--pos-s-surface-2) disabled:opacity-60"
               >
                 <HandCoins className="h-5 w-5 shrink-0 text-emerald-500" />
                 <span>{t('tableRelease.collect', { defaultValue: 'Collect the payment' })}</span>
@@ -116,7 +116,7 @@ export function TableReleaseOwedModal({
               type="button"
               disabled={busy}
               onClick={onKeepOpenTab}
-              className="flex min-h-[48px] flex-col items-start gap-1 rounded-2xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-left transition active:bg-amber-500/20 disabled:opacity-60"
+              className="flex min-h-[48px] flex-col items-start gap-1 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-left transition active:bg-(--pos-s-surface-2) disabled:opacity-60"
             >
               <span className="flex items-center gap-3 font-semibold">
                 <Receipt className="h-5 w-5 shrink-0 text-amber-500" />
@@ -137,7 +137,7 @@ export function TableReleaseOwedModal({
             {cancelRefusal === 'ORDER_HAS_PAYMENTS' && !onRequestCancel ? (
               <p
                 data-testid="table-release-cancel-refused"
-                className="rounded-2xl border border-red-400/30 bg-red-500/5 px-4 py-3 text-sm liquid-glass-modal-text-muted"
+                className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-sm liquid-glass-modal-text-muted"
               >
                 {t('tableRelease.cancelRefusedPaid', {
                   defaultValue:
@@ -149,7 +149,7 @@ export function TableReleaseOwedModal({
                 type="button"
                 disabled={busy}
                 onClick={() => onRequestCancel ? onRequestCancel() : setAskingReason(true)}
-                className="flex min-h-[48px] items-center gap-3 rounded-2xl border border-red-400/40 bg-red-500/10 px-4 py-3 text-left font-semibold transition active:bg-red-500/20 disabled:opacity-60"
+                className="flex min-h-[48px] items-center gap-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-left font-semibold transition active:bg-(--pos-s-surface-2) disabled:opacity-60"
               >
                 <Ban className="h-5 w-5 shrink-0 text-red-500" />
                 <span>{t('tableRelease.cancelOrder', { defaultValue: 'Cancel the order' })}</span>
@@ -193,7 +193,7 @@ export function TableReleaseOwedModal({
                 type="button"
                 disabled={busy || trimmedReason.length === 0}
                 onClick={() => onCancelOrder(trimmedReason)}
-                className="inline-flex min-h-touch items-center justify-center gap-2 rounded-2xl border border-red-400/50 bg-red-500/80 px-3 py-2 font-semibold text-white disabled:opacity-60"
+                className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--danger gap-2 rounded-2xl"
               >
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />}
                 {t('tableRelease.confirmCancel', { defaultValue: 'Cancel the order' })}

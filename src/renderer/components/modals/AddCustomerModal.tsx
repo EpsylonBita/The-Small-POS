@@ -1866,13 +1866,42 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         </div>
       ) : undefined}
       ariaLabel={callerIdWorkspace ? getModalTitle() : undefined}
-      size={callerIdWorkspace ? 'lg' : 'sm'}
-      className={callerIdWorkspace ? 'max-w-4xl!' : 'max-w-lg!'}
+      size={callerIdWorkspace ? 'lg' : 'md'}
+      className={callerIdWorkspace ? 'max-w-4xl!' : 'max-w-2xl!'}
+      footer={(
+        <div className="flex gap-3 border-t border-(--modal-glass-line) px-6 py-4">
+          <button
+            type="button"
+            onClick={handleSafeClose}
+            disabled={isSubmitting}
+            className="liquid-glass-modal-button flex-1 rounded-2xl"
+          >
+            {t('modals.addCustomer.cancel')}
+          </button>
+          <button
+            type="submit"
+            form="add-customer-form"
+            disabled={isSubmitting}
+            className="liquid-glass-modal-button pos-modal-primary flex-1 rounded-2xl disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isSubmitting
+              ? t('modals.addCustomer.saving')
+              : (mode === 'addAddress' || mode === 'editAddress')
+                ? t('modals.addCustomer.saveAddress', 'Save Address')
+                : mode === 'edit'
+                  ? t('modals.addCustomer.saveChanges', 'Save Changes')
+                  : t('modals.addCustomer.save')
+            }
+          </button>
+        </div>
+      )}
       closeOnBackdrop={!isSubmitting}
       closeOnEscape={!isSubmitting}
     >
       {/* Form Content */}
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form onSubmit={handleSubmit} id="add-customer-form" className="space-y-4">
+        {/* Founder 31/10: Phone | Name, Address, City | Postcode, Floor, Bell | Email, Notes. */}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         {/* Phone Number - disabled in addAddress mode */}
         <div>
           <label
@@ -1889,7 +1918,6 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               value={formData.phone}
               onChange={(e) => handleInputChange('phone', e.target.value)}
               onBlur={() => setPhoneBlurred(true)}
-              placeholder={t('modals.addCustomer.phonePlaceholder')}
               aria-invalid={phoneErrorText ? true : undefined}
               aria-describedby={
                 phoneErrorText
@@ -1898,7 +1926,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
                     ? 'add-customer-phone-warning'
                     : undefined
               }
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''} ${phoneErrorText ? 'border-red-500! focus:ring-red-500/50!' : ''}`}
+              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''} ${phoneErrorText ? 'border-red-500! focus:ring-(--pos-s-fg)!' : ''}`}
               disabled={isAddressOnlyMode}
               readOnly={isAddressOnlyMode}
             />
@@ -1921,6 +1949,29 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               <span className="block">{t('modals.addCustomer.phoneKeptAsSaved')}</span>
             </p>
           )}
+        </div>
+
+        {/* Name - disabled in addAddress mode */}
+        <div>
+          <label htmlFor="add-customer-name" className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            {t('modals.addCustomer.nameLabel').replace(' *', '')} <span className="text-red-500">*</span>
+          </label>
+          <div className="relative">
+            <User className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
+            <input
+              type="text"
+              id="add-customer-name"
+              value={formData.name}
+              onChange={(e) => handleInputChange('name', e.target.value)}
+              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+              disabled={isAddressOnlyMode}
+              readOnly={isAddressOnlyMode}
+            />
+          </div>
+          {errors.name && (
+            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.name}</p>
+          )}
+        </div>
         </div>
 
         {/* Address with Simple Input + Delivery Validation */}
@@ -1950,7 +2001,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             <div
               role="status"
               data-testid="add-customer-zone-not-checked"
-              className="mt-2 space-y-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3"
+              className="mt-2 space-y-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3"
             >
               <div className="flex items-start gap-2 text-sm text-amber-800 dark:text-amber-100">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-300" />
@@ -1980,7 +2031,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
                 <p className="font-medium">
                   {t('modals.addCustomer.specialAddressModeTitle', 'Special address label detected')}
                 </p>
-                <p className="text-emerald-700/90 dark:text-emerald-100/80">
+                <p className="text-emerald-700 dark:text-emerald-100">
                   {t(
                     'modals.addCustomer.specialAddressModeDescription',
                     {
@@ -2016,7 +2067,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
                 {!isValidatingDelivery && deliveryValidationResult && (
                   <div>
                     {deliveryValidationStatus === 'in_zone' ? (
-                      <div className="flex items-center gap-2 text-green-600">
+                      <div className="flex items-center gap-2 text-green-700 dark:text-green-400">
                         <CheckCircle className="w-4 h-4" />
                         <span className="text-sm">
                           {t('modals.addCustomer.deliveryAvailable')}
@@ -2069,7 +2120,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               )}
 
               {(deliveryValidationStatus === 'out_of_zone' || deliveryValidationStatus === 'unverified_offline') && (
-                <div className="space-y-2 rounded-2xl border border-orange-500/30 bg-orange-500/10 p-3">
+                <div className="space-y-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
                   <label className="flex items-center gap-2 text-sm text-orange-200">
                     <input
                       type="checkbox"
@@ -2101,18 +2152,19 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           </div>
         )}
 
+        <div className="grid grid-cols-2 gap-4">
         {/* City */}
         <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+          <label htmlFor="add-customer-city" className="block text-sm font-medium liquid-glass-modal-text mb-2">
             {t('modals.addCustomer.cityLabel')}
           </label>
           <div className="relative">
             <Building className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
             <input
               type="text"
+              id="add-customer-city"
               value={formData.city}
               onChange={(e) => handleInputChange('city', e.target.value)}
-              placeholder={t('modals.addCustomer.cityPlaceholder')}
               className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
             />
           </div>
@@ -2120,85 +2172,20 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
         {/* Postal Code */}
         <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+          <label htmlFor="add-customer-postcode" className="block text-sm font-medium liquid-glass-modal-text mb-2">
             {t('modals.addCustomer.postcodeLabel')}
           </label>
           <div className="relative">
             <Hash className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
             <input
               type="text"
+              id="add-customer-postcode"
               value={formData.postalCode}
               onChange={(e) => handleInputChange('postalCode', e.target.value)}
-              placeholder={t('modals.addCustomer.postcodePlaceholder')}
               className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
             />
           </div>
         </div>
-
-        {/* Name - disabled in addAddress mode */}
-        <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.nameLabel').replace(' *', '')} <span className="text-red-500">*</span>
-          </label>
-          <div className="relative">
-            <User className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
-            <input
-              type="text"
-              value={formData.name}
-              onChange={(e) => handleInputChange('name', e.target.value)}
-              placeholder={t('modals.addCustomer.namePlaceholder')}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
-              disabled={isAddressOnlyMode}
-              readOnly={isAddressOnlyMode}
-            />
-          </div>
-          {errors.name && (
-            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.name}</p>
-          )}
-        </div>
-
-        {/* Email - disabled in addAddress/editAddress mode */}
-        <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.emailLabel')}
-          </label>
-          <div className="relative">
-            <Mail className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
-            <input
-              type="email"
-              value={formData.email}
-              onChange={(e) => handleInputChange('email', e.target.value)}
-              placeholder={t('modals.addCustomer.emailPlaceholder')}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
-              disabled={isAddressOnlyMode}
-              readOnly={isAddressOnlyMode}
-            />
-          </div>
-          {errors.email && (
-            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.email}</p>
-          )}
-        </div>
-
-        {/* Name on Ringer */}
-        <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.nameOnRingerLabel')}
-          </label>
-          <div className="relative">
-            <Users className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
-            <input
-              type="text"
-              value={formData.nameOnRinger}
-              onChange={(e) => handleInputChange('nameOnRinger', e.target.value)}
-              placeholder={t('modals.addCustomer.nameOnRingerPlaceholder')}
-              required
-              aria-required="true"
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
-            />
-          </div>
-          {errors.nameOnRinger && (
-            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.nameOnRinger}</p>
-          )}
         </div>
 
         {/* Floor Number */}
@@ -2222,6 +2209,52 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           )}
         </div>
 
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {/* Name on Ringer */}
+        <div>
+          <label htmlFor="add-customer-ringer" className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            {t('modals.addCustomer.nameOnRingerLabel').replace(' *', '')} <span className="text-red-500">*</span>
+          </label>
+          <div className="relative">
+            <Users className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
+            <input
+              type="text"
+              id="add-customer-ringer"
+              value={formData.nameOnRinger}
+              onChange={(e) => handleInputChange('nameOnRinger', e.target.value)}
+              required
+              aria-required="true"
+              className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
+            />
+          </div>
+          {errors.nameOnRinger && (
+            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.nameOnRinger}</p>
+          )}
+        </div>
+
+        {/* Email - disabled in addAddress/editAddress mode */}
+        <div>
+          <label htmlFor="add-customer-email" className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            {t('modals.addCustomer.emailLabel')}
+          </label>
+          <div className="relative">
+            <Mail className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
+            <input
+              type="email"
+              id="add-customer-email"
+              value={formData.email}
+              onChange={(e) => handleInputChange('email', e.target.value)}
+              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+              disabled={isAddressOnlyMode}
+              readOnly={isAddressOnlyMode}
+            />
+          </div>
+          {errors.email && (
+            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.email}</p>
+          )}
+        </div>
+        </div>
+
         {/* Notes */}
         <div>
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
@@ -2241,36 +2274,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
         {/* Submit Error */}
         {errors.submit && (
-          <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-600 dark:text-red-400 text-sm">
+          <div className="p-3 bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl text-red-800 dark:text-red-400 text-sm">
             {errors.submit}
           </div>
         )}
-
-        {/* Action Buttons */}
-        <div className="flex gap-3 pt-4">
-          <button
-            type="button"
-            onClick={handleSafeClose}
-            disabled={isSubmitting}
-            className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-2xl"
-          >
-            {t('modals.addCustomer.cancel')}
-          </button>
-          <button
-            type="submit"
-            disabled={isSubmitting}
-            className="liquid-glass-modal-button liquid-glass-modal-success flex-1 rounded-2xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
-          >
-            {isSubmitting
-              ? t('modals.addCustomer.saving')
-              : (mode === 'addAddress' || mode === 'editAddress')
-                ? t('modals.addCustomer.saveAddress', 'Save Address')
-                : mode === 'edit'
-                  ? t('modals.addCustomer.saveChanges', 'Save Changes')
-                  : t('modals.addCustomer.save')
-            }
-          </button>
-        </div>
       </form>
     </LiquidGlassModal>
   );

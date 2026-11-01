@@ -111,13 +111,13 @@ function toQuantity(value: string): number {
 
 function statusChipClasses(status: PurchaseOrderStatus, isDark: boolean): string {
   if (status === 'ordered') {
-    return isDark ? 'bg-sky-900/50 text-sky-200' : 'bg-sky-100 text-sky-800';
+    return isDark ? 'bg-(--pos-s-surface-2) text-sky-800 dark:text-sky-200' : 'bg-(--pos-s-surface-2) text-sky-800';
   }
   if (status === 'partially_received') {
-    return isDark ? 'bg-amber-900/50 text-amber-200' : 'bg-amber-100 text-amber-800';
+    return isDark ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'bg-(--pos-s-surface-2) text-amber-800';
   }
   if (status === 'received_closed') {
-    return isDark ? 'bg-emerald-900/50 text-emerald-200' : 'bg-emerald-100 text-emerald-800';
+    return isDark ? 'bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200' : 'bg-(--pos-s-surface-2) text-emerald-800';
   }
   if (status === 'cancelled') {
     return isDark ? 'bg-zinc-800 text-zinc-300' : 'bg-gray-200 text-gray-600';
@@ -539,11 +539,11 @@ const PurchaseOrdersTab: React.FC = () => {
     const isAttention = receipt.state === 'conflict' || receipt.state === 'failed';
     const cardClass = isAttention
       ? isDark
-        ? 'border-red-900 bg-red-950/30 text-red-100'
-        : 'border-red-200 bg-red-50 text-red-800'
+        ? 'border-red-900 bg-(--pos-s-surface-2) text-red-800 dark:text-red-200'
+        : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800'
       : isDark
-        ? 'border-amber-900 bg-amber-950/30 text-amber-100'
-        : 'border-amber-200 bg-amber-50 text-amber-800';
+        ? 'border-amber-900 bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200'
+        : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800';
     return (
       <div key={receipt.queueId} className={`rounded-xl border p-3 text-sm ${cardClass}`}>
         <div className="flex items-center justify-between gap-2">
@@ -697,7 +697,7 @@ const PurchaseOrdersTab: React.FC = () => {
 
           {!isOnline && (
             <p
-              className={`rounded-xl border p-2 text-xs ${isDark ? 'border-amber-900 bg-amber-950/30 text-amber-200' : 'border-amber-200 bg-amber-50 text-amber-800'}`}
+              className={`rounded-xl border p-2 text-xs ${isDark ? 'border-amber-900 bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800'}`}
             >
               {t(
                 'procurement.offline.receiveNote',
@@ -708,7 +708,7 @@ const PurchaseOrdersTab: React.FC = () => {
 
           {dialogError && (
             <div
-              className={`flex items-center gap-2 rounded-xl border p-3 text-sm ${isDark ? 'border-red-900 bg-red-950/30 text-red-100' : 'border-red-200 bg-red-50 text-red-700'}`}
+              className={`flex items-center gap-2 rounded-xl border p-3 text-sm ${isDark ? 'border-red-900 bg-(--pos-s-surface-2) text-red-800 dark:text-red-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-700'}`}
             >
               <AlertCircle className="h-4 w-4 shrink-0" />
               {dialogError}

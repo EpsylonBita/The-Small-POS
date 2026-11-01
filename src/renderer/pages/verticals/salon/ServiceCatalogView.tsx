@@ -310,7 +310,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
   // Show loading or error state
   if (!branchId || !effectiveOrgId) {
     return (
-      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'bg-black text-zinc-400' : 'bg-[#fdfaf5] text-gray-500'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'bg-black text-zinc-400' : 'bg-[#fdfaf5] text-gray-600'}`}>
         {t('serviceCatalog.selectBranch', { defaultValue: 'Please select a branch to view services' })}
       </motion.div>
     );
@@ -332,19 +332,19 @@ export const ServiceCatalogView: React.FC = memo(() => {
           {/* Stats */}
           <motion.div variants={pageMotionContainer} className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-zinc-500' : 'bg-white border-gray-200 border-t-zinc-400'}`}>
-              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
                 {t('serviceCatalog.stats.totalServices', { defaultValue: 'Total Services' })}
               </div>
               <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.totalServices}</div>
             </motion.div>
             <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-emerald-400' : 'bg-white border-gray-200 border-t-emerald-500'}`}>
-              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
                 {t('serviceCatalog.stats.activeServices', { defaultValue: 'Active' })}
               </div>
               <div className={`text-xl font-bold ${isDark ? 'text-emerald-300' : 'text-emerald-600'}`}>{stats.activeServices}</div>
             </motion.div>
             <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500'}`}>
-              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
                 {t('serviceCatalog.stats.avgPrice', { defaultValue: 'Avg Price' })}
               </div>
               <div className={`text-xl font-bold ${isDark ? 'text-amber-300' : 'text-amber-600'}`}>{formatPrice(stats.avgPrice)}</div>
@@ -413,7 +413,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
       {/* Loading State */}
       {isLoading && (
         <motion.div variants={pageMotionItem} className="flex-1 flex items-center justify-center">
-          <Loader2 className={`w-8 h-8 animate-spin ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
+          <Loader2 className={`w-8 h-8 animate-spin ${isDark ? 'text-gray-400' : 'text-gray-600'}`} />
         </motion.div>
       )}
 
@@ -454,8 +454,8 @@ export const ServiceCatalogView: React.FC = memo(() => {
                   </div>
                   <span className={`px-2 py-1 rounded text-xs ${
                     service.isActive
-                      ? isDark ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30' : 'bg-emerald-100 text-emerald-700 border border-emerald-200'
-                      : isDark ? 'bg-zinc-800 text-zinc-400 border border-zinc-700' : 'bg-gray-100 text-gray-500 border border-gray-200'
+                      ? isDark ? 'bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200 border border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) text-emerald-700 border border-(--pos-s-border)'
+                      : isDark ? 'bg-zinc-800 text-zinc-400 border border-zinc-700' : 'bg-gray-100 text-gray-600 border border-gray-200'
                   }`}>
                     {service.isActive
                       ? t('serviceCatalog.status.active', { defaultValue: 'Active' })
@@ -465,7 +465,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
                 </div>
 
                 <h3 className={`font-medium mb-1 ${isDark ? 'text-white' : 'text-gray-900'}`}>{service.name}</h3>
-                <p className={`text-sm mb-3 line-clamp-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                <p className={`text-sm mb-3 line-clamp-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                   {service.description || t('serviceCatalog.noDescription', { defaultValue: 'No description' })}
                 </p>
 
@@ -507,7 +507,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
                     onClick={(event) => openDeleteService(service, event)}
                     aria-label={t('serviceCatalog.delete.title', { defaultValue: 'Delete Service' })}
                     className={`py-1.5 px-3 rounded-xl text-sm flex items-center justify-center text-red-500 ${
-                    isDark ? 'bg-red-500/10 active:bg-red-500/20' : 'bg-red-50 active:bg-red-100'
+                    isDark ? 'bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2)'
                   }`}
                   >
                   <Trash2 className="w-3 h-3" />
@@ -645,7 +645,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
                   />
                   <span
                     aria-hidden="true"
-                    className={`relative inline-flex h-8 w-14 shrink-0 rounded-full border p-1 transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-yellow-400/60 ${isDark ? 'border-white/15 bg-zinc-700/70' : 'border-gray-300 bg-gray-300/80'} peer-checked:border-yellow-400/60 peer-checked:bg-yellow-400/90 after:content-[''] after:absolute after:top-1 after:inset-s-1 after:h-6 after:w-6 after:rounded-full after:bg-white after:shadow-md after:transition-transform peer-checked:after:translate-x-6`}
+                    className={`relative inline-flex h-8 w-14 shrink-0 rounded-full border p-1 transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-(--pos-s-fg) ${isDark ? 'border-white/15 bg-zinc-700/70' : 'border-gray-300 bg-gray-300/80'} peer-checked:border-(--pos-s-yellow) peer-checked:bg-(--pos-s-yellow) after:content-[''] after:absolute after:top-1 after:inset-s-1 after:h-6 after:w-6 after:rounded-full after:bg-white after:shadow-md after:transition-transform peer-checked:after:translate-x-6`}
                   />
                 </span>
               </label>
@@ -656,14 +656,14 @@ export const ServiceCatalogView: React.FC = memo(() => {
                 type="button"
                 onClick={closeServiceModal}
                 disabled={isSaving}
-                className={`rounded-xl border px-4 py-2 text-sm font-medium transition-transform active:scale-95 ${isDark ? 'bg-red-500/25 text-red-200 border-red-400/40 active:bg-red-500/35' : 'bg-red-500/20 text-red-900 border-red-500/50 active:bg-red-500/30'} disabled:cursor-not-allowed disabled:opacity-50`}
+                className={`rounded-xl border px-4 py-2 text-sm font-medium transition-transform active:scale-95 ${isDark ? 'bg-(--pos-s-surface-2) text-(--pos-s-fg) border-(--pos-s-border) active:bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2) text-(--pos-s-fg) border-(--pos-s-border) active:bg-(--pos-s-surface-2)'} disabled:cursor-not-allowed disabled:opacity-50`}
               >
                 {t('common.cancel', { defaultValue: 'Cancel' })}
               </button>
               <button
                 type="submit"
                 disabled={!canSubmitService || isSaving}
-                className={`rounded-xl border px-4 py-2 text-sm font-semibold transition-transform active:scale-95 ${isDark ? 'bg-green-500/25 text-green-200 border-green-500/45 active:bg-green-500/35' : 'bg-green-500/25 text-green-900 border-green-600/50 active:bg-green-500/35'} disabled:cursor-not-allowed disabled:opacity-50`}
+                className={`rounded-xl border px-4 py-2 text-sm font-semibold transition-transform active:scale-95 ${isDark ? 'bg-(--pos-s-yellow) text-black border-(--pos-s-yellow) active:bg-yellow-500' : 'bg-(--pos-s-yellow) text-black border-(--pos-s-yellow) active:bg-yellow-500'} disabled:cursor-not-allowed disabled:opacity-50`}
               >
                 {isSaving ? t('common.saving', { defaultValue: 'Saving...' }) : t('common.actions.save', { defaultValue: 'Save' })}
               </button>

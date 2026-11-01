@@ -532,7 +532,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   };
 
   const fieldClass =
-    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-hidden focus:ring-2 focus:ring-yellow-400/40 dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
+    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg) dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
   const addressFieldClass = `${fieldClass} pl-10`;
 
   return (
@@ -548,7 +548,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
           {t('modals.addNewAddress.subtitle', { name: customer.name })}
         </p>
 
-        <div className="mb-6 rounded-3xl border border-yellow-400/25 bg-yellow-400/12 p-4">
+        <div className="mb-6 rounded-3xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-yellow-400 text-black">
               <User className="w-5 h-5" />
@@ -588,7 +588,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
               />
               {hasDeliveryPro && isLoadingAddresses && (
                 <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
-                  <div className="w-4 h-4 border-2 border-yellow-400/30 border-t-yellow-400 rounded-full animate-spin"></div>
+                  <div className="w-4 h-4 border-2 border-(--pos-s-border) border-t-yellow-400 rounded-full animate-spin"></div>
                 </div>
               )}
             </div>
@@ -659,7 +659,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
               )}
 
               {(validationStatus === 'out_of_zone' || validationStatus === 'unverified_offline') && (
-                <div className="space-y-2 rounded-2xl border border-orange-500/30 bg-orange-500/10 p-3">
+                <div className="space-y-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
                   <label className="flex items-center gap-2 text-sm text-orange-200">
                     <input
                       type="checkbox"

@@ -505,8 +505,8 @@ const CouponsPage: React.FC = () => {
             onClick={() => setShowScanPanel(true)}
             className={`h-10 px-4 rounded-2xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] inline-flex items-center gap-2 ${
               isDark
-                ? 'border border-yellow-400/70 bg-yellow-400/10 text-yellow-100 active:bg-yellow-400/20'
-                : 'border border-yellow-400/70 bg-yellow-50 text-yellow-700 active:bg-yellow-100'
+                ? 'border border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200 active:bg-(--pos-s-surface-2)'
+                : 'border border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-yellow-700 active:bg-(--pos-s-surface-2)'
             }`}
           >
             <ScanLine className="w-4 h-4" />
@@ -517,7 +517,7 @@ const CouponsPage: React.FC = () => {
             disabled={saveAction.disabled}
             className={`h-10 px-4 rounded-2xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] inline-flex items-center gap-2 ${
               isDark
-                ? 'bg-yellow-400 text-black border border-yellow-300 active:bg-yellow-300'
+                ? 'bg-yellow-400 text-black border border-(--pos-s-border) active:bg-yellow-300'
                 : 'bg-black text-white border border-black active:bg-zinc-800'
             } disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100`}
           >
@@ -541,11 +541,7 @@ const CouponsPage: React.FC = () => {
             onClick={() => void fetchCoupons()}
             disabled={loading}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 shadow-xs ${
-              isDark
-                ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
-                : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
-            } ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+            className={`h-12 w-12 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 shadow-xs border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -563,7 +559,7 @@ const CouponsPage: React.FC = () => {
               <CheckCircle className="w-5 h-5 text-green-500" />
             </div>
             <div>
-              <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+              <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
                 {t('coupons.activeCoupons', 'Active Coupons')}
               </p>
               <p className="text-xl font-bold">{activeCoupons.length}</p>
@@ -581,7 +577,7 @@ const CouponsPage: React.FC = () => {
               <Ticket className="w-5 h-5 text-yellow-500" />
             </div>
             <div>
-              <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+              <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
                 {t('coupons.totalCoupons', 'Total Coupons')}
               </p>
               <p className="text-xl font-bold">{coupons.length}</p>
@@ -647,7 +643,7 @@ const CouponsPage: React.FC = () => {
                           {t('common.active', 'Active')}
                         </span>
                       ) : (
-                        <span className="text-xs font-semibold text-red-400 inline-flex items-center gap-1">
+                        <span className="text-xs font-semibold text-red-700 dark:text-red-400 inline-flex items-center gap-1">
                           <XCircle className="w-3 h-3" />
                           {expired ? t('coupons.expired', 'Expired') : usedUp ? t('coupons.usedUp', 'Used Up') : t('common.inactive', 'Inactive')}
                         </span>
@@ -693,7 +689,7 @@ const CouponsPage: React.FC = () => {
                     </div>
                     <div className={`rounded-2xl px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
                       <div className="text-[11px] text-zinc-400">{t('coupons.expires', 'Expires')}</div>
-                      <div className={`font-semibold mt-0.5 flex items-center gap-1 ${expired ? 'text-red-400' : ''}`}>
+                      <div className={`font-semibold mt-0.5 flex items-center gap-1 ${expired ? 'text-red-700 dark:text-red-400' : ''}`}>
                         <Calendar className="w-3 h-3" />
                         {coupon.expires_at ? formatDate(coupon.expires_at) : '-'}
                       </div>
@@ -716,7 +712,7 @@ const CouponsPage: React.FC = () => {
                       disabled={busy || toggleAction.disabled}
                       className={`h-9 px-3 rounded-2xl text-sm inline-flex items-center gap-1.5 transition-transform duration-150 active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100 ${
                         coupon.is_active
-                          ? 'bg-transparent text-amber-300 border border-amber-500/40'
+                          ? 'bg-transparent text-amber-800 dark:text-amber-300 border border-(--pos-s-border)'
                           : isDark
                             ? 'bg-zinc-900 text-zinc-100 border border-zinc-700 active:bg-zinc-800'
                             : 'bg-white text-black border border-gray-300 active:bg-gray-100'
@@ -761,8 +757,8 @@ const CouponsPage: React.FC = () => {
               {saveAction.disabled && (
                 <div className={`rounded-2xl border px-3 py-2 text-sm ${
                   isDark
-                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-100'
-                    : 'bg-amber-50 border-amber-300 text-amber-900'
+                    ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-amber-800 dark:text-amber-200'
+                    : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-amber-900'
                 }`}>
                   {saveAction.message}
                 </div>
@@ -892,14 +888,14 @@ const CouponsPage: React.FC = () => {
               <button
                 onClick={closeModal}
                 disabled={saving}
-                className={`px-4 py-2 rounded-2xl transition-transform duration-150 active:scale-[0.98] ${isDark ? 'border border-red-500/25 bg-red-500/10 text-red-200 active:bg-red-500/15' : 'border border-red-300/70 bg-red-50 text-red-700 active:bg-red-100'} disabled:opacity-50 disabled:active:scale-100`}
+                className={`px-4 py-2 rounded-2xl transition-transform duration-150 active:scale-[0.98] ${isDark ? 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'} disabled:opacity-50 disabled:active:scale-100`}
               >
                 {t('common.cancel', 'Cancel')}
               </button>
               <button
                 onClick={handleSaveCoupon}
                 disabled={saving || saveAction.disabled}
-                className="px-4 py-2 rounded-2xl disabled:opacity-50 disabled:active:scale-100 inline-flex items-center gap-2 font-semibold bg-green-600 active:bg-green-700 text-white transition-transform duration-150 active:scale-[0.98]"
+                className="px-4 py-2 rounded-2xl disabled:opacity-50 disabled:active:scale-100 inline-flex items-center gap-2 font-semibold bg-(--pos-s-yellow) active:bg-yellow-500 text-black transition-transform duration-150 active:scale-[0.98]"
               >
                 {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : null}
                 {editingCoupon ? t('common.save', 'Save') : t('common.create', 'Create')}

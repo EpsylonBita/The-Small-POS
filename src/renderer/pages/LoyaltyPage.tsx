@@ -117,10 +117,10 @@ const LoyaltyPage: React.FC = () => {
       return isDark ? 'text-zinc-400 border-zinc-700' : 'text-gray-500 border-gray-300';
     }
     switch (normalized) {
-      case 'platinum': return isDark ? 'text-amber-300 border-amber-400/50' : 'text-amber-800 border-amber-400/50';
-      case 'gold': return isDark ? 'text-yellow-400 border-yellow-500/40' : 'text-yellow-800 border-yellow-500/40';
+      case 'platinum': return isDark ? 'text-amber-300 border-(--pos-s-yellow)' : 'text-amber-800 border-(--pos-s-yellow)';
+      case 'gold': return isDark ? 'text-yellow-400 border-(--pos-s-border)' : 'text-yellow-800 border-(--pos-s-border)';
       case 'silver': return isDark ? 'text-zinc-300 border-zinc-400/40' : 'text-zinc-600 border-zinc-400/40';
-      default: return isDark ? 'text-amber-500 border-amber-500/40' : 'text-amber-800 border-amber-500/40';
+      default: return isDark ? 'text-amber-500 border-(--pos-s-border)' : 'text-amber-800 border-(--pos-s-border)';
     }
   };
 
@@ -262,7 +262,7 @@ const LoyaltyPage: React.FC = () => {
           <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               onClick={() => setShowScanPanel(true)}
-              className={`h-10 px-4 rounded-xl text-sm font-semibold transition-all duration-200 inline-flex items-center justify-center gap-2 bg-transparent active:scale-95 ${isDark ? 'border border-yellow-400/70 text-white active:bg-yellow-400/10' : 'border border-yellow-400 text-gray-950 active:bg-yellow-50'}`}
+              className={`h-10 px-4 rounded-xl text-sm font-semibold transition-all duration-200 inline-flex items-center justify-center gap-2 bg-transparent active:scale-95 ${isDark ? 'border border-(--pos-s-yellow) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'border border-yellow-400 text-gray-950 active:bg-(--pos-s-surface-2)'}`}
             >
               <ScanLine className="w-4 h-4" />
               {t('loyalty.scan.button', 'Scan')}
@@ -272,11 +272,7 @@ const LoyaltyPage: React.FC = () => {
               onClick={() => void fetchData(true)}
               disabled={loading}
               aria-label={t('common.refresh', 'Refresh')}
-              className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${
-                isDark
-                  ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
-                  : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
-              } ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+              className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
             >
               <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
             </button>
@@ -376,7 +372,7 @@ const LoyaltyPage: React.FC = () => {
               onClick={() => setSelectedCustomer(selectedCustomer?.id === customer.id ? null : customer)}
               className={`p-4 rounded-xl cursor-pointer transition-all border ${
                 isDark ? 'bg-zinc-950 active:bg-zinc-900 border-zinc-800' : 'bg-white active:bg-gray-50 border-gray-200'
-              } ${selectedCustomer?.id === customer.id ? 'ring-2 ring-yellow-400' : ''}`}
+              } ${selectedCustomer?.id === customer.id ? 'ring-2 ring-(--pos-s-sel-bg)' : ''}`}
             >
               <div className="flex items-start justify-between mb-3">
                 <div>

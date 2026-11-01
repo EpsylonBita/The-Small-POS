@@ -112,7 +112,7 @@ test('Round 322/355/356: the single next action is a plain Commit Z report butto
   // The commit action is wired once, and the button itself carries the native hard-blocker gate.
   const submits = action.match(/onClick=\{handleSubmitReport\}/g) ?? [];
   assert.equal(submits.length, 1, 'submit must be wired exactly once');
-  assert.match(action, /onClick=\{handleSubmitReport\}[\s\S]*?bg-emerald-600/);
+  assert.match(action, /onClick=\{handleSubmitReport\}[\s\S]*?bg-\(--pos-s-yellow\)/);
   assert.match(action, /disabled=\{!canCommitZReport\}/);
   assert.match(
     source,
@@ -225,7 +225,8 @@ test('Round 352 (reversed 06/09/2026): the Review tab headline is the whole day,
   const reviewMoney = slice(source, 'data-z-report-review-money-overview', 'effectivePaymentBlockers.length > 0');
   assert.match(reviewMoney, /formatMoney\(collectedTotal\)/);
   assert.match(reviewMoney, /data-z-report-earned-source/);
-  assert.match(reviewMoney, /liveCurrentWindow/);
+  // Founder 31/10: plain counts; «live current window» was jargon (and wrong on a past day's preview).
+  assert.doesNotMatch(reviewMoney, /liveCurrentWindow/);
   assert.match(reviewMoney, /activeShiftCount/);
   assert.match(reviewMoney, /closedShiftCount/);
   assert.match(reviewMoney, /data-z-report-revenue-split/);
@@ -257,8 +258,15 @@ test('Round 351: the day chip is derived from the displayed business date vs loc
     /const friendlyBusinessDate = !isBusinessDateValid\s*\n?\s*\? resolvedBusinessDate/,
   );
   const header = slice(source, 'data-z-report-command-header', 'size="full"');
-  assert.match(header, /\$\{isLiveDay \?/, 'the chip class is gated by isLiveDay');
+  assert.match(header, /\$\{isLiveDay \|\| isOpenPastDay \?/, 'the chip class is gated by isLiveDay (or the open day)');
   assert.match(header, /isLiveDay\s*\n?\s*\? t\('modals\.zReport\.clarity\.dayLive'/, 'chip text says Today only when isLiveDay');
+  // Founder 31/10: the day runs from the first check-in to the Z. The live report of a day that began
+  // before today is the open day -- «Open day», never «Past day» -- and a picked or locked day stays past.
+  assert.match(
+    source,
+    /const isOpenPastDay = !isLiveDay && !lockDate && isUsingLiveDefaultDate && isBusinessDateValid && resolvedBusinessDate < localToday;/,
+  );
+  assert.match(header, /isOpenPastDay\s*\n?\s*\? t\('modals\.zReport\.clarity\.dayOpen'/);
 });
 
 test('Round 320: the details area carries the four tabs + the quiet (secondary) tools cluster + one hidden-scrollbar body', () => {
@@ -284,7 +292,9 @@ test('Round 320: the details area carries the four tabs + the quiet (secondary) 
   assert.match(details, /aria-label=\{action\.label\}/);
 
   // The Review tab drills into ONLY the non-ready checks (clean day stays short) + the full blocker panel.
-  assert.match(details, /closeoutChecklistItems\.filter\(\(item\) => item\.state !== 'ready'\)\.map/);
+  // Founder 31/10: a row that only repeats the verdict card above (same sentence, nothing more to show or
+  // press) is not shown a second time.
+  assert.match(details, /closeoutChecklistItems\.filter\(\(item\) => item\.state !== 'ready'\s*&& !\(item\.description === closeoutSubtitle && !item\.details\?\.length/);
   assert.match(details, /closeoutStateLabel\(item\.state\)/, 'each non-ready Review row must show a short localized status word');
   assert.match(details, /<UnsettledPaymentBlockersPanel/);
   assert.match(details, /clarity\.readyHint/, 'a clean day shows a short all-clear in the Review tab');

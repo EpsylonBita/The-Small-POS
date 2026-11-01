@@ -189,7 +189,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
             <h3 className="font-medium text-gray-900">Settings Updates ({pendingUpdates.length})</h3>
             <button
               onClick={() => setShowNotificationPanel(false)}
-              className="text-gray-400 hover:text-gray-600"
+              className="text-gray-400 "
             >
               <X className="w-4 h-4" />
             </button>
@@ -227,7 +227,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
                     {!autoApply && (
                       <button
                         onClick={() => updates.forEach(handleApplyUpdate)}
-                        className="bg-blue-600 text-white px-2 py-1 rounded-sm text-xs hover:bg-blue-700"
+                        className="bg-blue-600 text-white px-2 py-1 rounded-sm text-xs "
                       >
                         Apply
                       </button>
@@ -244,7 +244,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
                 onClick={() => {
                   pendingUpdates.forEach(handleApplyUpdate);
                 }}
-                className="w-full bg-blue-600 text-white py-2 rounded-sm text-sm font-medium hover:bg-blue-700"
+                className="w-full bg-blue-600 text-white py-2 rounded-sm text-sm font-medium "
               >
                 Apply All Updates
               </button>
@@ -253,7 +253,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
 
           <button
             onClick={() => setPendingUpdates([])}
-            className="mt-2 w-full text-gray-600 text-xs py-1 hover:text-gray-800"
+            className="mt-2 w-full text-gray-600 text-xs py-1 "
           >
             Clear All
           </button>
@@ -286,7 +286,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
             <div className="flex gap-3">
               <button 
                 onClick={handleRestartLater}
-                className="flex-1 bg-gray-200 text-gray-800 py-2 px-4 rounded-sm font-medium hover:bg-gray-300"
+                className="flex-1 bg-gray-200 text-gray-800 py-2 px-4 rounded-sm font-medium "
               >
                 Restart Later
               </button>
@@ -294,7 +294,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
                 onClick={() => {
                   void handleRestartNow();
                 }}
-                className="flex-1 bg-red-600 text-white py-2 px-4 rounded-sm font-medium hover:bg-red-700"
+                className="flex-1 bg-red-600 text-white py-2 px-4 rounded-sm font-medium "
               >
                 Restart Now
               </button>

@@ -1,6 +1,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { DeliveryScooterIcon } from '../icons/OrderTypeGlyphs';
 import { liquidGlassModalTone } from '../../styles/designSystem';
 
 interface EditOptionsModalProps {
@@ -59,12 +60,10 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                 onClick={onEditInfo}
                 className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-slate-100 dark:active:bg-slate-800 active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-slate-500/60 dark:focus-visible:ring-slate-300/60 ${liquidGlassModalTone('neutral')}`}
               >
-                <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-2xl border border-slate-300 bg-white/80 dark:border-white/10 dark:bg-slate-800/80 flex items-center justify-center backdrop-blur-sm">
-                    <svg className="w-6 h-6 text-slate-600 dark:text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                    </svg>
-                  </div>
+                <div className="flex items-center gap-4">
+                  <svg aria-hidden="true" className="h-7 w-7 shrink-0 text-slate-600 dark:text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                  </svg>
                   <div>
                     <div className="font-medium">{t('modals.editOptions.editCustomerInfo')}</div>
                     <div className="text-sm liquid-glass-modal-text-muted">{t('modals.editOptions.editCustomerInfoDesc')}</div>
@@ -75,14 +74,12 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
               {/* Edit Order Items Option */}
               <button
                 onClick={onEditOrder}
-                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-emerald-100 dark:active:bg-emerald-500/20 active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-emerald-500/60 dark:focus-visible:ring-emerald-300/60 ${liquidGlassModalTone('success')}`}
+                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-emerald-100 dark:active:bg-zinc-800 active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg) ${liquidGlassModalTone('success')}`}
               >
-                <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-2xl border border-emerald-200 bg-emerald-100/80 dark:border-emerald-400/30 dark:bg-emerald-500/15 flex items-center justify-center backdrop-blur-sm">
-                    <svg className="w-6 h-6 text-emerald-700 dark:text-emerald-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
-                    </svg>
-                  </div>
+                <div className="flex items-center gap-4">
+                  <svg aria-hidden="true" className="h-7 w-7 shrink-0 text-emerald-700 dark:text-emerald-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                  </svg>
                   <div>
                     <div className="font-medium">{t('modals.editOptions.editOrderItems')}</div>
                     <div className="text-sm liquid-glass-modal-text-muted">{t('modals.editOptions.editOrderItemsDesc')}</div>
@@ -96,24 +93,18 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                 disabled={!canEditPayment}
                 className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 focus-visible:outline-hidden focus-visible:ring-2 ${
                   canEditPayment
-                    ? `${liquidGlassModalTone('warning')} active:bg-amber-100 dark:active:bg-amber-500/20 active:scale-[0.99] focus-visible:ring-amber-500/60 dark:focus-visible:ring-amber-300/60`
+                    ? `${liquidGlassModalTone('warning')} active:bg-(--pos-s-surface-2) active:scale-[0.99] focus-visible:ring-(--pos-s-fg)`
                     : `${liquidGlassModalTone('neutral')} cursor-not-allowed`
                 }`}
               >
-                <div className="flex items-center gap-3">
-                  <div className={`w-12 h-12 rounded-2xl border flex items-center justify-center backdrop-blur-sm ${
-                    canEditPayment
-                      ? 'border-amber-200 bg-amber-100/80 dark:border-amber-400/30 dark:bg-amber-500/15'
-                      : 'border-slate-300 bg-white/70 dark:border-white/10 dark:bg-slate-800/70'
-                  }`}>
-                    <svg className={`w-6 h-6 ${
+                <div className="flex items-center gap-4">
+                  <svg aria-hidden="true" className={`h-7 w-7 shrink-0 ${
                       canEditPayment
                         ? 'text-amber-700 dark:text-amber-300'
                         : 'text-slate-500 dark:text-slate-400'
                     }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.25 8.25h19.5m-18 7.5h3m-3 3h5.25m9-10.5H5.25A2.25 2.25 0 003 10.5v6A2.25 2.25 0 005.25 18.75h13.5A2.25 2.25 0 0021 16.5v-6A2.25 2.25 0 0018.75 8.25z" />
-                    </svg>
-                  </div>
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.25 8.25h19.5m-18 7.5h3m-3 3h5.25m9-10.5H5.25A2.25 2.25 0 003 10.5v6A2.25 2.25 0 005.25 18.75h13.5A2.25 2.25 0 0021 16.5v-6A2.25 2.25 0 0018.75 8.25z" />
+                  </svg>
                   <div>
                     <div className="font-medium">{t('modals.editOptions.editPaymentMethod')}</div>
                     <div className="text-sm liquid-glass-modal-text-muted">
@@ -131,14 +122,10 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                   type="button"
                   data-testid="edit-options-change-driver"
                   onClick={onChangeDriver}
-                  className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-sky-100 dark:active:bg-sky-500/20 active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-500/60 dark:focus-visible:ring-sky-300/60 border-sky-300 bg-sky-50 text-sky-900 dark:border-sky-400/30 dark:bg-sky-500/10 dark:text-sky-100`}
+                  className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-(--pos-s-surface-2) active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg) border-zinc-300 bg-white text-sky-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-sky-300`}
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 rounded-2xl border border-sky-200 bg-sky-100/80 dark:border-sky-400/30 dark:bg-sky-500/15 flex items-center justify-center backdrop-blur-sm">
-                      <svg className="w-6 h-6 text-sky-700 dark:text-sky-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.25 18.75a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h6m-9 0H3.375a1.125 1.125 0 01-1.125-1.125V14.25m17.25 4.5a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h1.125c.621 0 1.129-.504 1.09-1.124a17.902 17.902 0 00-3.213-9.193 2.056 2.056 0 00-1.58-.86H14.25M16.5 18.75h-2.25m0-11.177v-.958c0-.568-.422-1.048-.987-1.106a48.554 48.554 0 00-10.026 0 1.106 1.106 0 00-.987 1.106v7.635m12-6.677v6.677m0 4.5v-4.5m0 0h-12" />
-                      </svg>
-                    </div>
+                  <div className="flex items-center gap-4">
+                    <DeliveryScooterIcon className="h-7 w-7 shrink-0 text-sky-700 dark:text-sky-300" />
                     <div>
                       <div className="font-medium">{t('modals.editOptions.changeDriver')}</div>
                       <div className="text-sm liquid-glass-modal-text-muted" data-testid="edit-options-current-driver">
@@ -153,12 +140,10 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
 
               {orderCount === 1 && (
                 <div className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 ${liquidGlassModalTone('warning')}`}>
-                  <div className="flex items-center gap-3 mb-3">
-                    <div className="w-12 h-12 rounded-2xl border border-amber-200 bg-amber-100/80 dark:border-amber-400/30 dark:bg-amber-500/15 flex items-center justify-center backdrop-blur-sm">
-                      <svg className="w-6 h-6 text-amber-700 dark:text-amber-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h11m-8 5h8m-11 5h11m3-10 3 3m0 0-3 3m3-3h-7" />
-                      </svg>
-                    </div>
+                  <div className="flex items-center gap-4 mb-3">
+                    <svg aria-hidden="true" className="h-7 w-7 shrink-0 text-amber-700 dark:text-amber-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h11m-8 5h8m-11 5h11m3-10 3 3m0 0-3 3m3-3h-7" />
+                    </svg>
                     <div>
                       <div className="font-medium">{t('modals.editOptions.changeOrderType', 'Change Order Type')}</div>
                       <div className="text-sm liquid-glass-modal-text-muted">
@@ -180,8 +165,8 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                           disabled={isActive}
                           className={`rounded-xl border px-3 py-2 text-sm font-semibold transition-all ${
                             isActive
-                              ? 'border-yellow-400 bg-yellow-400 text-black cursor-default'
-                              : 'border-slate-300 bg-white/80 text-slate-900 active:bg-slate-100 active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:border-white/20 dark:bg-white/10 dark:text-slate-100 dark:active:bg-white/20 dark:focus-visible:ring-amber-300/60'
+                              ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) cursor-default'
+                              : 'border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2) active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)'
                           }`}
                         >
                           {label}

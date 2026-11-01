@@ -361,7 +361,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
             <div className="max-h-56 overflow-y-auto pr-1 scrollbar-hide">
               {preview.item.description ? (
                 <p className={`text-base font-semibold leading-relaxed ${
-                  resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-800'
+                  'text-(--pos-s-muted)'
                 }`}>
                   {preview.item.description}
                 </p>
@@ -384,8 +384,8 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
                         key={`${preview.item.id}-glance-ingredient-${index}`}
                         className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
                           resolvedTheme === 'dark'
-                            ? 'bg-yellow-300/12 text-yellow-200'
-                            : 'bg-yellow-100 text-yellow-800'
+                            ? 'bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200'
+                            : 'bg-(--pos-s-surface-2) text-yellow-800'
                         }`}
                       >
                         {ingredient}
@@ -440,7 +440,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
                     onClick={() => onShortcutNavigate(shortcut.categoryId, shortcut.subcategoryId)}
                     className={`flex min-h-[42px] shrink-0 items-center gap-2 whitespace-nowrap rounded-xl border px-3 py-2 text-[13px] font-semibold antialiased shadow-xs transition-all duration-150 active:scale-[0.98] ${
                       resolvedTheme === 'dark'
-                        ? 'border-white/12 bg-white/8 text-zinc-100 shadow-black/20 active:border-yellow-300/60 active:bg-yellow-400 active:text-black'
+                        ? 'border-white/12 bg-white/8 text-zinc-100 shadow-black/20 active:border-(--pos-s-border) active:bg-yellow-400 active:text-black'
                         : 'border-white/80 bg-white/90 text-gray-800 shadow-gray-900/5 active:border-yellow-500 active:bg-yellow-400 active:text-black'
                     }`}
                     aria-label={
@@ -456,14 +456,14 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
                       <LayoutGrid
                         aria-hidden="true"
                         className={`h-4 w-4 shrink-0 ${
-                          resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-600'
+                          resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-(--pos-s-fg)'
                         }`}
                       />
                     ) : (
                       <Layers
                         aria-hidden="true"
                         className={`h-4 w-4 shrink-0 ${
-                          resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-600'
+                          resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-(--pos-s-fg)'
                         }`}
                       />
                     )}

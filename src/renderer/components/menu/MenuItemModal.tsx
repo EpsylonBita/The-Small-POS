@@ -333,8 +333,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
             }}
             className={`px-3.5 py-1.5 rounded-full font-semibold text-sm transition-all duration-300 ${
               isWithoutMode
-                ? 'bg-red-500 text-white shadow-[0_0_20px_rgba(239,68,68,0.6),0_0_40px_rgba(239,68,68,0.3)] scale-105 border-2 border-red-300'
-                : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent active:bg-red-100 dark:active:bg-red-900/30 active:border-red-300 dark:active:border-red-700'
+                ? 'bg-red-500 text-white scale-105 border-2 border-(--pos-s-border)'
+                : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent active:bg-red-100 dark:active:bg-zinc-800 active:border-red-300 dark:active:border-red-700'
             }`}
             style={{
               textRendering: 'geometricPrecision',
@@ -351,8 +351,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
             }}
             className={`px-3.5 py-1.5 rounded-full font-semibold text-sm transition-all duration-300 ${
               isLittleMode
-                ? 'bg-orange-500 text-white shadow-[0_0_20px_rgba(245,158,11,0.6),0_0_40px_rgba(245,158,11,0.3)] scale-105 border-2 border-orange-300'
-                : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent active:bg-orange-100 dark:active:bg-orange-900/30 active:border-orange-300 dark:active:border-orange-700'
+                ? 'bg-orange-500 text-white scale-105 border-2 border-(--pos-s-border)'
+                : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent active:bg-orange-100 dark:active:bg-zinc-800 active:border-orange-300 dark:active:border-orange-700'
             }`}
             style={{
               textRendering: 'geometricPrecision',
@@ -397,7 +397,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         <button
           onClick={() => setActiveFlavorType('savory')}
           className={`${flavorFilterButtonBaseClass} ${activeFlavorType === 'savory'
-              ? 'border-orange-400/70 bg-orange-500 text-white shadow-[0_8px_18px_rgba(245,158,11,0.22)]'
+              ? 'border-orange-600 bg-orange-500 text-white'
               : 'liquid-glass-modal-icon-button liquid-glass-modal-text active:opacity-80'
             }`}
         >
@@ -458,7 +458,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                   return (
                     <span
                       key={`selected-${selectedItem.ingredient.id}`}
-                      className="inline-flex shrink-0 items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium antialiased bg-slate-500/15 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200 border border-slate-500/20"
+                      className="inline-flex shrink-0 items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium antialiased bg-slate-500/15 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200 border border-slate-500/20 dark:border-zinc-700"
                     >
                       <span className="max-w-[180px] truncate">
                         + {ingredientName}
@@ -492,7 +492,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                 {selectedWithoutItems.map((selectedItem) => (
                   <span
                     key={`without-${selectedItem.ingredient.id}`}
-                    className="inline-flex shrink-0 items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium antialiased bg-red-500/15 text-red-700 dark:bg-red-500/25 dark:text-red-200 border border-red-500/20"
+                    className="inline-flex shrink-0 items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium antialiased bg-(--pos-s-surface-2) text-red-700 dark:bg-zinc-800 dark:text-red-200 border border-(--pos-s-border)"
                   >
                     <Ban className="w-3 h-3" aria-hidden="true" />
                     <span className="max-w-[180px] truncate line-through">
@@ -500,7 +500,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                     </span>
                     <button
                       onClick={() => handleSelectedIngredientRemove(selectedItem.ingredient.id)}
-                      className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-red-500/20 active:bg-red-500/35 transition-colors"
+                      className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) transition-colors"
                       aria-label={t('common.actions.remove')}
                     >
                       <X className="w-3 h-3" />
@@ -740,7 +740,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       e.stopPropagation();
                                       handleIngredientToggle(ingredient, false);
                                     }}
-                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-full bg-red-500/40 active:bg-red-500/60 flex items-center justify-center transition-all"
+                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-full bg-(--pos-s-surface-2) active:bg-red-700 flex items-center justify-center transition-all"
                                     aria-label={t('common.actions.remove')}
                                   >
                                     <X className="w-4 h-4 text-white" />
@@ -807,7 +807,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
               <div className="flex gap-2 justify-end mt-3">
                 <button
                   onClick={() => setShowNotesOverlay(false)}
-                  className="px-4 py-2 text-sm font-semibold rounded-lg bg-amber-500 active:bg-amber-600 text-black transition-colors"
+                  className="px-4 py-2 text-sm font-semibold rounded-lg bg-(--pos-s-yellow) active:bg-yellow-500 text-black transition-colors"
                 >
                   {t('common.actions.done', { defaultValue: 'Done' })}
                 </button>

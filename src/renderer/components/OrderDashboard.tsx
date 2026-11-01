@@ -39,11 +39,11 @@ import type { Customer, CustomerInfo } from "../types/customer";
 import { mergeCustomerInfoModalSave } from "../utils/customerInfoModalMerge";
 import OrderGrid from "./OrderGrid";
 import OrderTabsBar, { type TabId } from "./OrderTabsBar";
-import { TableWorkspaceToolbar, TableWorkspaceCard } from "./tables/TableWorkspace";
+import { TableWorkspaceToolbar, TableWorkspaceCard, WorkspaceGroup } from "./tables/TableWorkspace";
 import BulkActionsBar from "./BulkActionsBar";
 import DriverAssignmentModal from "./modals/DriverAssignmentModal";
 import OrderCancellationModal, { type CancellationReturnChannel } from "./modals/OrderCancellationModal";
-import { prepareManualOrderCancellation, commitManualOrderCancellation, type ManualCancellationPlan, manualCancellationFailureKey, manualCancellationFailureOptions } from "../services/ManualOrderCancellation";
+import { prepareManualOrderCancellation, applyPreparedOrderCancellation, type ManualCancellationPlan, manualCancellationFailureKey, manualCancellationFailureOptions } from "../services/ManualOrderCancellation";
 import { releaseRefusedTableCancellation } from "../services/TableManualCancellation";
 import EditOptionsModal from "./modals/EditOptionsModal";
 import EditPaymentMethodModal, {
@@ -118,7 +118,7 @@ import {
   Zap,
 } from "lucide-react";
 import TableOrderIcon from "./icons/TableOrderIcon";
-import PickupOrderIcon from "./icons/PickupOrderIcon";
+import { DeliveryScooterIcon, PickupHandBagIcon } from "./icons/OrderTypeGlyphs";
 import { submitTableReservation } from "../utils/table-reservation-submit";
 import { debugLog } from "../utils/debugLog";
 import {
@@ -1001,6 +1001,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             ),
       [floorScopedTables, tableStatusFilter],
     );
+    // Founder 31/10: one group per floor, in the order the tables come.
+    const visibleTableGroups = useMemo(() => {
+      const groups = new Map<string, RestaurantTable[]>();
+      for (const table of visibleTableCards) {
+        const floor = getTableFloorValue(table);
+        groups.set(floor, [...(groups.get(floor) ?? []), table]);
+      }
+      return Array.from(groups.entries());
+    }, [visibleTableCards]);
 
     // State for modals
     const [showDriverModal, setShowDriverModal] = useState(false);
@@ -1770,7 +1779,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const visibleOrderTypeCardCount = newWorkCards.length;
     const orderTypeModalWidthClass =
       visibleOrderTypeCardCount >= 5
-        ? "max-w-5xl!"
+        ? "max-w-6xl!"
         : visibleOrderTypeCardCount === 4
           ? "max-w-4xl!"
           : visibleOrderTypeCardCount === 3
@@ -1778,13 +1787,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             : visibleOrderTypeCardCount === 2
               ? "max-w-xl!"
               : "max-w-lg!";
-    // Round 322 layout, extended to seven cards: from five cards up the lg
-    // track has six columns and every card spans two, so rows read as 3+2
-    // (fifth card starts at column 2), 3+3, or 3+3+1 (seventh card centred at
-    // column 3) — never a 3+1 / 4+1 orphan in the bottom-right hole.
+    // Founder 31/10 («δεν είναι στη σειρά»): from five cards up the cards wrap
+    // in centred rows of five — one row for five, 5+1 / 5+2 centred — and two
+    // per row on small screens. (The old six-column track put the fifth card
+    // at column 2, under the fourth, so five cards read 3+1+1.)
     const orderTypeGridColsClass =
       visibleOrderTypeCardCount >= 5
-        ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-6"
+        ? "flex flex-wrap justify-center"
         : visibleOrderTypeCardCount === 4
           ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"
           : visibleOrderTypeCardCount === 3
@@ -1792,13 +1801,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             : visibleOrderTypeCardCount === 2
               ? "grid-cols-2"
               : "grid-cols-1";
-    const orderTypeCardSpanClass = (visibleIndex: number): string =>
+    // Widths add up with the gaps (sm/lg gap 1.25rem): 2 x (50% - 0.625rem)
+    // + 1 gap, 5 x (20% - 1rem) + 4 gaps = 100%.
+    const orderTypeCardSpanClass = (_visibleIndex: number): string =>
       visibleOrderTypeCardCount >= 5
-        ? visibleIndex === 4 && visibleOrderTypeCardCount === 5
-          ? "lg:col-span-2 lg:col-start-2"
-          : visibleIndex === 6
-            ? "lg:col-span-2 lg:col-start-3"
-            : "lg:col-span-2"
+        ? "w-full sm:w-[calc(50%-0.625rem)] lg:w-[calc(20%-1rem)]"
         : "";
     // Visible indices come from the resolver's live card order (delivery,
     // pickup, table, room, service, repair, quick service), so the span
@@ -6199,6 +6206,48 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     );
 
     // Handle bulk actions
+    // Shared entry: the Refund screen must hand off before it returns any money.
+    const beginOrderCancellation = async (orderIds: string[], refundHandoff = false): Promise<boolean> => {
+      const refusals = await findCancelRefusals(orderIds);
+      if (refundHandoff && refusals.notRecorded.length > 0) throw new Error("ORDER_PAYMENT_NOT_RECORDED");
+      if (refusals.notRecorded.length > 0) announceCancelRefusedNotRecorded(refusals.notRecorded);
+      const plans: Record<string, ManualCancellationPlan> = {};
+      const protectedOrders: string[] = [];
+      // Table checks are decided by table evidence, never by the dine-in
+      // label alone: a kiosk eat-in order is cancelled like a counter
+      // order (review 06/10/2026). Orders holding money are prepared
+      // anyway, so the till decides their table history itself.
+      const tableIds = orderIds.filter(id =>
+        hasTableServiceEvidence([...orders, ...pendingExternalOrders].find(row => row.id === id)));
+      for (const orderId of new Set([...refusals.hasPayments, ...tableIds, ...(refundHandoff ? orderIds : [])])) {
+        try {
+          plans[orderId] = await prepareManualOrderCancellation(bridge, orderId);
+        } catch (error) {
+          if (refundHandoff) {
+            if (String(error).includes("ORIGINAL_PROVIDER_RETURN_REQUIRED")) return false;
+            throw error;
+          }
+          console.warn("Manual cancellation preflight refused", error);
+          protectedOrders.push(orderId);
+          toast.error(t(manualCancellationFailureKey(error), { orderNumber: describeOrderNumbers([orderId]), ...manualCancellationFailureOptions(error) }), { duration: 9000 });
+        }
+      }
+      const cancellable = orderIds.filter(id => !refusals.notRecorded.includes(id) && !protectedOrders.includes(id));
+      if (cancellable.length === 0) return true;
+      if (Object.values(plans).some(plan => plan.pending) && cancellable.length > 1) {
+        toast.error(t("paymentIntegrity.fixCodes.table_cancellation_not_saved"));
+        return true;
+      }
+      if (new Set(Object.values(plans).filter(plan => plan.requiresReturn || plan.requiresHandback).map(plan => plan.currency)).size > 1) {
+        toast.error(t("modals.orderCancellation.mixedCurrencies"));
+        return true;
+      }
+      setManualCancelPlans(plans);
+      setPendingCancelOrders(cancellable);
+      setShowCancelModal(true);
+      return true;
+    };
+
     const handleBulkAction = async (action: string) => {
       const deliveryOrders = selectedOrderObjects.filter(
         (order) => order.orderType === "delivery",
@@ -6630,43 +6679,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             }
           }
         } else if (action === "cancel") {
-          // Handle cancel action - show cancellation modal
-          if (selectedOrders.length > 0) {
-            const refusals = await findCancelRefusals(selectedOrders);
-            if (refusals.notRecorded.length > 0) announceCancelRefusedNotRecorded(refusals.notRecorded);
-            const plans: Record<string, ManualCancellationPlan> = {};
-            const protectedOrders: string[] = [];
-            // Table checks are decided by table evidence, never by the dine-in
-            // label alone: a kiosk eat-in order is cancelled like a counter
-            // order (review 06/10/2026). Orders holding money are prepared
-            // anyway, so the till decides their table history itself.
-            const tableIds = selectedOrders.filter(id =>
-              hasTableServiceEvidence([...orders, ...pendingExternalOrders].find(row => row.id === id)));
-            for (const orderId of new Set([...refusals.hasPayments, ...tableIds])) {
-              try {
-                plans[orderId] = await prepareManualOrderCancellation(bridge, orderId);
-              } catch (error) {
-                console.warn("Manual cancellation preflight refused", error);
-                protectedOrders.push(orderId);
-                toast.error(t(manualCancellationFailureKey(error), { orderNumber: describeOrderNumbers([orderId]), ...manualCancellationFailureOptions(error) }), { duration: 9000 });
-              }
-            }
-            const cancellable = selectedOrders.filter(id => !refusals.notRecorded.includes(id) && !protectedOrders.includes(id));
-            if (cancellable.length === 0) return;
-            if (Object.values(plans).some(plan => plan.pending) && cancellable.length > 1) {
-              toast.error(t("paymentIntegrity.fixCodes.table_cancellation_not_saved"));
-              return;
-            }
-            if (new Set(Object.values(plans).filter(plan => plan.requiresReturn || plan.requiresHandback).map(plan => plan.currency)).size > 1) {
-              toast.error(t("modals.orderCancellation.mixedCurrencies"));
-              return;
-            }
-            setManualCancelPlans(plans);
-            setPendingCancelOrders(cancellable);
-            setShowCancelModal(true);
-          } else {
-            toast.error(t("orderDashboard.noOrdersForCancel"));
-          }
+          if (selectedOrders.length > 0) await beginOrderCancellation(selectedOrders);
+          else toast.error(t("orderDashboard.noOrdersForCancel"));
         } else if (action === "edit") {
           // Handle edit action - show edit options modal
           if (selectedOrders.length > 0) {
@@ -6751,27 +6765,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           const manualPlan = manualCancelPlans[orderId];
           if (manualPlan) {
             if (manualPlan.requiresReturn && !returnChannel) return;
-            if (manualPlan.tableSessionId) {
-              const result = await runTableReleaseApproval({
-                scope: "cash_drawer_control",
-                action: (managerPin) => bridge.orders.cancelWithApproval({
-                  orderId, reason: trimmedReason, tableSessionId: manualPlan.tableSessionId,
-                  clientEventId: manualPlan.requestId, managerPin,
-                  ...((manualPlan.requiresReturn || manualPlan.requiresHandback) ? { manualCancellation: { generation: manualPlan.generation, returnChannel: returnChannel || "cash_drawer" } } : {}),
-                }),
-              });
-              if (result?.success !== true) throw new Error("ORDER_CANCELLATION_FAILED");
-            } else {
-              // When nobody here may cancel a paid order, a staff member who
-              // may approves it with their own PIN (founder 07/10/2026); the
-              // till asks and the cancellation is sent again.
-              await runTableReleaseApproval({
-                scope: "cash_drawer_control",
-                action: () => commitManualOrderCancellation(bridge, manualPlan, trimmedReason, returnChannel || "cash_drawer"),
-                title: t("modals.orderCancellation.managerApprovalTitle"),
-                approvalSubtitle: t("modals.orderCancellation.managerApprovalSubtitle"),
-              });
-            }
+            await runTableReleaseApproval({
+              scope: "cash_drawer_control",
+              action: (managerPin) => applyPreparedOrderCancellation(bridge, manualPlan, trimmedReason, returnChannel || "cash_drawer", managerPin),
+              title: t("modals.orderCancellation.managerApprovalTitle"),
+              approvalSubtitle: t("modals.orderCancellation.managerApprovalSubtitle"),
+            });
             continue;
           }
           const targetOrder = [...orders, ...pendingExternalOrders].find(order => order.id === orderId);
@@ -7790,7 +7789,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   {t("tables.noTables") || "No tables configured"}
                 </p>
                 <p
-                  className={`text-sm mt-1 ${resolvedTheme === "light" ? "text-gray-400" : "text-white/30"}`}
+                  className={`text-sm mt-1 ${resolvedTheme === "light" ? "text-gray-600" : "text-zinc-400"}`}
                 >
                   {t("tables.configureInAdmin") ||
                     "Configure tables in the Admin Dashboard"}
@@ -7852,8 +7851,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                       className="min-h-full"
                     />
                   ) : (
+                  visibleTableGroups.map(([floorValue, floorTables]) => (
+                  <WorkspaceGroup key={floorValue} heading={getTableFloorLabel(floorValue)} count={floorTables.length}>
                   <div className="table-workspace-grid">
-                    {visibleTableCards.map((table) => {
+                    {floorTables.map((table) => {
                       const displayStatus = resolveTableDisplayStatus(table);
                       const visual =
                         tableStatusConfig[displayStatus] ||
@@ -7906,7 +7907,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                           shape={table.shape}
                           status={displayStatus}
                           statusLabel={visual.label}
-                          floor={getTableFloorLabel(getTableFloorValue(table))}
                           covers={hasOpenCheck ? `${guestCount}/${table.capacity}` : String(table.capacity)}
                           waiter={waiterName}
                           hasOpenCheck={hasOpenCheck}
@@ -7922,6 +7922,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                       );
                     })}
                   </div>
+                  </WorkspaceGroup>
+                  ))
                   )}
                   </div>
                 </div>
@@ -7929,14 +7931,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             )}
           </div>
         ) : activeTab === "rooms" && hasRoomsModule ? (
-          /* Rooms hub (Round 236) — embedded RoomsView; the bordered card bounds the scroll. */
-          <div
-            className={`h-full min-h-0 overflow-hidden rounded-2xl border shadow-xs transition-colors ${
-              resolvedTheme === "light"
-                ? "border-amber-100/80 bg-[#fffaf1]/90"
-                : "border-white/10 bg-slate-950/45"
-            }`}
-          >
+          /* Rooms hub (Round 236) — embedded RoomsView, which draws the shared workspace card (31/10). */
+          <div className="h-full min-h-0 overflow-hidden">
             {/* Round 237: the Rooms tab is browse-only — no preset. The New Order check-in /
                 reservation flows run in the focused workflow modal below, not via this tab. */}
             <Suspense fallback={<div role="status" className="p-8">{t('common.loading')}</div>}>
@@ -7944,14 +7940,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             </Suspense>
           </div>
         ) : activeTab === "services" && hasServicesModule ? (
-          /* Services hub (Round 236) — embedded AppointmentsView with its availability check intact. */
-          <div
-            className={`h-full min-h-0 overflow-hidden rounded-2xl border shadow-xs transition-colors ${
-              resolvedTheme === "light"
-                ? "border-amber-100/80 bg-[#fffaf1]/90"
-                : "border-white/10 bg-slate-950/45"
-            }`}
-          >
+          /* Services hub (Round 236) — embedded AppointmentsView with its availability check intact;
+             it draws the shared workspace card (31/10). */
+          <div className="h-full min-h-0 overflow-hidden">
             <Suspense fallback={<div role="status" className="p-8">{t('common.loading')}</div>}>
               <AppointmentsView
                 embedded
@@ -8021,7 +8012,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               });
               return (
               <div
-                className={`grid gap-4 sm:gap-5 ${orderTypeGridColsClass}`}
+                className={`${visibleOrderTypeCardCount >= 5 ? "" : "grid "}gap-4 sm:gap-5 ${orderTypeGridColsClass}`}
               >
                 {/* Delivery Button - Yellow (only if Delivery module acquired) */}
                 {hasDeliveryModule && (
@@ -8030,29 +8021,18 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     data-order-type-card="delivery"
                     onClick={() => handleOrderTypeSelect("delivery")}
                     aria-label={composeOrderTypeAriaLabel(deliveryTitle, deliveryDescription)}
-                    className={`relative p-6 rounded-2xl border-2 border-[#facc15]/45 bg-[linear-gradient(135deg,rgba(250,204,21,0.16),rgba(234,179,8,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(deliveryCardVisibleIndex)}`}
+                    className={`relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(deliveryCardVisibleIndex)}`}
                   >
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-16 h-16 flex items-center justify-center">
-                        <svg
-                          className="w-full h-full text-white"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                          strokeWidth="1.5"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            d="M8.25 18.75a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h6m-9 0H3.375a1.125 1.125 0 01-1.125-1.125V14.25m17.25 4.5a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h1.125c.621 0 1.129-.504 1.09-1.124a17.902 17.902 0 00-3.213-9.193 2.056 2.056 0 00-1.58-.86H14.25M16.5 18.75h-2.25m0-11.177v-.958c0-.568-.422-1.048-.987-1.106a48.554 48.554 0 00-10.026 0 1.106 1.106 0 00-.987 1.106v7.635m12-6.677v6.677m0 4.5v-4.5m0 0h-12"
-                          />
-                        </svg>
+                        {/* Founder 31/10: his scooter rider, as on the order cards. */}
+                        <DeliveryScooterIcon className="w-full h-full text-yellow-800 dark:text-yellow-400" />
                       </div>
                       <div className="text-center">
-                        <h3 className="text-lg font-bold text-yellow-400 transition-colors mb-1">
+                        <h3 className="text-lg font-bold text-yellow-800 dark:text-yellow-400 mb-1">
                           {deliveryTitle}
                         </h3>
-                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                        <p className="text-sm leading-snug text-(--pos-s-muted)">
                           {deliveryDescription}
                         </p>
                       </div>
@@ -8068,17 +8048,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   disabled={!newWorkCard("pickup")?.enabled}
                   onClick={() => handleOrderTypeSelect("pickup")}
                   aria-label={composeOrderTypeAriaLabel(pickupTitle, pickupDescription)}
-                  className={`relative p-6 rounded-2xl border-2 border-[#34d399]/45 bg-[linear-gradient(135deg,rgba(52,211,153,0.16),rgba(22,163,74,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(pickupCardVisibleIndex)}${newWorkCardStateClass("pickup")}`}
+                  className={`relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(pickupCardVisibleIndex)}${newWorkCardStateClass("pickup")}`}
                 >
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-16 h-16 flex items-center justify-center">
-                      <PickupOrderIcon className="w-full h-full text-white" />
+                      <PickupHandBagIcon className="w-full h-full text-emerald-800 dark:text-emerald-400" />
                     </div>
                     <div className="text-center">
-                      <h3 className="text-lg font-bold text-green-400 transition-colors mb-1">
+                      <h3 className="text-lg font-bold text-emerald-800 dark:text-emerald-400 mb-1">
                         {pickupTitle}
                       </h3>
-                      <p className="text-sm leading-snug text-white/60 transition-colors">
+                      <p className="text-sm leading-snug text-(--pos-s-muted)">
                         {pickupDescription}
                       </p>
                     </div>
@@ -8093,22 +8073,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     data-order-type-card="table"
                     onClick={() => handleOrderTypeSelect("dine-in")}
                     aria-label={composeOrderTypeAriaLabel(tableTitle, tableDescription)}
-                    className={`relative p-6 rounded-2xl border-2 border-[#60a5fa]/45 bg-[linear-gradient(135deg,rgba(96,165,250,0.16),rgba(37,99,235,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(tableCardVisibleIndex)}`}
+                    className={`relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(tableCardVisibleIndex)}`}
                   >
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-16 h-16 flex items-center justify-center">
                         {/* Dine-in / table order icon */}
                         <TableOrderIcon
-                          className="w-full h-full text-white"
+                          className="w-full h-full text-[#1d4ed8] dark:text-[#60a5fa]"
                           strokeWidth={1.6}
                           opticalScale={1.62}
                         />
                       </div>
                       <div className="text-center">
-                        <h3 className="text-lg font-bold text-[#60a5fa] transition-colors mb-1">
+                        <h3 className="text-lg font-bold text-[#1d4ed8] dark:text-[#60a5fa] mb-1">
                           {tableTitle}
                         </h3>
-                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                        <p className="text-sm leading-snug text-(--pos-s-muted)">
                           {tableDescription}
                         </p>
                       </div>
@@ -8123,17 +8103,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     data-order-type-card="room"
                     onClick={handleSelectRoomFlow}
                     aria-label={composeOrderTypeAriaLabel(roomTitle, roomDescription)}
-                    className={`relative p-6 rounded-2xl border-2 border-[#a855f7]/45 bg-[linear-gradient(135deg,rgba(168,85,247,0.16),rgba(126,34,206,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(roomCardVisibleIndex)}`}
+                    className={`relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(roomCardVisibleIndex)}`}
                   >
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-16 h-16 flex items-center justify-center">
-                        <BedDouble className="w-full h-full text-white" strokeWidth={1.5} />
+                        <BedDouble className="w-full h-full text-[#7e22ce] dark:text-[#c084fc]" strokeWidth={1.5} />
                       </div>
                       <div className="text-center">
-                        <h3 className="text-lg font-bold text-[#a855f7] transition-colors mb-1">
+                        <h3 className="text-lg font-bold text-[#7e22ce] dark:text-[#c084fc] mb-1">
                           {roomTitle}
                         </h3>
-                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                        <p className="text-sm leading-snug text-(--pos-s-muted)">
                           {roomDescription}
                         </p>
                       </div>
@@ -8148,17 +8128,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     data-order-type-card="service"
                     onClick={handleSelectServiceFlow}
                     aria-label={composeOrderTypeAriaLabel(serviceTitle, serviceDescription)}
-                    className={`relative p-6 rounded-2xl border-2 border-[#22d3ee]/45 bg-[linear-gradient(135deg,rgba(34,211,238,0.16),rgba(8,145,178,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(serviceCardVisibleIndex)}`}
+                    className={`relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(serviceCardVisibleIndex)}`}
                   >
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-16 h-16 flex items-center justify-center">
-                        <CalendarClock className="w-full h-full text-white" strokeWidth={1.5} />
+                        <CalendarClock className="w-full h-full text-[#155e75] dark:text-[#22d3ee]" strokeWidth={1.5} />
                       </div>
                       <div className="text-center">
-                        <h3 className="text-lg font-bold text-[#22d3ee] transition-colors mb-1">
+                        <h3 className="text-lg font-bold text-[#155e75] dark:text-[#22d3ee] mb-1">
                           {serviceTitle}
                         </h3>
-                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                        <p className="text-sm leading-snug text-(--pos-s-muted)">
                           {serviceDescription}
                         </p>
                       </div>
@@ -8176,17 +8156,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                       t("primaryActions.newRepair"),
                       t("orderFlow.repairDescription", { defaultValue: "Take in a device for repair" }),
                     )}
-                    className={`relative p-6 rounded-2xl border-2 border-[#fb923c]/45 bg-[linear-gradient(135deg,rgba(251,146,60,0.16),rgba(234,88,12,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(repairCardVisibleIndex)}${newWorkCardStateClass("repair")}`}
+                    className={`relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(repairCardVisibleIndex)}${newWorkCardStateClass("repair")}`}
                   >
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-16 h-16 flex items-center justify-center">
-                        <Wrench className="w-full h-full text-white" strokeWidth={1.5} />
+                        <Wrench className="w-full h-full text-orange-800 dark:text-orange-400" strokeWidth={1.5} />
                       </div>
                       <div className="text-center">
-                        <h3 className="text-lg font-bold text-[#fb923c] transition-colors mb-1">
+                        <h3 className="text-lg font-bold text-orange-800 dark:text-orange-400 mb-1">
                           {t("primaryActions.newRepair")}
                         </h3>
-                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                        <p className="text-sm leading-snug text-(--pos-s-muted)">
                           {newWorkCard("repair")?.enabled === false
                             ? t(newWorkCard("repair")?.disabledReasonKey ?? "orders.startShiftFirst")
                             : t("orderFlow.repairDescription", { defaultValue: "Take in a device for repair" })}
@@ -8206,17 +8186,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                       t("primaryActions.quickService"),
                       t("orderFlow.quickServiceDescription", { defaultValue: "Serve on the spot, no intake" }),
                     )}
-                    className={`relative p-6 rounded-2xl border-2 border-[#a78bfa]/45 bg-[linear-gradient(135deg,rgba(167,139,250,0.16),rgba(124,58,237,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(quickServiceCardVisibleIndex)}${newWorkCardStateClass("quick_service")}`}
+                    className={`relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(quickServiceCardVisibleIndex)}${newWorkCardStateClass("quick_service")}`}
                   >
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-16 h-16 flex items-center justify-center">
-                        <Zap className="w-full h-full text-white" strokeWidth={1.5} />
+                        <Zap className="w-full h-full text-[#6d28d9] dark:text-[#a78bfa]" strokeWidth={1.5} />
                       </div>
                       <div className="text-center">
-                        <h3 className="text-lg font-bold text-[#a78bfa] transition-colors mb-1">
+                        <h3 className="text-lg font-bold text-[#6d28d9] dark:text-[#a78bfa] mb-1">
                           {t("primaryActions.quickService")}
                         </h3>
-                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                        <p className="text-sm leading-snug text-(--pos-s-muted)">
                           {newWorkCard("quick_service")?.enabled === false
                             ? t(newWorkCard("quick_service")?.disabledReasonKey ?? "orders.startShiftFirst")
                             : t("orderFlow.quickServiceDescription", { defaultValue: "Serve on the spot, no intake" })}
@@ -8248,7 +8228,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   t("orderFlow.roomFlowOrder", { defaultValue: "Room Order" }),
                   t("orderFlow.roomFlowOrderDesc", { defaultValue: "Charge an order to a room" }),
                 )}
-                className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-amber-400/30 bg-linear-to-br from-amber-500/10 to-amber-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+                className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-(--pos-s-border) px-5 py-4 text-left transition-transform duration-150 active:scale-95"
               >
                 <DoorOpen className="h-7 w-7 shrink-0 text-amber-400" strokeWidth={1.6} />
                 <div>
@@ -8270,7 +8250,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 t("orderFlow.roomFlowCheckin", { defaultValue: "Check-in" }),
                 t("orderFlow.roomFlowCheckinDesc", { defaultValue: "Check in a reserved room" }),
               )}
-              className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-green-400/30 bg-linear-to-br from-green-500/10 to-green-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+              className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-(--pos-s-border) px-5 py-4 text-left transition-transform duration-150 active:scale-95"
             >
               <UserCheck className="h-7 w-7 shrink-0 text-green-400" strokeWidth={1.6} />
               <div>
@@ -8292,7 +8272,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   t("orderFlow.roomFlowReservation", { defaultValue: "Create Reservation" }),
                   t("orderFlow.roomFlowReservationDesc", { defaultValue: "Reserve an available room" }),
                 )}
-                className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-purple-400/30 bg-linear-to-br from-purple-500/10 to-purple-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+                className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-(--pos-s-border) px-5 py-4 text-left transition-transform duration-150 active:scale-95"
               >
                 <CalendarPlus className="h-7 w-7 shrink-0 text-[#a855f7]" strokeWidth={1.6} />
                 <div>
@@ -8362,7 +8342,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                           })}
                           className={`flex flex-col gap-1 rounded-2xl border-2 px-4 py-3 text-left transition-transform duration-150 ${
                             folioId
-                              ? "border-amber-400/30 bg-linear-to-br from-amber-500/10 to-amber-600/5 active:scale-95"
+                              ? "border-(--pos-s-border) active:scale-95"
                               : "border-white/10 bg-white/3 opacity-50 cursor-not-allowed"
                           }`}
                         >
@@ -8752,6 +8732,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               ""
             }
             order={selectedOrderForApproval}
+            onRequestCancellation={(orderId) => beginOrderCancellation([orderId], true)}
             onClose={() => {
               setShowApprovalPanel(false);
               setSelectedOrderForApproval(null);

@@ -87,7 +87,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
           <button
             onClick={handleCheck}
             disabled={isChecking}
-            className="liquid-glass-modal-text px-4 py-2 bg-blue-500/20 border border-blue-500/30 rounded-xl active:bg-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+            className="liquid-glass-modal-text px-4 py-2 bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-xl active:bg-(--pos-s-surface-2) disabled:opacity-50 disabled:cursor-not-allowed transition-all"
           >
             {isChecking ? 'Checking...' : 'Check Orders'}
           </button>
@@ -98,19 +98,19 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
           <div className="space-y-4">
             {/* Summary */}
             <div className="grid grid-cols-4 gap-4">
-              <div className="bg-blue-500/10 border border-blue-400/20 rounded-2xl p-3">
+              <div className="bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl p-3">
                 <div className="liquid-glass-modal-text text-2xl font-bold">{result.total}</div>
                 <div className="liquid-glass-modal-text-muted text-sm">Total Delivered</div>
               </div>
-              <div className="bg-green-500/10 border border-green-400/20 rounded-2xl p-3">
-                <div className="text-2xl font-bold text-green-400">{result.withDriver}</div>
+              <div className="bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl p-3">
+                <div className="text-2xl font-bold text-green-700 dark:text-green-400">{result.withDriver}</div>
                 <div className="liquid-glass-modal-text-muted text-sm">With Driver</div>
               </div>
-              <div className="bg-red-500/10 border border-red-400/20 rounded-2xl p-3">
-                <div className="text-2xl font-bold text-red-400">{result.withoutDriver}</div>
+              <div className="bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl p-3">
+                <div className="text-2xl font-bold text-red-700 dark:text-red-400">{result.withoutDriver}</div>
                 <div className="liquid-glass-modal-text-muted text-sm">Missing Driver</div>
               </div>
-              <div className="bg-purple-500/10 border border-purple-400/20 rounded-2xl p-3">
+              <div className="bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl p-3">
                 <div className="text-2xl font-bold text-purple-400">{result.earningsCount}</div>
                 <div className="liquid-glass-modal-text-muted text-sm">Driver Earnings</div>
               </div>
@@ -118,7 +118,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
 
             {/* Driver Selection */}
             {result.withoutDriver > 0 && (
-              <div className="bg-yellow-500/10 border border-yellow-400/20 rounded-2xl p-4">
+              <div className="bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl p-4">
                 <h3 className="liquid-glass-modal-text text-lg font-semibold mb-3">
                   Fix Missing Driver Assignments
                 </h3>
@@ -135,7 +135,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
                         onClick={() => setSelectedDriverId(shift.staff_id)}
                         className={`w-full text-left p-3 rounded-lg border transition-all ${
                           selectedDriverId === shift.staff_id
-                            ? 'bg-green-500/20 border-green-400/40'
+                            ? 'bg-(--pos-s-surface-2) border-(--pos-s-border)'
                             : 'liquid-glass-modal-inset'
                         }`}
                       >
@@ -149,7 +149,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
                             </div>
                           </div>
                           {selectedDriverId === shift.staff_id && (
-                            <div className="flex items-center gap-1 text-green-400">
+                            <div className="flex items-center gap-1 text-green-700 dark:text-green-400">
                               <Check className="w-4 h-4" />
                               <span>Selected</span>
                             </div>
@@ -167,7 +167,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
                 <button
                   onClick={handleFix}
                   disabled={isFixing || !selectedDriverId}
-                  className="liquid-glass-modal-text w-full px-4 py-3 bg-yellow-500/20 border border-yellow-500/30 rounded-xl active:bg-yellow-500/30 font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                  className="liquid-glass-modal-text w-full px-4 py-3 bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-xl active:bg-(--pos-s-surface-2) font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                 >
                   {isFixing ? 'Fixing...' : `Assign Driver to ${result.withoutDriver} Orders`}
                 </button>
@@ -194,7 +194,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
                             {new Date(order.createdAt).toLocaleString()}
                           </div>
                         </div>
-                        <div className="text-red-400 text-sm">No Driver</div>
+                        <div className="text-red-700 dark:text-red-400 text-sm">No Driver</div>
                       </div>
                     </div>
                   ))}

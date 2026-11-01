@@ -155,7 +155,7 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
         disabled={!allChoicesFilled}
         className={`w-full rounded-2xl border py-3 font-semibold transition-transform duration-150 ${
           allChoicesFilled
-            ? 'border-green-500/70 bg-green-600 text-white active:scale-[0.98] active:bg-green-700'
+            ? 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:scale-[0.98] active:bg-yellow-500'
             : isDark
               ? 'cursor-not-allowed border-white/10 bg-white/6 text-white/35'
               : 'cursor-not-allowed border-black/10 bg-black/6 text-black/35'
@@ -214,7 +214,7 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
               return (
                 <div key={index} className="space-y-1">
                   <label className={`text-xs font-semibold tracking-wide ${
-                    isDark ? 'text-yellow-300' : 'text-yellow-700'
+                    isDark ? 'text-yellow-300' : 'text-amber-800'
                   }`}>
                     {item.quantity > 1 && `${item.quantity}x `}
                     {t('menu.combos.choice.pickFrom', { category: catName, defaultValue: `Pick from ${catName}` })}
@@ -226,8 +226,8 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                       className={`flex w-full items-center justify-between rounded-2xl border p-3 text-left transition-transform duration-150 active:scale-[0.99] ${
                         chosen
                           ? isDark
-                            ? 'border-yellow-400/70 bg-yellow-400/12'
-                            : 'border-yellow-500/70 bg-yellow-50'
+                            ? 'border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg) bg-(--pos-s-surface-2)'
+                            : 'border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg) bg-(--pos-s-surface-2)'
                           : isDark
                             ? 'border-white/12 bg-black/20 active:border-white/25 active:bg-white/6'
                             : 'border-black/12 bg-white/60 active:border-black/20 active:bg-white/90'
@@ -267,8 +267,8 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                                 className={`flex w-full items-center justify-between p-3 text-left transition-transform duration-150 active:scale-[0.99] ${
                                   isSelected
                                     ? isDark
-                                      ? 'bg-yellow-400/14'
-                                      : 'bg-yellow-50'
+                                      ? 'bg-(--pos-s-surface-2)'
+                                      : 'bg-(--pos-s-surface-2)'
                                     : isDark
                                       ? 'active:bg-white/6'
                                       : 'active:bg-black/4'

@@ -787,7 +787,7 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
     // Reentry opens the same order's own Tender at zero with only its receipt step.
     fireEvent.click(within(recoveryBanner()).getByRole('button', { name: 'Check again' }));
     expect(await screen.findByRole('button', { name: 'Issue receipt' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /CASH/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Cash/ })).toBeNull();
     expect(h.native.reconcileOrder).toHaveBeenCalled();
     expect(h.native.reconcileOrder.mock.calls.every(([payload]) => payload.orderId === orderId)).toBe(true);
     expect(h.native.fiscalFinalize).not.toHaveBeenCalled();

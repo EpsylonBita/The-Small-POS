@@ -170,7 +170,7 @@ const TableCard = memo<TableCardProps>(({ table, isSelected, onPress, isDark }) 
       onClick={onPress}
       className={`relative p-0 overflow-hidden rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${
         isSelected
-          ? 'border-yellow-400 ring-2 ring-yellow-400/40'
+          ? 'border-yellow-400 ring-2 ring-(--pos-s-yellow)'
           : isDark
           ? 'border-white/10'
           : 'border-gray-200'
@@ -506,8 +506,8 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
                       ? 'cursor-not-allowed bg-white/5 border-white/10 text-white/40'
                       : 'cursor-not-allowed bg-gray-100 border-gray-200 text-gray-400'
                     : isDark
-                      ? 'bg-yellow-400/15 border-yellow-400/40 text-yellow-300 active:bg-yellow-400/25'
-                      : 'bg-yellow-400! border-yellow-500 text-black active:bg-yellow-500! shadow-lg shadow-yellow-500/30'
+                      ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-yellow-800 dark:text-yellow-200 active:bg-(--pos-s-surface-2)'
+                      : 'bg-yellow-400! border-yellow-500 text-black active:bg-yellow-500! shadow-lg'
                 }`}
               >
                 <Receipt className="w-4 h-4" />
@@ -1025,9 +1025,9 @@ const TablesPage: React.FC = () => {
 
       {/* Error Banner */}
       {error && (
-        <motion.div variants={pageMotionItem} className="mx-6 mb-4 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center gap-3">
-          <AlertTriangle className="w-5 h-5 text-red-500" />
-          <p className="text-red-500 text-sm">{error.message}</p>
+        <motion.div variants={pageMotionItem} className="mx-6 mb-4 px-4 py-3 rounded-xl bg-(--pos-s-bad-bg) border border-(--pos-s-bad) flex items-center gap-3">
+          <AlertTriangle className="w-5 h-5 text-(--pos-s-bad)" />
+          <p className="text-(--pos-s-bad) text-sm">{error.message}</p>
         </motion.div>
       )}
 
@@ -1093,7 +1093,7 @@ const TablesPage: React.FC = () => {
             {hasActiveFilters && (
               <button
                 onClick={handleClearFilters}
-                className="mt-4 px-4 py-2 rounded-xl border border-yellow-500 text-yellow-600 font-medium active:bg-yellow-500/10 transition-colors"
+                className="mt-4 px-4 py-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) font-medium active:bg-(--pos-s-border) transition-colors"
               >
                 {t('tables.filters.clear', 'Clear Filters')}
               </button>

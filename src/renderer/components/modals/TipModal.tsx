@@ -25,7 +25,7 @@ interface TipModalProps {
 const TIP_PERCENTAGES = [5, 10, 15, 20];
 const EMPTY_STAFF_OPTIONS: TipStaffOption[] = [];
 const tipChoiceButtonBaseClass =
-  'rounded-xl border border-slate-200/90 bg-white/90 shadow-[0_8px_20px_rgba(15,23,42,0.10)] transition-all dark:border-white/10 dark:bg-white/5 dark:shadow-[0_10px_24px_rgba(0,0,0,0.28)] active:translate-y-px active:shadow-inner';
+  'rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface) shadow-[0_8px_20px_rgba(0,0,0,0.10)] transition-all dark:shadow-[0_10px_24px_rgba(0,0,0,0.28)] active:translate-y-px active:shadow-inner';
 const TIP_RECIPIENT_ICON_CLASSES: Record<TipRecipientRole, string> = {
   waiter: 'tip-recipient-icon-waiter',
   cashier: 'tip-recipient-icon-cashier',
@@ -166,7 +166,7 @@ export const TipModal: React.FC<TipModalProps> = ({
                 aria-pressed={selectedPercentage === percentage}
                 className={`min-h-10 text-sm font-bold ${tipChoiceButtonBaseClass} ${
                   selectedPercentage === percentage
-                    ? 'border-emerald-400/70! bg-emerald-50! text-emerald-700 dark:bg-emerald-500/25! dark:text-emerald-100'
+                    ? 'border-emerald-600! bg-emerald-50! text-emerald-700 dark:bg-zinc-800! dark:text-emerald-100'
                     : 'liquid-glass-modal-text'
                 }`}
               >
@@ -181,7 +181,7 @@ export const TipModal: React.FC<TipModalProps> = ({
             {t('modals.tip.manualLabel', 'Or enter an amount')}
           </label>
           <div className="relative">
-            <Banknote className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-emerald-400" />
+            <Banknote className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-emerald-700 dark:text-emerald-400" />
             <CentsMoneyInput
               aria-label={t('modals.tip.manualLabel', 'Or enter an amount')}
               value={manualAmount}
@@ -190,7 +190,7 @@ export const TipModal: React.FC<TipModalProps> = ({
                 setManualAmount(value);
               }}
               placeholder="0,00"
-              className="w-full rounded-xl border-2 border-slate-200/90 bg-white/90 py-2.5 pl-10 pr-4 text-lg font-bold liquid-glass-modal-text shadow-inner outline-hidden transition-colors focus:border-emerald-400/60 dark:border-white/15 dark:bg-white/10"
+              className="w-full rounded-xl border-2 border-slate-200/90 bg-white/90 py-2.5 pl-10 pr-4 text-lg font-bold liquid-glass-modal-text shadow-inner outline-hidden transition-colors focus:border-emerald-600 dark:border-white/15 dark:bg-white/10"
             />
           </div>
         </div>
@@ -212,7 +212,7 @@ export const TipModal: React.FC<TipModalProps> = ({
                   aria-pressed={isSelected}
                   className={`flex min-h-14 items-center gap-3 p-2.5 text-left ${tipChoiceButtonBaseClass} ${
                     isSelected
-                      ? 'border-yellow-400/80! bg-yellow-50/90! dark:bg-yellow-400/10!'
+                      ? 'border-(--pos-s-sel-bg)! bg-(--pos-s-surface-2)! ring-1 ring-(--pos-s-sel-bg)'
                       : ''
                   }`}
                 >
@@ -245,7 +245,7 @@ export const TipModal: React.FC<TipModalProps> = ({
                     aria-pressed={recipientStaffId === option.staffId}
                     className={`min-h-10 truncate px-2 text-sm font-semibold ${tipChoiceButtonBaseClass} ${
                       recipientStaffId === option.staffId
-                        ? 'border-yellow-400/80! bg-yellow-50/90! dark:bg-yellow-400/10! liquid-glass-modal-text'
+                        ? 'border-(--pos-s-sel-bg)! bg-(--pos-s-surface-2)! ring-1 ring-(--pos-s-sel-bg) liquid-glass-modal-text'
                         : 'liquid-glass-modal-text'
                     }`}
                   >
@@ -264,7 +264,7 @@ export const TipModal: React.FC<TipModalProps> = ({
           </div>
           <div className="mt-2 flex items-center justify-between border-t border-white/10 pt-2 font-bold liquid-glass-modal-text">
             <span>{t('modals.tip.totalWithTip', 'Total with tip')}</span>
-            <span className="text-xl text-emerald-400">{formatCurrency(totalWithTip)}</span>
+            <span className="text-xl text-emerald-700 dark:text-emerald-400">{formatCurrency(totalWithTip)}</span>
           </div>
         </div>
 
@@ -275,7 +275,7 @@ export const TipModal: React.FC<TipModalProps> = ({
               onApply(null);
               onClose();
             }}
-            className="liquid-glass-modal-button flex-1 border-slate-200/90 bg-white/90 font-medium liquid-glass-modal-text shadow-[0_10px_24px_rgba(15,23,42,0.12)] transition-all active:translate-y-px active:shadow-inner dark:border-white/10 dark:bg-white/10"
+            className="liquid-glass-modal-button flex-1 border-(--pos-s-border) bg-(--pos-s-surface) font-medium text-(--pos-s-fg) shadow-[0_10px_24px_rgba(0,0,0,0.12)] transition-all active:translate-y-px active:shadow-inner"
           >
             {t('modals.tip.noTip', 'No tip')}
           </button>
@@ -283,7 +283,7 @@ export const TipModal: React.FC<TipModalProps> = ({
             type="button"
             onClick={handleApply}
             disabled={staffChoiceMissing}
-            className="liquid-glass-modal-button flex-1 disabled:cursor-not-allowed disabled:opacity-50 border-emerald-400/50 bg-emerald-50/90 font-medium text-emerald-700 shadow-[0_10px_24px_rgba(15,23,42,0.12)] transition-all active:translate-y-px active:shadow-inner dark:border-emerald-500/30 dark:bg-emerald-600/20 dark:text-emerald-300"
+            className="liquid-glass-modal-button pos-modal-primary flex-1 disabled:cursor-not-allowed disabled:opacity-60 font-semibold shadow-[0_10px_24px_rgba(0,0,0,0.12)] transition-all active:translate-y-px active:shadow-inner"
           >
             <HandCoins className="mr-2 inline h-4 w-4" />
             {t('modals.tip.apply', 'Apply Tip')}

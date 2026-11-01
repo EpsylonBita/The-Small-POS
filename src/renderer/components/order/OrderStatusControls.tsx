@@ -188,8 +188,8 @@ export function OrderStatusControls({
               disabled={disabled || isLoading}
               className={`${baseButtonClass} ${
                 theme === 'dark'
-                  ? 'bg-green-900 active:bg-green-800 text-green-100'
-                  : 'bg-green-500 active:bg-green-600 text-white'
+                  ? 'bg-(--pos-s-yellow) active:bg-yellow-500 text-black'
+                  : 'bg-(--pos-s-yellow) active:bg-yellow-500 text-black'
               }`}
             >
               {isLoading ? t('orders.actions.processing') : t('orders.actions.approve')}
@@ -244,8 +244,8 @@ export function OrderStatusControls({
               disabled={disabled || isLoading}
               className={`w-full ${baseButtonClass} ${
                 theme === 'dark'
-                  ? 'bg-green-900 active:bg-green-800 text-green-100'
-                  : 'bg-green-500 active:bg-green-600 text-white'
+                  ? 'bg-(--pos-s-yellow) active:bg-yellow-500 text-black'
+                  : 'bg-(--pos-s-yellow) active:bg-yellow-500 text-black'
               }`}
             >
               {isLoading ? t('orders.actions.processing') : t('orders.actions.markReady')}
@@ -320,8 +320,8 @@ export function OrderStatusControls({
               disabled={disabled || isLoading}
               className={`w-full ${baseButtonClass} ${
                 theme === 'dark'
-                  ? 'bg-green-900 active:bg-green-800 text-green-100'
-                  : 'bg-green-500 active:bg-green-600 text-white'
+                  ? 'bg-(--pos-s-yellow) active:bg-yellow-500 text-black'
+                  : 'bg-(--pos-s-yellow) active:bg-yellow-500 text-black'
               }`}
             >
               {isLoading ? t('orders.actions.processing') : t('orders.actions.completeOrder')}
@@ -336,8 +336,8 @@ export function OrderStatusControls({
             disabled={disabled || isLoading}
             className={`w-full ${baseButtonClass} ${
               theme === 'dark'
-                ? 'bg-green-900 active:bg-green-800 text-green-100'
-                : 'bg-green-500 active:bg-green-600 text-white'
+                ? 'bg-(--pos-s-yellow) active:bg-yellow-500 text-black'
+                : 'bg-(--pos-s-yellow) active:bg-yellow-500 text-black'
             }`}
           >
             {isLoading ? t('orders.actions.processing') : t('orders.actions.markDelivered')}

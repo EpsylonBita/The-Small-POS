@@ -506,7 +506,7 @@ const SuppliersPage: React.FC = () => {
   const captureQueueTitleId = useId();
 
   const panelClass = isDark ? 'bg-zinc-950 border-zinc-800 text-white' : 'bg-white border-gray-200 text-gray-950';
-  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-500';
+  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-600';
   const fieldClass = isDark
     ? 'bg-zinc-900 border-zinc-800 text-white placeholder:text-zinc-500'
     : 'bg-white border-gray-200 text-gray-950 placeholder:text-gray-400';
@@ -1600,16 +1600,16 @@ const SuppliersPage: React.FC = () => {
   const getInvoiceStatusClass = (status: PaymentStatus) => {
     switch (status) {
       case 'paid':
-        return isDark ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-emerald-50 text-emerald-700 border-emerald-200';
+        return isDark ? 'bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200 border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) text-emerald-700 border-(--pos-s-border)';
       case 'partial':
-        return isDark ? 'bg-amber-500/15 text-amber-200 border-amber-500/30' : 'bg-amber-50 text-amber-700 border-amber-200';
+        return isDark ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) text-amber-700 border-(--pos-s-border)';
       case 'overdue':
-        return isDark ? 'bg-red-500/15 text-red-300 border-red-500/30' : 'bg-red-50 text-red-700 border-red-200';
+        return isDark ? 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-200 border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) text-red-700 border-(--pos-s-border)';
       case 'cancelled':
         return isDark ? 'bg-zinc-800 text-zinc-300 border-zinc-700' : 'bg-gray-100 text-gray-600 border-gray-200';
       case 'unpaid':
       default:
-        return isDark ? 'bg-amber-500/15 text-amber-300 border-amber-500/30' : 'bg-amber-50 text-amber-700 border-amber-200';
+        return isDark ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) text-amber-700 border-(--pos-s-border)';
     }
   };
 
@@ -1644,7 +1644,7 @@ const SuppliersPage: React.FC = () => {
                     data-testid="capture-scan-invoice"
                     onClick={() => void startScan()}
                     disabled={scanStarting}
-                    className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${isDark ? 'border-yellow-400/70 text-white active:bg-yellow-400/10' : 'border-yellow-400 text-gray-950 active:bg-yellow-50'}`}
+                    className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${isDark ? 'border-(--pos-s-yellow) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'border-yellow-400 text-gray-950 active:bg-(--pos-s-surface-2)'}`}
                   >
                     {scanStarting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScanLine className="h-4 w-4" />}
                     {t('suppliers.capture.scan.open', 'Scan invoice')}
@@ -1667,7 +1667,7 @@ const SuppliersPage: React.FC = () => {
                     {capturePending > 0 && (
                       <span
                         data-testid="capture-pending-badge"
-                        className={`rounded-full border px-2 py-0.5 text-xs font-bold ${isDark ? 'border-amber-400/50 text-amber-200' : 'border-amber-400 text-amber-700'}`}
+                        className={`rounded-full border px-2 py-0.5 text-xs font-bold ${isDark ? 'border-(--pos-s-yellow) text-amber-200' : 'border-amber-400 text-amber-700'}`}
                       >
                         {capturePending}
                       </span>
@@ -1677,7 +1677,7 @@ const SuppliersPage: React.FC = () => {
               )}
               <button
                 onClick={() => setImportOpen(true)}
-                className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${isDark ? 'border-yellow-400/70 text-white active:bg-yellow-400/10' : 'border-yellow-400 text-gray-950 active:bg-yellow-50'}`}
+                className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${isDark ? 'border-(--pos-s-yellow) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'border-yellow-400 text-gray-950 active:bg-(--pos-s-surface-2)'}`}
               >
                 <Upload className="h-4 w-4" />
                 {t('suppliers.import.open', 'Import items')}
@@ -1686,7 +1686,7 @@ const SuppliersPage: React.FC = () => {
                 onClick={fetchData}
                 disabled={loading}
                 aria-label={t('common.refresh', 'Refresh')}
-                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${isDark ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25' : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
               >
                 <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
               </button>
@@ -1720,7 +1720,7 @@ const SuppliersPage: React.FC = () => {
         </section>
 
         {error && !loading && (
-          <div className={`shrink-0 rounded-xl border p-4 ${isDark ? 'border-red-900 bg-red-950/30 text-red-100' : 'border-red-200 bg-red-50 text-red-700'}`}>
+          <div className={`shrink-0 rounded-xl border p-4 ${isDark ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800 dark:text-red-200' : 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-700'}`}>
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-5 w-5" />
@@ -1831,7 +1831,7 @@ const SuppliersPage: React.FC = () => {
                             setSelectedSupplierId(supplier.id);
                             setSupplierSummaryId(supplier.id);
                           }}
-                          className={`min-h-[180px] rounded-xl border p-4 text-left transition ${selectedSupplier?.id === supplier.id ? (isDark ? 'border-yellow-400 bg-transparent text-white' : 'border-yellow-400 bg-transparent text-gray-950') : isDark ? 'border-zinc-800 bg-zinc-900/60 active:bg-zinc-900' : 'border-gray-200 bg-white active:bg-gray-50'}`}
+                          className={`min-h-[180px] rounded-xl border p-4 text-left transition ${selectedSupplier?.id === supplier.id ? (isDark ? 'border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg) bg-transparent text-white' : 'border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg) bg-transparent text-gray-950') : isDark ? 'border-zinc-800 bg-zinc-900/60 active:bg-zinc-900' : 'border-gray-200 bg-white active:bg-gray-50'}`}
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
@@ -1920,7 +1920,7 @@ const SuppliersPage: React.FC = () => {
                                     event.stopPropagation();
                                     openInvoiceDetails(invoice, { partial: true });
                                   }}
-                                  className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold ${isDark ? 'border-amber-500/30 bg-amber-500/15 text-amber-200 active:bg-amber-500/25' : 'border-amber-200 bg-amber-50 text-amber-700 active:bg-amber-100'}`}
+                                  className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold border-yellow-400 bg-(--pos-s-yellow) text-black active:bg-yellow-500 disabled:opacity-60`}
                                 >
                                   <CreditCard className="h-4 w-4" />
                                   {t('suppliers.invoices.partialPayment', 'Partial')}
@@ -1931,7 +1931,7 @@ const SuppliersPage: React.FC = () => {
                                     event.stopPropagation();
                                     markInvoiceStatus(invoice.id, 'paid');
                                   }}
-                                  className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold ${isDark ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-200 active:bg-emerald-500/25' : 'border-emerald-200 bg-emerald-50 text-emerald-700 active:bg-emerald-100'}`}
+                                  className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 active:bg-(--pos-s-surface-2)'}`}
                                 >
                                   <Check className="h-4 w-4" />
                                   {t('suppliers.invoices.markPaid', 'Paid')}
@@ -1945,7 +1945,7 @@ const SuppliersPage: React.FC = () => {
                                   event.stopPropagation();
                                   markInvoiceStatus(invoice.id, 'unpaid');
                                 }}
-                                className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold ${isDark ? 'border-amber-500/30 bg-amber-500/15 text-amber-200 active:bg-amber-500/25' : 'border-amber-200 bg-amber-50 text-amber-700 active:bg-amber-100'}`}
+                                className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold border-yellow-400 bg-(--pos-s-yellow) text-black active:bg-yellow-500 disabled:opacity-60`}
                               >
                                 <Ban className="h-4 w-4" />
                                 {t('suppliers.invoices.markUnpaid', 'Unpaid')}
@@ -2256,7 +2256,7 @@ const SuppliersPage: React.FC = () => {
                           <button
                             disabled={saving}
                             onClick={() => void recordInvoicePayment()}
-                            className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold disabled:opacity-50 ${isDark ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-200 active:bg-emerald-500/25' : 'border-emerald-200 bg-emerald-600 text-white active:bg-emerald-700'}`}
+                            className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold disabled:opacity-50 border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500`}
                           >
                             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CreditCard className="h-4 w-4" />}
                             {t('suppliers.invoices.recordPayment', 'Record payment')}
@@ -2264,7 +2264,7 @@ const SuppliersPage: React.FC = () => {
                           <button
                             disabled={saving}
                             onClick={() => void recordInvoicePayment(selectedInvoiceRemaining)}
-                            className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold disabled:opacity-50 ${isDark ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-200 active:bg-emerald-500/25' : 'border-emerald-200 bg-emerald-50 text-emerald-700 active:bg-emerald-100'}`}
+                            className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold disabled:opacity-50 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 active:bg-(--pos-s-surface-2)'}`}
                           >
                             <Check className="h-4 w-4" />
                             {t('suppliers.invoices.payRemaining', 'Pay remaining')}
@@ -2295,7 +2295,7 @@ const SuppliersPage: React.FC = () => {
                           </div>
                         ))
                       ) : (
-                        <p className={`rounded-2xl border p-3 text-sm ${isDark ? 'border-zinc-800 bg-zinc-950 text-zinc-400' : 'border-gray-200 bg-white text-gray-500'}`}>
+                        <p className={`rounded-2xl border p-3 text-sm ${isDark ? 'border-zinc-800 bg-zinc-950 text-zinc-400' : 'border-gray-200 bg-white text-gray-600'}`}>
                           {t('suppliers.invoices.noPayments', 'No payments recorded yet')}
                         </p>
                       )}
@@ -2428,13 +2428,13 @@ const SuppliersPage: React.FC = () => {
                         placeholder={t('suppliers.fields.notes', 'Notes')}
                       />
                       {correctLoadError && (
-                        <div className={`mt-3 flex gap-2 rounded-2xl border px-3 py-2 text-sm ${isDark ? 'border-red-500/30 bg-red-500/10 text-red-100' : 'border-red-200 bg-red-50 text-red-800'}`}>
+                        <div className={`mt-3 flex gap-2 rounded-2xl border px-3 py-2 text-sm ${isDark ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800 dark:text-red-200' : 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800'}`}>
                           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                           <span>{correctLoadError}</span>
                         </div>
                       )}
                       {importError && (
-                        <div className={`mt-3 flex gap-2 rounded-2xl border px-3 py-2 text-sm ${isDark ? 'border-red-500/30 bg-red-500/10 text-red-100' : 'border-red-200 bg-red-50 text-red-800'}`}>
+                        <div className={`mt-3 flex gap-2 rounded-2xl border px-3 py-2 text-sm ${isDark ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800 dark:text-red-200' : 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800'}`}>
                           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                           <span>{importError}</span>
                         </div>
@@ -2449,7 +2449,7 @@ const SuppliersPage: React.FC = () => {
                         <button
                           disabled={saving || correctLoading || !correctBaseline}
                           onClick={() => void saveHeaderCorrection()}
-                          className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold disabled:opacity-50 ${isDark ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200 active:bg-emerald-500/25' : 'border-emerald-200 bg-emerald-600 text-white active:bg-emerald-700'}`}
+                          className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold disabled:opacity-50 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500' : 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500'}`}
                         >
                           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                           {t('common.save', 'Save')}
@@ -2616,7 +2616,7 @@ const SuppliersPage: React.FC = () => {
                     {reviewCapture && reviewQuality === 'poor' && (
                       <div
                         data-testid="capture-poor-quality"
-                        className={`rounded-xl border p-4 ${isDark ? 'border-amber-500/30 bg-amber-500/10 text-amber-100' : 'border-amber-200 bg-amber-50 text-amber-800'}`}
+                        className={`rounded-xl border p-4 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800'}`}
                       >
                         <p className="font-semibold">
                           {t('suppliers.capture.review.poorTitle', 'This scan is hard to read')}
@@ -2707,7 +2707,7 @@ const SuppliersPage: React.FC = () => {
                           <button
                             onClick={previewImport}
                             disabled={saving}
-                            className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold ${isDark ? 'border-amber-500/40 bg-amber-500/15 text-amber-200 active:bg-amber-500/25' : 'border-amber-200 bg-amber-50 text-amber-700 active:bg-amber-100'}`}
+                            className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold border-yellow-400 bg-(--pos-s-yellow) text-black active:bg-yellow-500 disabled:opacity-60`}
                           >
                             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
                             {t('suppliers.import.preview', 'Preview')}
@@ -2715,7 +2715,7 @@ const SuppliersPage: React.FC = () => {
                           <button
                             onClick={commitImport}
                             disabled={saving || !importDraft || importDraft.rows.some(row => row.status === 'error')}
-                            className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${isDark ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200 active:bg-emerald-500/25' : 'border-emerald-200 bg-emerald-600 text-white active:bg-emerald-700'}`}
+                            className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500' : 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500'}`}
                           >
                             {saving && importDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                             {importDraft ? t('suppliers.import.commit', 'Save to inventory') : t('suppliers.import.saveAfterPreview', 'Save after preview')}
@@ -2723,7 +2723,7 @@ const SuppliersPage: React.FC = () => {
                         </div>
                       </div>
                       {importError && (
-                        <div className={`mx-3 mt-3 flex gap-2 rounded-2xl border px-3 py-2 text-sm ${isDark ? 'border-red-500/30 bg-red-500/10 text-red-100' : 'border-red-200 bg-red-50 text-red-800'}`}>
+                        <div className={`mx-3 mt-3 flex gap-2 rounded-2xl border px-3 py-2 text-sm ${isDark ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800 dark:text-red-200' : 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800'}`}>
                           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                           <span>{importError}</span>
                         </div>
@@ -2766,7 +2766,7 @@ const SuppliersPage: React.FC = () => {
                           <button
                             onClick={commitImport}
                             disabled={saving || importDraft.rows.some(row => row.status === 'error')}
-                            className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${isDark ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200 active:bg-emerald-500/25 disabled:opacity-50' : 'border-emerald-200 bg-emerald-600 text-white active:bg-emerald-700 disabled:opacity-50'}`}
+                            className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-semibold border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500 disabled:opacity-50`}
                           >
                             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                             {t('suppliers.import.commit', 'Save to inventory')}
@@ -2774,7 +2774,7 @@ const SuppliersPage: React.FC = () => {
                         </div>
                         <div className="max-h-[38vh] overflow-y-auto scrollbar-hide p-3">
                           {importDraft.missingCategories.length > 0 && (
-                            <div className={`mb-3 rounded-2xl border p-3 text-sm ${isDark ? 'border-amber-500/30 bg-amber-500/10 text-amber-100' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+                            <div className={`mb-3 rounded-2xl border p-3 text-sm ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800'}`}>
                               {importDraft.missingCategories.map(category => (
                                 <span key={`${category.parentName}-${category.name}`} className="mr-2 inline-flex rounded-full border border-current/20 px-2 py-1 text-xs">
                                   {category.parentName ? `${category.parentName} / ${category.name}` : category.name}
@@ -2906,7 +2906,7 @@ const EmptyState: React.FC<EmptyStateProps> = ({ isDark, icon, heading, descript
 
 const InfoLine: React.FC<{ icon: React.ReactNode; label: string; value: string; subtleClass: string }> = ({ icon, label, value, subtleClass }) => (
   <div className="flex items-start gap-3">
-    <div className="text-yellow-400">{icon}</div>
+    <div className="text-yellow-700 dark:text-yellow-400">{icon}</div>
     <div className="min-w-0">
       <p className={`text-xs ${subtleClass}`}>{label}</p>
       <p className="wrap-break-word text-sm font-medium">{value}</p>
@@ -2933,7 +2933,7 @@ interface ImportRowEditorProps {
 }
 
 const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClass, subtleClass, iconButtonClass, isDark, doubleCheck, onChange, onRemove, t }) => (
-  <div className={`rounded-xl border p-3 ${doubleCheck ? (isDark ? 'border-amber-500/50 bg-amber-500/10' : 'border-amber-300 bg-amber-50') : (isDark ? 'border-zinc-800 bg-black/20' : 'border-gray-200 bg-gray-50')}`}>
+  <div className={`rounded-xl border p-3 ${doubleCheck ? (isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2)' : 'border-(--pos-s-yellow) bg-(--pos-s-surface-2)') : (isDark ? 'border-zinc-800 bg-black/20' : 'border-gray-200 bg-gray-50')}`}>
     <div className="grid gap-2 md:grid-cols-[minmax(0,1.4fr)_120px_120px_86px_86px_42px]">
       <input
         value={row.name}
@@ -2988,7 +2988,7 @@ const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClas
       {doubleCheck && (
         <span
           data-testid={`capture-double-check-${index}`}
-          className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${isDark ? 'border-amber-500/50 text-amber-200' : 'border-amber-300 text-amber-800'}`}
+          className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${isDark ? 'border-(--pos-s-yellow) text-amber-200' : 'border-(--pos-s-yellow) text-amber-800'}`}
         >
           {t('suppliers.capture.review.doubleCheck', 'Double-check this')}
         </span>
@@ -3009,12 +3009,12 @@ interface ReviewRowProps {
 
 const ReviewRow: React.FC<ReviewRowProps> = ({ row, index, fieldClass, subtleClass, isDark, onChange, t }) => {
   const statusClass = row.status === 'error'
-    ? (isDark ? 'border-red-500/30 bg-red-500/10 text-red-200' : 'border-red-200 bg-red-50 text-red-700')
+    ? (isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-700')
     : row.status === 'update'
-      ? (isDark ? 'border-amber-500/30 bg-amber-500/10 text-amber-200' : 'border-amber-200 bg-amber-50 text-amber-700')
+      ? (isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700')
       : row.status === 'skip'
         ? (isDark ? 'border-zinc-700 bg-zinc-800 text-zinc-300' : 'border-gray-200 bg-gray-100 text-gray-600')
-        : (isDark ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200' : 'border-emerald-200 bg-emerald-50 text-emerald-700');
+        : (isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700');
 
   return (
     <div className={`rounded-xl border p-3 ${isDark ? 'border-zinc-800 bg-black/20' : 'border-gray-200 bg-gray-50'}`}>
@@ -3045,7 +3045,7 @@ const ReviewRow: React.FC<ReviewRowProps> = ({ row, index, fieldClass, subtleCla
         </div>
       </div>
       {[...row.errors, ...row.warnings].length > 0 && (
-        <div className={`mt-2 rounded-2xl border px-3 py-2 text-xs ${row.errors.length > 0 ? (isDark ? 'border-red-500/30 text-red-200' : 'border-red-200 text-red-700') : (isDark ? 'border-amber-500/30 text-amber-200' : 'border-amber-200 text-amber-700')}`}>
+        <div className={`mt-2 rounded-2xl border px-3 py-2 text-xs ${row.errors.length > 0 ? (isDark ? 'border-(--pos-s-border) text-red-200' : 'border-(--pos-s-border) text-red-700') : (isDark ? 'border-(--pos-s-border) text-amber-200' : 'border-(--pos-s-border) text-amber-700')}`}>
           {[...row.errors, ...row.warnings].join(' ')}
         </div>
       )}

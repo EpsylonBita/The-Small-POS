@@ -171,9 +171,9 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
         {/* Main card */}
         <POSGlassCard className="p-8 text-center">
           {/* Lock icon with gradient */}
-          <div className="mx-auto w-24 h-24 rounded-[28px] bg-linear-to-br from-amber-400/25 to-white/10 flex items-center justify-center mb-6 relative border border-amber-400/25">
-            <div className="absolute inset-0 rounded-[28px] bg-amber-400/10 blur-xl" />
-            <Lock className="h-12 w-12 text-amber-300 relative z-10" />
+          <div className="mx-auto w-24 h-24 rounded-[28px] bg-linear-to-br to-white/10 flex items-center justify-center mb-6 relative border border-(--pos-s-border)">
+            <div className="absolute inset-0 rounded-[28px] bg-(--pos-s-surface-2) blur-xl" />
+            <Lock className="h-12 w-12 text-amber-800 dark:text-amber-300 relative z-10" />
           </div>
 
           {/* Title */}
@@ -189,7 +189,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
           {/* Loading state */}
           {isLoading ? (
             <div className="flex justify-center py-4">
-              <Loader2 className="h-6 w-6 animate-spin text-amber-300" />
+              <Loader2 className="h-6 w-6 animate-spin text-amber-800 dark:text-amber-300" />
             </div>
           ) : (
             <>
@@ -212,7 +212,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
               {/* Benefits preview */}
               {moduleInfo && moduleInfo.features.length > 0 && (
                 <button
-                  className="mb-6 mx-auto flex min-h-touch items-center gap-1 rounded-2xl px-3 text-sm font-semibold text-amber-300 transition-transform active:scale-[0.98] active:bg-amber-400/10"
+                  className="mb-6 mx-auto flex min-h-touch items-center gap-1 rounded-2xl px-3 text-sm font-semibold text-amber-800 dark:text-amber-200 transition-transform active:scale-[0.98] active:bg-(--pos-s-surface-2)"
                   onClick={() => setShowLearnMore(true)}
                 >
                   <Sparkles className="h-4 w-4" />
@@ -276,13 +276,13 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
               {/* Features list */}
               <div>
                 <h5 className="liquid-glass-modal-text font-medium mb-3 flex items-center gap-2">
-                  <Sparkles className="h-4 w-4 text-amber-400" />
+                  <Sparkles className="h-4 w-4 text-amber-700 dark:text-amber-400" />
                   What's Included
                 </h5>
                 <ul className="space-y-2">
                   {moduleInfo.features.map((feature) => (
                     <li key={feature.id} className="flex items-start gap-2">
-                      <Check className="h-4 w-4 text-green-400 mt-0.5 shrink-0" />
+                      <Check className="h-4 w-4 text-green-700 dark:text-green-400 mt-0.5 shrink-0" />
                       <div>
                       <span className="liquid-glass-modal-text text-sm">{feature.name}</span>
                       {feature.description && (

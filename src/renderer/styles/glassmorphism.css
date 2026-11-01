@@ -51,13 +51,14 @@
   --pos-glass-text-inverse: rgba(255, 255, 255, 0.95);
 
   /* POS Status Colors with Glass Effect */
-  --pos-status-success: rgba(16, 185, 129, 0.2);
-  --pos-status-warning: rgba(245, 158, 11, 0.2);
-  --pos-status-error: rgba(239, 68, 68, 0.2);
+  /* Wave ΣΤ1: the kit's solid notice tints (theme-aware), not translucent washes. */
+  --pos-status-success: var(--pos-s-ok-bg);
+  --pos-status-warning: var(--pos-s-warn-bg);
+  --pos-status-error: var(--pos-s-bad-bg);
   --pos-status-info: rgba(113, 113, 122, 0.2);
-  --pos-status-pending: rgba(245, 158, 11, 0.2);
+  --pos-status-pending: var(--pos-s-warn-bg);
   --pos-status-preparing: rgba(113, 113, 122, 0.2);
-  --pos-status-ready: rgba(16, 185, 129, 0.2);
+  --pos-status-ready: var(--pos-s-ok-bg);
 
   /* Liquid Glass Variables - Light Theme */
   --c-glass: #bbbbbc;
@@ -79,43 +80,26 @@
   --modal-glass-reflex-dark: 1;
   --modal-glass-reflex-light: 1;
   --modal-saturation: 150%;
-  --modal-surface: rgba(248, 250, 252, 0.72);
-  --modal-surface-elevated: rgba(255, 255, 255, 0.64);
-  --modal-surface-subtle: rgba(241, 245, 249, 0.56);
-  --modal-border: rgba(15, 23, 42, 0.14);
-  --modal-border-strong: rgba(15, 23, 42, 0.22);
-  --modal-control-bg: rgba(255, 255, 255, 0.56);
-  --modal-control-bg-active: rgba(248, 250, 252, 0.78);
-  --modal-backdrop: rgba(15, 23, 42, 0.32);
-  --modal-muted: #475569;
+  /* Solid modal surfaces (UI audit wave 7): opaque, no glass. */
+  --modal-surface: #ffffff;
+  --modal-surface-elevated: #ffffff;
+  --modal-surface-subtle: #f4f4f5;
+  --modal-border: #d4d4d8;
+  --modal-border-strong: #71717a;
+  --modal-control-bg: #ffffff;
+  --modal-control-bg-active: #e4e4e7;
+  /* Glass modals (founder 30/10, «Νέο ραντεβού»): neutral frost only, never a colour. */
+  --modal-backdrop: rgba(0, 0, 0, 0.22);
+  --modal-glass: rgba(255, 255, 255, 0.18);
+  --modal-glass-border: rgba(255, 255, 255, 0.7);
+  --modal-glass-card: rgba(255, 255, 255, 0.14);
+  --modal-glass-card-border: rgba(255, 255, 255, 0.5);
+  --modal-glass-line: rgba(255, 255, 255, 0.35);
+  --modal-glass-selected: #ffffff;
+  /* zinc-700: stays AA on the frost over light and dark pages. */
+  --modal-muted: #3f3f46;
 
   /* Floating action button palette */
-  --pos-fab-core: rgba(255, 244, 210, 0.98);
-  --pos-fab-core-strong: rgba(255, 176, 62, 0.96);
-  --pos-fab-cyan: rgba(255, 255, 232, 0.92);
-  --pos-fab-violet: rgba(255, 232, 178, 0.88);
-  --pos-fab-magenta: rgba(255, 176, 72, 0.74);
-  --pos-fab-lilac: rgba(255, 240, 214, 0.9);
-  --pos-fab-yellow: rgba(255, 236, 128, 0.96);
-  --pos-fab-green: rgba(255, 250, 214, 0.88);
-  --pos-fab-orange: rgba(255, 164, 86, 0.9);
-  --pos-fab-white: rgba(255, 255, 244, 0.96);
-  --pos-fab-highlight: rgba(255, 255, 248, 0.86);
-  --pos-fab-border: rgba(255, 183, 70, 0.52);
-  --pos-fab-wrapper-border: transparent;
-  --pos-fab-btn-bg: rgba(255, 247, 225, 0.3);
-  --pos-fab-btn-text: rgba(71, 42, 18, 0.24);
-  --pos-fab-btn-text-shadow: rgba(255, 255, 255, 0.98);
-  --pos-fab-btn-inset-shadow: rgba(255, 156, 67, 0.28);
-  --pos-fab-layer-a: rgba(255, 255, 255, 0);
-  --pos-fab-layer-b: rgba(255, 183, 78, 0.92);
-  --pos-fab-overlay-text: rgba(75, 47, 24, 0.82);
-  --pos-fab-overlay-glow: rgba(255, 255, 255, 0.82);
-  --pos-fab-overlay-shadow: rgba(0, 0, 0, 0.1);
-  --pos-fab-overlay-highlight: rgba(255, 255, 255, 0.16);
-  --pos-fab-shadow: 0 18px 36px rgba(255, 174, 71, 0.34), 0 10px 20px rgba(124, 58, 18, 0.12);
-  --pos-fab-shadow-hover: 0 24px 46px rgba(255, 174, 71, 0.42), 0 14px 28px rgba(124, 58, 18, 0.16);
-  --pos-fab-shadow-pressed: 0 14px 24px rgba(255, 174, 71, 0.28), 0 8px 14px rgba(124, 58, 18, 0.12);
 }
 
 /* Dark theme overrides with black background */
@@ -155,41 +139,23 @@
   --modal-glass-reflex-dark: 2;
   --modal-glass-reflex-light: 0.3;
   --modal-saturation: 150%;
-  --modal-surface: rgba(9, 9, 11, 0.72);
-  --modal-surface-elevated: rgba(24, 24, 27, 0.64);
-  --modal-surface-subtle: rgba(39, 39, 42, 0.5);
-  --modal-border: rgba(255, 255, 255, 0.12);
-  --modal-border-strong: rgba(255, 255, 255, 0.2);
-  --modal-control-bg: rgba(255, 255, 255, 0.055);
-  --modal-control-bg-active: rgba(255, 255, 255, 0.1);
-  --modal-backdrop: rgba(0, 0, 0, 0.62);
-  --modal-muted: #cbd5e1;
+  /* Solid modal surfaces (UI audit wave 7): opaque, no glass. */
+  --modal-surface: #18181b;
+  --modal-surface-elevated: #18181b;
+  --modal-surface-subtle: #27272a;
+  --modal-border: #3f3f46;
+  --modal-border-strong: #71717a;
+  --modal-control-bg: #18181b;
+  --modal-control-bg-active: #27272a;
+  --modal-backdrop: rgba(0, 0, 0, 0.55);
+  --modal-glass: rgba(9, 9, 11, 0.55);
+  --modal-glass-border: rgba(255, 255, 255, 0.1);
+  --modal-glass-card: rgba(24, 24, 27, 0.35);
+  --modal-glass-card-border: rgba(255, 255, 255, 0.1);
+  --modal-glass-line: rgba(255, 255, 255, 0.08);
+  --modal-glass-selected: #27272a;
+  --modal-muted: #a1a1aa;
 
-  --pos-fab-core: rgba(255, 242, 204, 0.98);
-  --pos-fab-core-strong: rgba(255, 185, 72, 0.98);
-  --pos-fab-cyan: rgba(255, 255, 232, 0.94);
-  --pos-fab-violet: rgba(255, 230, 176, 0.92);
-  --pos-fab-magenta: rgba(255, 172, 70, 0.78);
-  --pos-fab-lilac: rgba(255, 238, 212, 0.9);
-  --pos-fab-yellow: rgba(255, 236, 128, 0.98);
-  --pos-fab-green: rgba(255, 250, 214, 0.9);
-  --pos-fab-orange: rgba(255, 166, 84, 0.94);
-  --pos-fab-white: rgba(255, 255, 245, 0.96);
-  --pos-fab-border: rgba(255, 194, 92, 0.5);
-  --pos-fab-wrapper-border: transparent;
-  --pos-fab-btn-bg: rgba(255, 247, 225, 0.32);
-  --pos-fab-btn-text: rgba(75, 47, 24, 0.2);
-  --pos-fab-btn-text-shadow: rgba(255, 255, 255, 0.96);
-  --pos-fab-btn-inset-shadow: rgba(255, 150, 72, 0.32);
-  --pos-fab-layer-a: rgba(255, 255, 255, 0);
-  --pos-fab-layer-b: rgba(255, 182, 76, 0.94);
-  --pos-fab-overlay-text: rgba(75, 47, 24, 0.86);
-  --pos-fab-overlay-glow: rgba(255, 255, 255, 0.78);
-  --pos-fab-overlay-shadow: rgba(0, 0, 0, 0.14);
-  --pos-fab-overlay-highlight: rgba(255, 255, 255, 0.14);
-  --pos-fab-shadow: 0 18px 38px rgba(255, 177, 72, 0.4), 0 12px 24px rgba(2, 6, 23, 0.28);
-  --pos-fab-shadow-hover: 0 24px 46px rgba(255, 177, 72, 0.46), 0 16px 30px rgba(2, 6, 23, 0.34);
-  --pos-fab-shadow-pressed: 0 14px 24px rgba(255, 177, 72, 0.3), 0 8px 16px rgba(2, 6, 23, 0.28);
 }
 
 /* MISSING CLASSES USED IN MAINLAYOUT - Adding them here */
@@ -226,14 +192,6 @@
 }
 
 /* Mouse-only: never apply sticky hover on a touch terminal. */
-@media (hover: hover) {
-  .glass-button:hover {
-    background: var(--pos-glass-bg-hover);
-    border-color: var(--pos-glass-border-hover);
-    transform: translateY(-2px);
-    box-shadow: var(--pos-glass-shadow-hover);
-  }
-}
 
 .glass-button:active {
   transform: translateY(0) scale(0.98);
@@ -263,17 +221,9 @@
   text-align: center;
 }
 
-.glass-badge-success {
-  background: var(--pos-status-success);
-  border-color: rgba(16, 185, 129, 0.4);
-  color: rgba(16, 185, 129, 1);
-}
 
-.glass-badge-error {
-  background: var(--pos-status-error);
-  border-color: rgba(239, 68, 68, 0.4);
-  color: rgba(239, 68, 68, 1);
-}
+
+
 
 .glass-fab {
   background: linear-gradient(135deg, rgba(113, 113, 122, 0.8), rgba(82, 82, 91, 0.8));
@@ -287,225 +237,149 @@
   animation: float 3s ease-in-out infinite;
 }
 
-@media (hover: hover) {
-  .glass-fab:hover {
-    transform: translateY(-4px) scale(1.05);
-    box-shadow: 0 12px 40px rgba(113, 113, 122, 0.6);
-  }
-}
-
 .glass-fab:active {
   transform: translateY(-2px) scale(0.95);
 }
 
+/* Founder 31/10 (Dribbble «Voice AI Assistant Liquid Glass Button», «σαν πέρλα»): the floating «+» is a
+   pearl shaped like a coat button — one frosted glass material, a thin lip — lit from behind by two colours
+   like ink in water: two soft drops, one on each side, drifting slowly round together, swelling and easing so
+   the edge where they meet keeps mixing (founder: «σαν μέσα σε νερό 2 χρώματα να αναμειγνύονται και να
+   πιάνουν αντίθετες πλευρές»). They sit a little below the button, like the coloured shadow it casts. Brand
+   colours: yellow and black on the light theme, yellow and white on the dark one. Opaque colours only (the
+   blur and the frost make the softness); only transforms animate (compositor); reduce-motion stops them. */
+@keyframes pos-pearl-turn {
+  to { transform: rotate(360deg); }
+}
+/* One drop: it drifts round slowly, swelling and easing as it goes; the other drop runs the same path half a
+   turn behind, so the two keep to opposite sides while the line between them ripples. */
+@keyframes pos-pearl-ink-a {
+  0% { transform: translateY(6px) rotate(0deg) translateX(13px) scale(1); }
+  25% { transform: translateY(6px) rotate(90deg) translateX(9px) scale(1.14); }
+  50% { transform: translateY(6px) rotate(180deg) translateX(14px) scale(0.96); }
+  75% { transform: translateY(6px) rotate(270deg) translateX(11px) scale(1.1); }
+  100% { transform: translateY(6px) rotate(360deg) translateX(13px) scale(1); }
+}
+@keyframes pos-pearl-ink-b {
+  0% { transform: translateY(6px) rotate(180deg) translateX(13px) scale(1.08); }
+  25% { transform: translateY(6px) rotate(270deg) translateX(14px) scale(0.95); }
+  50% { transform: translateY(6px) rotate(360deg) translateX(9px) scale(1.14); }
+  75% { transform: translateY(6px) rotate(450deg) translateX(13px) scale(1); }
+  100% { transform: translateY(6px) rotate(540deg) translateX(13px) scale(1.08); }
+}
 .pos-fab-halo {
   border-radius: 50%;
   background: transparent;
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.08);
   transform: translateZ(0);
-  transition:
-    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 240ms cubic-bezier(0.22, 1, 0.36, 1);
-  will-change: transform, box-shadow;
-  box-shadow:
-    0 0 14px 1px rgba(255, 217, 50, 0.26),
-    0 0 30px 3px rgba(255, 164, 36, 0.16),
-    0 10px 18px rgba(255, 132, 36, 0.12);
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-
-.pos-fab-halo--animated {
-  animation: pos-fab-halo-pulse 4.2s ease-in-out infinite;
+.pos-fab-halo::before,
+.pos-fab-halo::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  z-index: -1;
+  border-radius: 50%;
+  filter: blur(13px);
+  opacity: 0.72;
+  will-change: transform;
+  pointer-events: none;
 }
-
+/* The yellow drop. */
+.pos-fab-halo::before {
+  background: radial-gradient(circle, #facc15 0%, #facc15 40%, #fde047 58%, transparent 80%);
+  animation: pos-pearl-ink-a 16s ease-in-out infinite;
+}
+/* The other colour's drop: black on the light theme, white on the dark one. */
+.pos-fab-halo::after {
+  background: radial-gradient(circle, #18181b 0%, #27272a 40%, #52525b 58%, transparent 80%);
+  opacity: 0.52;
+  animation: pos-pearl-ink-b 16s ease-in-out infinite;
+}
+.dark .pos-fab-halo::after {
+  background: radial-gradient(circle, #ffffff 0%, #ffffff 40%, #f4f4f5 58%, transparent 80%);
+  opacity: 0.72;
+}
+.pos-fab-halo--disabled::before,
+.pos-fab-halo--disabled::after {
+  animation: none;
+  opacity: 0.3;
+}
 .pos-fab-halo--movable {
   cursor: grab;
   touch-action: none;
   user-select: none;
 }
-
 .pos-fab-halo--movable .pos-fab {
   cursor: inherit;
   touch-action: none;
 }
-
 .pos-fab {
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  overflow-clip-margin: 4px;
-  border: 2px solid rgba(255, 181, 34, 0.78);
-  background:
-    radial-gradient(ellipse at 78% 30%, rgba(255, 238, 126, 0.58) 0 12%, rgba(255, 224, 80, 0.26) 20%, transparent 36%),
-    radial-gradient(ellipse at 27% 65%, rgba(255, 233, 101, 0.48) 0 16%, rgba(255, 216, 58, 0.22) 25%, transparent 43%),
-    radial-gradient(ellipse at 50% -1%, rgba(255, 131, 111, 0.24) 0 11%, rgba(255, 190, 55, 0.18) 22%, transparent 40%),
-    radial-gradient(circle at 50% 49%, rgba(255, 226, 92, 0.84) 0 31%, rgba(255, 207, 76, 0.7) 55%, rgba(255, 170, 72, 0.5) 78%, rgba(255, 224, 124, 0.26) 100%);
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+  -webkit-backdrop-filter: blur(4px) saturate(1.25);
+  backdrop-filter: blur(4px) saturate(1.25);
+  color: #3f3f46;
+  /* No outline (founder 31/10): the edge is a whisper of light, lit on top, a hair darker underneath. */
   box-shadow:
-    inset 8px 8px 18px rgba(255, 246, 160, 0.36),
-    inset -7px -8px 17px rgba(255, 140, 48, 0.32),
-    inset 5px 0 10px rgba(255, 133, 54, 0.18),
-    inset -3px 0 8px rgba(255, 209, 113, 0.22),
-    inset 0 0 0 2px rgba(255, 196, 28, 0.42),
-    inset 0 0 0 4px rgba(255, 232, 112, 0.18);
-  filter: saturate(1.18) brightness(1.14);
+    inset 0 1.5px 1.5px rgba(255, 255, 255, 0.9),
+    inset 0 -1.5px 2px rgba(0, 0, 0, 0.03);
   transform: translateZ(0);
-  transition:
-    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    filter 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-color 240ms cubic-bezier(0.22, 1, 0.36, 1);
-  will-change: transform, filter, border-radius;
-  animation: pos-fab-orb-wobble 7.2s ease-in-out infinite;
-  -webkit-mask-image: radial-gradient(
-    circle at 50% 50%,
-    #000 0 76%,
-    rgba(0, 0, 0, 0.82) 86%,
-    rgba(0, 0, 0, 0.42) 94%,
-    transparent 100%
-  );
-  mask-image: radial-gradient(
-    circle at 50% 50%,
-    #000 0 76%,
-    rgba(0, 0, 0, 0.82) 86%,
-    rgba(0, 0, 0, 0.42) 94%,
-    transparent 100%
-  );
-  -webkit-mask-size: 100% 100%;
-  mask-size: 100% 100%;
-  -webkit-mask-repeat: no-repeat;
-  mask-repeat: no-repeat;
-  -webkit-mask-position: 50% 50%;
-  mask-position: 50% 50%;
 }
-
-.pos-fab::after {
-  content: "";
-  position: absolute;
-  inset: 2px;
-  z-index: 6;
-  pointer-events: none;
-  border-radius: inherit;
-  border: 1px solid rgba(255, 183, 48, 0.52);
-  box-shadow:
-    inset 3px 0 6px rgba(255, 132, 52, 0.24),
-    inset -3px 0 7px rgba(255, 210, 43, 0.32),
-    inset 0 -4px 8px rgba(255, 111, 139, 0.18),
-    inset 8px 2px 12px rgba(255, 236, 112, 0.22);
-  opacity: 0.9;
-  mix-blend-mode: normal;
-}
-
+/* One material over the whole button (founder 31/10: the lip is the same body as the face): a single milky
+   frost over the turning sheen, a little thinner towards the edge so the colours breathe through evenly. */
 .pos-fab::before {
   content: "";
   position: absolute;
-  inset: -3%;
-  z-index: 5;
+  inset: 0;
+  z-index: 2;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 42%, rgba(255, 255, 255, 0.66) 0%, rgba(255, 255, 255, 0.52) 55%, rgba(255, 255, 255, 0.38) 100%);
   pointer-events: none;
-  border-radius: inherit;
-  background:
-    radial-gradient(ellipse at 49% -2%, rgba(255, 116, 105, 0.32) 0 12%, rgba(255, 187, 48, 0.2) 23%, transparent 42%),
-    radial-gradient(ellipse at 80% 31%, rgba(255, 238, 111, 0.54) 0 13%, transparent 32%),
-    radial-gradient(ellipse at 25% 66%, rgba(255, 226, 72, 0.48) 0 15%, transparent 40%),
-    linear-gradient(112deg, transparent 10%, rgba(255, 234, 92, 0.2) 28%, transparent 48%);
-  opacity: 0.5;
-  mix-blend-mode: screen;
-  animation: pos-fab-highlight-drift 6.4s ease-in-out infinite alternate;
 }
-
-.pos-fab__gradient-layer {
+/* The depth of a coat button, drawn with light only: the face sits a touch lower than the rim — a faint
+   shade where the rim overhangs its top, a faint light along its bottom. No fill, so no second colour. */
+.pos-fab::after {
+  content: "";
   position: absolute;
+  inset: 6%;
+  z-index: 2;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow:
+    inset 0 4px 7px -4px rgba(0, 0, 0, 0.06),
+    inset 0 -4px 7px -4px rgba(255, 255, 255, 0.9);
   pointer-events: none;
-  z-index: 1;
-  top: -42%;
-  left: -42%;
-  width: 184%;
-  aspect-ratio: 1;
-  border-radius: 47% 53% 44% 56% / 57% 42% 58% 43%;
-  opacity: 0.7;
-  will-change: transform, filter;
-  animation-timing-function: linear;
-  animation-iteration-count: infinite;
-  transform-origin: 50% 50%;
-  filter: blur(3px) saturate(1.06);
-  mix-blend-mode: normal;
-  animation-name: pos-fab-membrane-spin;
-  background:
-    radial-gradient(ellipse at 35% 70%, rgba(255, 255, 204, 0.46) 0 13%, transparent 33%),
-    radial-gradient(ellipse at 68% 30%, rgba(255, 235, 101, 0.36) 0 15%, transparent 38%),
-    radial-gradient(ellipse at 50% 50%, rgba(255, 128, 82, 0.28) 0 17%, transparent 46%),
-    conic-gradient(from 18deg, rgba(255, 229, 95, 0.12) 0 8%, rgba(255, 163, 24, 0.38) 18%, rgba(255, 221, 75, 0.32) 31%, rgba(255, 128, 72, 0.3) 45%, rgba(255, 190, 36, 0.34) 63%, rgba(255, 235, 104, 0.36) 80%, rgba(255, 142, 24, 0.22) 93%, rgba(255, 229, 95, 0.12) 100%);
 }
-
-.pos-fab__gradient-layer:nth-of-type(3),
-.pos-fab__gradient-layer:nth-of-type(5),
-.pos-fab__gradient-layer:nth-of-type(7) {
-  animation-name: pos-fab-membrane-spin-reverse;
-  opacity: 0.52;
-  filter: blur(4px) saturate(1);
-  background:
-    radial-gradient(ellipse at 74% 68%, rgba(255, 126, 72, 0.34) 0 16%, transparent 38%),
-    radial-gradient(ellipse at 28% 30%, rgba(255, 231, 78, 0.26) 0 17%, transparent 38%),
-    conic-gradient(from 210deg, transparent 0 8%, rgba(255, 116, 64, 0.28) 18%, rgba(255, 216, 100, 0.24) 33%, rgba(255, 158, 28, 0.36) 54%, rgba(255, 231, 80, 0.3) 70%, transparent 92% 100%);
-}
-
-.pos-fab__gradient-layer:nth-of-type(8) {
-  opacity: 0.34;
-  filter: blur(2px) saturate(1.05);
-  mix-blend-mode: normal;
-  animation-name: pos-fab-ribbon-flow;
-  background:
-    linear-gradient(100deg, transparent 0 20%, rgba(255, 133, 98, 0.18) 36%, rgba(255, 225, 76, 0.36) 48%, rgba(255, 181, 40, 0.28) 64%, transparent 82% 100%);
-}
-
+.pos-fab__gradient-layer,
 .pos-fab__light {
-  position: absolute;
-  inset: 4%;
-  z-index: 4;
-  pointer-events: none;
-  border-radius: inherit;
-  display: block;
-  background:
-    radial-gradient(ellipse at 78% 29%, rgba(255, 238, 120, 0.44) 0 12%, rgba(255, 221, 64, 0.2) 20%, transparent 38%),
-    radial-gradient(ellipse at 24% 66%, rgba(255, 226, 82, 0.38) 0 15%, rgba(255, 214, 42, 0.18) 24%, transparent 44%),
-    radial-gradient(ellipse at 50% 3%, rgba(255, 134, 92, 0.18) 0 10%, transparent 30%);
-  mix-blend-mode: screen;
-  opacity: 0.42;
-  animation: pos-fab-light-pulse 4.6s ease-in-out infinite;
+  display: none;
 }
-
+/* The sheen: the same pastels turning the other way under the frost. */
 .pos-fab__button-layer {
   position: absolute;
-  inset: 1px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 3;
-  border: none;
-  border-radius: inherit;
-  color: var(--pos-fab-btn-text);
-  background:
-    radial-gradient(ellipse at 43% 52%, transparent 0 20%, rgba(255, 174, 46, 0.26) 36%, rgba(255, 135, 64, 0.22) 52%, rgba(255, 181, 30, 0.28) 82%, rgba(255, 225, 82, 0.1) 100%),
-    conic-gradient(from 155deg, transparent 0 10%, rgba(255, 145, 32, 0.28), rgba(255, 218, 64, 0.2), rgba(255, 119, 58, 0.16), transparent 90% 100%);
-  box-shadow: inset 0 0 16px 4px rgba(255, 177, 42, 0.24);
-  text-shadow: 0 1px 3px var(--pos-fab-btn-text-shadow);
-  mix-blend-mode: multiply;
-  opacity: 0.78;
+  inset: -25%;
+  z-index: 1;
+  border-radius: 50%;
+  /* Light theme: the black stays in the glow round the pearl; the face keeps a clean yellow-and-pearl sheen. */
+  /* The same two colours inside, one on each side, drifting with the drops (no repeating stripes). */
+  background: linear-gradient(120deg, #facc15 0%, #fde68a 30%, #ffffff 55%, #d4d4d8 100%);
+  filter: blur(12px);
+  opacity: 0.6;
+  animation: pos-pearl-turn 16s linear infinite;
+  will-change: transform;
   pointer-events: none;
-  transition:
-    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    color 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    text-shadow 240ms cubic-bezier(0.22, 1, 0.36, 1);
-  animation: pos-fab-membrane-drift 6.2s ease-in-out infinite alternate;
 }
-
-.pos-fab__button-layer::after {
-  content: none;
+.dark .pos-fab__button-layer {
+  background: linear-gradient(120deg, #facc15 0%, #fef08a 30%, #ffffff 60%, #ffffff 100%);
 }
-
-.pos-fab__button-layer > * {
-  position: relative;
-  z-index: 2;
-}
-
 .pos-fab__overlay {
   position: absolute;
   inset: 0;
@@ -514,333 +388,35 @@
   justify-content: center;
   z-index: 3;
   border-radius: inherit;
-  color: var(--pos-fab-overlay-text);
-  text-shadow: 0 0 4px var(--pos-fab-overlay-glow);
-  box-shadow: none;
-  mix-blend-mode: multiply;
-  opacity: 0.84;
+  color: #3f3f46;
   pointer-events: none;
-  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
-  animation: pos-fab-icon-pulse 5s ease infinite;
 }
-
-.pos-fab__button-layer svg,
 .pos-fab__overlay svg {
-  width: 2rem;
-  height: 2rem;
-  stroke-width: 2.4;
+  width: 2.1rem;
+  height: 2.1rem;
+  stroke-width: 1.6;
 }
-
-.pos-fab-halo--animated:active:not(.pos-fab-halo--disabled) {
-  transform: translateY(-1px) scale(0.95);
-  animation-duration: 1.6s;
-}
-
-.pos-fab-halo--animated:active:not(.pos-fab-halo--disabled) .pos-fab {
-  filter: saturate(0.98) brightness(1.02);
-}
-
-.pos-fab-halo--animated:active:not(.pos-fab-halo--disabled) .pos-fab__overlay {
+.pos-fab-halo:active:not(.pos-fab-halo--disabled) {
   transform: scale(0.95);
 }
-
-.pos-fab-halo--animated:active:not(.pos-fab-halo--disabled) .pos-fab__button-layer {
-  opacity: 0.78;
-}
-
-/* Static means every layer, including pseudo-elements, is actually still. */
-.pos-fab-halo--static,
-.pos-fab--static,
-.pos-fab--static::before,
-.pos-fab--static::after,
-.pos-fab--static * {
-  animation: none;
-  will-change: auto;
-}
-
-.pos-fab-halo--static,
-.pos-fab--static {
-  transform: none;
-}
-
-.pos-fab--static::before {
-  content: none;
-}
-
-/* The FAB is a body portal. Modal isolation is ref-counted, so even explicitly
-   animated FABs stop while a nested dialog covers them, then resume on close. */
-body.pos-modal-open .pos-fab-halo,
-body.pos-modal-open .pos-fab,
-body.pos-modal-open .pos-fab::before,
-body.pos-modal-open .pos-fab::after,
-body.pos-modal-open .pos-fab * {
-  animation-play-state: paused !important;
-  will-change: auto !important;
-}
-
-.pos-fab-halo--static:active:not(.pos-fab-halo--disabled) {
-  transform: translateY(-1px) scale(0.95);
-  box-shadow: var(--pos-fab-shadow-pressed);
-}
-
 .pos-fab-halo--dragging,
 .pos-fab-halo--dragging:active:not(.pos-fab-halo--disabled) {
   cursor: grabbing;
   transform: scale(1.03);
-  animation-duration: 2.4s;
 }
-
 .pos-fab-halo--dragging .pos-fab {
   cursor: grabbing;
 }
-
 .pos-fab-halo--disabled {
-  box-shadow:
-    0 0 12px 1px rgba(255, 217, 50, 0.18),
-    0 0 24px 2px rgba(255, 164, 36, 0.12),
-    0 10px 18px rgba(15, 23, 42, 0.18);
-  animation: none;
-  opacity: 0.72;
+  box-shadow: none;
+  opacity: 0.6;
 }
-
 .pos-fab--disabled,
 .pos-fab:disabled {
-  border-color: rgba(255, 181, 34, 0.42);
-  background:
-    radial-gradient(ellipse at 78% 30%, rgba(255, 238, 126, 0.28) 0 12%, rgba(255, 224, 80, 0.14) 20%, transparent 36%),
-    radial-gradient(ellipse at 27% 65%, rgba(255, 233, 101, 0.26) 0 16%, rgba(255, 216, 58, 0.12) 25%, transparent 43%),
-    radial-gradient(circle at 50% 49%, rgba(255, 226, 92, 0.58) 0 31%, rgba(255, 207, 76, 0.44) 55%, rgba(255, 170, 72, 0.3) 78%, rgba(255, 224, 124, 0.18) 100%);
   cursor: not-allowed;
-  filter: saturate(0.68) brightness(0.94);
-}
-
-.pos-fab:disabled .pos-fab__gradient-layer {
-  opacity: 0.2;
-  animation: none;
-  transform: none;
-}
-
-.pos-fab:disabled .pos-fab__button-layer,
-.pos-fab:disabled .pos-fab__overlay {
-  opacity: 0.8;
-  animation: none;
 }
 }
-
-@keyframes pos-fab-rotate {
-  from {
-    transform: rotate(0deg) translate3d(-4%, -2%, 0) scale(1.02);
-  }
-
-  50% {
-    transform: rotate(180deg) translate3d(4%, 3%, 0) scale(1.08);
-  }
-
-  to {
-    transform: rotate(360deg) translate3d(-4%, -2%, 0) scale(1.02);
-  }
-}
-
-@keyframes pos-fab-rotate-reverse {
-  from {
-    transform: rotate(0deg) translate3d(4%, 2%, 0) scale(1.06);
-  }
-
-  50% {
-    transform: rotate(-180deg) translate3d(-5%, -4%, 0) scale(0.98);
-  }
-
-  to {
-    transform: rotate(-360deg) translate3d(4%, 2%, 0) scale(1.06);
-  }
-}
-
-@keyframes pos-fab-light-pulse {
-
-  0%,
-  100% {
-    opacity: 0.42;
-  }
-
-  50% {
-    opacity: 0.16;
-  }
-}
-
-@keyframes pos-fab-icon-pulse {
-
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.82;
-  }
-}
-
-@keyframes pos-fab-orb-wobble {
-  0%,
-  100% {
-    border-radius: 51% 49% 47% 53% / 49% 46% 54% 51%;
-  }
-
-  28% {
-    border-radius: 56% 44% 50% 50% / 45% 56% 47% 53%;
-  }
-
-  58% {
-    border-radius: 47% 53% 56% 44% / 53% 46% 56% 44%;
-  }
-
-  82% {
-    border-radius: 54% 46% 44% 56% / 47% 54% 44% 56%;
-  }
-}
-
-@keyframes pos-fab-membrane-spin {
-  0% {
-    transform: rotate(0deg) translate3d(-8%, -4%, 0) scale(1);
-    border-radius: 45% 55% 52% 48% / 58% 43% 57% 42%;
-  }
-
-  33% {
-    transform: rotate(128deg) translate3d(7%, -6%, 0) scale(1.1);
-    border-radius: 57% 43% 61% 39% / 43% 58% 42% 57%;
-  }
-
-  66% {
-    transform: rotate(246deg) translate3d(4%, 8%, 0) scale(0.98);
-    border-radius: 39% 61% 44% 56% / 61% 42% 58% 39%;
-  }
-
-  100% {
-    transform: rotate(360deg) translate3d(-8%, -4%, 0) scale(1);
-    border-radius: 45% 55% 52% 48% / 58% 43% 57% 42%;
-  }
-}
-
-@keyframes pos-fab-membrane-spin-reverse {
-  0% {
-    transform: rotate(0deg) translate3d(8%, 5%, 0) scale(1.08);
-    border-radius: 58% 42% 48% 52% / 44% 58% 42% 56%;
-  }
-
-  50% {
-    transform: rotate(-178deg) translate3d(-8%, 3%, 0) scale(0.96);
-    border-radius: 42% 58% 59% 41% / 58% 42% 56% 44%;
-  }
-
-  100% {
-    transform: rotate(-360deg) translate3d(8%, 5%, 0) scale(1.08);
-    border-radius: 58% 42% 48% 52% / 44% 58% 42% 56%;
-  }
-}
-
-@keyframes pos-fab-ribbon-flow {
-  0% {
-    transform: rotate(-24deg) translate3d(-18%, 4%, 0) scale(1.15);
-    opacity: 0.34;
-  }
-
-  45% {
-    transform: rotate(18deg) translate3d(11%, -8%, 0) scale(1.28);
-    opacity: 0.58;
-  }
-
-  100% {
-    transform: rotate(52deg) translate3d(18%, 6%, 0) scale(1.1);
-    opacity: 0.4;
-  }
-}
-
-@keyframes pos-fab-membrane-drift {
-  0% {
-    transform: rotate(-22deg) translate3d(-5%, -3%, 0) scale(0.98);
-    opacity: 0.52;
-  }
-
-  50% {
-    transform: rotate(8deg) translate3d(3%, 4%, 0) scale(1.08);
-    opacity: 0.78;
-  }
-
-  100% {
-    transform: rotate(30deg) translate3d(7%, -4%, 0) scale(1.02);
-    opacity: 0.62;
-  }
-}
-
-@keyframes pos-fab-highlight-drift {
-  0% {
-    transform: rotate(-18deg) translate3d(-3%, -4%, 0) scale(1);
-    opacity: 0.34;
-  }
-
-  50% {
-    transform: rotate(4deg) translate3d(2%, 2%, 0) scale(1.07);
-    opacity: 0.5;
-  }
-
-  100% {
-    transform: rotate(18deg) translate3d(4%, -2%, 0) scale(1.02);
-    opacity: 0.38;
-  }
-}
-
-@keyframes pos-fab-halo-pulse {
-  0% {
-    box-shadow:
-      0 0 14px 1px rgba(255, 217, 50, 0.26),
-      0 0 30px 3px rgba(255, 164, 36, 0.16),
-      0 10px 18px rgba(255, 132, 36, 0.12);
-  }
-
-  25% {
-    box-shadow:
-      0 0 16px 1px rgba(255, 224, 58, 0.3),
-      0 0 34px 4px rgba(255, 151, 32, 0.18),
-      0 11px 19px rgba(255, 132, 36, 0.13);
-  }
-
-  50% {
-    box-shadow:
-      0 0 18px 1px rgba(255, 230, 64, 0.34),
-      0 0 38px 4px rgba(255, 174, 32, 0.2),
-      0 12px 20px rgba(255, 132, 36, 0.14);
-  }
-
-  75% {
-    box-shadow:
-      0 0 16px 1px rgba(255, 220, 54, 0.3),
-      0 0 34px 4px rgba(255, 159, 30, 0.18),
-      0 11px 19px rgba(255, 132, 36, 0.13);
-  }
-
-  100% {
-    box-shadow:
-      0 0 14px 1px rgba(255, 217, 50, 0.26),
-      0 0 30px 3px rgba(255, 164, 36, 0.16),
-      0 10px 18px rgba(255, 132, 36, 0.12);
-  }
-}
-
-@keyframes pos-fab-white-drift {
-  from {
-    transform: rotate(-26deg) translate3d(-5%, -4%, 0) scale(0.96);
-    opacity: 0.56;
-  }
-
-  50% {
-    transform: rotate(6deg) translate3d(2%, 3%, 0) scale(1.08);
-    opacity: 0.94;
-  }
-
-  to {
-    transform: rotate(28deg) translate3d(6%, -3%, 0) scale(1);
-    opacity: 0.8;
-  }
-}
+/* end @layer utilities (opened at the top of this file) */
 
 @keyframes float {
 
@@ -877,7 +453,7 @@ body.pos-modal-open .pos-fab * {
   .pos-glass-card-compact,
   .pos-glass-modal {
     background: rgba(248, 250, 252, 0.95);
-    border: 1px solid rgba(203, 213, 225, 0.5);
+    border: 1px solid rgba(212, 212, 216, 0.5);
   }
 }
 
@@ -917,18 +493,6 @@ body.pos-modal-open .pos-fab * {
   user-select: none;
   -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
-}
-
-@media (hover: hover) {
-  .pos-glass-interactive:hover,
-  .pos-glass-button:hover,
-  .pos-glass-button-large:hover,
-  .pos-glass-button-xl:hover,
-  .pos-glass-input:hover,
-  .pos-glass-pin-input:hover {
-    background: var(--pos-glass-bg-hover);
-    border: 1px solid var(--pos-glass-border-hover);
-  }
 }
 
 .pos-glass-interactive:active,
@@ -1094,12 +658,12 @@ body.pos-modal-open .pos-fab * {
   position: absolute;
   inset: 0;
   background: var(--modal-backdrop);
-  /* Reduced blur for less blurry effect - only blur the background, not the modal */
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  /* Glass modals (founder 30/10): the page behind is dimmed and blurred. */
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
   z-index: 0;
   transition: backdrop-filter 180ms cubic-bezier(0.4, 0, 0.2, 1), background 180ms cubic-bezier(0.4, 0, 0.2, 1);
-  animation: backdropEnter 180ms cubic-bezier(0.4, 0, 0.2, 1);
+  animation: backdropEnter var(--pos-motion-base, 180ms) var(--pos-ease, cubic-bezier(0.2, 0.8, 0.2, 1));
 }
 
 .dark .liquid-glass-modal-backdrop {
@@ -1112,19 +676,15 @@ body.pos-modal-open .pos-fab * {
   max-height: 92vh;
   width: 100%;
   padding: 0;
-  border-radius: 28px;
-  background: var(--modal-surface);
-  backdrop-filter: blur(40px) saturate(200%);
-  -webkit-backdrop-filter: blur(40px) saturate(200%);
-  /* Glass Border */
-  border: 1px solid var(--modal-border);
-  /* Simple shadow */
-  box-shadow:
-    0 20px 60px rgba(0, 0, 0, 0.1),
-    0 8px 24px rgba(0, 0, 0, 0.05),
-    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  border-radius: 16px;
+  /* Glass modals (founder 30/10): a frosted neutral shell, a light rim and one soft shadow. */
+  background: var(--modal-glass);
+  border: 1px solid var(--modal-glass-border);
+  backdrop-filter: blur(40px) saturate(1.15);
+  -webkit-backdrop-filter: blur(40px) saturate(1.15);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.35);
   transition: transform 180ms cubic-bezier(0.4, 0, 0.2, 1), opacity 180ms cubic-bezier(0.4, 0, 0.2, 1);
-  animation: liquidModalEnter 180ms cubic-bezier(0.4, 0, 0.2, 1);
+  animation: liquidModalEnter var(--pos-motion-base, 180ms) var(--pos-ease, cubic-bezier(0.2, 0.8, 0.2, 1));
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -1137,14 +697,9 @@ body.pos-modal-open .pos-fab * {
 
 /* Dark theme - Liquid Glass */
 .dark .liquid-glass-modal-shell {
-  background: var(--modal-surface);
-  backdrop-filter: blur(40px) saturate(180%);
-  -webkit-backdrop-filter: blur(40px) saturate(180%);
-  border: 1px solid var(--modal-border);
-  box-shadow:
-    0 20px 60px rgba(0, 0, 0, 0.4),
-    0 8px 24px rgba(0, 0, 0, 0.3),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  background: var(--modal-glass);
+  border: 1px solid var(--modal-glass-border);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.55);
 }
 
 /* Opaque variant keeps frequently opened staff workflows off the backdrop
@@ -1267,111 +822,23 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
   isolation: auto;
 }
 
+/* Founder 31/10 («δεν είναι γυαλί»): the order type cards are glass — a milky neutral frost over the
+   blurred page, a light rim and one soft shadow; the type colours stay on the icon and the title. */
 .order-type-transparent-modal [data-order-type-card] {
-  backdrop-filter: blur(22px) saturate(150%);
-  -webkit-backdrop-filter: blur(22px) saturate(150%);
-  box-shadow:
-    0 8px 24px rgba(15, 23, 42, 0.1),
-    inset 0 1px 0 rgba(255, 255, 255, 0.86);
+  /* Top-aligned content: every icon and title sits on the same line across the row. */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  border-color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(24px) saturate(1.2);
+  -webkit-backdrop-filter: blur(24px) saturate(1.2);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
 }
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card] svg,
-html:not(.dark) .order-type-transparent-modal [data-order-type-card] [aria-hidden="true"] {
-  color: #334155 !important;
-}
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card] p {
-  color: #475569 !important;
-  text-shadow: none;
-}
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="delivery"] {
-  background: linear-gradient(135deg, rgba(254, 249, 195, 0.68), rgba(255, 255, 255, 0.42)) !important;
-  border-color: rgba(202, 138, 4, 0.54) !important;
-}
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="delivery"] h3,
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="delivery"] svg {
-  color: #a16207 !important;
-}
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="pickup"] {
-  background: linear-gradient(135deg, rgba(209, 250, 229, 0.68), rgba(255, 255, 255, 0.42)) !important;
-  border-color: rgba(5, 150, 105, 0.48) !important;
-}
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="pickup"] h3,
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="pickup"] svg {
-  color: #047857 !important;
-}
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="table"] {
-  background: linear-gradient(135deg, rgba(219, 234, 254, 0.68), rgba(255, 255, 255, 0.42)) !important;
-  border-color: rgba(37, 99, 235, 0.46) !important;
-}
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="table"] h3,
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="table"] svg {
-  color: #1d4ed8 !important;
-}
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="room"] {
-  background: linear-gradient(135deg, rgba(243, 232, 255, 0.68), rgba(255, 255, 255, 0.42)) !important;
-  border-color: rgba(147, 51, 234, 0.46) !important;
-}
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="room"] h3,
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="room"] svg {
-  color: #7e22ce !important;
-}
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] {
-  background: linear-gradient(135deg, rgba(207, 250, 254, 0.68), rgba(255, 255, 255, 0.42)) !important;
-  border-color: rgba(8, 145, 178, 0.46) !important;
-}
-
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] h3,
-html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] svg {
-  color: #0e7490 !important;
-}
-
 .dark .order-type-transparent-modal [data-order-type-card] {
-  box-shadow: none;
-}
-
-.dark .order-type-transparent-modal [data-order-type-card] svg,
-.dark .order-type-transparent-modal [data-order-type-card] [aria-hidden="true"] {
-  color: #fff !important;
-}
-
-.dark .order-type-transparent-modal [data-order-type-card] p {
-  color: rgba(255, 255, 255, 0.6) !important;
-  text-shadow: none;
-}
-
-.dark .order-type-transparent-modal [data-order-type-card="delivery"] {
-  background: linear-gradient(135deg, rgba(250, 204, 21, 0.16), rgba(234, 179, 8, 0.06)) !important;
-  border-color: rgba(250, 204, 21, 0.45) !important;
-}
-
-.dark .order-type-transparent-modal [data-order-type-card="pickup"] {
-  background: linear-gradient(135deg, rgba(52, 211, 153, 0.16), rgba(22, 163, 74, 0.06)) !important;
-  border-color: rgba(52, 211, 153, 0.45) !important;
-}
-
-.dark .order-type-transparent-modal [data-order-type-card="table"] {
-  background: linear-gradient(135deg, rgba(96, 165, 250, 0.16), rgba(37, 99, 235, 0.06)) !important;
-  border-color: rgba(96, 165, 250, 0.45) !important;
-}
-
-.dark .order-type-transparent-modal [data-order-type-card="room"] {
-  background: linear-gradient(135deg, rgba(168, 85, 247, 0.16), rgba(126, 34, 206, 0.06)) !important;
-  border-color: rgba(168, 85, 247, 0.45) !important;
-}
-
-.dark .order-type-transparent-modal [data-order-type-card="service"] {
-  background: linear-gradient(135deg, rgba(34, 211, 238, 0.16), rgba(8, 145, 178, 0.06)) !important;
-  border-color: rgba(34, 211, 238, 0.45) !important;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(24, 24, 27, 0.55);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
 }
 }
 
@@ -1446,25 +913,26 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 @layer utilities {
 
 .liquid-glass-modal-shell.leaving {
-  animation: liquidModalExit 180ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: liquidModalExit var(--pos-motion-base, 180ms) var(--pos-ease, cubic-bezier(0.2, 0.8, 0.2, 1)) forwards;
 }
 
 .liquid-glass-modal-backdrop.leaving {
-  animation: backdropExit 180ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: backdropExit var(--pos-motion-base, 180ms) var(--pos-ease, cubic-bezier(0.2, 0.8, 0.2, 1)) forwards;
 }
 
 .liquid-glass-modal-button {
+  /* Solid (UI audit wave 7): opaque control with a 1px border that identifies it. */
   background: var(--modal-control-bg);
-  backdrop-filter: blur(10px) saturate(var(--modal-saturation));
-  -webkit-backdrop-filter: blur(10px) saturate(var(--modal-saturation));
-  /* Crisp Rim Light Border */
-  border: 1px solid var(--modal-border);
+  border: 1px solid var(--modal-border-strong);
   border-radius: var(--pos-glass-radius-small);
   padding: 0.75rem 1.5rem;
   color: var(--modal-c-content);
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  /* Only what changes on press/selection, on the shared fast token (was "all 0.3s"). */
+  transition-property: transform, background-color, border-color, color, box-shadow;
+  transition-duration: var(--pos-motion-fast, 150ms);
+  transition-timing-function: var(--pos-ease, cubic-bezier(0.2, 0.8, 0.2, 1));
   min-height: 44px;
   display: inline-flex;
   align-items: center;
@@ -1472,19 +940,9 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   /* Consistent icon↔label spacing for every modal button (matches the gap-2 that
      16 call-sites already set explicitly; harmless for text-only buttons). */
   gap: 0.5rem;
-  /* Inner glow for depth */
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    0 4px 12px rgba(0, 0, 0, 0.1);
+  box-shadow: none;
   /* Prevent scale transform from causing overflow */
   will-change: transform;
-}
-
-@media (hover: hover) {
-  .liquid-glass-modal-button:hover {
-    background: var(--modal-control-bg-active);
-    border-color: var(--modal-border-strong);
-  }
 }
 
 .liquid-glass-modal-button:active {
@@ -1495,37 +953,31 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 /* Dark mode button adjustments */
 .dark .liquid-glass-modal-button {
   background: var(--modal-control-bg);
-  border-color: var(--modal-border);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
-}
-
-@media (hover: hover) {
-  .dark .liquid-glass-modal-button:hover {
-    background: var(--modal-control-bg-active);
-    border-color: var(--modal-border-strong);
-  }
+  border-color: var(--modal-border-strong);
+  box-shadow: none;
 }
 
 /* .liquid-glass-modal-input rules moved to globals.css @layer components
    so Tailwind utilities (pl-10, pr-10, etc.) can properly override padding */
 
 /* Field-leading icons are deliberately solid rather than glass: the thin
-   Lucide strokes otherwise become washed out against translucent controls. */
+   Lucide strokes otherwise become washed out against translucent controls.
+   Founder 31/10: a calm neutral grey, not yellow (yellow is the primary action). */
 .liquid-glass-modal-field-icon {
   z-index: 2 !important;
-  color: #eab308 !important;
-  stroke: #eab308 !important;
+  color: #71717a !important;
+  stroke: #71717a !important;
   opacity: 1 !important;
   stroke-opacity: 1 !important;
-  stroke-width: 3;
+  stroke-width: 2;
   filter: none !important;
   mix-blend-mode: normal !important;
   pointer-events: none;
 }
 
 .dark .liquid-glass-modal-field-icon {
-  color: #facc15 !important;
-  stroke: #facc15 !important;
+  color: #a1a1aa !important;
+  stroke: #a1a1aa !important;
 }
 
 .liquid-glass-modal-card {
@@ -1548,115 +1000,41 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
-/* Liquid glass variant tints */
-.liquid-glass-modal-primary {
-  background: rgba(234, 179, 8, 0.16);
-  border-color: rgba(234, 179, 8, 0.4);
-  color: #a16207;
-}
-
-.dark .liquid-glass-modal-primary {
-  background: rgba(234, 179, 8, 0.18);
-  border-color: rgba(234, 179, 8, 0.45);
-  color: #fde047;
-}
-
-.liquid-glass-modal-secondary {
-  background: var(--modal-control-bg);
+/* Liquid glass variant tones (wave ΣΤ1): a neutral solid surface in both themes; the tone is the
+   colour of the words (AA), never a tinted wash. */
+.liquid-glass-modal-primary,
+.liquid-glass-modal-success,
+.liquid-glass-modal-warning,
+.liquid-glass-modal-error,
+.liquid-glass-modal-info,
+.liquid-glass-modal-pending,
+.liquid-glass-modal-preparing,
+.liquid-glass-modal-ready {
+  background: var(--modal-surface);
   border-color: var(--modal-border);
-  color: var(--modal-c-content);
 }
-
+.liquid-glass-modal-primary,
+.liquid-glass-modal-pending { color: #854d0e; }
+.dark .liquid-glass-modal-primary,
+.dark .liquid-glass-modal-pending { color: #fde047; }
+.liquid-glass-modal-secondary,
 .dark .liquid-glass-modal-secondary {
   background: var(--modal-control-bg);
   border-color: var(--modal-border);
   color: var(--modal-c-content);
 }
-
-.liquid-glass-modal-success {
-  background: rgba(34, 197, 94, 0.14);
-  border-color: rgba(34, 197, 94, 0.35);
-  color: #15803d;
-}
-
-.dark .liquid-glass-modal-success {
-  background: rgba(34, 197, 94, 0.2);
-  border-color: rgba(34, 197, 94, 0.45);
-  color: #86efac;
-}
-
-.liquid-glass-modal-warning {
-  background: rgba(245, 158, 11, 0.16);
-  border-color: rgba(245, 158, 11, 0.35);
-  color: #b45309;
-}
-
-.dark .liquid-glass-modal-warning {
-  background: rgba(245, 158, 11, 0.22);
-  border-color: rgba(245, 158, 11, 0.45);
-  color: #fcd34d;
-}
-
-.liquid-glass-modal-error {
-  background: rgba(239, 68, 68, 0.16);
-  border-color: rgba(239, 68, 68, 0.35);
-  color: #b91c1c;
-}
-
-.dark .liquid-glass-modal-error {
-  background: rgba(239, 68, 68, 0.22);
-  border-color: rgba(239, 68, 68, 0.45);
-  color: #fca5a5;
-}
-
-.liquid-glass-modal-info {
-  background: rgba(113, 113, 122, 0.16);
-  border-color: rgba(113, 113, 122, 0.35);
-  color: #3f3f46;
-}
-
-.dark .liquid-glass-modal-info {
-  background: rgba(161, 161, 170, 0.18);
-  border-color: rgba(161, 161, 170, 0.4);
-  color: #e4e4e7;
-}
-
-.liquid-glass-modal-pending {
-  background: rgba(234, 179, 8, 0.14);
-  border-color: rgba(234, 179, 8, 0.35);
-  color: #a16207;
-}
-
-.dark .liquid-glass-modal-pending {
-  background: rgba(234, 179, 8, 0.18);
-  border-color: rgba(234, 179, 8, 0.45);
-  color: #fde047;
-}
-
-.liquid-glass-modal-preparing {
-  background: rgba(113, 113, 122, 0.16);
-  border-color: rgba(113, 113, 122, 0.35);
-  color: #3f3f46;
-}
-
-.dark .liquid-glass-modal-preparing {
-  background: rgba(161, 161, 170, 0.18);
-  border-color: rgba(161, 161, 170, 0.4);
-  color: #e4e4e7;
-}
-
-.liquid-glass-modal-ready {
-  background: rgba(16, 185, 129, 0.16);
-  border-color: rgba(16, 185, 129, 0.35);
-  color: #047857;
-}
-
-.dark .liquid-glass-modal-ready {
-  background: rgba(16, 185, 129, 0.22);
-  border-color: rgba(16, 185, 129, 0.45);
-  color: #6ee7b7;
-}
-
+.liquid-glass-modal-success,
+.liquid-glass-modal-ready { color: #166534; }
+.dark .liquid-glass-modal-success,
+.dark .liquid-glass-modal-ready { color: #86efac; }
+.liquid-glass-modal-warning { color: #92400e; }
+.dark .liquid-glass-modal-warning { color: #fcd34d; }
+.liquid-glass-modal-error { color: #991b1b; }
+.dark .liquid-glass-modal-error { color: #fca5a5; }
+.liquid-glass-modal-info,
+.liquid-glass-modal-preparing { color: #3f3f46; }
+.dark .liquid-glass-modal-info,
+.dark .liquid-glass-modal-preparing { color: #e4e4e7; }
 .liquid-glass-modal-text {
   color: var(--modal-c-content);
   opacity: 1;
@@ -1728,13 +1106,13 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   align-items: center;
   justify-content: space-between;
   padding: 1.5rem 2rem;
-  border-bottom: 1px solid var(--modal-border);
+  border-bottom: 1px solid var(--modal-glass-line);
   background: transparent !important;
   flex-shrink: 0;
 }
 
 .dark .liquid-glass-modal-header {
-  border-bottom: 1px solid var(--modal-border);
+  border-bottom: 1px solid var(--modal-glass-line);
   background: transparent !important;
 }
 
@@ -1774,18 +1152,6 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   color: rgba(255, 255, 255, 0.7);
 }
 
-@media (hover: hover) {
-  .liquid-glass-modal-close:hover {
-    background: rgba(0, 0, 0, 0.08);
-    color: rgba(0, 0, 0, 0.8);
-  }
-
-  .dark .liquid-glass-modal-close:hover {
-    background: rgba(255, 255, 255, 0.1);
-    color: rgba(255, 255, 255, 0.9);
-  }
-}
-
 .liquid-glass-modal-close:active {
   transform: scale(0.95);
 }
@@ -1813,41 +1179,25 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   color: #f8fafc;  /* Slate-50 - brightest white */
 }
 
-/* Status variant classes for POS */
-.pos-glass-success {
-  background: var(--pos-status-success);
-  border-color: rgba(16, 185, 129, 0.3);
-}
 
-.pos-glass-warning {
-  background: var(--pos-status-warning);
-  border-color: rgba(245, 158, 11, 0.3);
-}
 
-.pos-glass-error {
-  background: var(--pos-status-error);
-  border-color: rgba(239, 68, 68, 0.3);
-}
+
+
+
 
 .pos-glass-info {
   background: var(--pos-status-info);
   border-color: rgba(113, 113, 122, 0.3);
 }
 
-.pos-glass-pending {
-  background: var(--pos-status-pending);
-  border-color: rgba(249, 115, 22, 0.3);
-}
+
 
 .pos-glass-preparing {
   background: var(--pos-status-preparing);
   border-color: rgba(113, 113, 122, 0.3);
 }
 
-.pos-glass-ready {
-  background: var(--pos-status-ready);
-  border-color: rgba(16, 185, 129, 0.3);
-}
+
 
 /* POS-specific layout classes */
 .pos-glass-grid {
@@ -1958,15 +1308,6 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
     transition: none;
   }
 
-  .pos-glass-interactive:hover,
-  .pos-glass-button:hover,
-  .pos-glass-button-large:hover,
-  .pos-glass-button-xl:hover,
-  .pos-glass-input:hover,
-  .pos-glass-pin-input:hover {
-    transform: none;
-  }
-
   .pos-glass-modal {
     animation: none;
   }
@@ -1981,6 +1322,8 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   }
 
   .pos-fab-halo,
+  .pos-fab-halo::before,
+  .pos-fab-halo::after,
   .pos-fab,
   .pos-fab::before,
   .pos-fab::after,
@@ -2070,17 +1413,6 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   transition: var(--glass-transition);
 }
 
-@media (hover: hover) {
-  .glass-interactive:hover,
-  .pos-glass-button:hover,
-  .pos-glass-button-large:hover,
-  .pos-glass-button-xl:hover,
-  .pos-glass-tab:hover {
-    background: var(--glass-bg-hover);
-    border-color: var(--glass-border-hover);
-  }
-}
-
 .glass-interactive:active,
 .pos-glass-button:active,
 .pos-glass-button-large:active,
@@ -2089,24 +1421,11 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   transform: scale(0.98);
 }
 
-/* Status variants */
-.glass-success {
-  background: rgba(34, 197, 94, 0.15);
-  border: 1px solid rgba(34, 197, 94, 0.3);
-  box-shadow: 0 8px 32px 0 rgba(34, 197, 94, 0.2);
-}
 
-.glass-warning {
-  background: rgba(251, 191, 36, 0.15);
-  border: 1px solid rgba(251, 191, 36, 0.3);
-  box-shadow: 0 8px 32px 0 rgba(251, 191, 36, 0.2);
-}
 
-.glass-error {
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  box-shadow: 0 8px 32px 0 rgba(239, 68, 68, 0.2);
-}
+
+
+
 
 .glass-info {
   background: rgba(113, 113, 122, 0.15);
@@ -2223,7 +1542,7 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 .pos-glass-button-large:focus-visible,
 .pos-glass-button-xl:focus-visible,
 .pos-glass-tab:focus-visible {
-  outline: 2px solid rgba(234, 179, 8, 0.85);
+  outline: 2px solid var(--pos-s-fg);
   outline-offset: 2px;
 }
 
@@ -2237,14 +1556,6 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   .pos-glass-sidebar,
   .pos-glass-modal {
     border-width: 2px;
-  }
-
-  .glass-interactive:hover,
-  .pos-glass-button:hover,
-  .pos-glass-button-large:hover,
-  .pos-glass-button-xl:hover,
-  .pos-glass-tab:hover {
-    border-width: 3px;
   }
 }
 }
@@ -2514,15 +1825,7 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
-.pos-glass-success {
-  background: linear-gradient(135deg,
-      rgba(34, 197, 94, 0.4) 0%,
-      rgba(21, 128, 61, 0.3) 100%);
-  border: 1px solid rgba(34, 197, 94, 0.3);
-  box-shadow:
-    0 8px 32px rgba(34, 197, 94, 0.2),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
-}
+
 
 .pos-glass-info {
   background: linear-gradient(135deg,
@@ -2583,19 +1886,11 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   background: transparent;
 }
 
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: transparent;
-}
-
 .dark .custom-scrollbar::-webkit-scrollbar-track {
   background: transparent;
 }
 
 .dark .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: transparent;
-}
-
-.dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: transparent;
 }
 
@@ -2634,6 +1929,12 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
+/* Founder 31/10: while the start-up intro shows (AppIntro), its logo is on its way to the sign-in logo,
+   so the real one waits hidden until the moving one is on it. */
+html[data-app-intro] [data-login-logo] {
+  opacity: 0 !important;
+}
+
 .pos-login-glow {
   position: absolute;
   inset: -4px;
@@ -2643,6 +1944,24 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   opacity: 0.4;
   pointer-events: none;
   z-index: 0;
+}
+
+/* Founder 31/10: a wrong PIN shakes the PIN field once (it also empties), as the Android till does. */
+.pos-login-shake {
+  animation: pos-login-shake 0.42s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+@keyframes pos-login-shake {
+  10%, 90% { transform: translateX(-1px); }
+  20%, 80% { transform: translateX(3px); }
+  30%, 50%, 70% { transform: translateX(-6px); }
+  40%, 60% { transform: translateX(6px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pos-login-shake {
+    animation: none;
+  }
 }
 
 /* ===== CRISP INGREDIENT TEXT STYLES ===== */
@@ -2674,25 +1993,19 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   text-shadow: 0 0 1px rgba(255, 255, 255, 0.1);
 }
 
-/* Selected payment segments stay black on their yellow slab in both themes. */
+/* Selected payment segments use the kit selection colours in both themes (wave ΣΤ7). */
 .liquid-glass-modal-shell button.split-payment-segment-selected,
 .liquid-glass-modal-shell button.split-payment-segment-selected svg,
 .dark .liquid-glass-modal-shell button.split-payment-segment-selected,
 .dark .liquid-glass-modal-shell button.split-payment-segment-selected svg {
-  color: #000 !important;
+  color: var(--pos-s-sel-fg) !important;
   text-shadow: none !important;
 }
 
-/* Ingredient price text - more vivid green */
+/* Ingredient price text: the kit ok colour (AA on the light and dark surfaces), no glow. */
 .menu-item-customizer-modal .text-green-500 {
-  color: #22c55e !important;  /* Vivid green-500 */
+  color: var(--pos-s-ok) !important;
   font-weight: 600;
-  text-shadow: 0 0 1px rgba(34, 197, 94, 0.3);
-}
-
-.dark .menu-item-customizer-modal .text-green-500 {
-  color: #4ade80 !important;  /* Vivid green-400 for dark */
-  text-shadow: 0 0 2px rgba(74, 222, 128, 0.4);
 }
 
 /* Category color dot text - vivid */
@@ -2735,35 +2048,28 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   text-shadow: 0 0 1px rgba(255, 255, 255, 0.2);
 }
 
-/* Flavor type tabs - vivid active state (on-palette: yellow / amber / grey) */
+/* Flavor type tabs - solid active state (on-palette: yellow / amber / grey), no coloured glow */
 .menu-item-customizer-modal .bg-blue-500 {
   background-color: #eab308 !important;
-  box-shadow: 0 4px 14px rgba(234, 179, 8, 0.4);
 }
 
 .menu-item-customizer-modal .bg-orange-500 {
   background-color: #d97706 !important;
-  box-shadow: 0 4px 14px rgba(217, 119, 6, 0.4);
 }
 
 .menu-item-customizer-modal .bg-pink-500 {
   background-color: #52525b !important;
-  box-shadow: 0 4px 14px rgba(82, 82, 91, 0.4);
 }
 
-/* Red text for "without" items - more vivid */
+/* "Without" items: the kit bad colour (AA on the light and dark surfaces) */
 .menu-item-customizer-modal .text-red-400 {
-  color: #f87171 !important;
+  color: var(--pos-s-bad) !important;
   font-weight: 600;
-}
-
-.dark .menu-item-customizer-modal .text-red-400 {
-  color: #fb7185 !important;  /* Rose-400 */
 }
 
 /* Neutral text for "little" indicator */
 .menu-item-customizer-modal .text-blue-400 {
-  color: #a1a1aa !important;
+  color: var(--pos-s-muted) !important;
   font-weight: 500;
 }
 
@@ -2801,10 +2107,7 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   backface-visibility: hidden;
 }
 
-.dark .glass-crisp-text-layer {
-  background: rgba(15, 23, 42, 0.88);
-  box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.1);
-}
+
 
 /* Modal content with crisp text - keeps glass header visible */
 .liquid-glass-modal-content.glass-crisp-content {
@@ -2816,43 +2119,25 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 .dark .liquid-glass-modal-content.glass-crisp-content {
-  background: rgba(15, 23, 42, 0.92);
+  background: rgba(24, 24, 27, 0.92);
 }
 
-/* Z-report uses a heavier dashboard layout, so keep text crisp while allowing
-   the modal shell and panels to retain a real blurred glass surface. */
+/* Founder 31/10 («δες και το Ζ … όχι μόνο το γυαλί»): the Z is glass like every modal -- the shared
+   frost shell, light rim and one soft shadow (the modal tokens follow the theme). The content layer adds
+   no second frost; its cards are the frost cards (--modal-glass-card). */
 .liquid-glass-modal-shell.z-report-glass-shell {
-  background: rgba(248, 250, 252, 0.74) !important;
-  backdrop-filter: blur(46px) saturate(145%) !important;
-  -webkit-backdrop-filter: blur(46px) saturate(145%) !important;
-  border-color: rgba(202, 138, 4, 0.32);
-  box-shadow:
-    0 28px 90px rgba(15, 23, 42, 0.24),
-    inset 0 1px 0 rgba(255, 255, 255, 0.92);
-}
-
-.dark .liquid-glass-modal-shell.z-report-glass-shell {
-  background: rgba(8, 8, 8, 0.72) !important;
-  backdrop-filter: blur(46px) saturate(145%) !important;
-  -webkit-backdrop-filter: blur(46px) saturate(145%) !important;
-  border-color: rgba(250, 204, 21, 0.26);
-  box-shadow:
-    0 28px 90px rgba(0, 0, 0, 0.48),
-    inset 0 1px 0 rgba(250, 204, 21, 0.12);
+  background: var(--modal-glass) !important;
+  backdrop-filter: blur(40px) saturate(1.15) !important;
+  -webkit-backdrop-filter: blur(40px) saturate(1.15) !important;
+  border-color: var(--modal-glass-border);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.35);
 }
 
 .liquid-glass-modal-content.z-report-glass-content {
-  background: rgba(255, 255, 255, 0.42) !important;
-  backdrop-filter: blur(42px) saturate(145%) !important;
-  -webkit-backdrop-filter: blur(42px) saturate(145%) !important;
-  color: #0f172a;
-}
-
-.dark .liquid-glass-modal-content.z-report-glass-content {
-  background: rgba(0, 0, 0, 0.22) !important;
-  backdrop-filter: blur(42px) saturate(145%) !important;
-  -webkit-backdrop-filter: blur(42px) saturate(145%) !important;
-  color: #ffffff;
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  color: var(--modal-c-content);
 }
 
 /* Ultra crisp text class for important values */
@@ -2888,11 +2173,14 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   text-shadow: none !important;
 }
 
-/* Flat, opaque payment choices match the native POS and retain keyboard focus cues. */
+/* Flat, opaque payment choices match the native POS and retain keyboard focus cues.
+   Founder 31/10: the method icons keep their colours (green cash, blue card, violet split). */
 .liquid-glass-modal-shell button.payment-option-cash {
-  border-color: #dce3eb !important;
-  background: #ffffff !important;
+  border-color: var(--pos-s-border) !important;
+  background: var(--pos-s-surface) !important;
   box-shadow: none;
+  /* The shapes in front in the payment glyphs are filled with the card surface (founder 31/10). */
+  --pay-icon-fill: var(--pos-s-surface);
 }
 
 .liquid-glass-modal-shell .payment-option-cash-icon {
@@ -2900,9 +2188,10 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 .liquid-glass-modal-shell button.payment-option-card {
-  border-color: #dce3eb !important;
-  background: #ffffff !important;
+  border-color: var(--pos-s-border) !important;
+  background: var(--pos-s-surface) !important;
   box-shadow: none;
+  --pay-icon-fill: var(--pos-s-surface);
 }
 
 .liquid-glass-modal-shell .payment-option-card-icon {
@@ -2910,48 +2199,34 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 .liquid-glass-modal-shell button.payment-option-split {
-  border-color: #dce3eb !important;
-  background: #ffffff !important;
+  border-color: var(--pos-s-border) !important;
+  background: var(--pos-s-surface) !important;
   box-shadow: none;
+  --pay-icon-fill: var(--pos-s-surface);
 }
 
 .liquid-glass-modal-shell .payment-option-split-icon {
   color: #7c3aed !important;
 }
-
-@media (hover: hover) and (pointer: fine) {
-  .liquid-glass-modal-shell button.payment-option-cash:hover {
-    border-color: rgba(16, 185, 129, 0.82) !important;
-  }
-
-  .liquid-glass-modal-shell button.payment-option-card:hover {
-    border-color: rgba(37, 99, 235, 0.82) !important;
-  }
-
-  .liquid-glass-modal-shell button.payment-option-split:hover {
-    border-color: rgba(124, 58, 237, 0.82) !important;
-  }
+/* The split glyph: its top half in the cash green, its torn half in the card blue (founder 31/10). */
+.liquid-glass-modal-shell .payment-option-split-icon {
+  --pay-split-a: #10b981;
+  --pay-split-b: #2563eb;
 }
 
-.liquid-glass-modal-shell button.payment-option-cash:focus-visible {
-  outline: 3px solid rgba(16, 185, 129, 0.42);
-  outline-offset: 3px;
-}
-
-.liquid-glass-modal-shell button.payment-option-card:focus-visible {
-  outline: 3px solid rgba(37, 99, 235, 0.42);
-  outline-offset: 3px;
-}
-
+/* Wave ΣΤ4: the kit focus outline (solid fg), not a coloured translucent ring. */
+.liquid-glass-modal-shell button.payment-option-cash:focus-visible,
+.liquid-glass-modal-shell button.payment-option-card:focus-visible,
 .liquid-glass-modal-shell button.payment-option-split:focus-visible {
-  outline: 3px solid rgba(124, 58, 237, 0.42);
+  outline: 3px solid var(--pos-s-fg);
   outline-offset: 3px;
 }
 
 .dark .liquid-glass-modal-shell button.payment-option-cash {
-  border-color: #475569 !important;
-  background: #1e293b !important;
+  border-color: var(--pos-s-border) !important;
+  background: var(--pos-s-surface-2) !important;
   box-shadow: none;
+  --pay-icon-fill: var(--pos-s-surface-2);
 }
 
 .dark .liquid-glass-modal-shell .payment-option-cash-icon {
@@ -2959,9 +2234,10 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 .dark .liquid-glass-modal-shell button.payment-option-card {
-  border-color: #475569 !important;
-  background: #1e293b !important;
+  border-color: var(--pos-s-border) !important;
+  background: var(--pos-s-surface-2) !important;
   box-shadow: none;
+  --pay-icon-fill: var(--pos-s-surface-2);
 }
 
 .dark .liquid-glass-modal-shell .payment-option-card-icon {
@@ -2969,13 +2245,18 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 .dark .liquid-glass-modal-shell button.payment-option-split {
-  border-color: #475569 !important;
-  background: #1e293b !important;
+  border-color: var(--pos-s-border) !important;
+  background: var(--pos-s-surface-2) !important;
   box-shadow: none;
+  --pay-icon-fill: var(--pos-s-surface-2);
 }
 
 .dark .liquid-glass-modal-shell .payment-option-split-icon {
   color: #c084fc !important;
+}
+.dark .liquid-glass-modal-shell .payment-option-split-icon {
+  --pay-split-a: #34d399;
+  --pay-split-b: #60a5fa;
 }
 
 .liquid-glass-modal-shell .tip-recipient-icon-waiter {
@@ -3001,25 +2282,352 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 .dark .liquid-glass-modal-shell .tip-recipient-icon-driver {
   color: #fcd34d !important;
 }
-.bulk-action-reset {
-  background: #0ea5e9 !important;
-  border-color: #0284c7 !important;
-  color: #ffffff !important;
-  box-shadow: 0 10px 24px rgba(14, 165, 233, 0.28) !important;
+/* Wave ΣΤ2: the bulk RESET button is the kit's yellow primary (BulkActionsBar), no sky fill or glow. */
 }
 
-.bulk-action-reset:active {
-  background: #0284c7 !important;
+/* ------------------------------------------------------------------------
+   Motion (UI audit 30/10/2026): one set of short timings for the whole till.
+   CSS only, never awaited by code: a sale, payment or print never waits for
+   an animation. Short (150-250 ms), ease-out, no overshoot and no loops.
+   Under Windows "reduce motion" everything here is off.
+   ------------------------------------------------------------------------ */
+:root {
+  --pos-motion-fast: 150ms;
+  --pos-motion-base: 180ms;
+  --pos-motion-slow: 240ms;
+  --pos-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-.dark .bulk-action-reset {
-  background: #38bdf8 !important;
-  border-color: #7dd3fc !important;
-  color: #082f49 !important;
-  box-shadow: 0 10px 24px rgba(3, 105, 161, 0.34) !important;
+@keyframes pos-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
 }
 
-.dark .bulk-action-reset:active {
-  background: #7dd3fc !important;
+/* A section, step or opened group appearing. */
+.pos-enter {
+  animation: pos-enter var(--pos-motion-base) var(--pos-ease) both;
 }
+
+/* Cards in a list appear one after another: 30 ms apart, at most 8 steps. */
+.pos-enter-stagger > * {
+  animation: pos-enter var(--pos-motion-base) var(--pos-ease) both;
 }
+.pos-enter-stagger > *:nth-child(2) { animation-delay: 30ms; }
+.pos-enter-stagger > *:nth-child(3) { animation-delay: 60ms; }
+.pos-enter-stagger > *:nth-child(4) { animation-delay: 90ms; }
+.pos-enter-stagger > *:nth-child(5) { animation-delay: 120ms; }
+.pos-enter-stagger > *:nth-child(6) { animation-delay: 150ms; }
+.pos-enter-stagger > *:nth-child(7) { animation-delay: 180ms; }
+.pos-enter-stagger > *:nth-child(n + 8) { animation-delay: 210ms; }
+
+/* A save that succeeded: a short check pulse on the button itself. */
+@keyframes pos-saved-pulse {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.03); }
+  100% { transform: scale(1); }
+}
+.pos-saved {
+  animation: pos-saved-pulse var(--pos-motion-slow) var(--pos-ease);
+}
+
+/* A total or count that changed: the new value fades in. The element is keyed by
+   its value (ChangingValue), so only a real change replays it. */
+@keyframes pos-value-in {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+.pos-value {
+  animation: pos-value-in var(--pos-motion-fast) var(--pos-ease);
+}
+
+/* Keyboard focus ring: amber-700 on light surfaces (5:1), yellow-400 on dark. */
+:root {
+  --pos-focus-ring: #b45309;
+}
+html.dark {
+  --pos-focus-ring: #facc15;
+}
+
+/* Press and focus feedback for every control (UI audit wave 5).
+   The tills are touch screens (founder 30/10/2026): no hover effects, because a tapped
+   control keeps :hover until the next tap elsewhere. Press shows on touch: Chromium
+   holds :active for at least 150 ms on a tap, the global tap highlight is transparent
+   and touch-action: manipulation answers a tap at once.
+   In the base layer, so a control's own Tailwind active:/focus: classes win and keep
+   their look. Visual only: the click fires on the same press as before and nothing
+   waits for it. A control opts out with data-press="off"; dragged items and the glass
+   classes that already press with their own transform are left alone. */
+@layer base {
+  :where(button, [role='button'], [role='tab'], [role='switch'], [role='radio'], [role='checkbox'], [role='menuitem'], [role='option'], a[href], summary) {
+    touch-action: manipulation;
+    transition-property: scale, filter, color, background-color, border-color, box-shadow, opacity;
+    transition-duration: var(--pos-motion-fast, 150ms);
+    transition-timing-function: var(--pos-ease, cubic-bezier(0.2, 0.8, 0.2, 1));
+  }
+
+  :where(button, [role='button'], [role='tab'], [role='switch'], [role='radio'], [role='checkbox'], [role='menuitem'], [role='option'], a[href], summary):not(:disabled, [aria-disabled='true'], [data-press='off'], [draggable='true'], .glass-button, .glass-fab, .pos-fab-halo, .pos-fab-halo *, .pos-fab, .glass-interactive, .pos-glass-interactive, .pos-glass-button, .pos-glass-button-large, .pos-glass-button-xl, .pos-glass-tab, .liquid-glass-modal-button, .liquid-glass-modal-icon-button, .liquid-glass-modal-close):active,
+  /* Touch: utils/press-feedback.ts marks the control from touch-down (WebView2 sets
+     :active only on release). Glass classes included; at release their own :active wins. */
+  :where(button, [role='button'], [role='tab'], [role='switch'], [role='radio'], [role='checkbox'], [role='menuitem'], [role='option'], a[href], summary)[data-pressed]:not(:active, :disabled, [aria-disabled='true'], [data-press='off'], [draggable='true'], .pos-fab-halo, .pos-fab-halo *, .pos-fab) {
+    scale: 0.97;
+    filter: brightness(0.94);
+  }
+
+  :where(button, [role='button'], [role='tab'], [role='switch'], [role='radio'], [role='checkbox'], [role='menuitem'], [role='option'], a[href], summary):focus-visible {
+    outline: 2px solid var(--pos-focus-ring, #b45309);
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The global rule shortens durations but keeps delays; switch these off fully. */
+  .pos-enter,
+  .pos-enter-stagger > *,
+  .pos-saved,
+  .pos-value {
+    animation: none !important;
+  }
+
+  /* A press still changes colour but nothing moves: no scale anywhere, including the
+     Tailwind active:scale-* classes and the glass classes' own press transform. */
+  :active,
+  [data-pressed] {
+    scale: none !important;
+  }
+  .glass-button:active,
+  .glass-fab:active,
+  .glass-interactive:active,
+  .pos-glass-interactive:active,
+  .pos-glass-button:active,
+  .pos-glass-button-large:active,
+  .pos-glass-button-xl:active,
+  .pos-glass-input:active,
+  .pos-glass-pin-input:active,
+  .pos-glass-tab:active,
+  .liquid-glass-modal-button:active,
+  .liquid-glass-modal-icon-button:active,
+  .liquid-glass-modal-close:active {
+    transform: none !important;
+  }
+}
+
+/* Glass layer (founder 30/10): inside a modal, or a portaled glass panel, the kit's surfaces
+   are frosted like the shell; controls keep the kit's solid colours. */
+.pos-glass-scrim { background: var(--modal-backdrop); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+.pos-glass-panel { border-color: var(--modal-glass-border); background: var(--modal-glass); backdrop-filter: blur(40px) saturate(1.15); -webkit-backdrop-filter: blur(40px) saturate(1.15); }
+.pos-glass-footer { border-color: var(--modal-glass-line); background: var(--modal-glass-card); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+:is(.liquid-glass-modal-shell, .pos-glass-panel) :is(.pos-group, .pos-card, .pos-seg, .pos-checks, .pos-choice-card:not(.is-selected), .pos-choice-row:not(.is-selected)) { border-color: var(--modal-glass-card-border); background: var(--modal-glass-card); }
+/* A status card keeps its own words colour (tone) and frosts only inside a glass modal (Health, founder 31/10). */
+:is(.liquid-glass-modal-shell, .pos-glass-panel) .pos-frost { border-color: var(--modal-glass-card-border); background: var(--modal-glass-card); }
+/* pos-shell-glow:start — Founder 31/10 («ο κρυφός φωτισμός που είχαν τα navbar και το κεντρικό τετράγωνο
+   μου άρεσε»): the warm light behind the navigation rail and the main content panel, exactly as before
+   Wave ΣΤ1 (4e200e17a). Static shadows on two fixed shells: painted once, nothing animates or repaints
+   while lists scroll inside. The one coloured glow the solid UI guard allows, and only inside this block. */
+.pos-shell-glow-nav { box-shadow: 0 8px 32px 0 rgba(255, 221, 0, 0.34); border-color: rgba(253, 230, 138, 0.7); }
+.dark .pos-shell-glow-nav { box-shadow: 0 8px 32px 0 rgba(255, 221, 0, 0.6); border-color: rgba(251, 191, 36, 0.25); }
+.pos-shell-glow-panel { box-shadow: 0 0 64px rgba(255, 221, 0, 0.34), 0 10px 36px rgba(15, 23, 42, 0.08); border-color: rgba(253, 230, 138, 0.7); }
+.dark .pos-shell-glow-panel { box-shadow: 0 0 80px rgba(255, 221, 0, 0.58), 0 0 120px rgba(255, 238, 88, 0.36); border-color: rgba(251, 191, 36, 0.25); }
+/* pos-shell-glow:end */
+/* Founder 31/10: a customizable menu product glows in the brand yellow from its edges inward and fades
+   out towards the middle, like a neon behind glass. Opaque yellow; the blur of the inset shadow is the fade. */
+.pos-neon-card { border-color: #facc15 !important; box-shadow: inset 0 0 3px #facc15, inset 0 0 16px #facc15; }
+.dark .pos-neon-card { box-shadow: inset 0 0 3px #facc15, inset 0 0 20px #facc15; }
+:is(.liquid-glass-modal-shell, .pos-glass-panel) :is(.pos-row, .pos-disclosure, .pos-queue__list, .pos-queue__foot, .pos-queue__empty, .pos-queue__list > li + li) { border-color: var(--modal-glass-line); }
+/* Wave 7Δ2: the unsaved-changes bar sticks over scrolling rows, so it is opaque (frost let the rows under it read through). */
+:is(.liquid-glass-modal-shell, .pos-glass-panel) .pos-dirty-foot { border-color: var(--modal-glass-line); background: var(--modal-surface); box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.08); }
+:is(.liquid-glass-modal-shell, .pos-glass-panel) .pos-rail-item.is-active { background: var(--modal-glass-selected); }
+
+/* ------------------------------------------------------------------------
+   Solid settings kit (UI audit wave 7, founder-approved 30/10/2026).
+   Opaque surfaces, 1px borders, one solid yellow primary per screen, the
+   selected option in the brand yellow with dark words (founder 31/10; it was an
+   inverted neutral fill), status as a dot plus words.
+   Touch only: no hover; press and focus come from the shared base rule above.
+   Components: components/settings/SettingsKit.tsx.
+   ------------------------------------------------------------------------ */
+:root {
+  --pos-s-surface: #ffffff;
+  --pos-s-surface-2: #f4f4f5;
+  --pos-s-fg: #18181b;
+  --pos-s-muted: #3f3f46;
+  --pos-s-border: #d4d4d8;
+  --pos-s-control: #71717a;
+  /* Selection (founder 31/10): the brand yellow with dark words in both themes, never black. */
+  --pos-s-sel-bg: #facc15;
+  --pos-s-sel-fg: #18181b;
+  --pos-s-yellow: #facc15;
+  --pos-s-yellow-fg: #18181b;
+  --pos-s-ok: #15803d;
+  --pos-s-warn: #b45309;
+  --pos-s-bad: #b91c1c;
+  --pos-s-ok-bg: #dcfce7;
+  --pos-s-warn-bg: #fef3c7;
+  --pos-s-bad-bg: #fee2e2;
+  /* The open-section bar: the bright brand yellow in both themes (founder 30/10). */
+  --pos-s-bar: #facc15;
+}
+html.dark {
+  --pos-s-surface: #18181b;
+  --pos-s-surface-2: #27272a;
+  --pos-s-fg: #fafafa;
+  --pos-s-muted: #a1a1aa;
+  --pos-s-border: #3f3f46;
+  --pos-s-control: #71717a;
+  --pos-s-sel-bg: #facc15;
+  --pos-s-sel-fg: #18181b;
+  --pos-s-ok: #4ade80;
+  --pos-s-warn: #fbbf24;
+  --pos-s-bad: #f87171;
+  --pos-s-ok-bg: #052e16;
+  --pos-s-warn-bg: #451a03;
+  --pos-s-bad-bg: #450a0a;
+  --pos-s-bar: #facc15;
+}
+
+.pos-solid-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--pos-s-control);
+  border-radius: 12px;
+  background: var(--pos-s-surface);
+  color: var(--pos-s-fg);
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.pos-solid-btn--md { min-height: 48px; padding: 0 20px; font-size: 16px; }
+.pos-solid-btn--sm { min-height: 44px; padding: 0 16px; font-size: 15px; }
+.pos-solid-btn--primary { background: var(--pos-s-yellow); border-color: var(--pos-s-yellow); color: var(--pos-s-yellow-fg); }
+.pos-solid-btn--danger { color: var(--pos-s-bad); }
+.pos-solid-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Wave 7Ε: long labels in grid cells (recovery actions, every language) wrap instead of spilling. */
+.pos-solid-btn--wrap { white-space: normal; text-align: center; padding-top: 8px; padding-bottom: 8px; }
+
+.pos-group { overflow: hidden; border: 1px solid var(--pos-s-border); border-radius: 16px; background: var(--pos-s-surface); color: var(--pos-s-fg); }
+.pos-group__head { padding: 14px 20px 6px; }
+.pos-group__title { margin: 0; font-size: 16px; font-weight: 650; }
+.pos-group__desc { margin: 2px 0 0; font-size: 14px; color: var(--pos-s-muted); }
+.pos-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 60px; padding: 10px 20px; border-top: 1px solid var(--pos-s-border); }
+.pos-group > .pos-row:first-child, .pos-group__head + .pos-row { border-top: 0; }
+.pos-row__label { display: flex; min-width: 0; flex-direction: column; }
+.pos-row__title { font-size: 16px; font-weight: 600; }
+.pos-row__help { font-size: 14px; color: var(--pos-s-muted); }
+.pos-row__control { display: flex; flex: none; align-items: center; gap: 12px; }
+.pos-row--stack { flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 8px; }
+.pos-row__label .pos-status { margin-top: 6px; font-size: 14px; }
+
+.pos-seg { display: flex; flex-wrap: wrap; gap: 4px; min-height: 52px; padding: 4px; border: 1px solid var(--pos-s-control); border-radius: 12px; background: var(--pos-s-surface-2); }
+.pos-seg__opt { display: inline-flex; flex: 1; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 12px; white-space: nowrap; border: 0; border-radius: 8px; background: transparent; color: var(--pos-s-fg); font-size: 15px; font-weight: 500; }
+.pos-seg--grid { display: grid; grid-template-columns: repeat(var(--pos-seg-cols, 3), minmax(0, 1fr)); }
+@media (max-width: 640px) { .pos-seg--grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.pos-seg__opt.is-selected { background: var(--pos-s-sel-bg); color: var(--pos-s-sel-fg); font-weight: 650; }
+.pos-seg__opt:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.pos-checks { overflow: hidden; border: 1px solid var(--pos-s-control); border-radius: 12px; background: var(--pos-s-surface); }
+.pos-check { display: flex; width: 100%; align-items: center; gap: 12px; min-height: 48px; padding: 0 16px; border: 0; border-top: 1px solid var(--pos-s-border); background: transparent; color: var(--pos-s-fg); font-size: 16px; font-weight: 500; text-align: start; }
+.pos-check:first-child { border-top: 0; }
+.pos-check__box { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 22px; height: 22px; border: 2px solid var(--pos-s-control); border-radius: 6px; }
+.pos-check.is-checked .pos-check__box { border-color: var(--pos-s-sel-bg); background: var(--pos-s-sel-bg); }
+.pos-check.is-checked .pos-check__box::after { content: ""; width: 10px; height: 5px; border-bottom: 2.5px solid var(--pos-s-sel-fg); border-left: 2.5px solid var(--pos-s-sel-fg); transform: translateY(-1px) rotate(-45deg); }
+.pos-check__hint { margin-inline-start: auto; font-size: 14px; color: var(--pos-s-muted); }
+.pos-check:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.pos-status { display: inline-flex; align-items: center; gap: 8px; color: var(--pos-s-fg); font-weight: 600; }
+.pos-status__dot { width: 10px; height: 10px; flex: none; border-radius: 50%; background: var(--pos-s-control); }
+.pos-status--ok .pos-status__dot { background: var(--pos-s-ok); }
+.pos-status--warn .pos-status__dot { background: var(--pos-s-warn); }
+.pos-status--bad .pos-status__dot { background: var(--pos-s-bad); }
+
+.pos-badge { display: inline-flex; align-items: center; min-height: 26px; padding: 0 10px; border: 1px solid var(--pos-s-border); border-radius: 999px; background: var(--pos-s-surface-2); color: var(--pos-s-fg); font-size: 14px; font-weight: 600; }
+.pos-badge--tap { min-height: 44px; padding: 0 14px; }
+.pos-badge--ok { border-color: transparent; background: var(--pos-s-ok-bg); color: var(--pos-s-ok); }
+.pos-badge--warn { border-color: transparent; background: var(--pos-s-warn-bg); color: var(--pos-s-warn); }
+.pos-badge--bad { border-color: transparent; background: var(--pos-s-bad-bg); color: var(--pos-s-bad); }
+
+.pos-disclosure { border-top: 1px solid var(--pos-s-border); }
+.pos-disclosure__toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; min-height: 56px; padding: 0 20px; border: 0; background: transparent; color: var(--pos-s-fg); font-size: 16px; font-weight: 600; text-align: start; }
+.pos-disclosure__chevron { width: 20px; height: 20px; flex: none; transition: rotate var(--pos-motion-fast, 150ms) var(--pos-ease, ease-out); }
+.pos-disclosure.is-open .pos-disclosure__chevron { rotate: 180deg; }
+.pos-disclosure__body { display: flex; flex-direction: column; gap: 12px; padding: 4px 20px 16px; }
+
+.pos-dirty-foot { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 20px; border-top: 1px solid var(--pos-s-border); background: var(--pos-s-surface); }
+.pos-dirty-foot__note { color: var(--pos-s-muted); font-size: 15px; }
+.pos-dirty-foot__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 12px; }
+
+/* The shared modal button's variants (liquidGlassModalButton): unlayered, so they win
+   over the layered .liquid-glass-modal-button surface in both themes. */
+.liquid-glass-modal-button.pos-modal-primary { border-color: var(--pos-s-yellow); background: var(--pos-s-yellow); color: var(--pos-s-yellow-fg); }
+.liquid-glass-modal-button.pos-modal-primary:active { background: #eab308; }
+.liquid-glass-modal-button.pos-modal-danger { color: var(--pos-s-bad); }
+
+/* Solid settings surfaces (founder 30/10: no translucent washes anywhere in Settings). */
+.pos-choice-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 56px; padding: 6px 12px; border: 1px solid var(--pos-s-border); border-radius: 12px; background: var(--pos-s-surface); }
+/* Wave 7Ε: the selected row reads like the kit choice card; the radio is the kit one (dark ring, yellow centre). */
+.pos-choice-row.is-selected { padding: 5px 11px; border: 2px solid var(--pos-s-sel-bg); background: var(--pos-s-surface-2); }
+.pos-radio { appearance: none; -webkit-appearance: none; display: inline-grid; flex: none; place-content: center; width: 24px; height: 24px; margin: 0; border: 2px solid var(--pos-s-control); border-radius: 50%; background: var(--pos-s-surface); }
+.pos-radio:checked { border-color: var(--pos-s-fg); background: var(--pos-s-bar); box-shadow: inset 0 0 0 4px var(--pos-s-surface); }
+.pos-radio:focus-visible { outline: 3px solid var(--pos-s-fg); outline-offset: 2px; }
+.pos-radio:disabled { opacity: 0.5; }
+.pos-card { border: 1px solid var(--pos-s-border); border-radius: 16px; background: var(--pos-s-surface); color: var(--pos-s-fg); }
+.pos-notice { display: flex; align-items: flex-start; gap: 12px; padding: 12px 16px; border: 1px solid var(--pos-s-border); border-radius: 12px; background: var(--pos-s-surface-2); color: var(--pos-s-fg); }
+.pos-notice--warn { border-color: var(--pos-s-warn); background: var(--pos-s-warn-bg); }
+.pos-notice--stack { flex-direction: column; }
+.pos-notice--row { flex-wrap: wrap; align-items: center; justify-content: space-between; }
+.pos-notice--bad { border-color: var(--pos-s-bad); background: var(--pos-s-bad-bg); }
+.pos-notice--bad .pos-notice__icon { color: var(--pos-s-bad); }
+.pos-notice__icon { flex: none; margin-top: 2px; color: var(--pos-s-warn); }
+
+/* Settings rail (wave 7B): plain 48 px rows with a neutral icon and no subtitle; the open
+   section is a solid fill, a heavier label and a yellow bar at the start edge. */
+.pos-rail-group { padding: 10px 12px 4px; color: var(--pos-s-muted); font-size: 13px; font-weight: 600; }
+.pos-rail-item { position: relative; display: flex; width: 100%; align-items: center; gap: 12px; min-height: 48px; padding: 6px 12px 6px 16px; border: 0; border-radius: 12px; background: transparent; color: var(--pos-s-fg); font-size: 15px; font-weight: 500; text-align: start; }
+.pos-rail-item__icon { width: 20px; height: 20px; flex: none; color: var(--pos-s-muted); }
+.pos-rail-item__label { min-width: 0; overflow-wrap: anywhere; line-height: 1.25; }
+.pos-rail-item:active, .pos-rail-item[data-pressed] { background: var(--pos-s-surface-2); }
+.pos-rail-item.is-active { background: var(--modal-control-bg-active); font-weight: 650; }
+.pos-rail-item.is-active .pos-rail-item__icon { color: var(--pos-s-fg); }
+.pos-rail-item.is-active::before { content: ""; position: absolute; inset-block: 10px; inset-inline-start: 0; width: 4px; border-radius: 4px; background: var(--pos-s-bar); }
+
+/* Section title in the detail pane: the same words as the rail row. */
+.pos-pane-head { padding: 2px 4px 4px; }
+.pos-pane-title { margin: 0; color: var(--pos-s-fg); font-size: 20px; font-weight: 650; }
+.pos-pane-intro { margin: 2px 0 0; color: var(--pos-s-muted); font-size: 15px; }
+
+/* Print queue (wave 7A2): one solid group, one row per job, details behind plain text. */
+.pos-notice--ok { border-color: var(--pos-s-ok); background: var(--pos-s-ok-bg); }
+.pos-notice__details { margin: 0; padding-top: 8px; border-top: 1px solid var(--pos-s-border); font-size: 14px; overflow-wrap: anywhere; }
+.pos-text-disclosure { display: inline-flex; align-self: flex-start; align-items: center; gap: 4px; min-height: 44px; padding: 0 4px; border: 0; background: transparent; color: var(--pos-s-fg); font-size: 14px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+.pos-queue__counts { margin: 6px 0 0; color: var(--pos-s-muted); font-size: 14px; }
+.pos-queue__notice { margin: 0 20px 12px; }
+.pos-queue__issue { flex-wrap: wrap; align-items: center; gap: 0 8px; margin-top: 6px; padding: 2px 12px; }
+.pos-queue__issue .pos-notice__icon { margin-top: 0; }
+.pos-queue__issue .pos-notice__details { flex-basis: 100%; margin-bottom: 8px; }
+.pos-queue__empty { margin: 0; padding: 16px 20px; border-top: 1px solid var(--pos-s-border); color: var(--pos-s-muted); font-size: 15px; }
+.pos-queue__list { max-height: 24rem; margin: 0; padding: 0; overflow-y: auto; border-top: 1px solid var(--pos-s-border); list-style: none; scrollbar-width: none; }
+.pos-queue__list::-webkit-scrollbar { display: none; }
+.pos-queue__list > li + li { border-top: 1px solid var(--pos-s-border); }
+.pos-job { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px 16px; padding: 12px 20px; }
+.pos-job__main { display: flex; min-width: 0; flex: 1 1 320px; flex-direction: column; gap: 4px; }
+.pos-job__title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; }
+.pos-job__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.pos-queue__foot { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--pos-s-border); color: var(--pos-s-muted); font-size: 14px; }
+
+/* Kit buttons: pressed and disabled states (press scale comes from the shared base rule). */
+.pos-solid-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.pos-solid-btn:not(.pos-solid-btn--primary):active { background: var(--pos-s-surface-2); }
+.pos-solid-btn--primary:active { border-color: #eab308; background: #eab308; }
+/* Options that are buttons (wave 7A2): a small option and a card option. Selected = the kit
+   selection (yellow, founder 31/10); a card shows a strong yellow outline on a raised fill. */
+.pos-choice { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 16px; border: 1px solid var(--pos-s-control); border-radius: 12px; background: var(--pos-s-surface); color: var(--pos-s-fg); font-size: 15px; font-weight: 600; }
+.pos-choice.is-selected { border-color: var(--pos-s-sel-bg); background: var(--pos-s-sel-bg); color: var(--pos-s-sel-fg); }
+.pos-choice:disabled, .pos-choice-card:disabled { opacity: 0.5; cursor: not-allowed; }
+.pos-choice-card { display: block; width: 100%; min-height: 56px; padding: 12px 16px; border: 1px solid var(--pos-s-border); border-radius: 16px; background: var(--pos-s-surface); color: var(--pos-s-fg); text-align: start; }
+.pos-choice-card--row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; }
+.pos-choice-card.is-selected { padding: 11px 15px; border: 2px solid var(--pos-s-sel-bg); background: var(--pos-s-surface-2); }
+/* Icon-only kit button: a 44 px square, neutral; danger = red icon. */
+.pos-icon-btn { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 44px; height: 44px; border: 1px solid var(--pos-s-control); border-radius: 12px; background: var(--pos-s-surface); color: var(--pos-s-fg); }
+.pos-icon-btn--danger { color: var(--pos-s-bad); }
+.pos-icon-btn:active { background: var(--pos-s-surface-2); }
+.pos-icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }

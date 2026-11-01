@@ -55,7 +55,7 @@ export function showMissedPlatformOrdersNotice(result: MissedPlatformOrdersResul
         data-testid="missed-platform-orders-notice"
         role="alert"
         aria-live="assertive"
-        className={`pointer-events-auto w-[min(26rem,calc(100vw-2rem))] rounded-2xl border border-red-200 bg-white p-4 text-sm text-gray-900 shadow-2xl transition-opacity dark:border-red-400/30 dark:bg-gray-900 dark:text-white ${instance.visible ? 'opacity-100' : 'opacity-0'}`}
+        className={`pointer-events-auto w-[min(26rem,calc(100vw-2rem))] rounded-2xl border border-red-200 bg-white p-4 text-sm text-gray-900 shadow-2xl transition-opacity dark:border-zinc-700 dark:bg-gray-900 dark:text-white ${instance.visible ? 'opacity-100' : 'opacity-0'}`}
       >
         <div className="flex items-start gap-3">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-300" aria-hidden="true" />
@@ -66,7 +66,7 @@ export function showMissedPlatformOrdersNotice(result: MissedPlatformOrdersResul
               <button
                 type="button"
                 data-testid="missed-platform-orders-notice-dismiss"
-                className="min-h-touch rounded-full border border-gray-300 px-4 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-red-400 dark:border-white/20 dark:text-gray-100 dark:hover:bg-white/10"
+                className="min-h-touch rounded-full border border-gray-300 px-4 py-1.5 text-xs font-semibold text-gray-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-red-400 dark:border-white/20 dark:text-gray-100 "
                 onClick={() => toast.dismiss(instance.id)}
               >
                 {t('missedPlatformOrders.dismiss', { defaultValue: 'OK' })}

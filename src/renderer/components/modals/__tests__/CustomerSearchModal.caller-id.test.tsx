@@ -104,6 +104,7 @@ vi.mock('../../ui/pos-glass-components', () => ({
     children,
     title,
     header,
+    footer,
     ariaLabel,
   }: {
     isOpen: boolean
@@ -111,6 +112,7 @@ vi.mock('../../ui/pos-glass-components', () => ({
     children: React.ReactNode
     title?: string
     header?: React.ReactNode
+    footer?: React.ReactNode
     ariaLabel?: string
   }) {
     if (!isOpen || !mocks.renderModalContent) return null
@@ -124,6 +126,8 @@ vi.mock('../../ui/pos-glass-components', () => ({
         />
         {header}
         {children}
+        {/* The add-customer form keeps its actions in the modal footer (founder 31/10). */}
+        {footer}
       </div>
     )
   },
@@ -630,7 +634,7 @@ describe('CustomerSearchModal Caller ID lookup', () => {
       { target: { value: 'Ringer Street 5' } },
     )
     fireEvent.change(
-      screen.getByPlaceholderText('modals.addCustomer.nameOnRingerPlaceholder'),
+      screen.getByLabelText('modals.addCustomer.nameOnRingerLabel', { exact: false }),
       { target: { value: '  Bell  ' } },
     )
     fireEvent.change(screen.getByLabelText('modals.addCustomer.floorLabel'), {
@@ -674,7 +678,7 @@ describe('CustomerSearchModal Caller ID lookup', () => {
     fireEvent.change(screen.getByPlaceholderText('modals.addCustomer.manualAddressPlaceholder'), {
       target: { value: 'Locked Street 1' },
     })
-    fireEvent.change(screen.getByPlaceholderText('modals.addCustomer.nameOnRingerPlaceholder'), {
+    fireEvent.change(screen.getByLabelText('modals.addCustomer.nameOnRingerLabel', { exact: false }), {
       target: { value: 'Bell' },
     })
     fireEvent.change(screen.getByLabelText('modals.addCustomer.floorLabel'), {
@@ -726,7 +730,7 @@ describe('CustomerSearchModal Caller ID lookup', () => {
       fireEvent.change(screen.getByPlaceholderText('modals.addCustomer.manualAddressPlaceholder'), {
         target: { value: 'Timeout Street 1' },
       })
-      fireEvent.change(screen.getByPlaceholderText('modals.addCustomer.nameOnRingerPlaceholder'), {
+      fireEvent.change(screen.getByLabelText('modals.addCustomer.nameOnRingerLabel', { exact: false }), {
         target: { value: 'Bell' },
       })
       fireEvent.change(screen.getByLabelText('modals.addCustomer.floorLabel'), { target: { value: '2' } })
