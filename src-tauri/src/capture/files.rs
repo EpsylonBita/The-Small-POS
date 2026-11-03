@@ -84,6 +84,125 @@ pub struct WrittenPage {
     pub mime: String,
 }
 
+struct CaptureLifecycle {
+    busy: std::sync::Mutex<bool>,
+    available: std::sync::Condvar,
+}
+
+/// Owned (Send) guard: async callers obtain it on the blocking pool before
+/// taking a DB mutex. File replacement/discard shares this per-capture fence.
+pub(crate) struct CaptureLifecycleGuard {
+    capture_id: String,
+    lifecycle: std::sync::Arc<CaptureLifecycle>,
+}
+
+impl Drop for CaptureLifecycleGuard {
+    fn drop(&mut self) {
+        *self
+            .lifecycle
+            .busy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = false;
+        self.lifecycle.available.notify_one();
+    }
+}
+
+fn lifecycle(
+    app_data_dir: &Path,
+    capture_id: &str,
+) -> Result<std::sync::Arc<CaptureLifecycle>, String> {
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    static CAPTURES: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<CaptureLifecycle>>>> =
+        OnceLock::new();
+    sanitize_path_segment("capture_id", capture_id)?;
+    // Resolve the store before admission, so identical capture ids in separate
+    // stores neither block nor bypass each other's lifecycle fence.
+    let key = captures_root(app_data_dir)?.join(capture_id);
+    #[cfg(windows)]
+    let key = PathBuf::from(key.to_string_lossy().to_ascii_lowercase());
+    let mut captures = CAPTURES
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "Capture lifecycle unavailable")?;
+    captures.retain(|_, value| value.strong_count() > 0);
+    Ok(captures
+        .entry(key.clone())
+        .or_default()
+        .upgrade()
+        .unwrap_or_else(|| {
+            let lifecycle = Arc::new(CaptureLifecycle {
+                busy: Mutex::new(false),
+                available: std::sync::Condvar::new(),
+            });
+            captures.insert(key, Arc::downgrade(&lifecycle));
+            lifecycle
+        }))
+}
+
+pub(crate) fn lock_lifecycle(
+    app_data_dir: &Path,
+    capture_id: &str,
+) -> Result<CaptureLifecycleGuard, String> {
+    let lifecycle = lifecycle(app_data_dir, capture_id)?;
+    let mut busy = lifecycle
+        .busy
+        .lock()
+        .map_err(|_| "Capture lifecycle unavailable")?;
+    while *busy {
+        busy = lifecycle
+            .available
+            .wait(busy)
+            .map_err(|_| "Capture lifecycle unavailable")?;
+    }
+    *busy = true;
+    drop(busy);
+    Ok(CaptureLifecycleGuard {
+        capture_id: capture_id.to_owned(),
+        lifecycle,
+    })
+}
+
+pub(crate) fn try_lock_lifecycle(
+    app_data_dir: &Path,
+    capture_id: &str,
+) -> Result<Option<CaptureLifecycleGuard>, String> {
+    let lifecycle = lifecycle(app_data_dir, capture_id)?;
+    let mut busy = lifecycle
+        .busy
+        .lock()
+        .map_err(|_| "Capture lifecycle unavailable")?;
+    if *busy {
+        return Ok(None);
+    }
+    *busy = true;
+    drop(busy);
+    Ok(Some(CaptureLifecycleGuard {
+        capture_id: capture_id.to_owned(),
+        lifecycle,
+    }))
+}
+
+pub(crate) async fn lock_lifecycle_async(
+    app_data_dir: PathBuf,
+    capture_id: String,
+) -> Result<std::sync::Arc<CaptureLifecycleGuard>, String> {
+    tokio::task::spawn_blocking(move || {
+        lock_lifecycle(&app_data_dir, &capture_id).map(std::sync::Arc::new)
+    })
+    .await
+    .map_err(|e| format!("capture lifecycle task failed: {e}"))?
+}
+
+impl CaptureLifecycleGuard {
+    pub(crate) fn check(&self, capture_id: &str) -> Result<(), String> {
+        if self.capture_id == capture_id {
+            Ok(())
+        } else {
+            Err("Capture lifecycle mismatch".into())
+        }
+    }
+}
+
 /// Reject any path segment that is not a plain `[A-Za-z0-9_-]` token.
 ///
 /// Lifted verbatim in behavior from `print.rs::write_print_html_file`'s guard:
@@ -236,6 +355,20 @@ pub fn write_page_blocking(
     mime: &str,
     bytes: &[u8],
 ) -> Result<WrittenPage, String> {
+    let guard = lock_lifecycle(app_data_dir, capture_id)?;
+    write_page_blocking_guarded(&guard, app_data_dir, capture_id, page_index, mime, bytes)
+}
+
+pub(crate) fn write_page_blocking_guarded(
+    guard: &CaptureLifecycleGuard,
+    app_data_dir: &Path,
+    capture_id: &str,
+    page_index: usize,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<WrittenPage, String> {
+    guard.check(capture_id)?;
+
     if bytes.is_empty() {
         return Err("Captured page is empty".into());
     }
@@ -298,6 +431,28 @@ pub async fn write_page(
     .map_err(|e| format!("capture page write task failed: {e}"))?
 }
 
+pub(crate) async fn write_page_guarded(
+    guard: std::sync::Arc<CaptureLifecycleGuard>,
+    app_data_dir: PathBuf,
+    capture_id: String,
+    page_index: usize,
+    mime: String,
+    bytes: Vec<u8>,
+) -> Result<WrittenPage, String> {
+    tokio::task::spawn_blocking(move || {
+        write_page_blocking_guarded(
+            &guard,
+            &app_data_dir,
+            &capture_id,
+            page_index,
+            &mime,
+            &bytes,
+        )
+    })
+    .await
+    .map_err(|e| format!("capture page write task failed: {e}"))?
+}
+
 /// Write a capture's retained original document (`original.pdf`) durably.
 ///
 /// The watched-folder source copies a PDF in verbatim here (R17.5 — the source
@@ -311,6 +466,18 @@ pub fn write_original_blocking(
     capture_id: &str,
     bytes: &[u8],
 ) -> Result<PathBuf, String> {
+    let guard = lock_lifecycle(app_data_dir, capture_id)?;
+    write_original_blocking_guarded(&guard, app_data_dir, capture_id, bytes)
+}
+
+pub(crate) fn write_original_blocking_guarded(
+    guard: &CaptureLifecycleGuard,
+    app_data_dir: &Path,
+    capture_id: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    guard.check(capture_id)?;
+
     if bytes.is_empty() {
         return Err("Captured document is empty".into());
     }
@@ -365,6 +532,17 @@ pub fn read_page_blocking(
 /// (R11.8). Missing files are not an error — a partially cleaned capture must
 /// still finish cleaning.
 pub fn remove_capture_files(app_data_dir: &Path, capture_id: &str) -> Result<(), String> {
+    let guard = lock_lifecycle(app_data_dir, capture_id)?;
+    remove_capture_files_guarded(&guard, app_data_dir, capture_id)
+}
+
+pub(crate) fn remove_capture_files_guarded(
+    guard: &CaptureLifecycleGuard,
+    app_data_dir: &Path,
+    capture_id: &str,
+) -> Result<(), String> {
+    guard.check(capture_id)?;
+
     sanitize_path_segment("capture_id", capture_id)?;
 
     let canonical_root = captures_root(app_data_dir)?;

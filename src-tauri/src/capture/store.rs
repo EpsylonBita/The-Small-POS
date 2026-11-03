@@ -379,7 +379,62 @@ pub fn set_draft_json(conn: &Connection, id: &str, draft: &str) -> Result<(), St
 ///
 /// Upserts on `(capture_id, page_index)`, so re-scanning page N replaces it in
 /// place exactly as the file write does.
+#[cfg(test)]
 pub fn record_page(conn: &Connection, capture_id: &str, page: &WrittenPage) -> Result<(), String> {
+    let app_data_dir = page
+        .file_path
+        .ancestors()
+        .nth(3)
+        .ok_or("Capture page path is invalid")?;
+    let guard = files::lock_lifecycle(app_data_dir, capture_id)?;
+    let validated = validate_written_page(&guard, capture_id, page)?;
+    record_validated_page(conn, capture_id, &validated)
+}
+
+pub(crate) struct ValidatedPage<'a> {
+    page: &'a WrittenPage,
+    _lifecycle: &'a files::CaptureLifecycleGuard,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PAGE_VALIDATOR_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn validate_written_page<'a>(
+    guard: &'a files::CaptureLifecycleGuard,
+    capture_id: &str,
+    page: &'a WrittenPage,
+) -> Result<ValidatedPage<'a>, String> {
+    guard.check(capture_id)?;
+    #[cfg(test)]
+    PAGE_VALIDATOR_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+    if page.page_index >= MAX_CAPTURE_PAGES {
+        return Err(format!("A capture holds at most {MAX_CAPTURE_PAGES} pages"));
+    }
+    if !page.file_path.exists() {
+        return Err("Capture page must be written to disk before it is recorded".into());
+    }
+    Ok(ValidatedPage {
+        page,
+        _lifecycle: guard,
+    })
+}
+
+/// DB-only recording: the validated receipt borrows the lifecycle guard through
+/// commit, so application-owned deletion/replacement cannot invalidate its file.
+pub(crate) fn record_validated_page(
+    conn: &Connection,
+    capture_id: &str,
+    validated: &ValidatedPage<'_>,
+) -> Result<(), String> {
+    let page = validated.page;
+    validated._lifecycle.check(capture_id)?;
+
     assert_capture_id(capture_id)?;
 
     let document =
@@ -392,9 +447,6 @@ pub fn record_page(conn: &Connection, capture_id: &str, page: &WrittenPage) -> R
     }
     if page.page_index >= MAX_CAPTURE_PAGES {
         return Err(format!("A capture holds at most {MAX_CAPTURE_PAGES} pages"));
-    }
-    if !page.file_path.exists() {
-        return Err("Capture page must be written to disk before it is recorded".into());
     }
 
     conn.execute(
@@ -1301,3 +1353,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../admission_tests/capture.rs"]
+mod admission_regression_tests;

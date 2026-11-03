@@ -914,7 +914,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
                 }}
                 disabled={discoverAction.disabled}
                 aria-label={discoverAction.disabled && discoverAction.message ? discoverAction.message : undefined}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl font-medium text-black transition-all border border-(--pos-s-yellow) bg-(--pos-s-yellow) active:bg-yellow-500 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
+                className="pos-raised pos-raised--yellow inline-flex items-center gap-2 px-4 py-2 rounded-xl font-medium text-black transition-all border border-(--pos-s-yellow) bg-(--pos-s-yellow) active:bg-yellow-500 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
               >
                 <Plus size={18} />
                 {t('ecr.addManual', 'Add Terminal')}

@@ -1,14 +1,13 @@
-/* The floating checkout summary must cover the scrolling content beneath it. */
+/* The floating checkout summary must cover the scrolling content beneath it (kit surface, founder 01/11). */
 .liquid-glass-modal-shell .staff-checkout-footer-panel {
-  background: #ffffff !important;
-  border: 1px solid #d6d3d1 !important;
+  background: var(--pos-s-surface) !important;
+  border: 1px solid var(--pos-s-border) !important;
+  color: var(--pos-s-fg);
   box-shadow: 0 -4px 24px rgb(15 23 42 / 10%);
   isolation: isolate;
 }
 
 .dark .liquid-glass-modal-shell .staff-checkout-footer-panel {
-  background: #18181b !important;
-  border-color: #3f3f46 !important;
   box-shadow: 0 -4px 24px rgb(0 0 0 / 28%);
 }
 

@@ -127,7 +127,7 @@ pub(crate) fn courier_still_holds_order_cash(
         params![order_id],
         |row| row.get(0),
     )
-    .map_err(|e| format!("read whether a courier holds the cash of {order_id}: {e}"))
+    .map_err(crate::edit_settlement_recovery::storage_error)
 }
 
 /// Who hands a new cash refund back (shared rule R2, round 3, 01/10/2026;
@@ -427,12 +427,12 @@ fn refund_payment_with_cash_handler(
 ) -> Result<Value, String> {
     let payment_id = str_field(payload, "paymentId")
         .or_else(|| str_field(payload, "payment_id"))
-        .ok_or("Missing paymentId")?;
-    let amount = num_field(payload, "amount").ok_or("Missing amount")?;
+        .ok_or("REFUND_INVALID_REQUEST")?;
+    let amount = num_field(payload, "amount").ok_or("REFUND_INVALID_REQUEST")?;
     if amount <= 0.0 {
-        return Err("Refund amount must be positive".into());
+        return Err("REFUND_INVALID_REQUEST".into());
     }
-    let reason = str_field(payload, "reason").ok_or("Missing reason")?;
+    let reason = str_field(payload, "reason").ok_or("REFUND_INVALID_REQUEST")?;
     let requested_idempotency_key = str_field(payload, "idempotencyKey")
         .or_else(|| str_field(payload, "idempotency_key"))
         .or_else(|| str_field(payload, "clientRequestId"))
@@ -486,7 +486,10 @@ fn refund_payment_with_cash_handler(
                 ))
             },
         )
-        .map_err(|_| format!("Payment not found: {payment_id}"))?;
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => "REFUND_PAYMENT_NOT_FOUND".to_string(),
+            other => crate::edit_settlement_recovery::storage_error(other),
+        })?;
 
     let canonical_return = payments::canonical_return_status(conn, &payment_id)?;
     let pay_status = canonical_return.as_deref().unwrap_or(&pay_status);
@@ -517,7 +520,7 @@ fn refund_payment_with_cash_handler(
         return Err("TWINT_ORIGINAL_PROVIDER_REFUND_REQUIRED: Return TWINT money through the original provider; no cash or card refund was performed".into());
     }
     if pay_status == "voided" {
-        return Err("Cannot refund a voided payment".into());
+        return Err("REFUND_PAYMENT_VOIDED".into());
     }
     // A 1.4.119 placeholder records no money (item D3, round 2 review): it
     // counts nowhere as money in, so nothing is paid out against it.
@@ -528,7 +531,7 @@ fn refund_payment_with_cash_handler(
     // count money leaving that never counted as arriving. It is given back
     // only through its own resolution (fix review 30/09/2026).
     if pay_status == crate::payment_review::DUPLICATE_REVIEW_PAYMENT_STATUS {
-        return Err("Cannot refund a payment set aside for review".into());
+        return Err("REFUND_PAYMENT_SET_ASIDE".into());
     }
     if let Some(idempotency_key) = client_idempotency_key.as_deref() {
         let existing = conn
@@ -548,10 +551,10 @@ fn refund_payment_with_cash_handler(
                 },
             )
             .optional()
-            .map_err(|e| format!("lookup refund idempotency key: {e}"))?;
+            .map_err(crate::edit_settlement_recovery::storage_error)?;
         if let Some((existing_id, existing_payment_id, existing_amount)) = existing {
             if existing_payment_id != payment_id {
-                return Err("Refund idempotency key already belongs to another payment".into());
+                return Err("REFUND_IDEMPOTENCY_CONFLICT".into());
             }
             return Ok(serde_json::json!({
                 "success": true,
@@ -634,9 +637,7 @@ fn refund_payment_with_cash_handler(
     let remaining = original_amount - prior_refunds;
     // W4e: integer-cent comparison. Half-cent epsilon no longer needed.
     if Cents::round_half_even(amount).as_i64() > Cents::round_half_even(remaining).as_i64() {
-        return Err(format!(
-            "Refund amount {amount:.2} exceeds remaining balance {remaining:.2}"
-        ));
+        return Err("REFUND_AMOUNT_EXCEEDS_BALANCE".into());
     }
 
     let pay_sync_state: String = conn
@@ -718,14 +719,14 @@ fn refund_payment_with_cash_handler(
             now,
         ],
     )
-    .map_err(|e| format!("insert adjustment: {e}"))?;
+    .map_err(crate::edit_settlement_recovery::storage_error)?;
 
     if is_fully_refunded {
         conn.execute(
             "UPDATE order_payments SET status = 'refunded', updated_at = ?1 WHERE id = ?2",
             params![now, payment_id],
         )
-        .map_err(|e| format!("update payment status: {e}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
     }
 
     // The money that moves follows the refund's tender first: only a cash
@@ -747,7 +748,7 @@ fn refund_payment_with_cash_handler(
                      WHERE staff_shift_id = ?4",
                     params![amount, amount_cents, now, sid],
                 )
-                .map_err(|e| format!("update drawer refunds: {e}"))?;
+                .map_err(crate::edit_settlement_recovery::storage_error)?;
             }
         }
         (RefundMethod::Cash, Some(CashHandler::DriverShift)) => {
@@ -786,11 +787,9 @@ fn refund_payment_with_cash_handler(
                        AND COALESCE(is_transferred, 0) = 0",
                     params![amount, amount_cents, now, order_id],
                 )
-                .map_err(|e| format!("update driver settlement refund: {e}"))?;
+                .map_err(crate::edit_settlement_recovery::storage_error)?;
             if updated == 0 {
-                return Err(
-                    "Driver cash refund requires an active unsettled driver earning".into(),
-                );
+                return Err("REFUND_DRIVER_EARNING_REQUIRED".into());
             }
         }
         // A non-cash refund (card or other) of a CARD row lowers the card
@@ -853,7 +852,7 @@ fn refund_payment_with_cash_handler(
     payments::recompute_order_payment_state(conn, &order_id, &now, &payment_id)?;
 
     let mut sync_payload_value = serde_json::from_str::<Value>(&sync_payload)
-        .map_err(|e| format!("parse adjustment payload: {e}"))?;
+        .map_err(|_| "REFUND_INVALID_REQUEST".to_string())?;
     stamp_canonical_payment_id(&mut sync_payload_value, remote_payment_id.as_deref());
     crate::sync_queue::enqueue_payload_item(
         conn,
@@ -866,7 +865,7 @@ fn refund_payment_with_cash_handler(
         Some("manual"),
         Some(1),
     )
-    .map_err(|e| format!("enqueue adjustment parity sync: {e}"))?;
+    .map_err(crate::edit_settlement_recovery::storage_message)?;
 
     let parent_payment_missing_canonical_id = remote_payment_id
         .as_deref()
@@ -876,7 +875,7 @@ fn refund_payment_with_cash_handler(
         && (pay_sync_state != "applied" || parent_payment_missing_canonical_id)
     {
         payments::refresh_payment_sync_queue_entry(conn, &payment_id)
-            .map_err(|e| format!("refresh parent payment settlement proof sync: {e}"))?;
+            .map_err(crate::edit_settlement_recovery::storage_message)?;
     }
 
     Ok(serde_json::json!({
@@ -1615,7 +1614,7 @@ mod tests {
         }
         assert_eq!(get_payment_balance(&db, &payment).unwrap()["balance"], 4.0);
         let error=refund_payment(&db,&serde_json::json!({"paymentId":payment,"amount":5,"reason":"return","refundMethod":"cash"})).unwrap_err();
-        assert!(error.contains("exceeds remaining balance 4.00"), "{error}");
+        assert_eq!(error, "REFUND_AMOUNT_EXCEEDS_BALANCE");
         assert_eq!(
             list_order_adjustments(&db, "cross-till").unwrap()["adjustments"]
                 .as_array()
@@ -1729,7 +1728,7 @@ mod tests {
             &serde_json::json!({ "paymentId": pay_id, "amount": 13.0, "reason": "Duplicate" }),
         )
         .expect_err("a set-aside payment is not refundable");
-        assert!(refused.contains("set aside"), "{refused}");
+        assert_eq!(refused, "REFUND_PAYMENT_SET_ASIDE");
         assert!(void_payment_with_adjustment(&db, &pay_id, "Duplicate", None, None).is_err());
 
         let conn = db.conn.lock().unwrap();
@@ -2011,7 +2010,7 @@ mod tests {
         // Second refund: 10 — exceeds remaining 5
         let p2 = serde_json::json!({ "paymentId": pay_id, "amount": 10.0, "reason": "Too much" });
         let err = refund_payment(&db, &p2).unwrap_err();
-        assert!(err.contains("exceeds remaining balance"));
+        assert_eq!(err, "REFUND_AMOUNT_EXCEEDS_BALANCE");
     }
 
     #[test]
@@ -2025,7 +2024,7 @@ mod tests {
         // Try to refund — should fail
         let payload = serde_json::json!({ "paymentId": pay_id, "amount": 10.0, "reason": "test" });
         let err = refund_payment(&db, &payload).unwrap_err();
-        assert!(err.contains("voided"));
+        assert_eq!(err, "REFUND_PAYMENT_VOIDED");
     }
 
     #[test]

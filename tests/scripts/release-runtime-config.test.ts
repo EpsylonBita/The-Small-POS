@@ -16,6 +16,8 @@ const checkerFiles = [
   'pos-tauri/config/caller-id-offline-lease-verifier.properties',
   'pos-tauri/src-tauri/build.rs',
   'pos-tauri/src-tauri/tauri.conf.json',
+  'pos-tauri/src-tauri/src/main.rs',
+  'pos-tauri/src-tauri/src/lib.rs',
   'POSSystemMobile/android/app/build.gradle',
 ];
 const workflowFile = '.github/workflows/pos-tauri-auto-release.yml';

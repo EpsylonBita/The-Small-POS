@@ -44,10 +44,28 @@ test('RecoveryCenterPanel routes visually safe recovery actions through privileg
     'utf8',
   );
 
+  // Since remote support (pos-support-mcp) the panel hands the wrapper to the shared
+  // SupportRemedyRunner, which both the panel and remote remedies use.
+  const runner = fs.readFileSync(
+    path.join(projectRoot, 'src', 'renderer', 'services', 'support', 'SupportRemedyRunner.ts'),
+    'utf8',
+  );
   assert.match(
     source,
-    /runWithPrivilegedConfirmation\(\{\s*scope:\s*'cash_drawer_control'[\s\S]*action:\s*executeAction/,
+    /executeHealthRecoveryAction\(\{[\s\S]*?authorize:\s*runWithPrivilegedConfirmation\b/,
     'recovery actions should pass through the privileged wrapper so native REAUTH_REQUIRED responses can open the PIN modal',
+  );
+  assert.match(
+    runner,
+    /return authorize\(\{\s*scope:\s*'cash_drawer_control',\s*action:[\s\S]*?getBridge\(\)\.recovery\.executeAction\(/,
+    'the shared runner must execute recovery actions inside the privileged wrapper',
+  );
+  // The one exception is the native Star brand restore, which reads no PIN and owns its own snapshot and fence.
+  const bypasses = runner.match(/getBridge\(\)\.recovery\.executeAction\(request\)/g) ?? [];
+  assert.equal(bypasses.length, 1);
+  assert.match(
+    runner,
+    /if \(action\.recipeId === 'printer\.restore_last_known_brand' && action\.id === 'restoreLastKnownPrinterBrand'\) \{[\s\S]*?getBridge\(\)\.recovery\.executeAction\(request\)/,
   );
   assert.doesNotMatch(
     source,

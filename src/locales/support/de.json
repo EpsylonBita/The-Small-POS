@@ -333,5 +333,105 @@
         }
       }
     }
+  },
+  "connect": {
+    "action": "Support verbinden",
+    "permissionDisabled": "Sie dürfen den Support nicht verbinden."
+  },
+  "code": {
+    "needsInternet": "Für die Verbindung zum Support ist eine Internetverbindung erforderlich.",
+    "retry": "Der Code konnte nicht abgerufen werden. Versuchen Sie es erneut.",
+    "expired": "Der Code ist abgelaufen. Fordern Sie einen neuen an.",
+    "cancel": "Abbrechen",
+    "warning": "Geben Sie diesen Code nur an den Support von The Small weiter.",
+    "label": "Supportcode",
+    "qr": "Scannen, um die Supportverbindung zu öffnen",
+    "timeLeft": "Verbleibende Zeit",
+    "loading": "Code wird angefordert…",
+    "newCode": "Neuen Code anfordern"
+  },
+  "banner": {
+    "activity": "Kasse wird geprüft",
+    "waiting": "Warten auf die Supportverbindung",
+    "connected": "Support verbunden",
+    "executing": "Supportaktion wird ausgeführt",
+    "awaitingOnsite": "Support bittet um Zustimmung",
+    "deferredPayment": "Warten auf den Zahlungsabschluss",
+    "pausedOffline": "Pausiert — offline",
+    "restarting": "Daten werden wiederhergestellt — die Kasse startet neu",
+    "restoreRestarting": "Neustart zur Wiederherstellung",
+    "ended": "Support beendet",
+    "end": "Beenden",
+    "endDuringWrite": {
+      "committed": "Die Änderung wurde vor dem Supportende abgeschlossen.",
+      "rolledBack": "Die Änderung wurde vor dem Supportende abgebrochen. Es wurde nichts geändert."
+    },
+    "extend": "+30 Minuten",
+    "noPinPromise": "Der Support wird Sie niemals nach Ihrer PIN oder Ihrem Passwort fragen."
+  },
+  "onsite": {
+    "title": "Der Support möchte:",
+    "technicalDetails": "Technische Details",
+    "execute": "Ausführen",
+    "decline": "Ablehnen",
+    "aiExplanation": "Erklärung des Assistenten (KI)",
+    "storePinNotice": "Dies ist die PIN-Prüfung Ihres Geschäfts. Der Support sieht die PIN nicht.",
+    "terminalCommandWarning": "Der Befehl wird als Kassenbenutzer ausgeführt und kann lokale Daten lesen und das System ändern. Die Schutzmaßnahmen anderer Aktionen gelten dafür nicht.",
+    "cataloguePause": "Neue Sendungen an diesen Drucker anhalten.",
+    "catalogueResume": "Die von dieser Supportsitzung gesetzte Pause aufheben.",
+    "catalogueCancel": "Einen festhängenden nicht fiskalischen Druckauftrag abbrechen.",
+    "cataloguePauseScope": "Ändert nur die Versandpause dieses Druckers. Bricht keine Aufträge ab, ruft keine gesendeten Daten zurück und ändert keine Belege, Zahlungen, Schichten oder Z-Berichte.",
+    "catalogueCancelScope": "Der ursprüngliche Druckauftrag und sein Verlauf bleiben erhalten. Nur der ausgewählte ungewisse Sendeversuch wird abgebrochen. Kein Nachdruck und keine Änderung an Zahlungen, Schichten, Z-Berichten oder Fiskaldokumenten.",
+    "cataloguePaperWarning": "Bereits teilweise bedrucktes Papier kann nicht zurückgerufen werden. Nachdrucke erfolgen über den normalen Kassenvorgang.",
+    "catalogueResumeCheck": "Erst bestätigen, nachdem Drucker und Konfiguration vor Ort geprüft wurden. Der Versand wird aktiviert; dies beweist keine Fehlerbehebung."
+  },
+  "restore": {
+    "preparing": "Wiederherstellung wird vorbereitet. Starten Sie die App neu, wenn es Ihnen passt, um sie anzuwenden.",
+    "notices": {
+      "staged": "Wiederherstellung vorbereitet. Sie können weiterverkaufen. Starten Sie die App neu, wenn es Ihnen passt. Neue Geschäftsvorgänge brechen die Wiederherstellung ab.",
+      "applied": "Der Support-Snapshot wurde wiederhergestellt.",
+      "refused": "Die Wiederherstellung wurde abgelehnt, weil sich die Kassendaten geändert haben oder der Snapshot nicht mehr kompatibel ist. Ihre aktuellen Daten wurden beibehalten.",
+      "expired": "Die vorbereitete Wiederherstellung ist abgelaufen oder der Support wurde beendet. Ihre aktuellen Daten wurden beibehalten.",
+      "rolled_back": "Die Wiederherstellung konnte nicht abgeschlossen werden. Ihre ursprünglichen Daten wurden wiederhergestellt. Sie können weiterverkaufen."
+    },
+    "dismissNotice": "Schließen",
+    "action": "Wiederherstellen",
+    "snapshotFirst": "Zuerst wird eine vollständige lokale Sicherung erstellt.",
+    "snapshots": "Support-Sicherungen",
+    "quarantine": "Gruppen in Quarantäne",
+    "resynced": "Erneut vom Server synchronisiert",
+    "confirm": "Diese Änderung wiederherstellen? Die eigene Berechtigungsprüfung Ihres Betriebs ist erforderlich.",
+    "reasons": {
+      "pre_breakglass_sql": "Datenbankreparatur",
+      "pre_quarantine": "In Quarantäne verschieben",
+      "pre_quarantine_restore": "Datensätze aus Quarantäne wiederherstellen",
+      "pre_command": "Terminalbefehl",
+      "pre_restore": "Sicherung wiederherstellen"
+    }
+  },
+  "deviceApply": {
+    "undo": "Rückgängig"
+  },
+  "physicalCheck": {
+    "done": "Erledigt",
+    "notDone": "Nicht erledigt",
+    "power_cycle_printer": "Schalten Sie den Drucker aus und wieder ein.",
+    "check_printer_paper": "Prüfen Sie, ob Papier im Drucker ist.",
+    "check_printer_cable": "Prüfen Sie das Druckerkabel.",
+    "check_network_cable": "Prüfen Sie das Netzwerkkabel der Kasse.",
+    "power_cycle_card_terminal": "Schalten Sie das Kartenterminal aus und wieder ein."
+  },
+  "consent": {
+    "title": "Einwilligung zum Fernsupport",
+    "required": "Bevor sich der Support verbindet, ist die Einwilligung des Geschäfts erforderlich.",
+    "agree": "Ich stimme zu",
+    "decline": "Nein",
+    "onlyOwnerAdmin": "Nur der Inhaber oder ein Administrator des Geschäfts kann einwilligen.",
+    "accepted": "Die Einwilligung wurde erfasst.",
+    "withdrawn": "Das Geschäft hat seine Einwilligung widerrufen. Support ist nicht verfügbar.",
+    "outdated": "Der Einwilligungstext hat sich geändert. Eine neue Einwilligung ist erforderlich.",
+    "textUnavailable": "Der Einwilligungstext ist in der Sprache des Geschäfts noch nicht verfügbar.",
+    "version": "Textversion",
+    "storeAdminAlternative": "Der Inhaber oder ein Administrator kann auch in der Geschäftsverwaltung zustimmen."
   }
 }

@@ -445,7 +445,30 @@ pub(crate) fn original(conn: &Connection, event: &str) -> Result<Option<Value>, 
         return Ok(None);
     }
     let scope = OpeningScope::resolve(conn).ok_or("TERMINAL_SCOPE_UNAVAILABLE")?;
-    let raw:Option<String>=conn.query_row("SELECT request_json FROM table_manual_cancel_intents_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND event_id=?4",params![scope.organization_id,scope.branch_id,scope.terminal_id,event],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    original_scoped(
+        conn,
+        &scope.organization_id,
+        &scope.branch_id,
+        Some(&scope.terminal_id),
+        event,
+    )
+}
+
+pub(crate) fn original_scoped(
+    conn: &Connection,
+    organization: &str,
+    branch: &str,
+    terminal: Option<&str>,
+    event: &str,
+) -> Result<Option<Value>, String> {
+    if !exists(conn)? {
+        return Ok(None);
+    }
+    let terminal = terminal
+        .map(str::trim)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("TERMINAL_SCOPE_UNAVAILABLE")?;
+    let raw:Option<String>=conn.query_row("SELECT request_json FROM table_manual_cancel_intents_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND event_id=?4",params![organization.trim(),branch.trim(),terminal,event],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
     raw.map(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
         .transpose()
 }
@@ -889,7 +912,7 @@ pub(crate) fn release(
     let audit = json!({"organizationId":scope.organization_id,"branchId":scope.branch_id,"terminalId":scope.terminal_id,
         "orderId":order,"clientEventId":event,"releasedBy":released_by,"note":note,"releasedAt":now,
         "before":serde_json::from_str::<Value>(&before).map_err(|e|e.to_string())?,"charged":false,"moneyMoved":false});
-    let transaction = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let transaction = crate::db::immediate_transaction(&conn).map_err(|e| e.to_string())?;
     let changed = transaction
         .execute(
             "UPDATE table_manual_cancel_intents_v1 SET outcome='released',resolved_at=?1,resolved_by=?2
@@ -940,12 +963,37 @@ fn same_fields(expected: &Value, actual: &Value, fields: &[&str]) -> Result<(), 
 }
 /// Called inside the canonical-response savepoint. All validation precedes writes;
 /// any caller failure rolls the entire parent, receipts, and drawer projection back.
+#[cfg(test)]
 pub(crate) fn mirror(conn: &Connection, response: &Value) -> Result<(), String> {
+    let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
+    mirror_scoped(conn, response, &captured)
+}
+pub(crate) fn mirror_scoped(
+    conn: &Connection,
+    response: &Value,
+    captured: &crate::terminal_helpers::TerminalScopeSnapshot,
+) -> Result<(), String> {
     let Some(result) = response.pointer("/workflow/manual_cancellation") else {
         return Ok(());
     };
+    let scope = OpeningScope {
+        organization_id: captured
+            .value("organization_id")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or("TERMINAL_SCOPE_UNAVAILABLE")?,
+        branch_id: captured
+            .value("branch_id")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or("TERMINAL_SCOPE_UNAVAILABLE")?,
+        terminal_id: captured
+            .value("terminal_id")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or("TERMINAL_SCOPE_UNAVAILABLE")?,
+    };
     create_tables(conn)?;
-    let scope = OpeningScope::resolve(conn).ok_or("TERMINAL_SCOPE_UNAVAILABLE")?;
     let mut s=conn.prepare("SELECT event_id,order_id,request_json,applied FROM table_manual_cancel_intents_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3").map_err(|e|e.to_string())?;
     let intents = s
         .query_map(
@@ -1515,8 +1563,10 @@ mod tests {
                 0
             );
             let receipt = response(&conn, &request);
+            // Production captures the terminal scope before write admission.
+            let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(&conn).unwrap();
             let tx = conn.transaction().unwrap();
-            mirror(&tx, &receipt).unwrap();
+            mirror_scoped(&tx, &receipt, &captured).unwrap();
             tx.commit().unwrap();
             assert!(pending(&conn, "branch").unwrap().is_empty());
             assert_eq!(
@@ -1559,9 +1609,10 @@ mod tests {
             json!(1);
         assert!(mirror(&conn, &changed).is_err());
         conn.execute_batch("CREATE TRIGGER block_drawer BEFORE UPDATE ON cash_drawer_sessions BEGIN SELECT RAISE(ABORT,'test projection failure');END;").unwrap();
+        let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(&conn).unwrap();
         {
             let tx = conn.transaction().unwrap();
-            assert!(mirror(&tx, &receipt).is_err());
+            assert!(mirror_scoped(&tx, &receipt, &captured).is_err());
         }
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM payment_adjustments", [], |r| r
@@ -1571,6 +1622,13 @@ mod tests {
         );
         assert_eq!(pending(&conn, "branch").unwrap(), vec!["order"]);
         assert_eq!(original(&conn, EVENT).unwrap(), Some(request));
+        // The refusal above came from the projection, not from the scope: without
+        // the failing trigger the same captured scope mirrors and settles the intent.
+        conn.execute_batch("DROP TRIGGER block_drawer;").unwrap();
+        let tx = conn.transaction().unwrap();
+        mirror_scoped(&tx, &receipt, &captured).unwrap();
+        tx.commit().unwrap();
+        assert!(pending(&conn, "branch").unwrap().is_empty());
     }
     #[test]
     fn table_manual_cancellation_refuses_foreign_scope_and_changed_cashier() {

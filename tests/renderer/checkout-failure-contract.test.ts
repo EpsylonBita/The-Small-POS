@@ -174,8 +174,10 @@ test('new checkout requires readable tax settings and canonical edits preserve s
     'success requires the full canonical financial mirror, rather than a local total-only update');
   const recovery = readFileSync(path.join(process.cwd(), 'src-tauri', 'src', 'table_attempt_recovery.rs'), 'utf8');
   const apply = sliceBetween(recovery, 'fn apply_foreground_item_snapshot(', 'pub(crate) async fn confirm_foreground_item(');
-  assert.match(apply, /apply_lan_canonical_response\(&tx,[\s\S]*?foreground_applied\(&tx,[\s\S]*?tx\.commit\(\)/,
+  // 5718e3f73 moved both writes to their scope-revalidated `_scoped` forms inside the same transaction.
+  assert.match(apply, /let tx = crate::db::immediate_transaction\(&conn\)[\s\S]*?captured_scope\.revalidate\(&tx\)\?;[\s\S]*?apply_lan_canonical_response_scoped\(\s*&tx,[\s\S]*?foreground_applied_scoped\(&tx,[\s\S]*?tx\.commit\(\)/,
     'the full snapshot and the applied receipt must commit together');
+  assert.equal(apply.split('tx.commit()').length - 1, 1, 'one transaction holds both writes');
 });
 
 test('OrderDashboard.handleOrderComplete resolves an explicit boolean and success-gates the UI reset', () => {

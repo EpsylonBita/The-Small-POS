@@ -348,6 +348,15 @@
     }
   },
   "common": {
+    "datePicker": {
+      "selectDate": "Select a date",
+      "selectTime": "Select a time",
+      "previousMonth": "Previous month",
+      "nextMonth": "Next month",
+      "hours": "Hours",
+      "minutes": "Minutes",
+      "today": "Today"
+    },
     "none": "None",
     "requiresOnline": "This action requires an online connection.",
     "savedLocallyQueued": "Saved locally and queued",
@@ -1161,6 +1170,10 @@
       "sweet": "Sweet",
       "all": "All",
       "little": "Little",
+      "normal": "Normal",
+      "selectedCount_one": "{{count}} ingredient",
+      "selectedCount_other": "{{count}} ingredients",
+      "jumpTo": "Go to",
       "littleHint": "Add ingredients in smaller portions",
       "specialInstructions": "Special Instructions",
       "specialInstructionsPlaceholder": "Any special instructions for the order (allergies, preferences, etc.)",
@@ -1281,7 +1294,8 @@
     "pagination": {
       "previous": "Previous",
       "next": "Next",
-      "pageOf": "Page {{current}} of {{total}}"
+      "pageOf": "Page {{current}} of {{total}}",
+      "range": "{{start}}–{{end}} of {{total}}"
     },
     "deleteAddressSuccess": "Address deleted successfully",
     "deleteAddressQueued": "Address deleted and queued for sync",
@@ -3890,6 +3904,12 @@
       "staleMissing": "The queue still has actionable work, but telemetry freshness is unavailable."
     },
     "healthModal": {
+      "remoteSupport": {
+        "title": "Remote support: unavailable",
+        "impact": "Sales continue as normal.",
+        "action": "Restart the till. If this continues, send diagnostics to support.",
+        "details": "Remote support details"
+      },
       "syncDetails": "Sync details",
       "record": "Record",
       "error": "Error",
@@ -4471,8 +4491,26 @@
       "editCurrencyUnavailable": "The currency needed for this correction is not verified. Keep this cart and ask a manager to verify the order, payment and shift currencies before retrying. Do not take payment again.",
       "editCurrencyMismatch": "The order, payment and cashier shift currencies do not match. Keep this cart and ask a manager to check their currencies before retrying. Do not take payment again.",
       "editCollectorUnavailable": "The collecting cashier shift could not be verified. Check that the cashier is checked in on this till, then retry the saved correction. Do not take payment again.",
+      "editNoDrawerOwnerOnShift": "There is no cashier or manager on shift on this till. Check in a cashier and try again. No money was collected.",
+      "editHeldClosedRetry": "The held correction was closed without recording money. You can save your edit again.",
       "editPaymentMismatch": "The confirmed difference does not match this correction. Keep the saved cart and ask a manager to reconcile the payment in Health. Do not charge again.",
       "editLocalOperationFailed": "The till could not read or save the correction locally. Keep this cart and retry the saved correction. If it still fails, export support evidence from Health. Do not take payment again.",
+      "editStorageBusy": "The till was busy. Retry the saved correction. Keep this cart and do not take payment again.",
+      "editStorageConstraint": "The correction conflicts with local records. Keep this cart and ask a manager to review the saved correction in Health. Do not take payment again.",
+      "editStorageIo": "The till could not write to local storage. Ask a manager to check free space and write access, then retry the saved correction. Do not take payment again.",
+      "editOrderNotFound": "This order is no longer available on this till. Keep the correction, refresh the order list and reopen the order. Do not take payment again.",
+      "editGhostOrder": "This is a preview order and cannot record payments. Reopen the regular order to correct it. Do not take payment again.",
+      "editCollectorNotDrawerOwner": "The correction money must belong to a cashier or manager on shift. Check in the drawer owner and retry the saved correction. Do not take payment again.",
+      "editInvalidDetails": "Some payment, refund or delivery details are invalid. Keep this cart, check the details and retry the saved correction. Do not take or return money again.",
+      "editDriverSettlementUnavailable": "The unsettled driver earning for this order is unavailable. Keep the correction and ask a manager to check the delivery settlement. Do not take or return money again.",
+      "editOriginalPaymentUnavailable": "The original payment is unavailable on this till. Keep the correction, reconnect and refresh the order before retrying. Do not return money again.",
+      "editRefundOriginalUnavailable": "The original payment was voided or set aside for review. Keep the correction and ask a manager to review that payment in Health. Do not return money again.",
+      "editRefundIdentityConflict": "This refund reference already belongs to another payment. Keep the correction and ask a manager to reconcile it in Health. Do not return money again.",
+      "editRefundBalanceChanged": "The refund exceeds the remaining payment balance. Keep the correction and refresh its quote before retrying. Do not return money again.",
+      "editCancellationUnavailable": "This order cannot be cancelled through this correction. Keep the cart and ask a manager to check the order and its payments. Do not return money again.",
+      "editOriginalProviderRequired": "This return requires the original payment provider. Keep the correction and ask a manager to use that provider workflow. Do not record another till refund.",
+      "editReconciliationRequired": "A previous correction needs reconciliation. Keep this cart and ask a manager to review the held correction in Health. Do not take or return money again.",
+      "editSettlementBusy": "Another correction is being saved for this order. Wait for it to finish, then retry the saved correction. Do not take or return money again.",
       "editScopeChanged": "The till connection or store scope changed. Restore this till connection, then retry the saved correction. Keep this cart and do not take payment again.",
       "saveChanges": "Save Changes",
       "addCustomer": "Add Customer",
@@ -4486,6 +4524,14 @@
       "editNotApplied": "This correction was not saved, so its difference was not recorded anywhere. If money already changed hands, prepare the correction again and record that same money once; never collect or return it twice. Otherwise a manager can close it without recording money.",
       "editRequote": "Prepare the correction again",
       "editRequoteReady": "Review the cart and save the correction again. Record only the money already received; do not collect or return it twice.",
+      "editDiscard": "Discard correction",
+      "editDiscardQuestion": "Did money change hands for this correction?",
+      "editDiscardNo": "No / returned",
+      "editDiscardYes": "Yes",
+      "editDiscardMoneyGuidance": "Save the correction again or ask a manager to close it.",
+      "editDiscardProviderCheck": "The card provider may hold a charge. Check it with the provider or ask a manager to close this correction.",
+      "editDiscardCollect": "Collection",
+      "editDiscardRefund": "Refund",
       "editCloseWithoutMoney": "Close without recording money (manager)",
       "editCloseWithoutMoneyReason": "Correction not saved; closed by a manager without recording money",
       "editClosedWithoutMoney": "The unsaved correction was closed. No money was recorded; count the drawer to confirm.",
@@ -4499,6 +4545,18 @@
       "editCanonicalChanged": "The order details need refreshing. Refresh the order before confirming a payment or refund."
     },
     "payment": {
+      "refusals": {
+        "invalidRequest": "The payment details are invalid. Check the amount and method, then try saving the payment again. Do not collect money again if it was already received.",
+        "orderNotFound": "The order is no longer available on this till. Refresh the order list and reopen it before saving the payment. Do not collect money again.",
+        "ghostOrder": "Payments cannot be recorded for a preview order. Open the regular order before recording a payment.",
+        "collectorShiftRequired": "A cashier shift is required to record this payment. Check in a cashier or manager and try saving it again. Do not collect money again.",
+        "collectorNotDrawerOwner": "The payment must be assigned to a cashier or manager on shift. Check who is responsible for the drawer, then try saving it again. Do not collect money again.",
+        "driverEarningRequired": "The driver’s unsettled earnings for this order could not be found. Ask a manager to check the delivery settlement before saving the payment. Do not collect money again.",
+        "storageBusy": "The till was busy. Check whether the payment or refund was saved before retrying. Do not collect or return money again.",
+        "storageConstraint": "The till could not save the payment or refund because local records conflict. Keep the receipt and ask a manager to check Health. Do not collect or return money again.",
+        "storageIo": "The till could not write the payment or refund to local storage. Ask a manager to check free space and write access before retrying. Do not collect or return money again.",
+        "storageOther": "The till could not read or save the payment or refund locally. Check its status and ask a manager to export support evidence from Health if it keeps failing. Do not collect or return money again."
+      },
       "title": "Payment",
       "originalTotal": "Original Total:",
       "discount": "Discount:",
@@ -4538,6 +4596,7 @@
       "loadingMethods": "Loading payment methods",
       "loadingMethodsHint": "Checking terminal payment configuration...",
       "splitSimple": "Split",
+      "cancelOrder": "Cancel order",
       "enterCashReceived": "Cash Received",
       "insufficient": "Insufficient",
       "completeCash": "Complete",
@@ -4745,7 +4804,7 @@
       "next": "Next",
       "cancel": "Cancel",
       "continue": "Continue",
-      "selectRoleForShift": "Select Your Role for This Shift",
+      "selectRoleForShift": "Select your role for this shift",
       "yourAssignedRole": "Your assigned role",
       "primaryRole": "Primary role",
       "secondaryRole": "Secondary role",
@@ -5012,6 +5071,7 @@
       "checkedInNow": "Checked in now",
       "checkedInNowHelper": "Staff already on shift. Select one to review and close the active shift.",
       "noCheckedInStaff": "No staff are currently checked in.",
+      "noOrdersYet": "No orders in this shift yet.",
       "readyToStart": "Ready to start",
       "readyToStartHelper": "Choose a staff member and continue with PIN verification to start a new shift.",
       "noReadyStaff": "Everyone available is already checked in.",
@@ -5464,9 +5524,10 @@
       "unsavedAlreadyResolved": "This payment was already recorded as given back.",
       "unsavedSavedAfterAll": "This payment was saved after all: there is nothing to give back.",
       "unsavedResolveFailed": "Could not record it: {{error}}",
-      "heldEditCloseReason": "Order cancelled; correction closed from the Z checks by a manager without recording money",
+      "heldEditCloseReason": "Correction closed from the Z checks by a manager without recording money",
       "heldEditApprovalTitle": "Close the correction without money",
       "heldEditApprovalSubtitle": "Check the bank POS and the drawer first. A staff member with the right to void payments enters their own PIN. Nothing is charged or returned.",
+      "discardedCorrections": "Corrections discarded without money",
       "heldEditClosed": "The correction was closed. No money was recorded.",
       "heldEditCloseFailed": "The correction could not be closed. It stays held; nothing was recorded.",
       "unsavedSaved": "Payment saved.",
@@ -5981,6 +6042,15 @@
       "noOrders": "No order history found"
     },
     "refund": {
+      "refusals": {
+        "paymentVoided": "This payment has been voided and cannot be refunded. Check the order’s payment history before making any further return.",
+        "paymentSetAside": "This payment was set aside for review and cannot be refunded here. Ask a manager to review it in Health before returning money.",
+        "amountExceedsBalance": "The requested refund exceeds the payment’s remaining balance. Refresh the payment and check earlier refunds before trying again. Do not return money twice.",
+        "paymentNotFound": "The original payment could not be found on this till. Reconnect and refresh the order’s payments before retrying. Do not return money again.",
+        "invalidRequest": "The refund details are invalid. Check the amount, original payment and reason before trying again. Do not return money again.",
+        "idempotencyConflict": "This refund reference already belongs to another payment. Ask a manager to check the payment history before retrying. Do not return money again.",
+        "driverEarningRequired": "The driver’s unsettled earnings for this payment could not be found. Ask a manager to check the delivery settlement before recording the refund. Do not return money again."
+      },
       "title": "Void / Refund",
       "subtitle": "Manage payment adjustments",
       "orderTotal": "Order total",
@@ -6422,6 +6492,7 @@
     "noAddressForDelivery": "This customer has no saved address. Add an address to continue with a delivery order."
   },
   "orderDashboard": {
+    "unpaidOrderLeftPending": "Order {{orderNumber}} stays unpaid in Orders, waiting for payment.",
     "delivery": "Delivery",
     "pickup": "Pickup",
     "dineIn": "Dine-in",
@@ -7600,7 +7671,8 @@
       "unscheduled": "Unscheduled"
     },
     "filters": {
-      "all": "All roles"
+      "all": "All roles",
+      "role": "Role"
     },
     "actions": {
       "addShift": "Add shift",
@@ -9210,6 +9282,12 @@
     "contactSupport": "If the problem persists, contact support"
   },
   "splitPayment": {
+    "checkoutSaleHeld": "A card payment of {{amount}} was already charged for this order and is not saved yet. Save it as this order's payment; do not charge the card again.",
+    "checkoutSaleUnknown": "The card terminal did not answer for {{amount}}. Check the terminal's last transaction before taking another payment. This order cannot be left until the card is checked.",
+    "checkoutSalePersonAdded": "A person with {{amount}} was added for the card already charged. Press Card on that person to save it.",
+    "checkoutSaleReadFailed": "The till could not check this order's card payments. Try again.",
+    "saveCardPayment": "Save card payment",
+    "checkAgain": "Check again",
     "title": "Split Payment",
     "orderTotal": "Order Total",
     "byAmount": "By Amount",
@@ -9509,6 +9587,12 @@
       }
     },
     "recipes": {
+      "restoreLastKnownPrinterBrand": {
+        "title": "The printer language could not be identified",
+        "label": "Restore saved printer language",
+        "explanation": "The printer did not answer its language check. Restore its last recognised language so receipts remain readable.",
+        "verification": "The saved setting will be checked again. Print a test receipt to confirm the paper output."
+      },
       "checkoutPaymentOpenPayment": {
         "label": "Payment must be corrected in the order",
         "explanation": "This is a known payment blocker. The safe fix is to reopen the order payment screen instead of creating a payment automatically.",
@@ -10549,5 +10633,17 @@
     "walkIn": "Walk-in",
     "seatBooking": "Seat booking",
     "timezoneUnavailable": "The store time zone is unavailable. Refresh terminal settings before changing the schedule."
+  },
+  "workCard": {
+    "sent": "Work card: sent {{time}}",
+    "pending": "Work card: pending",
+    "dry_run": "Work card: test, not sent",
+    "late": "Work card: delayed, a reason is required from the manager",
+    "missing_exit": "Work card: exit missing",
+    "needs_action": "Work card: NOT sent, please inform the manager",
+    "offline": "Work card: will be sent when the connection returns",
+    "attention": "Work card: {{count}} movements need action. See admin → Staff schedule → ERGANI log.",
+    "zHint": "Each person should check out with their own PIN so the work card exit can be sent.",
+    "dismiss": "Dismiss for 1 hour"
   }
 }

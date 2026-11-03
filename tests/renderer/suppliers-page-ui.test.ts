@@ -27,10 +27,8 @@ test('SuppliersPage is a hidden-scrollbar supplier workbench', () => {
   assert.match(source, /h-full min-h-0 overflow-hidden/);
   assert.match(source, /overflow-y-auto scrollbar-hide/);
   assert.match(source, /aria-label=\{t\('common.refresh'/);
-  assert.match(source, /h-12 w-12/);
-  // Round 257: the refresh button is amber glass (was a stark black/white square).
-  assert.match(source, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
-  assert.match(source, /active:scale-95/);
+  // Founder 01/11: the refresh button is the kit icon button (44 px, raised; was a custom 48 px square).
+  assert.match(source, /aria-label=\{t\('common\.refresh', 'Refresh'\)\}\s*className="pos-icon-btn"/);
   assert.match(source, /<RefreshCw className=\{`w-5 h-5 \$\{loading \? 'animate-spin' : ''\}`\} \/>/);
 });
 
@@ -61,7 +59,8 @@ test('SuppliersPage import drawer portals above the page container with a blurre
 
   assert.match(source, /import \{ renderModalPortal \} from '\.\.\/utils\/render-modal-portal';/);
   assert.match(source, /\{importOpen && renderModalPortal\(\s*<motion\.div/);
-  assert.match(source, /className="fixed inset-0 z-1200 flex justify-end bg-black\/50 backdrop-blur-sm/);
+  // Founder 01/11: the shared glass backdrop and shell.
+  assert.match(source, /className="fixed inset-0 z-1200 flex items-center justify-end p-0 sm:p-4 md:p-6"[\s\S]{0,400}<div className="liquid-glass-modal-backdrop" aria-hidden="true" \/>/);
   assert.doesNotMatch(source, /\{importOpen && \(\s*<motion\.div\s+className="fixed inset-0 z-50/);
   assert.doesNotMatch(source, /<AnimatePresence>[\s\S]*\{importOpen && renderModalPortal/);
 
@@ -80,14 +79,23 @@ test('SuppliersPage supplier detail overlays portal above the page container wit
 
   assert.match(source, /\{supplierSummary && renderModalPortal\(\s*<motion\.div/);
   assert.match(source, /\{selectedInvoice && selectedInvoiceStatus && renderModalPortal\(\s*<motion\.div/);
-  // Three centered overlays now share the portal chrome: supplier summary,
+  // Three centered overlays share the portal z-index: supplier summary,
   // invoice detail, and — since invoice-scan-capture task 12.3 — the scanned
-  // invoice queue. Same z-index, same backdrop, so none of them can be trapped
-  // behind the page container.
+  // invoice queue, so none of them can be trapped behind the page container.
+  // Founder 01/11: the summary and the queue are the shared glass window (backdrop + shell); the invoice details
+  // (payment) window keeps its own backdrop until the founder decides on it.
+  assert.equal(
+    [...source.matchAll(/className="fixed inset-0 z-1200 flex items-center justify-center p-4"/g)].length,
+    2,
+  );
   assert.equal(
     [...source.matchAll(/className="fixed inset-0 z-1200 flex items-center justify-center bg-black\/55 p-4 backdrop-blur-sm"/g)].length,
-    3,
+    1,
   );
+  assert.match(source, /<div className="liquid-glass-modal-backdrop" onClick=\{\(\) => setSupplierSummaryId\(null\)\} aria-hidden="true" \/>/);
+  assert.match(source, /<div className="liquid-glass-modal-backdrop" onClick=\{\(\) => setCaptureQueueOpen\(false\)\} aria-hidden="true" \/>/);
+  assert.match(source, /const modalShellClass = 'liquid-glass-modal-shell relative flex w-full flex-col text-\(--pos-s-fg\)';/);
+  assert.match(source, /aria-labelledby=\{summaryTitleId\}[\s\S]{0,120}className=\{`max-w-4xl \$\{modalShellClass\}`\}/);
   assert.match(source, /\{captureEnabled && captureQueueOpen && renderModalPortal\(/);
   assert.doesNotMatch(source, /\{supplierSummary && \(\s*<motion\.div/);
   assert.doesNotMatch(source, /\{selectedInvoice && selectedInvoiceStatus && \(\s*<motion\.div/);
@@ -99,13 +107,18 @@ test('SuppliersPage uses unwrapped icons and yellow transparent selection chrome
   const source = suppliersPageSource();
 
   assert.match(source, /<h1 className="truncate text-3xl font-bold tracking-tight">\{t\('suppliers\.title', 'Suppliers'\)\}<\/h1>/);
-  assert.match(source, /<Icon className=\{`h-5 w-5 shrink-0 \$\{stat\.iconClass\}`\}/);
+  // Founder 01/11: stat icons are neutral (muted), never green / amber / red decoration.
+  assert.match(source, /<Icon className="h-5 w-5 shrink-0 text-\(--pos-s-muted\)" aria-hidden="true" \/>/);
+  assert.doesNotMatch(source, /iconClass: 'text-(?:emerald|amber|red)-500'/);
   // Round 180: stats are icon-only now (Wallet etc.); the old currency-symbol span is gone.
   assert.doesNotMatch(source, /w-5 shrink-0 text-center text-lg font-bold leading-none/);
-  assert.match(source, /border-\(--pos-s-yellow\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)/);
-  assert.match(source, /border-\(--pos-s-sel-bg\) ring-1 ring-\(--pos-s-sel-bg\) bg-transparent text-white/); // founder 31/10: selection = the yellow kit sel
+  // Founder 01/11: no yellow outlines as emphasis — Scan invoice is the one yellow primary.
+  assert.doesNotMatch(source, /border-\(--pos-s-yellow\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)|border-yellow-400 text-gray-950/);
+  // founder 31/10 + 01/11: the selected supplier card is a kit card with the 2 px yellow kit outline.
+  assert.match(source, /\? 'border-2! border-\(--pos-s-sel-bg\)! p-\[15px\]' : 'p-4'/);
   assert.match(source, /shrink-0 text-xs font-semibold \$\{supplier\.is_active/);
-  assert.match(source, /<div className="text-yellow-(?:700|800) dark:text-yellow-400">\{icon\}<\/div>/);
+  assert.match(source, /<div className="text-\(--pos-s-muted\)">\{icon\}<\/div>/);
+  assert.doesNotMatch(source, /text-yellow-\d00/);
   assert.doesNotMatch(source, /<Truck className/);
   assert.doesNotMatch(source, /flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border[\s\S]*<Truck/);
   assert.doesNotMatch(source, /flex h-9 w-9 items-center justify-center rounded-lg \$\{stat\.iconClass\}/);
@@ -282,9 +295,11 @@ test('SuppliersPage import overlay exposes labelled dialog semantics with a blur
     /<h2 id=\{importTitleId\}[^>]*>\{t\('suppliers\.import\.title', 'Import supplier items'\)\}<\/h2>/,
   );
 
-  // Still portaled outside the page container with the standard blurred app backdrop.
+  // Still portaled outside the page container with the standard blurred app backdrop (founder 01/11: the shared
+  // glass backdrop).
   assert.match(source, /\{importOpen && renderModalPortal\(\s*<motion\.div/);
-  assert.match(source, /className="fixed inset-0 z-1200 flex justify-end bg-black\/50 backdrop-blur-sm/);
+  assert.match(source, /className="fixed inset-0 z-1200 flex items-center justify-end p-0 sm:p-4 md:p-6"/);
+  assert.match(source, /<div className="liquid-glass-modal-backdrop" aria-hidden="true" \/>/);
 });
 
 // Regression contract for the non-dismissable import overlay (2026-06-21 live QA): Escape
@@ -344,13 +359,14 @@ test('SuppliersPage import overlay keeps a visible blurred backdrop on desktop (
   const source = suppliersPageSource();
 
   // The backdrop reserves visible margin on desktop and is full-bleed on mobile.
-  assert.match(source, /flex justify-end bg-black\/50 backdrop-blur-sm p-0 sm:p-4 md:p-6/);
+  assert.match(source, /flex items-center justify-end p-0 sm:p-4 md:p-6/);
 
   // The panel is full width only on small screens, then capped on desktop via a calc/min
   // width so a blurred strip of page is always visible behind it (gap = max(100vw-72rem, 8rem)).
+  // Founder 01/11: the panel is the shared glass shell (w-full flex-col come from modalShellClass).
   assert.match(
     source,
-    /flex h-full w-full max-w-none flex-col border-l[^`]*sm:max-w-\[min\(72rem,calc\(100vw-8rem\)\)\]/,
+    /className=\{`h-full max-w-none \$\{modalShellClass\} sm:max-w-\[min\(72rem,calc\(100vw-8rem\)\)\]`\}/,
     'the import panel must be width-constrained on desktop, full-bleed on mobile',
   );
 
@@ -436,7 +452,8 @@ test('SuppliersPage has no native title tooltips; aria-labels and visible EmptyS
   // The EmptyState renders a VISIBLE heading (h3) via a `heading` prop (not a title tooltip); the
   // visible copy (i18n keys) is unchanged, only the prop name.
   assert.match(source, /heading: string;/);
-  assert.match(source, /const EmptyState: React\.FC<EmptyStateProps> = \(\{ isDark, icon, heading, description \}\)/);
+  // Founder 01/11: the empty state needs no theme ternary (kit tokens), so it takes no isDark prop.
+  assert.match(source, /const EmptyState: React\.FC<EmptyStateProps> = \(\{ icon, heading, description \}\)/);
   assert.match(source, /<h3 className="text-base font-bold">\{heading\}<\/h3>/);
   assert.match(source, /heading=\{t\('suppliers\.empty\.title', 'No suppliers found'\)\}/);
 
@@ -460,13 +477,56 @@ test('SuppliersPage supervisor polish keeps supplier/import controls rounded and
   assert.doesNotMatch(source, /\btitle=/);
   assert.doesNotMatch(source, /bg-blue|text-blue|border-blue|focus:ring-blue|focus:border-blue/);
   assert.doesNotMatch(source, /bg-purple|text-purple|border-purple|ring-purple/);
+  // Founder 01/11: the import controls are the kit buttons, icon buttons and ONE kit field look (rounded-xl, 48 px);
+  // the invoice details (payment) window keeps its own rounded controls.
   assert.match(source, /inline-flex min-h-10 items-center gap-2 rounded-2xl/);
-  assert.match(source, /inline-flex h-10 w-10 .*rounded-2xl border/);
-  assert.match(source, /h-10 rounded-2xl border px-3 text-sm outline-hidden/);
-  assert.match(source, /h-10 min-w-\[220px\] rounded-2xl border px-3 text-sm font-semibold outline-hidden/);
-  assert.match(source, /mt-2 rounded-2xl border px-3 py-2 text-xs/);
+  assert.match(source, /const kitFieldLook = 'min-h-\[48px\] rounded-xl border border-\(--pos-s-control\) bg-\(--pos-s-surface\) px-3 text-base font-semibold text-\(--pos-s-fg\)/);
+  assert.match(source, /className="pos-icon-btn self-center"\s*aria-label=\{t\('common\.delete', 'Delete'\)\}/);
+  assert.match(source, /className="pos-icon-btn"\s*aria-label=\{t\('suppliers\.import\.addBarcode', 'Add barcode'\)\}/);
+  assert.match(source, /className=\{`min-w-\[220px\] flex-1 \$\{fieldClass\}`\}/);
+  assert.match(source, /<p className=\{`mt-2 text-xs font-semibold \$\{row\.errors\.length > 0 \? 'text-\(--pos-s-bad\)' : 'text-\(--pos-s-warn\)'\}`\}>/);
+  assert.doesNotMatch(source, /h-10 rounded-2xl border px-3 text-sm outline-hidden/);
 });
 
+test('Founder 01/11: the Suppliers page follows the kit (hero, tabs, tiles, cards, words)', () => {
+  const source = suppliersPageSource();
+
+  // Hero and panels are kit cards; Scan invoice is the one yellow primary, the rest neutral kit buttons.
+  assert.match(source, /<section className="pos-card shrink-0 p-4 md:p-5">/);
+  assert.match(source, /data-testid="capture-scan-invoice"[\s\S]{0,240}className=\{primaryButtonClass\}/);
+  assert.match(source, /data-testid="capture-scan-settings"[\s\S]{0,240}className=\{secondaryButtonClass\}/);
+  assert.match(source, /data-testid="capture-queue-open"[\s\S]{0,240}className=\{secondaryButtonClass\}/);
+  assert.match(source, /onClick=\{\(\) => setImportOpen\(true\)\}\s*className=\{secondaryButtonClass\}/);
+  const hero = source.slice(source.indexOf('<section className="pos-card shrink-0'), source.indexOf('</section>'));
+  assert.equal((hero.match(/className=\{primaryButtonClass\}/g) || []).length, 1, 'one yellow primary in the hero');
+  // The queued count is a plain amber word, no pill.
+  assert.match(source, /data-testid="capture-pending-badge"\s*className="font-bold tabular-nums text-\(--pos-s-warn\)"/);
+  // Tabs are kit options with the yellow selection (never a black / white fill).
+  assert.match(source, /className=\{`pos-choice\$\{activeTab === tab \? ' is-selected' : ''\}`\}/);
+  assert.doesNotMatch(source, /'bg-white text-black' : 'bg-black text-white'/);
+  // Filters are the kit select; the search is the kit field.
+  assert.equal((source.match(/className="pos-select"/g) || []).length, 2);
+  // Stat numbers are coloured only when they state something, and only above zero.
+  assert.match(source, /toneClass: stats\.unpaidInvoices > 0 \? 'text-\(--pos-s-warn\)' : ''/);
+  assert.match(source, /toneClass: stats\.overdueInvoices > 0 \? 'text-\(--pos-s-bad\)' : ''/);
+  assert.match(source, /toneClass: stats\.totalOwed > 0\.005 \? 'text-\(--pos-s-warn\)' : ''/);
+  // Statuses are coloured words on the page and the summary (no pill).
+  assert.match(source, /\$\{getInvoiceStatusTextClass\(paymentStatus\)\}/);
+  assert.match(source, /\$\{getInvoiceStatusTextClass\(status\)\}/);
+  assert.match(source, /supplier\.is_active \? 'text-\(--pos-s-ok\)' : 'text-\(--pos-s-muted\)'/);
+  // Cards are kit cards in a grid inside a scroll column that keeps room for their shadows.
+  assert.match(source, /className=\{`pos-card min-h-\[180px\] text-left/);
+  assert.match(source, /className="pos-scroll-room min-h-0 flex-1 overflow-y-auto scrollbar-hide p-3 md:p-4"/);
+  // The summary tiles carry neutral icons with no circle wrapper.
+  assert.doesNotMatch(source, /flex h-9 w-9 items-center justify-center rounded-2xl \$\{isDark \? 'bg-zinc-800 text-zinc-200' : 'bg-white text-gray-700'\}`\}>\s*\{Icon \?/);
+  // The empty state's icon has no grey box.
+  assert.doesNotMatch(source, /mb-3 flex h-14 w-14 items-center justify-center rounded-xl/);
+  // Review drawer: one yellow primary at a time (Preview until checked, then Save).
+  assert.match(source, /className=\{importDraft \? secondaryButtonClass : primaryButtonClass\}/);
+  assert.match(source, /className=\{importDraft \? primaryButtonClass : secondaryButtonClass\}/);
+});
+
+// (Founder 01/11 moved the refresh button and the aside tiles onto the kit classes; the guards below follow.)
 // --- Round 257 (live QA, 1282x802 Greek/dark): the Suppliers detail aside clipped its invoice-count
 // tile at the bottom edge, and the header refresh button was a stark black/white square that broke the
 // POS glass/yellow/neutral system used by the recent hotel + Menu/Housekeeping pages. The refresh is
@@ -476,8 +536,8 @@ test('SuppliersPage supervisor polish keeps supplier/import controls rounded and
 
 test('Round 257: the header refresh button is amber glass, not a stark black/white square', () => {
   const source = suppliersPageSource();
-  // Amber glass in both themes.
-  assert.match(source, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
+  // Founder 01/11: the kit icon button in both themes (raised, soft shadow, no outline).
+  assert.match(source, /onClick=\{fetchData\}\s*disabled=\{loading\}\s*aria-label=\{t\('common\.refresh', 'Refresh'\)\}\s*className="pos-icon-btn"/);
   // The stark black/white refresh treatment is gone.
   assert.doesNotMatch(source, /border border-white\/80 bg-white text-black/);
   assert.doesNotMatch(source, /border border-black bg-black text-white/);
@@ -490,12 +550,14 @@ test('Round 257: the header refresh button is amber glass, not a stark black/whi
 test('Round 257: the desktop supplier detail aside is compacted with bottom breathing room (no clipped invoice tile)', () => {
   const source = suppliersPageSource();
   // Aside header compacted to p-3 (anchored on the detail title so the summary modal is not matched).
-  assert.match(source, /border-b border-inherit p-3">[\s\S]{0,140}suppliers\.detail\.title/);
+  assert.match(source, /border-b border-\(--pos-s-border\) p-3">[\s\S]{0,140}suppliers\.detail\.title/);
   // Aside body: compact padding + a generous bottom pad (pb-4) over the preserved hidden scrollbar.
   assert.match(source, /min-h-0 flex-1 overflow-y-auto scrollbar-hide p-3 pb-4/);
   // Aside content stack + invoice tile are compacted (space-y-3 / p-3).
   assert.match(source, /\{selectedSupplier \? \(\s*<div className="space-y-3">/);
-  assert.match(source, /rounded-xl border p-3 \$\{isDark \? 'border-zinc-800 bg-zinc-900' : 'border-gray-200 bg-gray-50'\}/);
+  // Founder 01/11: the invoice-count tile is the neutral kit tile (p-3).
+  assert.match(source, /const tileClass = 'rounded-xl border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) p-3';/);
+  assert.match(source, /<div className=\{tileClass\}>\s*<p className=\{`text-sm \$\{subtleClass\}`\}>\{t\('suppliers\.invoices\.title', 'Invoices'\)\}<\/p>/);
   // The old roomy aside spacing that caused the bottom clip is gone (scoped to the aside, so the
   // summary modal's own p-4 / space-y-4 stay untouched).
   assert.doesNotMatch(source, /\{selectedSupplier \? \(\s*<div className="space-y-4">/);

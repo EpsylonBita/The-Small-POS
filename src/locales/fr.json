@@ -348,6 +348,15 @@
     }
   },
   "common": {
+    "datePicker": {
+      "selectDate": "Choisir une date",
+      "selectTime": "Choisir une heure",
+      "previousMonth": "Mois précédent",
+      "nextMonth": "Mois suivant",
+      "hours": "Heures",
+      "minutes": "Minutes",
+      "today": "Aujourd'hui"
+    },
     "none": "Aucun",
     "requiresOnline": "Cette action nécessite une connexion en ligne.",
     "savedLocallyQueued": "Enregistré localement et mis en file d’attente",
@@ -1161,6 +1170,10 @@
       "sweet": "Sucré",
       "all": "Tout",
       "little": "Peu",
+      "normal": "Normal",
+      "selectedCount_one": "{{count}} ingrédient",
+      "selectedCount_other": "{{count}} ingrédients",
+      "jumpTo": "Aller à",
       "littleHint": "Ajouter les ingrédients en petites portions",
       "specialInstructions": "Instructions spéciales",
       "specialInstructionsPlaceholder": "Instructions spéciales pour la commande (allergies, préférences, etc.)",
@@ -1281,7 +1294,8 @@
     "pagination": {
       "previous": "Précédent",
       "next": "Suivant",
-      "pageOf": "Page {{current}} sur {{total}}"
+      "pageOf": "Page {{current}} sur {{total}}",
+      "range": "{{start}}–{{end}} sur {{total}}"
     },
     "deleteAddressSuccess": "Adresse supprimée",
     "deleteAddressQueued": "Adresse supprimée et mise en attente de synchronisation",
@@ -3846,6 +3860,12 @@
       "staleMissing": "La file contient encore des éléments à traiter, mais la date de la dernière télémétrie est inconnue."
     },
     "healthModal": {
+      "remoteSupport": {
+        "title": "Assistance à distance : indisponible",
+        "impact": "Les ventes continuent normalement.",
+        "action": "Redémarrez la caisse. Si le problème persiste, envoyez les diagnostics à l’assistance.",
+        "details": "Détails de l’assistance à distance"
+      },
       "syncDetails": "Détails de synchronisation",
       "record": "Enregistrement",
       "error": "Erreur",
@@ -4471,8 +4491,26 @@
       "editCurrencyUnavailable": "La devise nécessaire à cette modification n’est pas vérifiée. Gardez le panier et faites vérifier les devises de la commande, du paiement et du service avant de réessayer. N’encaissez pas à nouveau.",
       "editCurrencyMismatch": "Les devises de la commande, du paiement et du service de caisse diffèrent. Faites vérifier les devises avant de réessayer. N’encaissez pas à nouveau.",
       "editCollectorUnavailable": "Le service du caissier n’a pas pu être vérifié. Vérifiez que le caissier a ouvert son service sur cette caisse, puis réessayez la modification sauvegardée. N’encaissez pas à nouveau.",
+      "editNoDrawerOwnerOnShift": "Aucun caissier ni responsable n’est en service sur cette caisse. Faites pointer un caissier et réessayez. Aucun argent n’a été encaissé.",
+      "editHeldClosedRetry": "La correction en attente a été clôturée sans enregistrer d’argent. Vous pouvez enregistrer à nouveau votre modification.",
       "editPaymentMismatch": "La différence confirmée ne correspond pas à la modification. Gardez le panier et faites rapprocher le paiement par un responsable dans État du système. Ne débitez pas à nouveau.",
       "editLocalOperationFailed": "La caisse n’a pas pu lire ou enregistrer la modification localement. Gardez le panier et réessayez. Si l’erreur persiste, exportez les données d’assistance depuis État du système. N’encaissez pas à nouveau.",
+      "editStorageBusy": "La caisse était occupée. Réessayez la correction enregistrée. Conservez le panier et ne procédez pas à un nouvel encaissement.",
+      "editStorageConstraint": "La correction est en conflit avec les données locales. Conservez le panier et demandez à un responsable de vérifier la correction dans Santé. Ne procédez pas à un nouvel encaissement.",
+      "editStorageIo": "La caisse ne peut pas écrire dans le stockage local. Faites vérifier l’espace libre et les droits d’écriture, puis réessayez la correction enregistrée. N’encaissez pas de nouveau.",
+      "editOrderNotFound": "Cette commande n’est plus disponible sur cette caisse. Conservez la correction, actualisez la liste et rouvrez la commande. N’encaissez pas de nouveau.",
+      "editGhostOrder": "Il s’agit d’une commande d’aperçu, qui ne peut pas recevoir de paiements. Ouvrez la commande normale pour la corriger. N’encaissez pas de nouveau.",
+      "editCollectorNotDrawerOwner": "L’argent de la correction doit être attribué à un caissier ou responsable en service. Faites pointer le responsable du tiroir et réessayez la correction enregistrée. N’encaissez pas de nouveau.",
+      "editInvalidDetails": "Certaines informations de paiement, remboursement ou livraison sont invalides. Conservez le panier, vérifiez les informations et réessayez la correction enregistrée. N’encaissez et ne remboursez pas de nouveau.",
+      "editDriverSettlementUnavailable": "Le règlement non clôturé du livreur pour cette commande est indisponible. Conservez la correction et faites vérifier ce règlement par un responsable. N’encaissez et ne remboursez pas de nouveau.",
+      "editOriginalPaymentUnavailable": "Le paiement d’origine est indisponible sur cette caisse. Conservez la correction, reconnectez la caisse et actualisez la commande avant de réessayer. Ne remboursez pas de nouveau.",
+      "editRefundOriginalUnavailable": "Le paiement d’origine a été annulé ou mis de côté pour vérification. Conservez la correction et faites vérifier ce paiement dans Santé. Ne remboursez pas de nouveau.",
+      "editRefundIdentityConflict": "Cette référence de remboursement appartient déjà à un autre paiement. Conservez la correction et demandez un rapprochement dans Santé. Ne remboursez pas de nouveau.",
+      "editRefundBalanceChanged": "Le remboursement dépasse le solde du paiement. Conservez la correction et actualisez son calcul avant de réessayer. Ne remboursez pas de nouveau.",
+      "editCancellationUnavailable": "Cette commande ne peut pas être annulée par cette correction. Conservez le panier et faites vérifier la commande et ses paiements. Ne remboursez pas de nouveau.",
+      "editOriginalProviderRequired": "Ce remboursement exige le prestataire de paiement d’origine. Conservez la correction et demandez à un responsable de suivre sa procédure. N’enregistrez pas un autre remboursement en caisse.",
+      "editReconciliationRequired": "Une correction précédente nécessite un rapprochement. Conservez le panier et faites vérifier la correction en attente dans Santé. N’encaissez et ne remboursez pas de nouveau.",
+      "editSettlementBusy": "Une autre correction est en cours d’enregistrement pour cette commande. Attendez sa fin, puis réessayez la correction enregistrée. N’encaissez et ne remboursez pas de nouveau.",
       "editScopeChanged": "La connexion de la caisse ou son établissement a changé. Rétablissez la connexion, puis réessayez la modification sauvegardée. Gardez le panier et n’encaissez pas à nouveau.",
       "saveChanges": "Enregistrer les modifications",
       "addCustomer": "Ajouter un client",
@@ -4486,6 +4524,14 @@
       "editNotApplied": "Cette correction n’a pas été enregistrée : sa différence n’a été consignée nulle part. Si de l’argent a déjà changé de mains, préparez à nouveau la correction et enregistrez ce même montant une seule fois ; ne l’encaissez ni ne le remboursez jamais deux fois. Sinon, un responsable peut la clôturer sans enregistrer d’argent.",
       "editRequote": "Préparer à nouveau la correction",
       "editRequoteReady": "Vérifiez le panier et enregistrez à nouveau la correction. N’enregistrez que l’argent déjà reçu ; ne l’encaissez ni ne le remboursez deux fois.",
+      "editDiscard": "Abandonner la correction",
+      "editDiscardQuestion": "De l’argent a-t-il été remis pour cette correction ?",
+      "editDiscardNo": "Non / rendu",
+      "editDiscardYes": "Oui",
+      "editDiscardMoneyGuidance": "Enregistrez à nouveau la correction ou demandez à un responsable de la clôturer.",
+      "editDiscardProviderCheck": "Une opération peut être en cours chez le prestataire de carte. Vérifiez auprès de lui ou demandez à un responsable de clôturer la correction.",
+      "editDiscardCollect": "Encaissement",
+      "editDiscardRefund": "Remboursement",
       "editCloseWithoutMoney": "Clôturer sans enregistrer d’argent (responsable)",
       "editCloseWithoutMoneyReason": "Correction non enregistrée ; clôturée par un responsable sans enregistrer d’argent",
       "editClosedWithoutMoney": "La correction non enregistrée a été clôturée. Aucun argent n’a été enregistré ; comptez la caisse pour confirmer.",
@@ -4499,6 +4545,18 @@
       "editCanonicalChanged": "Les détails de la commande doivent être actualisés. Actualisez la commande avant de confirmer un encaissement ou un remboursement."
     },
     "payment": {
+      "refusals": {
+        "invalidRequest": "Les informations de paiement sont invalides. Vérifiez le montant et le mode, puis réessayez l’enregistrement. N’encaissez pas de nouveau si l’argent a déjà été reçu.",
+        "orderNotFound": "La commande n’est plus disponible sur cette caisse. Actualisez la liste et rouvrez-la avant d’enregistrer le paiement. N’encaissez pas de nouveau.",
+        "ghostOrder": "Les paiements ne peuvent pas être enregistrés pour une commande d’aperçu. Ouvrez la commande normale avant d’enregistrer un paiement.",
+        "collectorShiftRequired": "Un service de caissier est nécessaire pour ce paiement. Faites pointer un caissier ou responsable et réessayez l’enregistrement. N’encaissez pas de nouveau.",
+        "collectorNotDrawerOwner": "Le paiement doit être attribué à un caissier ou responsable en service. Vérifiez le responsable du tiroir, puis réessayez l’enregistrement. N’encaissez pas de nouveau.",
+        "driverEarningRequired": "Aucun règlement non clôturé du livreur n’a été trouvé pour cette commande. Faites vérifier le règlement avant d’enregistrer le paiement. N’encaissez pas de nouveau.",
+        "storageBusy": "La caisse était occupée. Vérifiez si le paiement ou le remboursement a été enregistré avant de réessayer. N’encaissez et ne remboursez pas de nouveau.",
+        "storageConstraint": "Le paiement ou remboursement n’a pas pu être enregistré à cause d’un conflit de données locales. Gardez le reçu et faites vérifier Santé. N’encaissez et ne remboursez pas de nouveau.",
+        "storageIo": "La caisse n’a pas pu écrire le paiement ou remboursement localement. Faites vérifier l’espace libre et les droits d’écriture avant de réessayer. N’encaissez et ne remboursez pas de nouveau.",
+        "storageOther": "La caisse n’a pas pu lire ou enregistrer le paiement ou remboursement localement. Vérifiez son statut et faites exporter les données d’assistance depuis Santé si le problème persiste. N’encaissez et ne remboursez pas de nouveau."
+      },
       "title": "Paiement",
       "originalTotal": "Total d'origine :",
       "discount": "Remise :",
@@ -4538,6 +4596,7 @@
       "loadingMethods": "Chargement des modes de paiement",
       "loadingMethodsHint": "Vérification de la configuration de paiement du terminal...",
       "splitSimple": "Partage",
+      "cancelOrder": "Annuler la commande",
       "enterCashReceived": "Espèces reçues",
       "insufficient": "Insuffisant",
       "completeCash": "Terminer",
@@ -5008,6 +5067,7 @@
       "checkedInNow": "Déjà en service",
       "checkedInNowHelper": "Ces employés ont déjà une session active. Sélectionnez-en un pour gérer et clôturer son service.",
       "noCheckedInStaff": "Aucun employé n'est actuellement en service.",
+      "noOrdersYet": "Aucune commande dans ce service pour le moment.",
       "readyToStart": "Prêt à commencer",
       "readyToStartHelper": "Sélectionnez un employé puis continuez avec la vérification du PIN pour démarrer un nouveau service.",
       "noReadyStaff": "Tous les employés disponibles sont déjà en service.",
@@ -5464,9 +5524,10 @@
       "unsavedAlreadyResolved": "Ce paiement est déjà enregistré comme rendu.",
       "unsavedSavedAfterAll": "Ce paiement a finalement été enregistré : il n'y a rien à rendre.",
       "unsavedResolveFailed": "Impossible de l'enregistrer : {{error}}",
-      "heldEditCloseReason": "Commande annulée ; correction clôturée par un responsable depuis les contrôles du Z sans enregistrer d’argent",
+      "heldEditCloseReason": "Correction clôturée par un responsable depuis les contrôles Z sans enregistrer d’argent",
       "heldEditApprovalTitle": "Clôturer la correction sans argent",
       "heldEditApprovalSubtitle": "Vérifiez d’abord le TPE de la banque et le tiroir. Un membre du personnel ayant le droit d’annuler les paiements saisit son propre PIN. Rien n’est débité ni rendu.",
+      "discardedCorrections": "Corrections abandonnées sans mouvement d’argent",
       "heldEditClosed": "La correction a été clôturée. Aucun argent n’a été enregistré.",
       "heldEditCloseFailed": "La correction n’a pas pu être clôturée. Elle reste en attente ; rien n’a été enregistré.",
       "unsavedSaved": "Paiement enregistré.",
@@ -5981,6 +6042,15 @@
       "noOrders": "Aucun historique de commande trouvé"
     },
     "refund": {
+      "refusals": {
+        "paymentVoided": "Ce paiement a été annulé et ne peut pas être remboursé. Vérifiez l’historique des paiements de la commande avant tout autre remboursement.",
+        "paymentSetAside": "Ce paiement a été mis de côté pour vérification et ne peut pas être remboursé ici. Faites-le vérifier dans Santé avant de rendre de l’argent.",
+        "amountExceedsBalance": "Le remboursement demandé dépasse le solde du paiement. Actualisez le paiement et vérifiez les remboursements précédents avant de réessayer. Ne remboursez pas deux fois.",
+        "paymentNotFound": "Le paiement d’origine est introuvable sur cette caisse. Reconnectez la caisse et actualisez les paiements de la commande avant de réessayer. Ne remboursez pas de nouveau.",
+        "invalidRequest": "Les informations de remboursement sont invalides. Vérifiez le montant, le paiement d’origine et le motif avant de réessayer. Ne remboursez pas de nouveau.",
+        "idempotencyConflict": "Cette référence de remboursement appartient déjà à un autre paiement. Faites vérifier l’historique des paiements avant de réessayer. Ne remboursez pas de nouveau.",
+        "driverEarningRequired": "Aucun règlement non clôturé du livreur n’a été trouvé pour ce paiement. Faites vérifier le règlement avant d’enregistrer le remboursement. Ne remboursez pas de nouveau."
+      },
       "title": "Annulation / Remboursement",
       "subtitle": "Gérer les ajustements de paiement",
       "orderTotal": "Total commande",
@@ -6422,6 +6492,7 @@
     "noAddressForDelivery": "Ce client n'a pas d'adresse enregistrée. Ajoutez une adresse pour continuer une commande en livraison."
   },
   "orderDashboard": {
+    "unpaidOrderLeftPending": "La commande {{orderNumber}} reste impayée dans les Commandes, en attente de paiement.",
     "delivery": "Livraison",
     "pickup": "À emporter",
     "dineIn": "Sur place",
@@ -7600,7 +7671,8 @@
       "unscheduled": "Non planifiés"
     },
     "filters": {
-      "all": "Tous les rôles"
+      "all": "Tous les rôles",
+      "role": "Rôle"
     },
     "actions": {
       "addShift": "Ajouter un service",
@@ -9210,6 +9282,12 @@
     "contactSupport": "Si le problème persiste, contactez le support"
   },
   "splitPayment": {
+    "checkoutSaleHeld": "Un paiement par carte de {{amount}} a déjà été débité pour cette commande et n'est pas encore enregistré. Enregistrez-le comme paiement de la commande ; ne débitez pas la carte une seconde fois.",
+    "checkoutSaleUnknown": "Le terminal de paiement n'a pas répondu pour {{amount}}. Vérifiez la dernière transaction du terminal avant d'encaisser un autre paiement. Cette commande ne peut pas être quittée tant que la carte n'est pas vérifiée.",
+    "checkoutSalePersonAdded": "Une personne avec {{amount}} a été ajoutée pour la carte déjà débitée. Appuyez sur Carte pour cette personne afin de l'enregistrer.",
+    "checkoutSaleReadFailed": "La caisse n'a pas pu vérifier les paiements par carte de cette commande. Réessayez.",
+    "saveCardPayment": "Enregistrer le paiement par carte",
+    "checkAgain": "Vérifier à nouveau",
     "title": "Paiement partagé",
     "orderTotal": "Total de la commande",
     "byAmount": "Par montant",
@@ -9509,6 +9587,12 @@
       }
     },
     "recipes": {
+      "restoreLastKnownPrinterBrand": {
+        "title": "Le langage de l’imprimante n’a pas été reconnu",
+        "label": "Rétablir le langage enregistré de l’imprimante",
+        "explanation": "L’imprimante n’a pas répondu au contrôle du langage. Rétablissez le dernier langage reconnu pour garder les reçus lisibles.",
+        "verification": "Le réglage enregistré sera vérifié à nouveau. Imprimez un reçu de test pour vérifier le résultat sur papier."
+      },
       "checkoutPaymentOpenPayment": {
         "label": "Le paiement doit être corrigé dans la commande",
         "explanation": "C'est un blocage de paiement connu. La correction sûre consiste à rouvrir l'écran de paiement de la commande au lieu de créer automatiquement un paiement.",
@@ -10549,5 +10633,17 @@
     "walkIn": "Sans réservation",
     "seatBooking": "Installer les clients réservés",
     "timezoneUnavailable": "Le fuseau horaire du magasin est indisponible. Actualise les paramètres du terminal avant de modifier le planning."
+  },
+  "workCard": {
+    "sent": "Carte de travail : envoyée à {{time}}",
+    "pending": "Carte de travail : en attente",
+    "dry_run": "Carte de travail : test, non envoyée",
+    "late": "Carte de travail : en retard, un motif du responsable est requis",
+    "missing_exit": "Carte de travail : sortie manquante",
+    "needs_action": "Carte de travail : NON envoyée, veuillez prévenir le responsable",
+    "offline": "Carte de travail : sera envoyée au retour de la connexion",
+    "attention": "Carte de travail : {{count}} mouvements nécessitent une action. Voir admin → Planning du personnel → Journal ERGANI.",
+    "zHint": "Chaque personne doit terminer son service avec son propre PIN pour que la sortie de la carte de travail soit envoyée.",
+    "dismiss": "Masquer pendant 1 heure"
   }
 }

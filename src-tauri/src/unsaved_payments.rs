@@ -1073,6 +1073,11 @@ pub(crate) fn mark_direct_sale_returned(
 pub(crate) fn is_lasting_payment_refusal(error: &str) -> bool {
     const LASTING: &[&str] = &[
         crate::payments::PLATFORM_HELD_COLLECTION_ERROR,
+        "PAYMENT_ORDER_NOT_FOUND",
+        "PAYMENT_GHOST_ORDER",
+        "PAYMENT_INVALID_REQUEST",
+        "PAYMENT_COLLECTOR_SHIFT_REQUIRED",
+        "PAYMENT_COLLECTOR_NOT_DRAWER_OWNER",
         "Order not found",
         "Cannot record payment for ghost order",
         "Missing orderId",
@@ -1627,6 +1632,25 @@ pub(crate) fn resolve_in_connection(
     if key.is_empty() {
         return Ok(ResolveOutcome::NotFound);
     }
+    if conn.is_autocommit() && load(conn, key)?.is_none() {
+        if saved_row(conn, key)?.is_some() {
+            // An absent retained row needs no DELETE. Malformed retained
+            // values still take the admitted cleanup path below.
+            if crate::db::get_setting(conn, UNSAVED_CHARGED_PAYMENT_CATEGORY, key).is_none() {
+                return Ok(ResolveOutcome::Saved);
+            }
+        } else {
+            return Ok(
+                if crate::db::get_setting(conn, UNSAVED_CHARGED_PAYMENT_RESOLVED_CATEGORY, key)
+                    .is_some()
+                {
+                    ResolveOutcome::AlreadyResolved
+                } else {
+                    ResolveOutcome::NotFound
+                },
+            );
+        }
+    }
     crate::payment_review::with_savepoint(conn, "unsaved_payment_resolve", || {
         let retained = load(conn, key)?;
         if retained
@@ -1755,6 +1779,17 @@ pub(crate) fn resolve_twint_returned_in_connection(
         return Ok(ResolveOutcome::NotFound);
     }
     let reference = twint_return_reference(Some(reference))?;
+    if conn.is_autocommit() && twint_return_eligibility(conn, key)?.is_none() {
+        return Ok(
+            if crate::db::get_setting(conn, UNSAVED_CHARGED_PAYMENT_RESOLVED_CATEGORY, key)
+                .is_some()
+            {
+                ResolveOutcome::AlreadyResolved
+            } else {
+                ResolveOutcome::NotFound
+            },
+        );
+    }
     crate::payment_review::with_savepoint(conn, "twint_receipt_returned", || {
         let Some(entry) = twint_return_eligibility(conn, key)? else {
             let resolved =
@@ -2296,3 +2331,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "admission_tests/unsaved.rs"]
+mod admission_regression_tests;

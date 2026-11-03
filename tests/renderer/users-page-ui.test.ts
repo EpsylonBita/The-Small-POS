@@ -33,38 +33,69 @@ test('users page loads the POS customer directory without app-user type filterin
   assert.doesNotMatch(source, /setTypeFilter/);
 });
 
-test('users page search and filter controls use neutral grey chrome', () => {
+// Founder 01/11 («διόρθωσε και επανασχεδίασε και αυτή την σελίδα»): the search is the ONE kit field look (with room
+// for its icon) and the filter trigger is a kit icon button beside it; an active filter shows the kit selection
+// yellow instead of the old yellow dot. No theme ternaries: the kit tokens switch with the theme.
+test('users page search is the kit field and the filter trigger is a kit icon button', () => {
   const source = readFileSync(usersPagePath, 'utf8');
 
-  assert.match(source, /resolvedTheme === 'dark' \? 'bg-zinc-900\/70' : 'bg-gray-100'/);
-  assert.match(source, /bg-zinc-800 text-white border-zinc-600 focus:ring-white\/40 focus:border-white\/70/);
-  assert.match(source, /bg-white text-gray-900 border-gray-300 focus:ring-gray-400 focus:border-gray-500/);
-  // The filter trigger button is positioned at the input's right edge.
-  assert.match(source, /className=\{`absolute right-2 top-1\/2 -translate-y-1\/2 rounded-2xl p-1\.5 transition-transform/);
+  assert.match(
+    source,
+    /const searchFieldClass = 'min-h-\[48px\] w-full rounded-xl border border-\(--pos-s-control\) bg-\(--pos-s-surface\) pl-10 pr-3 text-base font-semibold text-\(--pos-s-fg\) outline-hidden transition-colors placeholder:font-normal placeholder:text-zinc-400 focus:border-\(--pos-s-yellow\) dark:placeholder:text-zinc-500';/,
+  );
+  assert.match(source, /value=\{searchTerm\}\s*onChange=\{\(e\) => setSearchTerm\(e\.target\.value\)\}\s*className=\{searchFieldClass\}/);
+  assert.match(
+    source,
+    /className=\{`pos-icon-btn\$\{filtersActive \? ' border-\(--pos-s-sel-bg\)! bg-\(--pos-s-sel-bg\)! text-\(--pos-s-sel-fg\)!' : ''\}`\}/,
+  );
+  // The old grey chrome, the trigger inside the input and its yellow dot are gone.
+  assert.doesNotMatch(source, /resolvedTheme|isDark|useTheme/);
+  assert.doesNotMatch(source, /bg-zinc-800 text-white border-zinc-600/);
+  assert.doesNotMatch(source, /absolute right-2 top-1\/2 -translate-y-1\/2 rounded-2xl p-1\.5/);
+  assert.doesNotMatch(source, /rounded-full bg-yellow-500/);
   assert.doesNotMatch(source, /bg-gray-800\/50' : 'bg-white'[\s\S]*focus:ring-blue-500 focus:border-blue-500/);
   assert.doesNotMatch(source, /<select/);
 });
 
-test('users table uses yellow header neutral rows and wrapperless chips', () => {
+// Founder 01/11: the list is kit rows inside a pos-card, not a table with a solid YELLOW header (yellow is the
+// selection / the one primary only). Icons are neutral (muted); colour only on the status word (active ok, blocked
+// bad); the loyalty tier is a plain word; the view / block actions are kit icon buttons (block = danger).
+test('users list is kit rows in a pos-card with neutral icons and coloured status words', () => {
   const source = readFileSync(usersPagePath, 'utf8');
 
-  assert.match(source, /<thead className="bg-yellow-400">/);
-  assert.match(source, /text-xs font-semibold uppercase tracking-wider text-black/);
-  assert.match(source, /resolvedTheme === 'dark' \? 'bg-zinc-950' : 'bg-gray-100'/);
-  assert.match(source, /resolvedTheme === 'dark' \? 'active:bg-zinc-900' : 'active:bg-gray-200'/);
-  assert.match(source, /'text-orange-700 dark:text-orange-500'/);
-  assert.match(source, /'text-amber-700 dark:text-amber-300'/);
-  assert.match(source, /'text-yellow-800 dark:text-yellow-400'/);
-  assert.match(source, /<Mail className="w-4 h-4 mr-2 text-yellow-500" \/>/);
-  assert.match(source, /<Phone className="w-4 h-4 mr-2 text-yellow-500" \/>/);
-  assert.match(source, /<ShoppingBag className="w-4 h-4 mr-2 text-green-500" \/>/);
-  assert.match(source, /inline-flex items-center text-xs font-medium text-green-800 dark:text-green-400/);
-  assert.match(source, /inline-flex items-center text-xs font-medium text-red-700 dark:text-red-400/);
-  assert.match(source, /inline-flex items-center text-xs font-medium \$\{color\}/);
+  assert.doesNotMatch(source, /<table|<thead|<tbody|motion\.tr/);
+  assert.doesNotMatch(source, /bg-yellow-400|text-yellow-500|text-amber-500|text-green-500/);
+  assert.match(source, /<motion\.div variants=\{pageMotionItem\} className="pos-card">/);
+  assert.match(source, /<div role="list" className="divide-y divide-\(--pos-s-border\)">/);
+  assert.match(source, /role="listitem"\s*variants=\{pageMotionItem\}/);
+  // Neutral icons, no wrapper.
+  assert.match(source, /<Mail className="h-4 w-4 shrink-0" aria-hidden="true" \/>/);
+  assert.match(source, /<Phone className="h-4 w-4 shrink-0" aria-hidden="true" \/>/);
+  assert.match(source, /<ShoppingBag className=\{`h-4 w-4 shrink-0 \$\{subtleClass\}`\} aria-hidden="true" \/>/);
+  assert.match(source, /<Star className=\{`h-4 w-4 shrink-0 \$\{subtleClass\}`\} aria-hidden="true" \/>/);
+  assert.match(source, /const subtleClass = 'text-\(--pos-s-muted\)';/);
+  // The status is a coloured word without a pill or icon.
+  assert.match(source, /user\.is_banned \? 'text-\(--pos-s-bad\)' : 'text-\(--pos-s-ok\)'/);
+  // The tier is a plain word: no tier colours, no star badge.
+  assert.match(source, /return <span className="text-sm font-semibold">\{tierLabel\}<\/span>;/);
+  assert.doesNotMatch(source, /'text-orange-700 dark:text-orange-500'|'text-amber-700 dark:text-amber-300'|'text-yellow-800 dark:text-yellow-400'/);
+  // Kit icon buttons for view / block.
+  assert.match(source, /onClick=\{\(\) => handleViewUser\(user\)\}\s*className="pos-icon-btn"/);
+  assert.match(source, /className=\{user\.is_banned \? 'pos-icon-btn' : 'pos-icon-btn pos-icon-btn--danger'\}/);
+  // Wrapperless chips stay gone.
   assert.doesNotMatch(source, /bg-yellow-100 text-yellow-800 dark:bg-yellow-900\/20/);
   assert.doesNotMatch(source, /bg-green-100 text-green-800 dark:bg-green-900\/20/);
   assert.doesNotMatch(source, /text-blue-600 dark:text-blue-400 hover:text-blue-900/);
   assert.doesNotMatch(source, /purple-/);
+});
+
+// Founder 01/11: the page opens with the kit hero (title + one muted line, refresh as a kit icon button).
+test('users page header is the kit hero', () => {
+  const source = readFileSync(usersPagePath, 'utf8');
+
+  assert.match(source, /<motion\.div variants=\{pageMotionItem\} className="pos-card p-4 md:p-5">/);
+  assert.match(source, /<h1 className="truncate text-3xl font-bold tracking-tight">/);
+  assert.match(source, /<p className=\{`mt-1 truncate text-sm \$\{subtleClass\}`\}>\s*\{t\('users\.description'\)/);
 });
 
 // Round 184 (touch-first a11y): UsersPage icon-only controls exposed native title descriptions
@@ -81,19 +112,20 @@ test('UsersPage has no native title tooltips; icon controls keep handlers + loca
   assert.match(source, /onClick=\{\(\) => void loadUsers\(\)\}/);
   assert.match(source, /aria-label=\{t\('common\.refresh', 'Refresh'\)\}/);
 
-  // Round 262: the header refresh button is amber glass (was a stark black/white inversion square),
-  // touch-first with active press feedback and no hover. The old black/white classes are gone.
-  assert.match(source, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-border\)/);
+  // Founder 01/11: the header refresh is the kit icon button (44 px, raised, press feedback and the disabled
+  // look from the kit), touch-first with no hover. The old black/white and hand-drawn classes are gone.
+  assert.match(
+    source,
+    /onClick=\{\(\) => void loadUsers\(\)\}\s*disabled=\{loading\}\s*aria-label=\{t\('common\.refresh', 'Refresh'\)\}\s*className="pos-icon-btn"/,
+  );
   assert.doesNotMatch(source, /border border-white\/80 bg-white text-black/);
   assert.doesNotMatch(source, /border border-black bg-black text-white/);
+  assert.doesNotMatch(source, /h-12 w-12 rounded-xl inline-flex/);
   assert.doesNotMatch(source, /hover:/);
   assert.doesNotMatch(source, /group-hover:/);
-  // Behaviour/shape preserved: disabled guard, 44px square, spinner, active feedback, neutral disabled.
+  // Behaviour preserved: disabled guard and spinner.
   assert.match(source, /disabled=\{loading\}/);
-  assert.match(source, /h-12 w-12/);
   assert.match(source, /<RefreshCw className=\{`w-5 h-5 \$\{loading \? 'animate-spin' : ''\}`\} \/>/);
-  assert.match(source, /loading \? 'opacity-60 cursor-not-allowed' : 'active:scale-95'/);
-  assert.match(source, /active:scale-95/);
 
   // Row view-details button keeps its handler and localized aria-label.
   assert.match(
@@ -130,15 +162,28 @@ test('users table paginates the rendered rows', () => {
   assert.doesNotMatch(source, /\{filteredUsers\.map\(\(user\) => \(/);
 });
 
-test('users detail modal opens through an app-level portal with a blurred high-z backdrop', () => {
+// Founder 01/11: the windows use the shared glass shell — the shared liquid-glass-modal-backdrop (dimmed and
+// blurred page behind) instead of a hand-drawn bg-black/50 backdrop.
+test('users detail modal opens through an app-level portal with the shared glass backdrop and shell', () => {
   const source = readFileSync(usersPagePath, 'utf8');
 
   assert.match(source, /import \{ renderModalPortal \} from '\.\.\/utils\/render-modal-portal';/);
   assert.match(source, /\{showDetailsModal && selectedUser && renderModalPortal\(\s*<div/);
   assert.match(
     source,
-    /className="fixed inset-0 z-1200 flex items-center justify-center p-4 bg-black\/50 backdrop-blur-sm"/,
+    /\{showDetailsModal && selectedUser && renderModalPortal\(\s*<div className="fixed inset-0 z-1200 flex items-center justify-center p-4">\s*<div className="liquid-glass-modal-backdrop" aria-hidden="true" \/>/,
   );
+  assert.match(source, /const modalShellClass = 'liquid-glass-modal-shell relative flex w-full flex-col overflow-hidden text-\(--pos-s-fg\)';/);
+  assert.match(source, /aria-labelledby=\{detailsTitleId\}\s*className=\{`max-h-\[calc\(100dvh-2rem\)\] max-w-2xl \$\{modalShellClass\}`\}/);
+  // Header and footer are separated by the glass line; the one round close X closes through the close-only path.
+  assert.match(source, /const modalHeaderClass = 'flex shrink-0 items-start justify-between gap-4 border-b border-\(--modal-glass-line\) p-5';/);
+  assert.match(source, /const modalFooterClass = 'flex shrink-0 flex-wrap items-center gap-3 border-t border-\(--modal-glass-line\) p-5';/);
+  assert.match(source, /onClick=\{closeDetailsModal\}\s*className="liquid-glass-modal-close"\s*aria-label=\{t\('common\.close', 'Close'\)\}/);
+  // Body sections are pos-frost; block is the kit danger button, unblock and Close are neutral kit buttons.
+  assert.match(source, /className="pos-frost grid gap-4 rounded-xl border p-4 sm:grid-cols-2"/);
+  assert.match(source, /className=\{selectedUser\.is_banned \? secondaryButtonClass : dangerButtonClass\}/);
+  assert.match(source, /onClick=\{closeDetailsModal\}\s*className=\{`ml-auto \$\{secondaryButtonClass\}`\}/);
+  assert.doesNotMatch(source, /bg-black\/50 backdrop-blur-sm|bg-gray-900 border-gray-700|bg-white\/75|bg-gray-900\/70/);
   // No longer an inline page-contained z-50 modal.
   assert.doesNotMatch(source, /\{showDetailsModal && selectedUser && \(\s*<div/);
   assert.doesNotMatch(source, /className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black\/50"/);
@@ -154,11 +199,16 @@ test('address delete uses a portaled confirmation modal, not a native confirm di
   assert.match(source, /const \[addressPendingDelete, setAddressPendingDelete\] = useState/);
   assert.match(source, /const confirmDeleteAddress = async \(\) =>/);
   assert.match(source, /\{addressPendingDelete && renderModalPortal\(\s*<div/);
+  // Founder 01/11: the shared glass backdrop and shell; neutral Cancel and the kit danger Delete.
   assert.match(
     source,
-    /className="fixed inset-0 z-1300 flex items-center justify-center p-4 bg-black\/50 backdrop-blur-sm"/,
+    /className="fixed inset-0 z-1300 flex items-center justify-center p-4"\s*onClick=\{\(\) => setAddressPendingDelete\(null\)\}\s*>\s*<div className="liquid-glass-modal-backdrop" aria-hidden="true" \/>/,
   );
-  assert.match(source, /onClick=\{\(\) => void confirmDeleteAddress\(\)\}/);
+  assert.match(source, /aria-labelledby=\{deleteAddressTitleId\}\s*className=\{`max-w-md \$\{modalShellClass\}`\}/);
+  assert.match(source, /onClick=\{closeAddressDeleteModal\}\s*className="liquid-glass-modal-close"/);
+  assert.match(source, /onClick=\{\(\) => void confirmDeleteAddress\(\)\}\s*className=\{dangerButtonClass\}/);
+  assert.match(source, /const dangerButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--danger';/);
+  assert.doesNotMatch(source, /rounded-xl bg-red-600 px-4 py-2/);
 });
 
 test('loyalty tier and pagination labels use localized users.* keys', () => {
@@ -168,7 +218,13 @@ test('loyalty tier and pagination labels use localized users.* keys', () => {
   assert.match(source, /t\('users\.pagination\.previous'/);
   assert.match(source, /t\('users\.pagination\.next'/);
   assert.match(source, /t\('users\.pagination\.pageOf'/);
+  // Founder 01/11: the range is plain localized words ("1–9 of 9"), the page buttons are kit buttons.
+  assert.match(source, /t\('users\.pagination\.range', '\{\{start\}\}–\{\{end\}\} of \{\{total\}\}', \{ start: pageStart, end: pageEnd, total: filteredUsers\.length \}\)/);
+  assert.match(source, /setCurrentPage\(page => Math\.max\(1, page - 1\)\)\}\s*disabled=\{activePage === 1\}\s*className=\{smallButtonClass\}/);
+  assert.match(source, /setCurrentPage\(page => Math\.min\(totalPages, page \+ 1\)\)\}\s*disabled=\{activePage === totalPages\}\s*className=\{smallButtonClass\}/);
+  assert.doesNotMatch(source, /border-yellow-500 text-yellow-700/);
   // Hardcoded English tier/pagination literals are gone.
+  assert.doesNotMatch(source, /\{pageStart\}-\{pageEnd\} of \{filteredUsers\.length\}/);
   assert.doesNotMatch(source, /\btier = 'Bronze'/);
   assert.doesNotMatch(source, />\s*Previous\s*<\/button>/);
   assert.doesNotMatch(source, />\s*Next\s*<\/button>/);
@@ -200,6 +256,7 @@ test('users page translations exist in every POS locale', () => {
     'pagination.previous',
     'pagination.next',
     'pagination.pageOf',
+    'pagination.range',
   ];
 
   const localeFiles = readdirSync(localesDir)
@@ -233,12 +290,16 @@ test('UsersPage filter affordance is an accessible button with a status/loyalty 
   // It still uses the funnel icon, now inside the button (not a bare graphic).
   assert.match(source, /<Filter className="h-5 w-5" \/>/);
 
-  // The popover exposes status and loyalty options as a menu with readable dark/light colors.
+  // The popover exposes status and loyalty options as a menu on the solid kit surface (readable in both themes
+  // through the kit tokens; Founder 01/11 replaced the dark/light ternary).
   assert.match(source, /role="menu"/);
   assert.match(source, /USER_STATUS_FILTERS\.map\(option =>/);
   assert.match(source, /USER_LOYALTY_FILTERS\.map\(option =>/);
-  assert.match(source, /'bg-zinc-900 border-zinc-700 text-white'/);
-  assert.match(source, /'bg-white border-gray-200 text-gray-900'/);
+  assert.match(source, /role="menu"\s*className="[^"]*border border-\(--pos-s-border\) bg-\(--pos-s-surface\) p-3 text-\(--pos-s-fg\) shadow-xl"/);
+  // Founder 01/11: the chosen option is the kit selection (yellow with dark words), never a raw bg-yellow-400.
+  // The kit option centres its words; a menu row reads from the left (justify-start! outranks the kit rule).
+  assert.match(source, /className=\{`pos-choice w-full justify-start! text-left\$\{statusFilter === option \? ' is-selected' : ''\}`\}/);
+  assert.match(source, /className=\{`pos-choice w-full justify-start! text-left\$\{loyaltyFilter === option \? ' is-selected' : ''\}`\}/);
   // Click-away closes the popover; it sits above the page/sidebar (high z).
   assert.match(source, /onClick=\{\(\) => setShowFilterMenu\(false\)\}/);
   assert.match(source, /z-1200(?![\w.-])/);
@@ -250,15 +311,19 @@ test('UsersPage filter popover is height-bounded with an internal scroll so it n
   const source = readFileSync(usersPagePath, 'utf8');
 
   // The popover is a bounded flex column capped well below the viewport at 1282x802
-  // (the old calc(100vh-15rem) still overflowed below a low search-bar anchor).
+  // (the old calc(100vh-15rem) still overflowed below a low search-bar anchor). Founder 01/11: the options are
+  // 44 px kit options now, so the cap is 22rem (450 px at 802) — the trigger sits in the toolbar under the hero,
+  // and even with the offline banner above it the menu ends inside the window.
   assert.doesNotMatch(source, /max-h-\[calc\(100vh-15rem\)\]/);
-  assert.match(source, /role="menu"[\s\S]*?flex max-h-\[calc\(100vh-28rem\)\][^`]*flex-col/);
+  assert.match(source, /role="menu"[\s\S]*?flex max-h-\[calc\(100vh-22rem\)\][^`]*flex-col/);
   // The option lists scroll internally...
   assert.match(source, /min-h-0 flex-1 overflow-y-auto pr-1 scrollbar-hide/);
-  // ...and the Clear filters action is pinned (shrink-0) so it stays fully visible.
-  assert.match(source, /mt-3 shrink-0 w-full rounded-2xl border[\s\S]*?users\.filters\.clear/);
+  // ...and the Clear filters action (a kit button, Founder 01/11) is pinned (shrink-0) so it stays fully visible.
+  assert.match(source, /className=\{`mt-3 shrink-0 w-full \$\{smallButtonClass\}`\}[\s\S]*?users\.filters\.clear/);
 });
 
+// Founder 01/11: the polish now comes from the kit — one field look (kitFieldLook) for every field in the
+// windows, kit buttons, kit address cards (pos-frost) and a solid kit suggestion list.
 test('UsersPage supervisor polish keeps controls rounded, on-palette, and touch-first', () => {
   const source = readFileSync(usersPagePath, 'utf8');
 
@@ -266,12 +331,27 @@ test('UsersPage supervisor polish keeps controls rounded, on-palette, and touch-
   assert.doesNotMatch(source, /hover:|group-hover:|dark:hover:/);
   assert.doesNotMatch(source, /bg-blue|text-blue|border-blue|focus:ring-blue|focus:border-blue/);
   assert.doesNotMatch(source, /bg-purple|text-purple|border-purple|ring-purple/);
-  assert.match(source, /w-full pl-10 pr-12 py-2 rounded-2xl/);
-  assert.match(source, /rounded-2xl px-3 py-1\.5 text-left text-sm transition-transform active:scale-\[0\.98\]/);
-  assert.match(source, /rounded-2xl border px-3 py-2 font-medium transition-transform active:scale-\[0\.98\]/);
-  assert.match(source, /p-4 rounded-2xl border/);
-  assert.match(source, /absolute z-50 w-full mt-1 rounded-2xl shadow-lg max-h-60 overflow-y-auto scrollbar-hide/);
-  assert.match(source, /w-full px-3 py-2 rounded-2xl text-sm/);
+  assert.match(
+    source,
+    /const kitFieldLook = 'min-h-\[48px\] rounded-xl border border-\(--pos-s-control\) bg-\(--pos-s-surface\) px-3 text-base font-semibold text-\(--pos-s-fg\) outline-hidden transition-colors placeholder:font-normal placeholder:text-zinc-400 focus:border-\(--pos-s-yellow\) dark:placeholder:text-zinc-500';/,
+  );
+  assert.match(source, /const fieldClass = `w-full \$\{kitFieldLook\}`;/);
+  // Street, city, postal code and floor share the field; the notes are the same field as a textarea.
+  assert.equal((source.match(/className=\{fieldClass\}/g) ?? []).length, 4);
+  assert.match(source, /className=\{`min-h-20 resize-none py-2\.5 \$\{fieldClass\}`\}/);
+  assert.doesNotMatch(source, /focus:ring-yellow-500|w-full px-3 py-2 rounded-2xl text-sm/);
+  // The address cards are pos-frost sections of the glass window.
+  assert.match(source, /className="pos-frost rounded-xl border p-4"/);
+  assert.match(
+    source,
+    /absolute z-50 mt-1 max-h-60 w-full overflow-y-auto scrollbar-hide rounded-xl border border-\(--pos-s-border\) bg-\(--pos-s-surface\) p-1 text-\(--pos-s-fg\) shadow-xl/,
+  );
+  // Neutral Cancel then the one yellow Save; address edit / delete are kit icon buttons (delete = danger).
+  assert.match(source, /onClick=\{handleCancelEdit\}\s*className=\{secondaryButtonClass\}/);
+  assert.match(source, /onClick=\{\(\) => handleSaveAddress\(address\.id\)\}\s*className=\{primaryButtonClass\}/);
+  assert.match(source, /onClick=\{\(\) => handleEditAddress\(address\)\}\s*className="pos-icon-btn"/);
+  assert.match(source, /onClick=\{\(\) => handleDeleteAddress\(address\.id\)\}\s*className="pos-icon-btn pos-icon-btn--danger"/);
+  assert.doesNotMatch(source, /liquid-glass-modal-success|text-red-600 dark:text-red-400/);
 });
 
 test('UsersPage empty state shows a no-matches message under search/filters, not "no users yet"', () => {
@@ -374,11 +454,12 @@ test('UsersPage customer details modal exposes labelled dialog semantics', () =>
     /<h3 id=\{detailsTitleId\}[\s\S]*?\{t\('users\.customerDetails'\) \|\| 'Customer Details'\}/,
   );
 
-  // Still portaled outside the page container with a blurred backdrop (no regression).
+  // Still portaled outside the page container with a blurred backdrop (no regression; Founder 01/11: the
+  // shared glass backdrop).
   assert.match(source, /\{showDetailsModal && selectedUser && renderModalPortal\(/);
   assert.match(
     source,
-    /className="fixed inset-0 z-1200 flex items-center justify-center p-4 bg-black\/50 backdrop-blur-sm"/,
+    /className="fixed inset-0 z-1200 flex items-center justify-center p-4">\s*<div className="liquid-glass-modal-backdrop" aria-hidden="true" \/>/,
   );
 });
 

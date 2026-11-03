@@ -46,28 +46,38 @@ test('CustomerSearchModal search spinner uses the yellow accent, not blue', () =
   assert.doesNotMatch(source, /border-blue-500\/30 border-t-blue-500/);
 });
 
-test('CustomerSearchModal renders found customer cards with neutral active chrome and non-blue icons', () => {
-  // Neutral card chrome with active (tap) feedback -- NOT hover (the previous, corrected value).
-  assert.match(source, /border-zinc-300\/70 bg-zinc-100\/85 active:bg-zinc-200\/80/);
-  assert.match(source, /dark:border-zinc-700\/70 dark:bg-zinc-800\/80 dark:active:bg-zinc-700\/70/);
-  assert.doesNotMatch(source, /hover:bg-zinc-200\/80/);
-
-  // The found (non-banned) User icon is neutral grey; banned stays red. Never blue.
-  assert.match(
-    source,
-    /<User className=\{`h-6 w-6 shrink-0 \$\{c\.is_banned \? 'text-red-500' : 'text-gray-600 dark:text-gray-300'\}`\}/,
-  );
-  assert.match(source, /<Phone className="h-4 w-4 shrink-0 text-yellow-500 dark:text-yellow-300"/);
-  assert.doesNotMatch(source, /📞 \{c\.phone\}/);
+// Founder 02/11/2026 («διόρθωσε και το modal της αναγνώρισης… και τα εικονίδια και όλα»; «τα χρώματα στα κουμπιά
+// θέλω να είναι από πίσω στις σκιές τους»): the window is the kit. Cards are raised kit cards, words and icons are
+// neutral (red only for a banned customer), the chosen address glows yellow behind with its check, and a coloured
+// button keeps the neutral face with its colour as the shadow behind it.
+test('CustomerSearchModal renders found customers as raised kit cards with neutral icons', () => {
+  assert.match(source, /className=\{`pos-choice-card relative mb-3 cursor-pointer text-left \$\{c\.is_banned \? 'pos-neon-bad' : ''\}`\}/);
+  assert.match(source, /<User className=\{`h-6 w-6 shrink-0 \$\{c\.is_banned \? 'text-\(--pos-s-bad\)' : 'text-\(--pos-s-muted\)'\}`\}/);
+  assert.doesNotMatch(source, /text-yellow-500 dark:text-yellow-300/, 'the phone icon is neutral, not decorated yellow');
+  assert.doesNotMatch(source, /bg-zinc-100\/85|bg-zinc-800\/80|border-zinc-300\/70/, 'no translucent card chrome');
+  assert.doesNotMatch(source, /rounded-full flex items-center gap-1/, 'banned is red words, not a pill');
+  assert.doesNotMatch(source, /📞|🔔|📝/, 'kit icons, not emoji');
 });
 
-test('CustomerSearchModal renders selected customer detail with neutral chrome and yellow phone icon', () => {
-  assert.match(source, /mb-6 rounded-2xl border p-4 \$\{/);
-  assert.match(source, /border-zinc-300\/70 bg-zinc-100\/85 dark:border-zinc-700\/70 dark:bg-zinc-800\/80/);
-  assert.match(source, /<User className=\{`h-7 w-7 shrink-0/);
-  assert.match(source, /<Phone className="h-4 w-4 shrink-0 text-yellow-500 dark:text-yellow-300" \/>[\s\S]*<span>\{customer\.phone\}<\/span>/);
-  assert.match(source, /w-full cursor-pointer rounded-lg p-2 transition-all/);
-  assert.doesNotMatch(source, /📞 \{customer\.phone\}/);
+test('CustomerSearchModal renders the customer as a kit panel and addresses as raised cards; the chosen one glows yellow', () => {
+  assert.match(source, /className=\{`pos-card mb-6 p-4 \$\{customer\.is_banned \? 'pos-neon-bad' : ''\}`\}/);
+  assert.match(source, /className=\{`pos-raised w-full cursor-pointer rounded-2xl border p-3 text-left \$\{isSelected\s*\? 'pos-raised--tint \[--pos-tint:var\(--pos-s-sel-bg\)\]'/);
+  assert.match(source, /rounded-full bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)/);
+  assert.doesNotMatch(source, /border-green-600|text-green-400|bg-green-500/, 'the selection is the kit yellow, never green');
+  assert.match(source, /<MapPin className="mt-0\.5 h-5 w-5 shrink-0 text-\(--pos-s-muted\)" aria-hidden="true" \/>/);
+  assert.match(source, /className="pos-icon-btn h-10! w-10!"/);
+  assert.match(source, /className="pos-icon-btn pos-icon-btn--danger h-10! w-10!"/);
+});
+
+test('CustomerSearchModal order types use the till glyphs and colours, the colour as the shadow behind', () => {
+  assert.match(source, /<DeliveryScooterIcon className="h-full w-full" \/>/);
+  assert.match(source, /<PickupHandBagIcon className="h-full w-full" \/>/);
+  assert.match(source, /<TableOrderIcon className="h-full w-full" strokeWidth=\{1\.6\} opticalScale=\{1\.62\} \/>/);
+  assert.match(source, /className=\{`pos-raised pos-raised--tint flex min-h-\[104px\] flex-col/);
+  assert.doesNotMatch(source, /border-2 bg-white px-4 py-4/, 'no coloured outline on a white tile');
+  const css = readFileSync(path.join(projectRoot, 'src', 'renderer', 'styles', 'glassmorphism.css'), 'utf8');
+  assert.match(css, /\.pos-raised--tint \{ box-shadow: [^}]*var\(--pos-tint, transparent\); \}/);
+  assert.match(css, /\.pos-raised--tint:is\(:active, \[data-pressed\]\):not\(:disabled\) \{/);
 });
 
 test('CustomerSearchModal address + action MapPins are neutral (not blue); actions are solid kit buttons', () => {
@@ -79,18 +89,14 @@ test('CustomerSearchModal address + action MapPins are neutral (not blue); actio
 
   // No MapPin (or any icon) is blue anywhere in the modal.
   assert.doesNotMatch(source, /<MapPin[^>]*text-blue/);
-  // The non-selected address-row marker is neutral; the action icons take the button's text colour.
-  assert.match(source, /<MapPin className="w-4 h-4 text-gray-500 dark:text-gray-300 mt-0\.5 shrink-0" \/>/);
-  assert.match(actionSection, /<MapPin className="w-4 h-4" \/>/);
+  assert.match(actionSection, /<MapPin className="w-4 h-4 shrink-0" \/>/);
 
-  // Selected-address border stays green. Wave ΣΤ2: the three actions are solid kit buttons (neutral
-  // Add address / Edit, red-text Delete) with no inline translucent borders.
-  assert.match(source, /border-2 border-green-600 bg-transparent/);
-  assert.match(source, /border border-gray-200 bg-transparent/);
-  assert.equal((actionSection.match(/className="pos-solid-btn pos-solid-btn--sm flex-1 /g) || []).length, 2);
-  assert.match(actionSection, /className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--danger /);
+  // The three actions are raised kit buttons (neutral Add address / Edit, red-text Delete) that wrap their words
+  // in the narrow window instead of being cut.
+  assert.equal((actionSection.match(/className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--wrap min-w-0 gap-1\.5"/g) || []).length, 2);
+  assert.match(actionSection, /className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--danger"/);
   assert.doesNotMatch(actionSection, /rgba\(/);
-  assert.match(actionSection, /<Edit className="w-4 h-4" \/>/);
+  assert.match(actionSection, /<Edit className="w-4 h-4 shrink-0" \/>/);
   assert.match(actionSection, /<Trash2 className="w-4 h-4" \/>/);
 });
 
@@ -114,22 +120,18 @@ test('CustomerSearchModal icon buttons use aria-label, not native title tooltips
   assert.match(source, /title=\{t\('modals\.customerSearch\.deleteCustomerTitle'/);
 });
 
-// Not-found / different-person prompt: a yellow info panel, but the create CTA stays semantic GREEN
-// (#16a34a / white) because it creates/saves a customer -- it must NOT be yellow.
-test('CustomerSearchModal add-new-customer prompt is a yellow info panel with a green create CTA', () => {
+// Not-found / different-person prompt: a kit panel; adding the customer is the one yellow primary when nobody was
+// found, and a plain raised action next to a found customer (one yellow primary per view).
+test('CustomerSearchModal add-new-customer prompt is a kit panel with the kit primary only when nobody was found', () => {
   const promptSectionStart = source.indexOf('{/* Add New Customer Option');
   const promptSectionEnd = source.indexOf('{/* Delete Confirmation Dialog */}', promptSectionStart);
   assert.notEqual(promptSectionStart, -1);
   assert.notEqual(promptSectionEnd, -1);
   const promptSection = source.slice(promptSectionStart, promptSectionEnd);
 
-  // Yellow info panel.
-  assert.match(promptSection, /bg-yellow-50 dark:bg-zinc-800 border border-yellow-200 dark:border-zinc-700/);
-  // Green create CTA (semantic save) with active tap feedback -- not yellow.
-  assert.match(promptSection, /backgroundColor: '#16a34a'/);
-  assert.match(promptSection, /color: '#ffffff'/);
-  assert.match(promptSection, /borderColor: '#16a34a'/);
-  assert.doesNotMatch(promptSection, /backgroundColor: '#facc15'/);
+  assert.match(promptSection, /<div className="pos-card p-4">/);
+  assert.match(promptSection, /pos-solid-btn pos-solid-btn--md w-full gap-2 \$\{customer \? '' : `pos-solid-btn--primary pos-raised--tint \[--pos-tint:var\(--pos-s-yellow\)\]`\}/);
+  assert.doesNotMatch(promptSection, /#16a34a|backgroundColor:/);
   assert.doesNotMatch(promptSection, /blue/);
 });
 
@@ -150,7 +152,7 @@ test('CustomerSearchModal renders a translated, touch-sized Caller ID add-addres
 
   assert.match(callerIdActions, /type="button"/);
   assert.match(callerIdActions, /min-h-touch(?![\w.-])/);
-  assert.match(callerIdActions, /[\s\S]*dark:text-white/);
+  assert.match(callerIdActions, /className="pos-solid-btn pos-solid-btn--md mt-4 min-h-touch w-full gap-2"/);
   assert.match(callerIdActions, /t\('modals\.customerSearch\.addNewAddress', 'Add address'\)/);
   assert.doesNotMatch(callerIdActions, /editCustomer|deleteCustomer|Trash2|<Edit/);
 });

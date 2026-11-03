@@ -304,6 +304,15 @@ describe('staged fulfillment and header corrections', () => {
 });
 
 describe('paid edit corrections (06/10/2026)', () => {
+  it('carries dry-run method refusals to the picker without confirming any money', async () => {
+    const bridge = orders();
+    vi.mocked(bridge.previewEditSettlement).mockResolvedValue({ ...preview, allowedMethods: ['card'],
+      methodRefusals: { cash: 'EDIT_LOCAL_STORAGE_CONSTRAINT' } } as any);
+    const result = await previewMenuOrderEdit(bridge, { ...data, expected_local_version: undefined });
+    expect(result.preflight).toMatchObject({ allowedMethods: ['card'], methodRefusals: { cash: 'EDIT_LOCAL_STORAGE_CONSTRAINT' } });
+    expect(bridge.applyEditSettlement).not.toHaveBeenCalled();
+    expect(result.preview.methodRefusals).toEqual({ cash: 'EDIT_LOCAL_STORAGE_CONSTRAINT' });
+  });
   it('carries the server tender policy and line limit to the picker before any confirmation', async () => {
     const bridge = orders();
     vi.mocked(bridge.previewEditSettlement).mockResolvedValue({ ...preview, allowedMethods: ['card', 'voucher'], maxLines: 50 } as any);

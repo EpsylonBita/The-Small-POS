@@ -47,6 +47,11 @@ const h = vi.hoisted(() => {
     ledger: 'normal' as 'normal' | 'fail' | 'nonmatching',
     recordPayment: 'ok' as 'ok' | 'lost',
     ordinaryBooked: null as null | { id: string; ref: string },
+    partialPaid: 0,
+    splitSession: null as null | { submission: Record<string, unknown>; commit: ReturnType<typeof vi.fn>; backOut: ReturnType<typeof vi.fn> },
+    firstPortionOrderId: '',
+    firstPortionError: '',
+    checkoutSale: null as null | Record<string, unknown>,
     orders: [] as Array<Record<string, unknown>>,
     tables: [] as Array<Record<string, unknown>>,
     // The one host reread to hold: after the gift import or the ordinary write.
@@ -79,6 +84,16 @@ const h = vi.hoisted(() => {
         currency: 'EUR',
         status: 'completed',
         transactionRef: state.ordinaryBooked.ref,
+      });
+    }
+    if (state.partialPaid > 0) {
+      completedPayments.push({
+        id: 'partial-cash-1',
+        method: 'cash',
+        amount: state.partialPaid,
+        currency: 'EUR',
+        status: 'completed',
+        transactionRef: 'PARTIAL-1',
       });
     }
     if (state.ledger === 'nonmatching') {
@@ -157,7 +172,7 @@ const h = vi.hoisted(() => {
       recordPayment: native.recordPayment,
       printReceipt: native.printReceipt,
     },
-    ecr: { fiscalPrint: native.fiscalPrint },
+    ecr: { fiscalPrint: native.fiscalPrint, checkoutDirectSale: vi.fn(async () => ({ success: true, directSale: state.checkoutSale })) },
     settings: { get: native.settingsGet },
     sync: { getNetworkStatus: native.getNetworkStatus },
     customers: { lookupById: vi.fn(async () => null) },
@@ -391,7 +406,10 @@ vi.mock('../OrderGrid', () => ({
 }));
 vi.mock('../BulkActionsBar', () => ({ default: none }));
 vi.mock('../modals/DriverAssignmentModal', () => ({ default: none }));
-vi.mock('../modals/OrderCancellationModal', () => ({ default: none }));
+vi.mock('../modals/OrderCancellationModal', () => ({
+  default: ({ isOpen, orderCount }: { isOpen: boolean; orderCount: number }) =>
+    isOpen ? <div data-testid="order-cancellation-modal" data-count={orderCount} /> : null,
+}));
 vi.mock('../modals/EditOptionsModal', () => ({ default: none }));
 vi.mock('../modals/EditPaymentMethodModal', () => ({ default: none }));
 vi.mock('../modals/EditCustomerInfoModal', () => ({ EditCustomerInfoModal: none }));
@@ -435,7 +453,15 @@ vi.mock('../modals/MenuModal', () => ({
         if (editMode) {
           void onEditComplete(h.state.checkoutDraft.submission).then(() => { h.state.checkoutDraft = null; onClose(); });
         } else void onOrderComplete({ ...h.orderData(), ...h.state.menuSubmission, ...(h.state.menuCreateId ? { clientRequestId: h.state.menuCreateId } : {}) });
-      }}>complete order</button><button data-testid="menu-close" onClick={() => { h.state.checkoutDraft = null; onClose(); }}>close editor</button>
+      }}>complete order</button>{props.onSplitCheckout ? <button data-testid="menu-split" onClick={() => {
+        const submission = { ...h.orderData(), clientRequestId: 'checkout-split-1' };
+        h.state.splitSession = {
+          submission,
+          commit: vi.fn(async (splitFirstPortion: unknown) => onOrderComplete({ ...submission, paymentData: { method: 'pending', splitFirstPortion } })),
+          backOut: vi.fn(async () => undefined),
+        };
+        props.onSplitCheckout(h.state.splitSession);
+      }}>split</button> : null}<button data-testid="menu-close" onClick={() => { h.state.checkoutDraft = null; onClose(); }}>close editor</button>
       <button data-testid="restore-context" onClick={() => {
         try { onDraftRestore(h.state.restoreContext); } catch (error) { h.state.restoreError = String(error); }
       }}>restore context</button></>
@@ -450,9 +476,13 @@ vi.mock('../recovery/TableAttemptRecoveryNotice', () => ({
   </>,
 }));
 vi.mock('../modals/SplitPaymentModal', () => ({
-  SplitPaymentModal: ({ orderId, onClose }: { orderId: string; onClose: () => void }) => (
-    <div data-testid="split-payment-modal" data-order-id={orderId}>
+  SplitPaymentModal: ({ orderId, onClose, draft }: { orderId: string; onClose: () => void; draft?: { reference: string; createOrder: (payment: unknown) => Promise<string> } }) => (
+    <div data-testid="split-payment-modal" data-order-id={orderId} data-draft={draft?.reference ?? ''}>
       <button type="button" onClick={onClose}>close split</button>
+      {draft ? <button type="button" onClick={() => {
+        void draft.createOrder({ method: 'cash', amount: 5, discountAmount: 0, cashReceived: 5, changeGiven: 0, paymentOrigin: 'manual', terminalApproved: false })
+          .then((id) => { h.state.firstPortionOrderId = id; }, (error) => { h.state.firstPortionError = String(error); });
+      }}>pay first portion</button> : null}
     </div>
   ),
 }));
@@ -578,6 +608,11 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
       ledger: 'normal',
       recordPayment: 'ok',
       ordinaryBooked: null,
+      partialPaid: 0,
+      splitSession: null,
+      firstPortionOrderId: '',
+      firstPortionError: '',
+      checkoutSale: null,
       orders: [],
       holdRefreshOn: null,
       refreshArmed: false,
@@ -620,26 +655,19 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
     expect(h.native.recordPayment).not.toHaveBeenCalled();
   });
 
-  it('preserves the cashier collector when a restored delivery edit collects an extra amount', async () => {
+  // Tomikro #19 (02/11/2026): a stored correction reopened on every new order.
+  // An edit draft now returns only through its own order's edit; the till, not
+  // the screen, names who collects its money (edit-money-drawer-owner.test.ts).
+  it('never reopens a stored delivery edit by itself', async () => {
     targetOrder('cashier-delivery-edit');
     h.state.checkoutDraft = { draftId: 'delivery-edit', checkoutRequestId: 'delivery-edit-event', phase: 'editing', cartItems: [{}],
       context: { orderType: 'delivery', editMode: true, editOrderId: 'cashier-delivery-edit' } };
-    h.bridge.orders.previewEditSettlement.mockResolvedValue({ success: true, paidTotal: 12.5, nextTotal: 17,
-      requiredAction: 'collect', completedPayments: [{ id: 'original', method: 'cash', amount: 12.5 }], paymentStatus: 'paid',
-      canonicalExpectedVersion: 1, localExpectedVersion: 1, quotedFinancials: { totalAmount: 17, quote: 'proof' } });
     render(<OrderDashboard />);
-    await screen.findByTestId('edit-complete');
-    const beforeCommit = vi.fn(async () => undefined);
-    let completion!: Promise<void>;
-    await act(async () => { completion = h.state.menuProps.onEditComplete({ orderId: 'cashier-delivery-edit',
-      client_event_id: 'delivery-edit-event', expected_version: 1, expected_local_version: 1, items: [], total: 17 }, { beforeCommit }); });
-    fireEvent.click(await screen.findByTestId('edit-settlement-delta-cash'));
-    await act(async () => { await completion; });
-    expect(beforeCommit).toHaveBeenCalledOnce();
-    expect(h.bridge.orders.applyEditSettlement).toHaveBeenCalledWith(expect.objectContaining({
-      action: { type: 'collect', payments: [expect.objectContaining({ amount: 4.5, method: 'cash', collectedBy: 'cashier_drawer',
-        staffId: '30000000-0000-4000-8000-000000000001', staffShiftId: '50000000-0000-4000-8000-000000000001' })] },
-    }));
+    await screen.findByTestId('new-order');
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('edit-complete')).toBeNull();
+    expect(h.bridge.orders.previewEditSettlement).not.toHaveBeenCalled();
+    expect(h.bridge.orders.applyEditSettlement).not.toHaveBeenCalled();
   });
 
   it('attributes an upfront delivery receipt to the collecting cashier without assigning courier custody', async () => {
@@ -852,6 +880,179 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
     expect(screen.queryByTestId('split-payment-modal')).toBeNull();
     expect(h.native.fiscalFinalize).not.toHaveBeenCalled();
     expectOnlyTheOriginalImport();
+  });
+
+  // Coordinator 01/11, founder «Ναι, έτσι»: Payment -> Split -> close split opened the outstanding window, and
+  // its ✕ reopened Split, forever, with no way back or out. Closing an unpaid outstanding window now leaves the
+  // order pending (PAY PENDING in Orders, as Android's back does) and says so; it is never marked paid.
+  it('closing the unpaid outstanding window leaves the order pending instead of reopening split', async () => {
+    targetOrder('dash-split-loop');
+    render(<OrderDashboard />);
+    await openOutstanding();
+    closeModal();
+    await settle();
+    expect(screen.queryByTestId('split-payment-modal')).toBeNull();
+    expect(screen.queryByRole('button', { name: /gift card/i })).toBeNull();
+    expect(h.toast).toHaveBeenCalledWith(expect.stringMatching(/unpaid/i));
+    expect(h.native.recordPayment).not.toHaveBeenCalled();
+    expect(h.store.createOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it('still resumes the split when part of the order is already paid', async () => {
+    targetOrder('dash-split-partial');
+    h.state.partialPaid = 5;
+    render(<OrderDashboard />);
+    fireEvent.click(screen.getByTestId('new-order'));
+    const complete = await screen.findByTestId('menu-complete');
+    finishLeavingModals();
+    fireEvent.click(complete);
+    await screen.findByTestId('split-payment-modal');
+    finishLeavingModals();
+    fireEvent.click(screen.getByRole('button', { name: 'close split' }));
+    await settle();
+    expect(await screen.findByTestId('split-payment-modal')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /gift card/i })).toBeNull();
+    expect(screen.queryByTestId('payment-cancel-order')).toBeNull();
+  });
+
+  it('offers Cancel order on the unpaid outstanding window and starts the normal cancellation', async () => {
+    targetOrder('dash-split-cancel');
+    render(<OrderDashboard />);
+    await openOutstanding();
+    const cancel = screen.getByTestId('payment-cancel-order');
+    expect(cancel.textContent).toMatch(/cancel order/i);
+    fireEvent.click(cancel);
+    finishLeavingModals();
+    expect(await screen.findByTestId('order-cancellation-modal')).toHaveAttribute('data-count', '1');
+    expect(screen.queryByTestId('split-payment-modal')).toBeNull();
+    expect(h.native.recordPayment).not.toHaveBeenCalled();
+    expect(h.native.printReceipt).not.toHaveBeenCalled();
+  });
+
+  // Founder 01/11/2026 («Τίποτα»): a counter order that starts with Split is saved only with its first payment.
+  // Split ✕ with nothing paid goes back to the menu's payment window and leaves no order, payment, print or sync.
+  it('Split from the menu opens on the cart and saves nothing before a payment', async () => {
+    targetOrder('dash-split-first-open');
+    render(<OrderDashboard />);
+    fireEvent.click(screen.getByTestId('new-order'));
+    fireEvent.click(await screen.findByTestId('menu-split'));
+    const split = await screen.findByTestId('split-payment-modal');
+    expect(split).toHaveAttribute('data-order-id', '');
+    expect(split).toHaveAttribute('data-draft', 'checkout-split-1');
+    expect(screen.getByTestId('menu-complete')).toBeInTheDocument();
+    expect(h.store.createOrder).not.toHaveBeenCalled();
+    expect(h.native.recordPayment).not.toHaveBeenCalled();
+    expect(h.native.printReceipt).not.toHaveBeenCalled();
+    expect(h.native.fiscalPrint).not.toHaveBeenCalled();
+  });
+
+  it('closing that split with nothing paid returns to the menu payment window and leaves nothing', async () => {
+    targetOrder('dash-split-first-back');
+    render(<OrderDashboard />);
+    fireEvent.click(screen.getByTestId('new-order'));
+    fireEvent.click(await screen.findByTestId('menu-split'));
+    await screen.findByTestId('split-payment-modal');
+    fireEvent.click(screen.getByRole('button', { name: 'close split' }));
+    await settle();
+    expect(h.state.splitSession?.backOut).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('split-payment-modal')).toBeNull();
+    expect(screen.queryByRole('button', { name: /gift card/i })).toBeNull();
+    expect(screen.getByTestId('menu-complete')).toBeInTheDocument();
+    expect(h.store.createOrder).not.toHaveBeenCalled();
+    expect(h.native.recordPayment).not.toHaveBeenCalled();
+    expect(h.toast).not.toHaveBeenCalledWith(expect.stringMatching(/unpaid/i));
+  });
+
+  it('the first portion saves the order with that payment and the split continues on it', async () => {
+    const orderId = targetOrder('dash-split-first-pay');
+    render(<OrderDashboard />);
+    fireEvent.click(screen.getByTestId('new-order'));
+    fireEvent.click(await screen.findByTestId('menu-split'));
+    await screen.findByTestId('split-payment-modal');
+    fireEvent.click(screen.getByRole('button', { name: 'pay first portion' }));
+    await waitFor(() => expect(h.state.firstPortionOrderId).toBe(orderId));
+    expect(h.state.firstPortionError).toBe('');
+    expect(h.state.splitSession?.commit).toHaveBeenCalledTimes(1);
+    expect(h.store.createOrder).toHaveBeenCalledTimes(1);
+    expect(h.store.createOrder).toHaveBeenCalledWith(expect.objectContaining({
+      clientRequestId: 'checkout-split-1',
+      payment_method: 'pending',
+      checkoutKind: 'split_first_portion',
+      initialPayment: expect.objectContaining({ method: 'cash', amount: 5, payment_method: 'cash', cashReceived: 5 }),
+    }));
+    const split = await screen.findByTestId('split-payment-modal');
+    expect(split).toHaveAttribute('data-order-id', orderId);
+    expect(split).toHaveAttribute('data-draft', 'checkout-split-1');
+  });
+
+  // Coordinator decision (A), 01/11/2026: money taken for the checkout is recorded, never dropped. A card charged
+  // and not saved, or not known yet, keeps the split open and says why; nothing backs out to «nothing».
+  it('a split on the cart with a card charged and not saved cannot be backed out', async () => {
+    targetOrder('dash-split-first-held-card');
+    render(<OrderDashboard />);
+    fireEvent.click(screen.getByTestId('new-order'));
+    fireEvent.click(await screen.findByTestId('menu-split'));
+    await screen.findByTestId('split-payment-modal');
+    for (const [sale, words] of [
+      [{ recoverable: true, id: 'sale-held', deviceId: 'eft-1', amountCents: 500, currency: 'EUR', status: 'approved' }, /already charged/],
+      [{ recoverable: false, requiresReconciliation: true, amountCents: 500, currency: 'EUR', status: 'error' }, /did not answer/],
+    ] as const) {
+      h.state.checkoutSale = { ...sale };
+      fireEvent.click(screen.getByRole('button', { name: 'close split' }));
+      await settle();
+      expect(h.toast.error).toHaveBeenLastCalledWith(expect.stringMatching(words), expect.anything());
+      expect(screen.getByTestId('split-payment-modal')).toBeInTheDocument();
+      expect(h.state.splitSession?.backOut).not.toHaveBeenCalled();
+    }
+    expect(h.store.createOrder).not.toHaveBeenCalled();
+  });
+
+  // Codex review P1: the preview read the checkout id without protecting it, so a cart abandoned after a
+  // back-out never blocks the next checkout.
+  it('a cart abandoned after a split back-out never blocks the next checkout', async () => {
+    targetOrder('dash-split-first-abandon');
+    render(<OrderDashboard />);
+    fireEvent.click(screen.getByTestId('new-order'));
+    fireEvent.click(await screen.findByTestId('menu-split'));
+    await screen.findByTestId('split-payment-modal');
+    fireEvent.click(screen.getByRole('button', { name: 'close split' }));
+    await settle();
+    // Another cart, another checkout id: it saves.
+    h.state.menuCreateId = 'another-cart';
+    fireEvent.click(screen.getByTestId('menu-complete'));
+    await waitFor(() => expect(h.store.createOrder).toHaveBeenCalledWith(expect.objectContaining({ clientRequestId: 'another-cart' })));
+    expect(h.toast.error).not.toHaveBeenCalledWith(expect.stringMatching(/orderCreateFailed|Failed to create/i));
+  });
+
+  // Codex review P2: a first portion that saved nothing (and holds no money) ends the split on the cart; the menu
+  // keeps the cart for another Pay.
+  it('a first portion that saved nothing closes the split on the cart and leaves the menu', async () => {
+    targetOrder('dash-split-first-failed');
+    h.store.createOrder.mockResolvedValueOnce({ success: false, error: 'The till could not save the order' } as any);
+    render(<OrderDashboard />);
+    fireEvent.click(screen.getByTestId('new-order'));
+    fireEvent.click(await screen.findByTestId('menu-split'));
+    await screen.findByTestId('split-payment-modal');
+    fireEvent.click(screen.getByRole('button', { name: 'pay first portion' }));
+    await waitFor(() => expect(h.state.firstPortionError).not.toBe(''));
+    await waitFor(() => expect(screen.queryByTestId('split-payment-modal')).toBeNull());
+    expect(screen.getByTestId('menu-complete')).toBeInTheDocument();
+    expect(h.state.firstPortionOrderId).toBe('');
+  });
+
+  it('a first card charged but not saved comes back to the split as «not saved», announced once', async () => {
+    targetOrder('dash-split-first-held');
+    h.store.createOrder.mockResolvedValueOnce({ success: false, paymentNotSaved: true, errorCode: 'PAYMENT_NOT_SAVED', amount: 5, currency: 'EUR' } as any);
+    render(<OrderDashboard />);
+    fireEvent.click(screen.getByTestId('new-order'));
+    fireEvent.click(await screen.findByTestId('menu-split'));
+    await screen.findByTestId('split-payment-modal');
+    fireEvent.click(screen.getByRole('button', { name: 'pay first portion' }));
+    await waitFor(() => expect(h.state.firstPortionError).toMatch(/PaymentNotSavedError/));
+    expect(h.state.firstPortionError).toMatch(/Do NOT charge again/);
+    expect(h.state.firstPortionOrderId).toBe('');
+    // The split's own portion says it; the dashboard does not announce it a second time.
+    expect(h.toast.error).not.toHaveBeenCalledWith(expect.stringMatching(/Do NOT charge again/), expect.anything());
   });
 
   it('lets a late ordinary result settle its owner but never touch a newer scope', async () => {

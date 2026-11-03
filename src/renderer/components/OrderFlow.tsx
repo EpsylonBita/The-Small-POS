@@ -7,7 +7,7 @@ import { MenuModal } from './modals/MenuModal';
 import { EditSettlementDeltaModal } from './modals/EditSettlementDeltaModal';
 import { commitMenuOrderEdit, menuEditRefundAction, previewMenuOrderEdit, type MenuOrderEditData, type MenuOrderEditLifecycle } from '../services/MenuOrderEdit';
 import type { OrderEditSettlementPreview } from '../../lib/ipc-adapter';
-import { resolveEditSettlementRefundAmount } from '../utils/editSettlementFinancials';
+import { resolveEditSettlementCollectAmount, resolveEditSettlementRefundAmount } from '../utils/editSettlementFinancials';
 import { ProductCatalogModal } from './modals/ProductCatalogModal';
 import { CustomerSearchModal } from './modals/CustomerSearchModal';
 import { AddCustomerModal } from './modals/AddCustomerModal';
@@ -56,6 +56,7 @@ import { useTables } from '../hooks/useTables';
 import { useModules } from '../contexts/module-context';
 import { useFeatures } from '../hooks/useFeatures';
 import toast from 'react-hot-toast';
+import { paymentRefusalMessage } from '../utils/paymentRefusalMessage';
 import { useDeliveryValidation } from '../hooks/useDeliveryValidation';
 import type { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
 import type { RestaurantTable } from '../types/tables';
@@ -545,7 +546,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       if (!lifecycle) throw new Error('CHECKOUT_DRAFT_EDIT_FREEZE_REQUIRED');
       if (preview.requiredAction === 'none') await commitMenuOrderEdit(bridge.orders, data, { type: 'none' }, lifecycle);
       else await new Promise<void>((resolve, reject) => setRecoveredEditPrompt({ data, lifecycle, preview,
-        amount: preview.requiredAction === 'collect' ? Math.max(0, preview.nextTotal - preview.paidTotal) : resolveEditSettlementRefundAmount(preview), resolve, reject }));
+        amount: preview.requiredAction === 'collect' ? resolveEditSettlementCollectAmount(preview) : resolveEditSettlementRefundAmount(preview), resolve, reject }));
     }
     void silentRefresh().catch(() => undefined);
   }, [bridge.orders, bridge.sync, restoredEditContext, silentRefresh]);
@@ -554,14 +555,11 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     if (!recoveredEditPrompt) return;
     const pending = recoveredEditPrompt;
     try {
-      const collectionAttribution = resolveAdjustmentAttribution({ databaseStaffId: staff?.databaseStaffId,
-        shiftStaffOwnerId: activeShift?.staff_id, staffShiftId: activeShift?.id, candidateStaffIds: [staff?.staffId] });
       const action = pending.preview.requiredAction === 'collect'
         ? { type: 'collect' as const, payments: [{ orderId: pending.data.orderId, method, amount: pending.amount,
-          ...collectionAttribution, paymentOrigin: 'manual' as const, collectedBy: 'cashier_drawer' as const }] }
+          paymentOrigin: 'manual' as const, collectedBy: 'cashier_drawer' as const }] }
         : menuEditRefundAction(pending.preview, pending.amount, method,
-          t('orderDashboard.editSettlementRefundReason', { defaultValue: 'Edit settlement refund' }),
-          { staffId: staff?.databaseStaffId || staff?.staffId, staffShiftId: activeShift?.id });
+          t('orderDashboard.editSettlementRefundReason', { defaultValue: 'Edit settlement refund' }));
       await commitMenuOrderEdit(bridge.orders, pending.data, action, pending.lifecycle);
       setRecoveredEditPrompt(null);
       pending.resolve();
@@ -928,7 +926,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     }
   }, [bridge, resetFlow, silentRefresh, splitPaymentData, t]);
 
-  const ordinaryRefusalText = useCallback((code: string) => (
+  const ordinaryRefusalText = useCallback((code: string) => paymentRefusalMessage(code, t) ?? (
     code === 'GIFT_CARD_TERMINAL_SCOPE_REQUIRED'
       ? t('giftCardCheckout.refusal.scope', 'This terminal has no confirmed organization or terminal identity. Pair the POS again.')
       : t('giftCardCheckout.refusal.admission', 'Earlier gift card attempts must be checked first.')
@@ -2042,7 +2040,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         notifyCheckoutOutcomeUnknown(result, t);
         return false;
       } else {
-        toast.error(t('orderFlow.orderFailed'));
+        toast.error(paymentRefusalMessage('error' in result ? result.error : null, t) ?? t('orderFlow.orderFailed'));
         if ('error' in result) {
           console.error('Order creation failed:', result.error);
         }
@@ -2056,7 +2054,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         return false;
       }
       console.error('Error creating order:', error);
-      toast.error(t('orderFlow.orderFailed'));
+      toast.error(paymentRefusalMessage(error, t) ?? t('orderFlow.orderFailed'));
       // If the order persisted before the throw, the cart must still clear —
       // retrying from a stale cart would duplicate the order.
       return resolveOrderCompletionOutcome({ succeeded: false, orderPersisted })
@@ -2124,7 +2122,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
                   data-order-type-card="delivery"
                   onClick={() => handleSelectOrderType('delivery')}
                   aria-label={composeOrderTypeAriaLabel(deliveryTitle, deliveryDescription)}
-                  className="relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95"
+                  className="pos-raised relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95"
                 >
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-16 h-16 flex items-center justify-center">
@@ -2149,7 +2147,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
                 data-order-type-card="pickup"
                 onClick={() => handleSelectOrderType('pickup')}
                 aria-label={composeOrderTypeAriaLabel(pickupTitle, pickupDescription)}
-                className="relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95"
+                className="pos-raised relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95"
               >
                 <div className="flex flex-col items-center gap-3">
                   <div className="w-16 h-16 flex items-center justify-center">
@@ -2173,7 +2171,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
                   data-order-type-card="table"
                   onClick={() => handleSelectOrderType('dine-in')}
                   aria-label={composeOrderTypeAriaLabel(tableTitle, tableDescription)}
-                  className="relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95"
+                  className="pos-raised relative p-6 rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface) transition-transform duration-150 active:scale-95"
                 >
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-16 h-16 flex items-center justify-center">
@@ -2345,7 +2343,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
       <EditSettlementDeltaModal isOpen={recoveredEditPrompt !== null}
         mode={recoveredEditPrompt?.preview.requiredAction === 'refund' ? 'refund' : 'collect'}
-        allowedMethods={(recoveredEditPrompt?.preview as { allowedMethods?: Array<'cash' | 'card'> } | undefined)?.allowedMethods}
+        allowedMethods={recoveredEditPrompt?.preview.allowedMethods}
+        methodRefusals={recoveredEditPrompt?.preview.methodRefusals}
         amount={recoveredEditPrompt?.amount ?? 0} onConfirm={confirmRecoveredEdit}
         onCancel={() => { recoveredEditPrompt?.reject(new Error('EDIT_SETTLEMENT_CANCELLED')); setRecoveredEditPrompt(null); }} />
 

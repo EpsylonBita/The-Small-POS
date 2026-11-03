@@ -146,6 +146,50 @@ impl HeadProbe for ReqwestHeadProbe {
     }
 }
 
+/// Reuse the existing discovery HEAD probe in the support sweep. This creates
+/// no CAP device or manager and never reaches the fiscal test/X-report path.
+#[cfg(target_os = "windows")]
+pub(crate) fn support_head_probe(ip: Ipv4Addr, timeout: Duration) -> bool {
+    if timeout.is_zero() {
+        return false;
+    }
+    let timeout_ms = timeout.as_millis().clamp(1, 500) as u64;
+    let Ok(probe) = ReqwestHeadProbe::new(timeout_ms) else {
+        return false;
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return false;
+    };
+    runtime
+        .block_on(probe.probe_head(ip))
+        .is_some_and(|header| header == EXPECTED_SERVER_HEADER)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn support_head_probe(_ip: Ipv4Addr, _timeout: Duration) -> bool {
+    false
+}
+
+/// The existing ECR TCP transport's connect-only path, on a private instance.
+/// No manager locks, protocol handshake, test print or fiscal command.
+pub(crate) fn support_ecr_tcp_probe(ip: Ipv4Addr, port: u16, timeout: Duration) -> bool {
+    if timeout.is_zero() {
+        return false;
+    }
+    use crate::ecr::transport::{EcrTransport, NetworkTransport};
+    let mut transport = NetworkTransport::new(
+        &ip.to_string(),
+        port,
+        timeout.as_millis().clamp(1, 500) as u64,
+    );
+    let open = transport.connect().is_ok();
+    let _ = transport.disconnect();
+    open
+}
+
 /// Only a plain successful (2xx) response is eligible for header matching.
 /// Redirects are never followed (`redirect::Policy::none()`), but a 3xx (or
 /// any non-2xx) response body/headers must still be explicitly rejected here
@@ -161,7 +205,7 @@ fn is_scannable_physical_ip(ip: Ipv4Addr) -> bool {
 /// Alias-name heuristics used to exclude VPN, tunnel, and virtual adapters
 /// when a live `Virtual`/`Status` flag from `Get-NetAdapter` is unavailable
 /// or ambiguous.
-fn is_excluded_interface_alias(alias: &str) -> bool {
+pub(crate) fn is_excluded_interface_alias(alias: &str) -> bool {
     const EXCLUDED_TOKENS: [&str; 13] = [
         "loopback",
         "vpn",
@@ -788,6 +832,14 @@ mod tests {
         let first = try_acquire_scan_guard();
         assert!(first.is_some());
         assert!(try_acquire_scan_guard().is_none());
+        let at = std::time::Instant::now();
+        assert!(!support_head_probe(Ipv4Addr::LOCALHOST, Duration::ZERO));
+        assert!(!support_ecr_tcp_probe(
+            Ipv4Addr::LOCALHOST,
+            10009,
+            Duration::ZERO
+        ));
+        assert!(at.elapsed() < Duration::from_millis(50));
         drop(first);
         assert!(try_acquire_scan_guard().is_some());
         SCAN_IN_PROGRESS.store(false, Ordering::SeqCst);

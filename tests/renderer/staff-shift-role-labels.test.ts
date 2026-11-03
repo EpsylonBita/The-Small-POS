@@ -122,8 +122,14 @@ test('Round 313: the PIN step has a touch numeric keypad wired to enteredPin, wi
   assert.match(footer, /disabled=\{loading \|\| enteredPin\.length !== 4\}/, 'Continue stays disabled until a 4-digit PIN');
   assert.match(footer, /renderCheckInBackButton\('select-staff'\)/, 'the PIN-step Back action is in the footer');
 
-  // Touch-first + on-palette: >=44px keys, no hover, no native title, no blue/cyan/purple/indigo/violet/sky.
-  assert.match(pinStep, /min-h-touch(?![\w.-])/);
+  // Touch-first + on-palette: >=44px keys (the shared kit key class, founder 01/11), no hover, no native
+  // title, no blue/cyan/purple/indigo/violet/sky.
+  assert.match(modalSource, /const checkInKeyClass =\s*'flex min-h-touch(?![\w.-])/);
+  // Every keypad button (the 1-9 map, 0, clear, backspace) uses the shared key class.
+  const keypadButtons = (pinStep.match(/<button\b/g) ?? []).length;
+  const keyClassUses = (pinStep.match(/className=\{(?:checkInKeyClass|`\$\{checkInKeyClass\} text-\(--pos-s-muted\)`)\}/g) ?? []).length;
+  assert.equal(keypadButtons, 4);
+  assert.equal(keyClassUses, keypadButtons);
   assert.doesNotMatch(pinStep, /hover:/);
   assert.doesNotMatch(pinStep, /\btitle=/);
   assert.doesNotMatch(pinStep, /\b(?:bg|text|border|from|to|ring)-(?:blue|cyan|purple|indigo|violet|sky)-/);
@@ -149,9 +155,9 @@ test('Round 313 follow-up: the PIN step is compact (no tall py-5/text-4xl input,
   assert.doesNotMatch(pinStep, /py-5 text-center text-4xl/, 'the tall PIN input must be compacted');
   assert.match(pinStep, /py-2\.5 text-center text-3xl/, 'the PIN input is compact (py-2.5 / text-3xl)');
 
-  // Tighter keypad rhythm, but every key is still a >=44px touch target.
+  // Tighter keypad rhythm, but every key is still a >=44px touch target (the shared kit key class).
   assert.match(pinStep, /data-testid="staff-pin-keypad" className="mt-3 grid grid-cols-3 gap-1\.5"/);
-  assert.match(pinStep, /min-h-touch(?![\w.-])/);
+  assert.match(modalSource, /const checkInKeyClass =\s*'flex min-h-touch(?![\w.-])/);
 
   // Compact section wrapper (space-y-3, not the old space-y-6) so the full step fits without scrolling.
   assert.match(modalSource, /className="space-y-3" data-testid="staff-pin-section"/);
@@ -171,13 +177,15 @@ test('Round 313 (2nd follow-up): keypad keys are exactly-44px (no py-3 overshoot
 
   // Keypad keys keep the 44px touch floor but no longer stack py-3 on top of it (that overshoot pushed the
   // footer below the fold).
-  assert.match(pinStep, /min-h-touch(?![\w.-])/);
-  assert.doesNotMatch(pinStep, /min-h-touch(?![\w.-])[^"]*\bpy-3\b/, 'keypad keys must not add py-3 over the 44px floor');
-  // The compact digit key is min-h-[44px] + text-xl with no vertical padding token.
-  assert.match(pinStep, /min-h-touch items-center justify-center rounded-xl border border-slate-200\/80 bg-white\/85 text-xl font-black/);
+  const keyClass = /const checkInKeyClass =\s*'([^']+)'/.exec(modalSource)?.[1] ?? '';
+  assert.match(keyClass, /min-h-touch(?![\w.-])/);
+  assert.doesNotMatch(keyClass, /\bpy-\d/, 'keypad keys must not add vertical padding over the 44px floor');
+  // The compact digit key is the 44 px floor + text-xl, on the kit surface.
+  assert.match(keyClass, /min-h-touch items-center justify-center rounded-xl border border-\(--pos-s-border\) bg-\(--pos-s-surface\) text-xl/);
 
   // The PIN heading is rendered once (the duplicate eyebrow + inset label are gone); the helper stays.
-  const enterPinHeadings = (pinStep.match(/staffShift\.enterPIN'\)/g) ?? []).length;
+  // Counted as visible headings; the PIN field's screen-reader label (aria-label) is not a heading.
+  const enterPinHeadings = (pinStep.match(/<h3[^>]*>\{t\('modals\.staffShift\.enterPIN'\)\}<\/h3>/g) ?? []).length;
   assert.equal(enterPinHeadings, 1, `the PIN step must render the Enter PIN heading once (found ${enterPinHeadings})`);
   assert.match(pinStep, /staffShift\.enterPinHelper/, 'the localized helper line is kept');
 
@@ -229,7 +237,7 @@ test('start-shift wizard uses the yellow brand accent without orange or amber UI
     progressStepperSource,
   ].join('\n');
 
-  assert.match(startShiftTheme, /yellow-400/);
+  assert.match(startShiftTheme, /pos-solid-btn--primary|--pos-s-sel-bg/);
   assert.doesNotMatch(
     startShiftTheme,
     /(?:amber|orange)-\d+/,
@@ -251,7 +259,10 @@ test('start-shift disabled states keep readable text without fading the whole ca
   const busyCard = modalSource.slice(busyCardStart, busyCardEnd);
   const footer = modalSource.slice(checkInFooterStart, checkInFooterEnd);
   assert.doesNotMatch(busyCard, /\bopacity-\d+/, 'disabled staff cards must not dim all child text');
-  assert.match(footer, /disabled:text-slate-600/, 'disabled actions must retain readable light-theme text');
+  // Busy staff keep readable words on the raised kit surface and say why with a badge.
+  assert.match(busyCard, /pos-choice-card pos-choice-card--row cursor-not-allowed bg-\(--pos-s-surface-2\)/);
+  assert.match(busyCard, /t\('modals\.staffShift\.unavailable', 'Unavailable'\)/);
+  assert.match(footer, /pos-solid-btn pos-solid-btn--md pos-solid-btn--primary/, 'actions are kit buttons (kit disabled state)');
 });
 
 test('cashier-first notice uses readable semantic text on its light yellow surface', () => {
@@ -260,9 +271,8 @@ test('cashier-first notice uses readable semantic text on its light yellow surfa
   assert.ok(noticeStart > 0 && noticeEnd > noticeStart);
   const notice = modalSource.slice(noticeStart, noticeEnd);
 
-  // Wave ΣΤ5: the kit warn notice (solid tint in both themes).
-  assert.match(notice, /border-\(--pos-s-warn\) bg-\(--pos-s-warn-bg\)/);
-  assert.match(notice, /text-yellow-900/);
+  // Wave ΣΤ5 + founder 01/11: the kit warn notice (warn line + solid warn tint, fg words in both themes).
+  assert.match(notice, /className="pos-notice pos-notice--warn mt-4 text-sm"/);
   assert.doesNotMatch(notice, /text-white/, 'white copy is unreadable on the light warning surface');
 });
 
@@ -276,5 +286,5 @@ test('start-shift person icons are standalone without decorative rounded icon ti
     checkIn,
     /flex h-(?:14|16) w-(?:14|16)[^"']*items-center justify-center[^"']*rounded[^"']*border/,
   );
-  assert.match(checkIn, /<User className={`h-8 w-8 shrink-0/);
+  assert.match(checkIn, /<User className="h-7 w-7 shrink-0 text-\(--pos-s-muted\)"/);
 });

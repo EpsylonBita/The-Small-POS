@@ -538,7 +538,7 @@ function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; e
                     type="button"
                     onClick={() => void closeExternalDisplay()}
                     disabled={isDisplayBusy}
-                    className="inline-flex items-center gap-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-sm font-semibold text-red-800 dark:text-red-200 transition-all active:scale-[0.98] active:bg-(--pos-s-surface-2) disabled:opacity-60 disabled:active:scale-100"
+                    className="pos-raised inline-flex items-center gap-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-sm font-semibold text-red-800 dark:text-red-200 transition-all active:scale-[0.98] active:bg-(--pos-s-surface-2) disabled:opacity-60 disabled:active:scale-100"
                   >
                     <X className="h-4 w-4" />
                     {t('customerDisplay.actions.stopExternal', 'Stop External')}
@@ -632,7 +632,7 @@ function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; e
               </h2>
             </div>
             {externalChoices.length > 0 && (
-              <motion.div variants={pageMotionContainer} className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+              <motion.div variants={pageMotionContainer} className="pos-scroll-row gap-2">
                 {externalChoices.map((display) => {
                   // Shows this content now; any other reservation (other content or a closing window) blocks it.
                   const running = display.id === runningDisplayId;

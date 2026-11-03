@@ -22,6 +22,7 @@ use crate::terminal_helpers::{
 use crate::{api, auth, db, menu, reset, storage};
 
 const TERMINAL_RUNTIME_STALE_AFTER_MS: i64 = 15 * 60 * 1000;
+const SUPABASE_PUBLISHABLE_KEY_PREFIX: &str = "sb_publishable_";
 pub(crate) const TERMINAL_CONNECTION_REBIND_PENDING_KEY: &str =
     "terminal_connection_rebind_pending";
 pub(crate) const TERMINAL_CONNECTION_REBIND_CANDIDATE_KEY: &str =
@@ -445,9 +446,8 @@ fn apply_generic_settings_updates_checked(
     for (category, key, _) in updates {
         validate_generic_setting_update(category, key)?;
     }
-    let mut conn = db.conn.lock().map_err(|error| error.to_string())?;
-    let transaction = conn
-        .transaction()
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    let transaction = crate::db::immediate_transaction(&conn)
         .map_err(|error| format!("settings update: {error}"))?;
     for (category, key, value) in updates {
         db::set_setting(&transaction, category, key, value)?;
@@ -491,12 +491,11 @@ fn restore_generic_sqlite_snapshot(
     db: &db::DbState,
     snapshot: &[(String, String, Option<String>)],
 ) -> Result<(), String> {
-    let mut conn = db
+    let conn = db
         .conn
         .lock()
         .map_err(|_| "SETTINGS_DURABLE_COMPENSATION_FAILED".to_string())?;
-    let transaction = conn
-        .transaction()
+    let transaction = crate::db::immediate_transaction(&conn)
         .map_err(|_| "SETTINGS_DURABLE_COMPENSATION_FAILED".to_string())?;
     for (category, key, value) in snapshot {
         match value {
@@ -525,6 +524,9 @@ fn apply_generic_settings_and_credentials_under_lock(
     db: &db::DbState,
     updates: &[(String, String, String)],
 ) -> Result<(), String> {
+    if updates.is_empty() {
+        return Ok(());
+    }
     for (category, key, _) in updates {
         validate_generic_setting_update(category, key)?;
     }
@@ -574,12 +576,11 @@ fn apply_generic_settings_and_credentials_under_lock(
     }
 
     let sqlite_result = (|| {
-        let mut conn = db
+        let conn = db
             .conn
             .lock()
             .map_err(|_| "SETTINGS_DURABLE_WRITE_FAILED".to_string())?;
-        let transaction = conn
-            .transaction()
+        let transaction = crate::db::immediate_transaction(&conn)
             .map_err(|_| "SETTINGS_DURABLE_WRITE_FAILED".to_string())?;
         for (category, key, value) in updates {
             db::set_setting(&transaction, category, key, value)
@@ -641,6 +642,22 @@ fn apply_refresh_secondary_settings_checked(
     apply_refresh_secondary_settings_under_lock(db, updates, supabase_anon_key)
 }
 
+/// Whether a settings sync stores the Supabase key the server offers. A till keeps the
+/// key it was paired with, except for a move to or from a publishable key
+/// (`sb_publishable_…`): the server moves a store onto the publishable key before the
+/// project's legacy JWT-based keys are disabled (Stage 3 of the 2026 key rotation), and
+/// can move it back while that rollout is being checked.
+pub(crate) fn should_adopt_server_supabase_key(stored: Option<&str>, offered: &str) -> bool {
+    match stored.map(str::trim).filter(|value| !value.is_empty()) {
+        None => true,
+        Some(current) => {
+            current != offered
+                && (offered.starts_with(SUPABASE_PUBLISHABLE_KEY_PREFIX)
+                    || current.starts_with(SUPABASE_PUBLISHABLE_KEY_PREFIX))
+        }
+    }
+}
+
 fn apply_refresh_secondary_settings_under_lock(
     db: &db::DbState,
     updates: &[(String, String, String)],
@@ -652,7 +669,7 @@ fn apply_refresh_secondary_settings_under_lock(
     let desired_anon = supabase_anon_key
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .filter(|_| previous_anon.is_none());
+        .filter(|value| should_adopt_server_supabase_key(previous_anon.as_deref(), value));
     if let Some(value) = desired_anon {
         if storage::set_credential("supabase_anon_key", value).is_err() {
             return match restore_single_credential("supabase_anon_key", previous_anon.as_deref()) {
@@ -1025,13 +1042,13 @@ fn persist_terminal_transition_intent(
             return DefiniteFailure(error_code.to_string());
         }
     };
-    let mut conn = match db.conn.lock() {
+    let conn = match db.conn.lock() {
         Ok(conn) => conn,
         Err(_) => {
             return DefiniteFailure(error_code.to_string());
         }
     };
-    let transaction = match conn.transaction() {
+    let transaction = match crate::db::immediate_transaction(&conn) {
         Ok(transaction) => transaction,
         Err(_) => {
             return DefiniteFailure(error_code.to_string());
@@ -1120,12 +1137,11 @@ fn rollback_pre_destructive_rebind_candidate(db: &db::DbState) -> Result<(), Str
 }
 
 fn clear_terminal_transition_journal_verified(db: &db::DbState) -> Result<(), String> {
-    let mut conn = db
+    let conn = db
         .conn
         .lock()
         .map_err(|_| "TERMINAL_TRANSITION_FINALIZE_FAILED".to_string())?;
-    let transaction = conn
-        .transaction()
+    let transaction = crate::db::immediate_transaction(&conn)
         .map_err(|_| "TERMINAL_TRANSITION_FINALIZE_FAILED".to_string())?;
     db::delete_setting(
         &transaction,
@@ -1802,9 +1818,8 @@ fn publish_terminal_binding_under_lock(
             .map_err(|_| "TERMINAL_TRANSITION_RECOVERY_FAILED".to_string())?;
     } else {
         {
-            let mut conn = db.conn.lock().map_err(|error| error.to_string())?;
-            let tx = conn
-                .transaction()
+            let conn = db.conn.lock().map_err(|error| error.to_string())?;
+            let tx = crate::db::immediate_transaction(&conn)
                 .map_err(|_| "TERMINAL_BINDING_SQLITE_FAILED".to_string())?;
             for (key, value) in [
                 ("terminal_id", target_binding.terminal_id.as_str()),
@@ -2509,6 +2524,19 @@ pub(crate) fn build_terminal_runtime_config(db: &db::DbState) -> Value {
         .ok()
         .flatten()
         .map(|value| value.to_string());
+    // The renderer's Supabase clients (Realtime included) use the publishable key the
+    // server handed out, so a rotated key needs no new build. Only a publishable key is
+    // exposed: it is public by design, while a stored legacy key stays in the keyring.
+    let supabase_url = storage::get_credential_strict("supabase_url")
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let supabase_publishable_key = storage::get_credential_strict("supabase_anon_key")
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .filter(|value| value.starts_with(SUPABASE_PUBLISHABLE_KEY_PREFIX));
 
     let sync_health = if credential_unavailable {
         "unavailable"
@@ -2556,6 +2584,8 @@ pub(crate) fn build_terminal_runtime_config(db: &db::DbState) -> Value {
         "enabled_features": enabled_features,
         "last_config_sync_at": last_config_sync_at,
         "ghost_mode_feature_enabled": ghost_mode_feature_enabled,
+        "supabase_url": supabase_url,
+        "supabase_publishable_key": supabase_publishable_key,
         "credential_state": if credential_unavailable { "unavailable" } else { "available" },
         "sync_health": sync_health,
         // Compatibility aliases while renderer migrates to the new DTO.
@@ -2586,6 +2616,7 @@ fn terminal_runtime_emit_signature(config: &Value) -> Value {
         "pos_operating_mode": config.get("pos_operating_mode").cloned().unwrap_or(Value::Null),
         "enabled_features": config.get("enabled_features").cloned().unwrap_or_else(|| serde_json::json!({})),
         "ghost_mode_feature_enabled": config.get("ghost_mode_feature_enabled").cloned().unwrap_or(Value::Null),
+        "supabase_publishable_key": config.get("supabase_publishable_key").cloned().unwrap_or(Value::Null),
         "sync_health": config.get("sync_health").cloned().unwrap_or(Value::Null),
     })
 }
@@ -3363,12 +3394,11 @@ fn clear_terminal_connection_lifecycle_under_lock(db: &db::DbState) -> Result<()
     }
     advance_terminal_transition_phase(db, TerminalTransitionPhase::CredentialsCommitted)?;
     {
-        let mut conn = db
+        let conn = db
             .conn
             .lock()
             .map_err(|_| "TERMINAL_CLEAR_SQLITE_FAILED".to_string())?;
-        let transaction = conn
-            .transaction()
+        let transaction = crate::db::immediate_transaction(&conn)
             .map_err(|_| "TERMINAL_CLEAR_SQLITE_FAILED".to_string())?;
         for key in [
             "pos_api_key",
@@ -4663,6 +4693,106 @@ mod dto_tests {
             "ghost_mode_feature_enabled"
         )
         .is_none());
+    }
+
+    #[test]
+    fn server_supabase_key_adoption_follows_publishable_key_moves_only() {
+        let legacy = "eyJlegacy-anon-fixture";
+        let publishable = "sb_publishable_fixture_a";
+        let rotated = "sb_publishable_fixture_b";
+        // A fresh till takes whatever key the server offers.
+        assert!(super::should_adopt_server_supabase_key(None, legacy));
+        assert!(super::should_adopt_server_supabase_key(
+            Some("  "),
+            publishable
+        ));
+        // A paired till moves onto the publishable key, follows a rotated one,
+        // and can be moved back while the rollout is checked.
+        assert!(super::should_adopt_server_supabase_key(
+            Some(legacy),
+            publishable
+        ));
+        assert!(super::should_adopt_server_supabase_key(
+            Some(publishable),
+            rotated
+        ));
+        assert!(super::should_adopt_server_supabase_key(
+            Some(publishable),
+            legacy
+        ));
+        // A legacy-to-legacy change stays refused, as before, and an unchanged key is not rewritten.
+        assert!(!super::should_adopt_server_supabase_key(
+            Some(legacy),
+            "eyJother-legacy"
+        ));
+        assert!(!super::should_adopt_server_supabase_key(
+            Some(publishable),
+            publishable
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn settings_refresh_moves_a_stored_key_to_and_from_the_server_publishable_key() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([(
+            "supabase_anon_key",
+            "eyJlegacy-anon-fixture",
+        )]);
+        let database = crate::tests::harness::TestDb::open();
+
+        super::apply_refresh_secondary_settings_checked(
+            &database.state,
+            &refresh_secondary_updates(),
+            Some(" sb_publishable_fixture_a "),
+        )
+        .expect("publishable key adopted");
+        assert_eq!(
+            crate::storage::get_credential("supabase_anon_key").as_deref(),
+            Some("sb_publishable_fixture_a")
+        );
+
+        // An unchanged offer leaves it alone; moving the store back restores the legacy key.
+        super::apply_refresh_secondary_settings_checked(
+            &database.state,
+            &refresh_secondary_updates(),
+            Some("sb_publishable_fixture_a"),
+        )
+        .expect("unchanged key");
+        assert_eq!(
+            crate::storage::get_credential("supabase_anon_key").as_deref(),
+            Some("sb_publishable_fixture_a")
+        );
+        super::apply_refresh_secondary_settings_checked(
+            &database.state,
+            &refresh_secondary_updates(),
+            Some("eyJlegacy-anon-fixture"),
+        )
+        .expect("rollback to the legacy key");
+        assert_eq!(
+            crate::storage::get_credential("supabase_anon_key").as_deref(),
+            Some("eyJlegacy-anon-fixture")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn runtime_config_exposes_only_a_publishable_supabase_key() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("supabase_url", "https://project.example.invalid"),
+            ("supabase_anon_key", "eyJlegacy-anon-fixture"),
+        ]);
+        let database = crate::tests::harness::TestDb::open();
+        let config = super::build_terminal_runtime_config(&database.state);
+        assert_eq!(config["supabase_url"], "https://project.example.invalid");
+        assert!(config["supabase_publishable_key"].is_null());
+
+        crate::storage::set_credential("supabase_anon_key", "sb_publishable_fixture_a")
+            .expect("store publishable key");
+        let config = super::build_terminal_runtime_config(&database.state);
+        assert_eq!(
+            config["supabase_publishable_key"],
+            "sb_publishable_fixture_a"
+        );
     }
 
     #[test]
@@ -8014,3 +8144,7 @@ mod dto_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../admission_tests/settings.rs"]
+mod admission_regression_tests;

@@ -112,15 +112,13 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
 
     return (
       // layoutScroll: the strip scrolls sideways, so the sliding indicator measures from it.
+      // Founder 01/11 («εδώ δεν έχει βάθος»): the strip is the kit's sunken well (as .pos-seg) and the chosen tab
+      // rises out of it in the raised yellow.
       <motion.div
         layoutScroll
         role="tablist"
         aria-label={t('dashboard.tabs.tablistLabel', 'Order status tabs')}
-        className={`flex backdrop-blur-sm rounded-xl p-1.5 sm:p-2 border overflow-x-auto scrollbar-hide touch-pan-x ${
-          resolvedTheme === 'light'
-            ? 'bg-[#fbf4e9] border-(--pos-s-border) shadow-xs'
-            : 'bg-white/10 border-white/20'
-        }`}
+        className="flex rounded-xl bg-(--pos-s-surface-2) p-1.5 shadow-(--pos-s-well) overflow-x-auto scrollbar-hide touch-pan-x sm:p-2"
         style={{ WebkitOverflowScrolling: 'touch' }}
       >
         {tabs.map((tab) => (
@@ -146,9 +144,7 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
             className={`flex-1 min-w-[90px] px-3 sm:px-4 py-2.5 sm:py-3 rounded-lg font-medium transition-all duration-200 relative touch-feedback active:scale-95 ${
               activeTab === tab.id
                 ? ''
-                : resolvedTheme === 'light'
-                  ? 'active:bg-[#fff7e8]'
-                  : 'active:bg-white/20'
+                : 'active:bg-(--pos-s-raised-press)'
             }`}
           >
             {/* The selected background slides to the newly selected tab (180 ms ease-out).
@@ -158,22 +154,22 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
                 layoutId="order-tabs-indicator"
                 aria-hidden="true"
                 transition={{ duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
-                className="absolute inset-0 rounded-lg bg-(--pos-s-sel-bg)"
+                className="absolute inset-0 rounded-lg bg-(--pos-s-sel-bg) shadow-(--pos-s-depth-yellow)"
               />
             )}
-            <div className="relative flex items-center justify-center gap-1.5 sm:gap-2">
+            <div className="relative flex items-center justify-center gap-0.5 sm:gap-1">
               <span
                 className={`text-sm sm:text-lg font-bold transition-all duration-200 ${tabTextClass(activeTab === tab.id, resolvedTheme === 'dark')}`}
               >
                 {tab.label}
               </span>
 
-              {/* A count only when there is something to count: «Τραπέζια 0» read as "no tables". */}
+              {/* A count only when there is something to count: «Τραπέζια 0» read as "no tables".
+                  Founder 01/11: a plain number, no pill — the same small size, up at the label's corner. */}
               {tab.count > 0 && (
                 <span
-                  className={`min-w-[20px] rounded-full px-1.5 text-center text-[10px] sm:text-xs font-bold transition-all duration-200 ${tabTextClass(activeTab === tab.id, resolvedTheme === 'dark')} ${
-                    activeTab === tab.id ? 'bg-black/12' : resolvedTheme === 'dark' ? 'bg-white/10' : 'bg-black/[0.06]'
-                  }`}
+                  data-order-tab-count
+                  className={`-mt-2 self-start text-[10px] font-bold tabular-nums transition-colors duration-200 sm:-mt-2.5 sm:text-xs ${activeTab === tab.id ? 'text-(--pos-s-sel-fg)' : 'text-(--pos-s-muted)'}`}
                 >
                   {tab.count}
                 </span>

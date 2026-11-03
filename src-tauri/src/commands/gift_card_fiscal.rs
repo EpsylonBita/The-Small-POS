@@ -2454,7 +2454,8 @@ mod tests {
             assert_eq!(refused["code"], expected, "{currency:?} {refused}");
             if raw_cents.is_some() {
                 let error = refused["error"].as_str().unwrap_or_default();
-                assert!(error.contains("ledger generation"), "{refused}");
+                // Rule 6 (02/11/2026): the unreadable ledger row is a storage class code.
+                assert!(error.starts_with("EDIT_LOCAL_STORAGE_"), "{refused}");
             }
             assert_eq!(dispatches.count(), 0);
             assert_eq!(operations(&state, None), 0);

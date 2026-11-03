@@ -2,8 +2,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   BadgeDollarSign,
-  Banknote,
-  Check,
   ChevronDown,
   ClipboardList,
   FileText,
@@ -16,7 +14,7 @@ import {
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
-import { LiquidGlassModal, POSGlassBadge, POSGlassButton } from '../ui/pos-glass-components';
+import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useShift } from '../../contexts/shift-context';
 import type {
@@ -29,6 +27,7 @@ import type {
 import { formatCurrency, formatDateTime } from '../../utils/format';
 import { parseMoneyInputValue } from '../../utils/moneyInput';
 import { CentsMoneyInput } from '../ui/CentsMoneyInput';
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 import { translateRoleName } from '../../utils/role-labels';
 import { loadFiscalOrderReportingEntitlement } from '../../utils/fiscal-integration-entitlement';
 import {
@@ -1260,18 +1259,28 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     }
   };
 
-  const drawerSummaryCardClass = 'rounded-3xl border border-slate-200/90 bg-white/80 p-3 backdrop-blur-xl dark:border-neutral-700/60 dark:bg-black/50 dark:shadow-[0_18px_48px_rgba(0,0,0,0.34)]';
-  const drawerPanelClass = 'rounded-[28px] border border-slate-200/90 bg-white/90 p-5 dark:border-neutral-700/60 dark:bg-neutral-950/80 dark:shadow-[0_18px_50px_rgba(0,0,0,0.24)]';
-  const drawerSidePanelClass = 'rounded-[28px] border border-slate-200/90 bg-white/90 p-3.5 dark:border-neutral-700/60 dark:bg-neutral-950/80 dark:shadow-[0_16px_42px_rgba(0,0,0,0.22)]';
-  const drawerListItemClass = 'rounded-2xl border border-slate-200/80 bg-slate-50/80 px-4 py-3 dark:border-neutral-700/60 dark:bg-black/35';
-  const drawerActivityItemClass = 'flex items-start justify-between gap-4 rounded-2xl border border-slate-200/80 bg-slate-50/80 px-4 py-3 dark:border-neutral-700/60 dark:bg-black/35 dark:shadow-[0_10px_26px_rgba(0,0,0,0.22)]';
-  const drawerEmptyStateClass = 'rounded-3xl border border-dashed border-slate-300/90 bg-slate-50/80 px-6 py-4 text-center dark:border-neutral-700/70 dark:bg-neutral-900/70';
-  const drawerEmptyIconClass = 'mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-white/90 text-slate-500 dark:bg-neutral-800 dark:text-neutral-400 dark:shadow-[0_10px_25px_rgba(0,0,0,0.24)]';
-  const drawerInputClass = 'w-full rounded-2xl border border-slate-300/90 bg-white/95 px-4 py-3 text-slate-900 shadow-inner outline-hidden transition-colors placeholder:text-slate-400 focus:border-(--pos-s-yellow) focus:ring-2 focus:ring-(--pos-s-fg) disabled:cursor-not-allowed disabled:opacity-60 dark:border-neutral-700/80 dark:bg-black dark:text-white dark:placeholder:text-neutral-500';
-  const drawerExpenseSubmitClass = 'border-slate-300/80! bg-white/70! font-bold! text-emerald-700! active:scale-[0.98]! disabled:text-emerald-500! disabled:opacity-100! dark:border-neutral-700/60! dark:bg-transparent! dark:text-emerald-400! dark:shadow-none!';
-  const drawerStaffPaymentSubmitClass = 'border-slate-300/80! bg-white/70! font-bold! text-amber-700! active:scale-[0.98]! disabled:text-amber-500! disabled:opacity-100! dark:border-neutral-700/60! dark:bg-transparent! dark:text-yellow-400! dark:shadow-none!';
-  const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-2xl border border-slate-200/90 bg-white text-slate-900 dark:border-neutral-700/80 dark:bg-neutral-950 dark:text-white dark:shadow-[0_18px_44px_rgba(0,0,0,0.42)]';
-  const drawerDropdownOptionClass = 'flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-slate-800 transition-colors active:bg-slate-100 focus:bg-slate-100 focus:outline-hidden dark:text-white dark:active:bg-neutral-800 dark:focus:bg-neutral-800';
+  // Founder 01/11 (this window, «στο ίδιο στυλ» as the shift check-out forms; «γυαλί όπως τα υπόλοιπα»): kit cards
+  // that frost on the shared glass shell, sentence-case labels, kit fields, one yellow primary per form. Every
+  // amount keeps its colour.
+  const drawerSummaryCardClass = 'pos-card p-4';
+  const drawerPanelClass = 'pos-card flex flex-col p-5';
+  const drawerSidePanelClass = 'pos-card p-4';
+  const drawerListItemClass = 'pos-frost rounded-xl border px-4 py-3';
+  const drawerActivityItemClass = 'pos-frost flex items-start justify-between gap-4 rounded-xl border px-4 py-3';
+  const drawerEmptyStateClass = 'rounded-xl border border-dashed border-zinc-400 px-6 py-5 text-center dark:border-zinc-600';
+  const drawerEmptyIconClass = 'mx-auto flex h-11 w-11 items-center justify-center text-(--pos-s-muted)';
+  const drawerLabelClass = 'mb-1 block text-sm font-semibold text-(--pos-s-fg)';
+  const drawerInputClass = 'min-h-[48px] w-full rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) px-3 py-2.5 text-(--pos-s-fg) outline-hidden transition-colors placeholder:font-normal placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:border-(--pos-s-yellow) disabled:cursor-not-allowed disabled:opacity-60';
+  const drawerSubmitClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';
+  // The action bar sits at the card's foot (the card stretches to the summary column). It has no fill or blur of
+  // its own: inside the glass shell either one drew a lighter band over the card (founder 01/11, «βλέπεις τα λάθη;»).
+  const drawerFooterClass = '-mx-5 -mb-5 flex flex-wrap items-center gap-3 border-t border-(--modal-glass-line) px-5 py-4';
+  const drawerRowActionClass = 'pos-solid-btn pos-solid-btn--sm';
+  const drawerSpinner = <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />;
+  // The open list is the kit dropdown list (the same look as every dropdown in the till): a solid rounded panel, 44 px
+  // rows, the chosen row in the kit selection yellow.
+  const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-1.5 max-h-[min(60vh,420px)] overflow-y-auto rounded-[14px] border border-(--pos-s-border) bg-(--pos-s-surface) p-1.5 text-(--pos-s-fg) shadow-xl';
+  const drawerDropdownOptionClass = 'flex min-h-11 w-full items-center gap-3 rounded-[10px] px-3 text-left text-[15px] font-medium text-(--pos-s-fg) transition-colors active:bg-(--pos-s-surface-2) focus-visible:outline-2 focus-visible:outline-(--pos-s-fg)';
 
   const renderDrawerDropdown = ({
     dropdownKey,
@@ -1311,14 +1320,14 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
             }
           }}
           className={`${drawerInputClass} flex items-center justify-between gap-3 text-left ${
-            isOpenDropdown ? 'border-(--pos-s-yellow) ring-2 ring-(--pos-s-border)' : ''
+            isOpenDropdown ? 'border-(--pos-s-yellow)' : ''
           }`}
         >
-          <span className={selectedOption?.value ? 'truncate' : 'truncate text-slate-400 dark:text-neutral-500'}>
+          <span className={selectedOption?.value ? 'truncate' : 'truncate text-(--pos-s-muted)'}>
             {selectedOption?.label}
           </span>
           <ChevronDown
-            className={`h-5 w-5 shrink-0 text-slate-500 transition-transform dark:text-neutral-300 ${isOpenDropdown ? 'rotate-180 text-yellow-500! dark:text-yellow-300!' : ''}`}
+            className={`h-5 w-5 shrink-0 text-(--pos-s-muted) transition-transform ${isOpenDropdown ? 'rotate-180' : ''}`}
           />
         </button>
 
@@ -1337,10 +1346,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     onChange(option.value);
                     setOpenDropdown(null);
                   }}
-                  className={`${drawerDropdownOptionClass} ${selected ? 'bg-yellow-50 text-yellow-700 dark:bg-neutral-800 dark:text-yellow-300' : ''}`}
+                  className={`${drawerDropdownOptionClass} ${selected ? 'bg-(--pos-s-sel-bg)! font-semibold text-(--pos-s-sel-fg)!' : ''}`}
                 >
                   <span className="truncate">{option.label}</span>
-                  {selected && <Check className="h-4 w-4 shrink-0" />}
                 </button>
               );
             })}
@@ -1357,11 +1365,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     accentClass: string,
   ) => (
     <div className={drawerSummaryCardClass}>
-      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
-        {label}
-      </p>
-      <div className={`mt-1.5 text-lg font-black ${accentClass}`}>{value}</div>
-      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{helper}</p>
+      <p className="text-sm font-semibold text-(--pos-s-muted)">{label}</p>
+      <div className={`mt-1 text-xl font-black ${accentClass}`}>{value}</div>
+      <p className="mt-1 text-sm text-(--pos-s-muted)">{helper}</p>
     </div>
   );
 
@@ -1377,8 +1383,8 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
           {icon}
         </div>
       )}
-      <h4 className="mt-2 text-base font-semibold text-slate-900 dark:text-white">{title}</h4>
-      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{description}</p>
+      <h4 className="mt-2 text-base font-semibold text-(--pos-s-fg)">{title}</h4>
+      <p className="mt-1 text-sm text-(--pos-s-muted)">{description}</p>
     </div>
   );
 
@@ -1393,15 +1399,15 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <POSGlassBadge variant={isExpense ? 'error' : 'warning'} size="sm" className="px-2.5! py-1!">
+            <span className={`shrink-0 text-sm font-semibold ${isExpense ? 'text-rose-600 dark:text-rose-300' : 'text-amber-600 dark:text-amber-300'}`}>
               {isExpense
                 ? t('modals.expense.tabs.expenses', 'Expenses')
                 : t('modals.expense.tabs.staffPayments', 'Staff Payments')}
-            </POSGlassBadge>
-            <span className="truncate text-sm font-semibold text-slate-900 dark:text-white">{item.title}</span>
+            </span>
+            <span className="truncate text-sm font-semibold text-(--pos-s-fg)">{item.title}</span>
           </div>
-          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{item.subtitle}</p>
-          <div className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+          <p className="mt-1 text-sm text-(--pos-s-muted)">{item.subtitle}</p>
+          <div className="mt-1 text-sm text-(--pos-s-muted)">
             {formatDateTime(item.createdAt, {
               day: '2-digit',
               month: 'short',
@@ -1424,9 +1430,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   description: item.title,
                 })
               }
-              className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-rose-200"
+              className={`${drawerRowActionClass} pos-solid-btn--danger`}
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <Trash2 className="h-4 w-4" />
               {t('modals.expense.deleteExpense', 'Delete expense')}
             </button>
           ) : (
@@ -1440,9 +1446,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     beginEditStaffPayment(payment);
                   }
                 }}
-                className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-amber-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-200"
+                className={drawerRowActionClass}
               >
-                <Pencil className="h-3.5 w-3.5" />
+                <Pencil className="h-4 w-4" />
                 {t('modals.expense.editStaffPayment', 'Edit payment')}
               </button>
               <button
@@ -1454,9 +1460,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     description: item.title,
                   })
                 }
-                className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-rose-200"
+                className={`${drawerRowActionClass} pos-solid-btn--danger`}
               >
-                <Trash2 className="h-3.5 w-3.5" />
+                <Trash2 className="h-4 w-4" />
                 {t('modals.expense.deleteStaffPayment', 'Delete payment')}
               </button>
             </div>
@@ -1483,28 +1489,26 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
       >
       {showCashierAttention && (
         <div
-          className={`shrink-0 rounded-2xl border px-4 py-3 ${
-            !cashierShift || cashierShiftSyncBanner?.variant === 'failed'
-              ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-100'
-              : 'border-neutral-300/70 bg-neutral-50/90 text-neutral-900 dark:border-neutral-500/20 dark:bg-neutral-500/10 dark:text-neutral-100'
+          className={`pos-notice shrink-0 ${
+            !cashierShift || cashierShiftSyncBanner?.variant === 'failed' ? 'pos-notice--warn' : ''
           }`}
         >
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-start gap-3">
               <div className="mt-0.5 shrink-0">
                 {!cashierShift || cashierShiftSyncBanner?.variant === 'failed' ? (
-                  <AlertTriangle className="h-5 w-5" />
+                  <AlertTriangle className="h-5 w-5 text-(--pos-s-warn)" />
                 ) : (
-                  <RefreshCw className="h-5 w-5" />
+                  <RefreshCw className="h-5 w-5 text-(--pos-s-muted)" />
                 )}
               </div>
               <div className="min-w-0">
-                <div className="text-sm font-black">
+                <div className="text-base font-semibold">
                   {!cashierShift
                     ? t('modals.expense.noActiveCashier', 'No active cashier drawer')
                     : cashierShiftSyncBanner?.title}
                 </div>
-                <div className="mt-1 text-sm font-medium opacity-85">
+                <div className="mt-1 text-sm">
                   {!cashierShift
                     ? cashierWarning ||
                       t(
@@ -1514,7 +1518,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     : cashierShiftSyncBanner?.message}
                 </div>
                 {cashierShiftSyncBanner && cashierShiftDisplaySyncStatus && (
-                  <div className="mt-2 text-xs font-semibold opacity-75">
+                  <div className="mt-1 text-sm text-(--pos-s-muted)">
                     {t('modals.expense.cashierShiftSyncStatusLabel', {
                       defaultValue: 'Local sync status',
                     })}
@@ -1523,18 +1527,17 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 )}
               </div>
             </div>
-            <POSGlassButton
+            <button
               type="button"
-              variant="secondary"
-              icon={<RefreshCw className="h-4 w-4" />}
               disabled={resolving}
-              className="h-11! shrink-0! justify-center! rounded-xl! px-4!"
+              className="pos-solid-btn pos-solid-btn--sm shrink-0"
               onClick={() => {
                 void refreshModalData();
               }}
             >
+              <RefreshCw className="h-4 w-4" />
               {t('common.refresh', 'Refresh')}
-            </POSGlassButton>
+            </button>
           </div>
         </div>
       )}
@@ -1552,11 +1555,8 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               key={tab.key}
               type="button"
               onClick={() => setActiveTab(tab.key)}
-              className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold transition-all active:scale-[0.98] ${
-                active
-                  ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
-                  : 'border-slate-200/90 bg-white/80 text-slate-700 dark:border-neutral-700/60 dark:bg-neutral-950/55 dark:text-neutral-200 dark:shadow-none'
-              }`}
+              aria-pressed={active}
+              className={`pos-choice${active ? ' is-selected' : ''}`}
             >
               {tab.icon}
               {tab.label}
@@ -1565,34 +1565,30 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         })}
         </div>
         {cashierShift && !showCashierAttention && (
-          <POSGlassButton
+          <button
             type="button"
-            variant="secondary"
-            icon={<RefreshCw className="h-4 w-4" />}
             disabled={resolving}
-            className="h-11! justify-center! rounded-xl! px-4!"
+            className="pos-solid-btn pos-solid-btn--sm shrink-0"
             onClick={() => {
               void refreshModalData();
             }}
           >
+            <RefreshCw className="h-4 w-4" />
             {t('common.refresh', 'Refresh')}
-          </POSGlassButton>
+          </button>
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide pr-1">
+      <div className="pos-scroll-room min-h-0 flex-1 overflow-y-auto scrollbar-hide pb-4">
       {activeTab === 'expenses' && (
         <div className="grid gap-5 xl:grid-cols-[minmax(0,1.18fr)_360px]">
           <section className={drawerPanelClass}>
             <div className="flex items-start justify-between gap-4">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
-                  {t('modals.expense.expenseFormTitle', 'Record expense')}
-                </p>
-                <h3 className="mt-1 text-xl font-black text-slate-900 dark:text-white">
+                <h3 className="text-xl font-semibold text-(--pos-s-fg)">
                   {t('modals.expense.expenseFormHeading', 'Operational expense')}
                 </h3>
-                <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                <p className="mt-1 text-sm text-(--pos-s-muted)">
                   {t('modals.expense.chargedToDrawer', 'This outflow is charged directly to the active cashier drawer.')}
                 </p>
               </div>
@@ -1600,7 +1596,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
               <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <label className={drawerLabelClass}>
                   {t('modals.expense.expenseType', 'Expense type')}
                 </label>
                 {renderDrawerDropdown({
@@ -1614,7 +1610,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               </div>
 
               <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <label className={drawerLabelClass}>
                   {t('modals.expense.amountLabel', 'Amount')}
                 </label>
                 <div className="relative">
@@ -1626,13 +1622,13 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     disabled={!canRecord}
                     className={`${drawerInputClass} pl-10! text-lg font-bold`}
                   />
-                  <Banknote className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+                  <CashHandIcon className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-(--pos-s-muted)" />
                 </div>
               </div>
             </div>
 
             <div className="mt-4">
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+              <label className={drawerLabelClass}>
                 {t('modals.expense.justification', 'Justification')}
               </label>
               <textarea
@@ -1647,7 +1643,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
             {canUseExpenseReceiptReference && (
               <div className="mt-4">
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <label className={drawerLabelClass}>
                   {t('modals.expense.receiptReference', 'Receipt or reference')}
                 </label>
                 <div className="relative">
@@ -1659,32 +1655,32 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     disabled={!canRecord}
                     className={`${drawerInputClass} pl-10!`}
                   />
-                  <FileText className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <FileText className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--pos-s-muted)" />
                 </div>
               </div>
             )}
 
-            <div className="sticky bottom-0 z-10 -mx-5 -mb-5 mt-4 flex flex-wrap items-center gap-3 rounded-b-[28px] border-t border-slate-200/80 bg-white/95 px-5 py-4 backdrop-blur-xl dark:border-neutral-700/60 dark:bg-neutral-950/90">
-              <POSGlassButton
+            <div aria-hidden="true" className="min-h-4 flex-1" />
+            <div className={drawerFooterClass}>
+              <button
                 type="button"
-                variant="success"
-                loading={submittingExpense}
-                disabled={!canSubmitExpense}
+                disabled={!canSubmitExpense || submittingExpense}
+                aria-busy={submittingExpense || undefined}
                 onClick={() => { void handleRecordExpense(); }}
-                icon={<Receipt className="h-4 w-4" />}
-                className={drawerExpenseSubmitClass}
+                className={drawerSubmitClass}
               >
+                {submittingExpense ? drawerSpinner : <Receipt className="h-4 w-4" />}
                 {t('modals.expense.recordExpense', 'Record expense')}
-              </POSGlassButton>
+              </button>
               {expenseValidationHint && (
-                <p className="text-sm text-slate-500 dark:text-slate-400">
+                <p className="text-sm text-(--pos-s-muted)">
                   {expenseValidationHint}
                 </p>
               )}
             </div>
           </section>
 
-          <aside className="space-y-2.5">
+          <aside className="flex flex-col gap-3">
             {renderSummaryCard(
               t('modals.expense.totalExpenses', 'Total expenses'),
               formatCurrency(totalExpenses),
@@ -1700,17 +1696,12 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
             <div className={drawerSidePanelClass}>
               <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-                    {t('modals.expense.recentExpenses', 'Recent expenses')}
-                  </p>
-                  <h4 className="mt-1 text-base font-bold text-slate-900 dark:text-white">
-                    {t('modals.expense.latestEntries', 'Latest entries')}
-                  </h4>
-                </div>
+                <h4 className="text-base font-semibold text-(--pos-s-fg)">
+                  {t('modals.expense.recentExpenses', 'Recent expenses')}
+                </h4>
               </div>
 
-              <div className="mt-3 space-y-2.5">
+              <div className="mt-3 flex flex-col gap-2.5">
                 {recentExpenses.length > 0 ? recentExpenses.map((expense) => {
                   const expenseTitle =
                     expense.description || t('modals.expense.untitledExpense', 'Untitled expense');
@@ -1724,9 +1715,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     <div key={expense.id} className={drawerListItemClass}>
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
-                          <div className="truncate font-semibold text-slate-900 dark:text-white">{expenseTitle}</div>
+                          <div className="truncate font-semibold text-(--pos-s-fg)">{expenseTitle}</div>
                           {metadata.length > 0 && (
-                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-(--pos-s-muted)">
                               {metadata.map((part, index) => (
                                 <React.Fragment key={`${expense.id}-meta-${index}`}>
                                   {index > 0 && <span aria-hidden="true">•</span>}
@@ -1749,9 +1740,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                                 description: expenseTitle,
                               })
                             }
-                            className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-rose-200"
+                            className={`${drawerRowActionClass} pos-solid-btn--danger`}
                           >
-                            <Trash2 className="h-3.5 w-3.5" />
+                            <Trash2 className="h-4 w-4" />
                             {t('modals.expense.deleteExpense', 'Delete expense')}
                           </button>
                         </div>
@@ -1759,7 +1750,10 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     </div>
                   );
                 }) : renderEmptyState(
-                  <Banknote className="mx-auto block h-9 w-9 text-emerald-700 dark:text-emerald-400" strokeWidth={2.2} />,
+                  // Founder 01/11: the founder's cash glyph (as in the payment window), its inner fill the card's.
+                  <span className="mx-auto block w-fit" style={{ '--pay-icon-fill': 'var(--pos-s-surface)' } as React.CSSProperties}>
+                    <CashHandIcon className="h-11 w-11 payment-option-cash-icon" />
+                  </span>,
                   t('modals.expense.noExpenses', 'No expenses recorded yet'),
                   t('modals.expense.noExpensesDetail', 'Recorded expenses will appear here immediately after saving.'),
                   { wrapIcon: false },
@@ -1775,16 +1769,13 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
           <section className={drawerPanelClass}>
             <div className="flex items-start justify-between gap-4">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
-                  {t('modals.expense.staffPaymentFormTitle', 'Record staff payment')}
-                </p>
-                <h3 className="mt-1 text-xl font-black text-slate-900 dark:text-white">
+                <h3 className="text-xl font-semibold text-(--pos-s-fg)">
                   {t(
                     editingPaymentId ? 'modals.expense.editStaffPaymentTitle' : 'modals.expense.staffPaymentFormHeading',
                     editingPaymentId ? 'Edit staff payment' : 'Staff payout from drawer',
                   )}
                 </h3>
-                <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                <p className="mt-1 text-sm text-(--pos-s-muted)">
                   {t(
                     'modals.expense.staffPaymentDrawerNote',
                     'Every payment here is deducted from the active cashier drawer.',
@@ -1795,7 +1786,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
               <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <label className={drawerLabelClass}>
                   {t('modals.expense.selectStaff', 'Pay to staff')}
                 </label>
                 {renderDrawerDropdown({
@@ -1809,7 +1800,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               </div>
 
               <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <label className={drawerLabelClass}>
                   {t('modals.expense.paymentType', 'Payment type')}
                 </label>
                 {renderDrawerDropdown({
@@ -1824,7 +1815,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
             </div>
 
             <div className="mt-4">
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+              <label className={drawerLabelClass}>
                 {t('modals.expense.amountLabel', 'Amount')}
               </label>
               <div className="relative">
@@ -1836,12 +1827,12 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   disabled={!canRecord}
                   className={`${drawerInputClass} pl-10! text-lg font-bold`}
                 />
-                <Banknote className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+                <CashHandIcon className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-(--pos-s-muted)" />
               </div>
             </div>
 
             <div className="mt-4">
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+              <label className={drawerLabelClass}>
                 {t('modals.expense.notes', 'Notes')}
               </label>
               <textarea
@@ -1855,46 +1846,42 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
             </div>
 
             {staffDirectoryWarning && (
-              <div className="mt-4 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-sm text-amber-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-200">
+              <div className="pos-notice pos-notice--warn mt-4 text-sm">
                 {staffDirectoryWarning}
               </div>
             )}
 
-            <p className="mt-6 text-sm text-slate-500 dark:text-slate-400">
+            <p className="mt-4 text-sm text-(--pos-s-muted)">
               {t(
                 'modals.expense.staffPaymentHelper',
                 'Use this for cashier self-payments or payments to other staff from the drawer. Drawer totals update immediately after corrections.',
               )}
             </p>
 
-            <div className="sticky bottom-0 z-10 -mx-5 -mb-5 mt-4 flex flex-wrap items-center gap-3 rounded-b-[28px] border-t border-slate-200/80 bg-white/95 px-5 py-4 backdrop-blur-xl dark:border-neutral-700/60 dark:bg-neutral-950/90">
+            <div aria-hidden="true" className="min-h-4 flex-1" />
+            <div className={drawerFooterClass}>
               {editingPaymentId && (
-                <POSGlassButton
-                  type="button"
-                  variant="secondary"
-                  onClick={resetPaymentForm}
-                >
+                <button type="button" className="pos-solid-btn pos-solid-btn--md" onClick={resetPaymentForm}>
                   {t('modals.expense.cancelEditStaffPayment', 'Cancel edit')}
-                </POSGlassButton>
+                </button>
               )}
-              <POSGlassButton
+              <button
                 type="button"
-                variant="warning"
-                loading={submittingPayment}
-                disabled={!canRecord || !paymentDraft.paidToStaffId || parseMoneyInputValue(paymentDraft.amount) <= 0}
+                disabled={!canRecord || !paymentDraft.paidToStaffId || parseMoneyInputValue(paymentDraft.amount) <= 0 || submittingPayment}
+                aria-busy={submittingPayment || undefined}
                 onClick={() => { void handleRecordStaffPayment(); }}
-                icon={<BadgeDollarSign className="h-4 w-4" />}
-                className={drawerStaffPaymentSubmitClass}
+                className={drawerSubmitClass}
               >
+                {submittingPayment ? drawerSpinner : <BadgeDollarSign className="h-4 w-4" />}
                 {t(
                   editingPaymentId ? 'modals.expense.saveStaffPaymentChanges' : 'modals.expense.recordStaffPayment',
                   editingPaymentId ? 'Save changes' : 'Record staff payment',
                 )}
-              </POSGlassButton>
+              </button>
             </div>
           </section>
 
-          <aside className="space-y-2.5">
+          <aside className="flex flex-col gap-3">
             {renderSummaryCard(
               t('modals.expense.totalStaffPayments', 'Total staff payments'),
               formatCurrency(totalStaffPayments),
@@ -1910,32 +1897,27 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
             <div className={drawerSidePanelClass}>
               <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-                    {t('modals.expense.recentStaffPayments', 'Recent staff payments')}
-                  </p>
-                  <h4 className="mt-1 text-base font-bold text-slate-900 dark:text-white">
-                    {t('modals.expense.latestEntries', 'Latest entries')}
-                  </h4>
-                </div>
-                <Users className="h-5 w-5 text-amber-500 dark:text-amber-300" />
+                <h4 className="text-base font-semibold text-(--pos-s-fg)">
+                  {t('modals.expense.recentStaffPayments', 'Recent staff payments')}
+                </h4>
+                <Users className="h-5 w-5 text-(--pos-s-muted)" />
               </div>
 
-              <div className="mt-3 space-y-2.5">
+              <div className="mt-3 flex flex-col gap-2.5">
                 {recentPayments.length > 0 ? recentPayments.map((payment) => (
                   <div key={payment.id} className={drawerListItemClass}>
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
-                        <div className="truncate font-semibold text-slate-900 dark:text-white">
+                        <div className="truncate font-semibold text-(--pos-s-fg)">
                           {payment.staff_name || t('common.unknown', 'Unknown')}
                         </div>
-                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-(--pos-s-muted)">
                           <span>{t(`modals.expense.paymentTypes.${payment.payment_type}`, payment.payment_type)}</span>
                           {payment.role_type && <><span>•</span><span>{translateRoleName(t, payment.role_type)}</span></>}
                           <span>•</span>
                           <span>{formatDateTime(payment.created_at, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
                         </div>
-                        {payment.notes && <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{payment.notes}</p>}
+                        {payment.notes && <p className="mt-1 text-sm text-(--pos-s-muted)">{payment.notes}</p>}
                       </div>
                       <div className="flex shrink-0 flex-col items-end gap-2">
                         <div className="text-base font-black text-amber-500 dark:text-amber-300">
@@ -1946,9 +1928,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                             type="button"
                             disabled={submittingPayment}
                             onClick={() => beginEditStaffPayment(payment)}
-                            className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-amber-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-amber-200"
+                            className={drawerRowActionClass}
                           >
-                            <Pencil className="h-3.5 w-3.5" />
+                            <Pencil className="h-4 w-4" />
                             {t('modals.expense.editStaffPayment', 'Edit payment')}
                           </button>
                           <button
@@ -1960,9 +1942,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                                 description: payment.staff_name || t('common.unknown', 'Unknown'),
                               })
                             }
-                            className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-rose-700 transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-rose-200"
+                            className={`${drawerRowActionClass} pos-solid-btn--danger`}
                           >
-                            <Trash2 className="h-3.5 w-3.5" />
+                            <Trash2 className="h-4 w-4" />
                             {t('modals.expense.deleteStaffPayment', 'Delete payment')}
                           </button>
                         </div>
@@ -1981,7 +1963,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
       )}
 
       {activeTab === 'activity' && (
-        <div className="space-y-5">
+        <div className="flex flex-col gap-4">
           <div className="grid gap-4 lg:grid-cols-3">
             {renderSummaryCard(
               t('modals.expense.totalExpenses', 'Total expenses'),
@@ -2006,17 +1988,17 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
           <div className={drawerSidePanelClass}>
             <div className="flex items-center justify-between gap-3">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <h4 className="text-base font-semibold text-(--pos-s-fg)">
                   {t('modals.expense.activityTitle', 'Drawer activity')}
-                </p>
-                <h4 className="mt-1 text-base font-bold text-slate-900 dark:text-white">
-                  {t('modals.expense.activitySubtitle', 'Expenses and staff payments recorded on this cashier shift')}
                 </h4>
+                <p className="mt-1 text-sm text-(--pos-s-muted)">
+                  {t('modals.expense.activitySubtitle', 'Expenses and staff payments recorded on this cashier shift')}
+                </p>
               </div>
-              <ClipboardList className="h-5 w-5 text-neutral-500 dark:text-neutral-300" />
+              <ClipboardList className="h-5 w-5 text-(--pos-s-muted)" />
             </div>
 
-            <div className="mt-4 space-y-3">
+            <div className="mt-4 flex flex-col gap-3">
               {activityItems.length > 0
                 ? activityItems.map(renderActivityItem)
                 : renderEmptyState(

@@ -57,7 +57,6 @@ import {
   RefreshCw,
   Trash2,
 } from 'lucide-react';
-import { useTheme } from '../../contexts/theme-context';
 import { offEvent, onEvent } from '../../../lib';
 import { formatCurrency, formatDate } from '../../utils/format';
 import {
@@ -203,8 +202,6 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
   onChanged,
 }) => {
   const { t, i18n } = useTranslation();
-  const { resolvedTheme } = useTheme();
-  const isDark = resolvedTheme === 'dark';
 
   const [documents, setDocuments] = useState<CaptureDocumentRow[]>([]);
   const [events, setEvents] = useState<CaptureEventRow[]>([]);
@@ -213,14 +210,20 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmDiscardId, setConfirmDiscardId] = useState<string | null>(null);
 
-  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-600';
-  const cardClass = isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50';
-  const secondaryButtonClass = isDark
-    ? 'border-zinc-800 bg-zinc-900 text-zinc-100 active:bg-zinc-800'
-    : 'border-gray-200 bg-white text-gray-800 active:bg-gray-100';
-  const primaryButtonClass = isDark
-    ? 'border-(--pos-s-yellow) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'
-    : 'border-yellow-400 text-gray-950 active:bg-(--pos-s-surface-2)';
+  // Founder 01/11: frost rows inside the glass window, neutral icons, the state as a coloured word, and kit
+  // buttons — a row's forward step (Check & Save / Carry on scanning) is the kit primary, the rest are neutral,
+  // throwing a scan away has red words.
+  const subtleClass = 'text-(--pos-s-muted)';
+  const cardClass = 'pos-frost';
+  const secondaryButtonClass = 'pos-solid-btn pos-solid-btn--sm';
+  const primaryButtonClass = 'pos-solid-btn pos-solid-btn--sm pos-solid-btn--primary';
+  const dangerButtonClass = 'pos-solid-btn pos-solid-btn--sm pos-solid-btn--danger';
+  const statusWordClass = (status: CaptureDocumentRow['status']): string =>
+    status === 'needs_attention'
+      ? 'text-(--pos-s-bad)'
+      : status === 'ready_review'
+        ? 'text-(--pos-s-warn)'
+        : 'text-(--pos-s-fg)';
 
   /**
    * Re-read the queue, writing state only when something actually differs.
@@ -351,13 +354,13 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
             <li
               key={`recorded-${captureId}`}
               data-testid={`capture-recorded-row-${captureId}`}
-              className={`rounded-2xl border p-3 ${cardClass}`}
+              className={`rounded-xl border p-3 ${cardClass}`}
             >
               <div className="flex flex-wrap items-center gap-3">
-                <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-500" />
+                <CheckCircle2 className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
 
                 <div className="min-w-0 flex-1">
-                  <p className="truncate font-semibold">{markLabel(automation)}</p>
+                  <p className="truncate font-semibold text-(--pos-s-ok)">{markLabel(automation)}</p>
                   <p className={`truncate text-xs ${subtleClass}`}>
                     {automation.supplierName}
                     {automation.invoiceNumber ? ` · ${automation.invoiceNumber}` : ''}
@@ -372,7 +375,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
                 <button
                   type="button"
                   onClick={() => onCorrect?.(automation)}
-                  className={`inline-flex min-h-10 shrink-0 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${secondaryButtonClass}`}
+                  className={`shrink-0 ${secondaryButtonClass}`}
                 >
                   {t('suppliers.capture.automation.openAndCorrect', 'Open and correct')}
                   <ChevronRight className="h-4 w-4" />
@@ -384,7 +387,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
       )}
 
       {sorted.length === 0 ? (
-        <div className={`rounded-2xl border p-4 text-sm ${cardClass}`}>
+        <div className={`rounded-xl border p-4 text-sm ${cardClass}`}>
           <p className="font-semibold">
             {t('suppliers.capture.queue.emptyTitle', 'Nothing waiting')}
           </p>
@@ -405,19 +408,19 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
               <li
                 key={document.captureId}
                 data-testid={`capture-queue-row-${document.captureId}`}
-                className={`rounded-2xl border p-3 ${cardClass}`}
+                className={`rounded-xl border p-3 ${cardClass}`}
               >
                 <div className="flex flex-wrap items-center gap-3">
                   {automatic ? (
-                    <Loader2 className="h-5 w-5 shrink-0 animate-spin text-amber-500" />
+                    <Loader2 className="h-5 w-5 shrink-0 animate-spin text-(--pos-s-muted)" aria-hidden="true" />
                   ) : document.status === 'needs_attention' ? (
-                    <AlertCircle className="h-5 w-5 shrink-0 text-red-500" />
+                    <AlertCircle className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
                   ) : (
-                    <Clock className="h-5 w-5 shrink-0 text-amber-500" />
+                    <Clock className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
                   )}
 
                   <div className="min-w-0 flex-1">
-                    <p className="truncate font-semibold">
+                    <p className={`truncate font-semibold ${statusWordClass(document.status)}`}>
                       {t(statusKey(document.status), document.status)}
                     </p>
                     <p className={`truncate text-xs ${subtleClass}`}>
@@ -450,7 +453,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
                         type="button"
                         disabled={busy}
                         onClick={() => onReview(document)}
-                        className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${primaryButtonClass}`}
+                        className={primaryButtonClass}
                       >
                         {t('suppliers.capture.queue.check', 'Check & Save')}
                         <ChevronRight className="h-4 w-4" />
@@ -462,7 +465,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
                         type="button"
                         disabled={busy}
                         onClick={() => onContinueCapture(document)}
-                        className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${primaryButtonClass}`}
+                        className={primaryButtonClass}
                       >
                         {t('suppliers.capture.queue.continue', 'Carry on scanning')}
                         <ChevronRight className="h-4 w-4" />
@@ -475,7 +478,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
                           type="button"
                           disabled={busy}
                           onClick={() => void act(document, 'waiting')}
-                          className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${primaryButtonClass}`}
+                          className={secondaryButtonClass}
                         >
                           <RefreshCw className="h-4 w-4" />
                           {t('suppliers.capture.queue.retry', 'Try again')}
@@ -484,7 +487,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
                           type="button"
                           disabled={busy}
                           onClick={() => void act(document, 'ready_review')}
-                          className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${primaryButtonClass}`}
+                          className={secondaryButtonClass}
                         >
                           <PenLine className="h-4 w-4" />
                           {t('suppliers.capture.queue.manual', 'Fill in by hand')}
@@ -498,7 +501,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
                         disabled={busy}
                         onClick={() => setConfirmDiscardId(document.captureId)}
                         aria-label={t('suppliers.capture.queue.discard', 'Throw this scan away')}
-                        className={`inline-flex h-10 w-10 items-center justify-center rounded-2xl border ${secondaryButtonClass}`}
+                        className="pos-icon-btn"
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
@@ -507,7 +510,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
                 </div>
 
                 {confirmDiscardId === document.captureId && (
-                  <div className={`mt-3 rounded-2xl border p-3 text-sm ${cardClass}`}>
+                  <div className="mt-3 rounded-xl border border-(--modal-glass-line) p-3 text-sm">
                     <p>
                       {t(
                         'suppliers.capture.queue.discardConfirm',
@@ -518,14 +521,14 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
                       <button
                         type="button"
                         onClick={() => void act(document, 'discarded')}
-                        className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${primaryButtonClass}`}
+                        className={dangerButtonClass}
                       >
                         {t('suppliers.capture.queue.discard', 'Throw this scan away')}
                       </button>
                       <button
                         type="button"
                         onClick={() => setConfirmDiscardId(null)}
-                        className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${secondaryButtonClass}`}
+                        className={secondaryButtonClass}
                       >
                         {t('common.cancel', 'Cancel')}
                       </button>
@@ -542,7 +545,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
         type="button"
         data-testid="capture-history-toggle"
         onClick={() => setShowHistory((current) => !current)}
-        className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${secondaryButtonClass}`}
+        className={secondaryButtonClass}
       >
         <History className="h-4 w-4" />
         {showHistory
@@ -551,7 +554,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
       </button>
 
       {showHistory && (
-        <div data-testid="capture-history" className={`rounded-2xl border p-3 ${cardClass}`}>
+        <div data-testid="capture-history" className={`rounded-xl border p-3 ${cardClass}`}>
           {ingest.length === 0 && events.length === 0 ? (
             <p className={`text-sm ${subtleClass}`}>
               {t('suppliers.capture.history.empty', 'Nothing has happened here yet.')}

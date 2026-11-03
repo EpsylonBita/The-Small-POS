@@ -137,10 +137,10 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                         </div>
                         <button
                             onClick={onClose}
-                            className="liquid-glass-modal-button p-2 min-h-0 min-w-0"
+                            className="liquid-glass-modal-close"
                             aria-label={t('common.actions.close')}
                         >
-                            <X className="w-5 h-5" />
+                            <X className="h-5 w-5" aria-hidden="true" />
                         </button>
                     </div>
                 </div>

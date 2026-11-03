@@ -4,6 +4,7 @@ import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import { menuService, MenuItem, Ingredient } from '../../services/MenuService';
 import { Ban, Check, MessageSquare, Minus, Plus, Search, ShoppingCart, X } from 'lucide-react';
+import { motion } from 'framer-motion';
 import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { renderModalPortal } from '../../utils/render-modal-portal';
@@ -175,11 +176,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
   const handleIngredientToggle = (ingredient: Ingredient, isSelected: boolean) => {
     if (isSelected) {
-      // Check if we've reached the max ingredients limit (only for customizable items)
-      if (menuItem?.is_customizable && menuItem.max_ingredients && selectedIngredients.length >= menuItem.max_ingredients) {
-        toast.error(t('menu.validation.maxIngredients', { count: menuItem.max_ingredients }));
-        return;
-      }
+      // Founder 01/11/2026 («τα υλικα πρεπει να ειναι απεριοριστα και απλα η λιστα να μεγαλωνει»): an item's
+      // `max_ingredients` no longer caps the choice; only Gemini X test data ever set one.
 
       setSelectedIngredients(prev => [
         ...prev,
@@ -286,6 +284,28 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
     }, {} as { [key: string]: Ingredient[] });
   }, [filteredIngredients]);
 
+  // Founder 01/11/2026 (proposal A, «ήρεμο πλέγμα»): a row of the categories on screen jumps to each section.
+  const categorySectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const ingredientsScrollRef = useRef<HTMLDivElement | null>(null);
+  // Scrolls the ingredient list itself to the section (a smooth scrollIntoView moved nothing in the till's WebView);
+  // if the smooth scroll does not start, it lands there at once.
+  const jumpToCategory = (color: string) => {
+    const scroller = ingredientsScrollRef.current;
+    const section = categorySectionRefs.current[color];
+    if (!scroller || !section) return;
+    const start = scroller.scrollTop;
+    const top = Math.max(0, start + section.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 4);
+    scroller.scrollTo({ top, behavior: 'smooth' });
+    window.setTimeout(() => {
+      if (Math.abs(scroller.scrollTop - start) < 1 && Math.abs(top - start) >= 1) scroller.scrollTop = top;
+    }, 250);
+  };
+  const ingredientMode: 'normal' | 'little' | 'without' = isWithoutMode ? 'without' : isLittleMode ? 'little' : 'normal';
+  const setIngredientMode = (mode: 'normal' | 'little' | 'without') => {
+    setIsWithoutMode(mode === 'without');
+    setIsLittleMode(mode === 'little');
+  };
+
   const selectedExtras = useMemo(
     () => selectedIngredients.filter(si => !si.isWithout),
     [selectedIngredients]
@@ -301,215 +321,209 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
     [selectedExtras]
   );
 
-  const flavorFilterButtonBaseClass =
-    'inline-flex h-12 min-w-28 items-center justify-center rounded-full border px-5 text-sm font-semibold antialiased box-border transition-colors duration-150 touch-feedback';
+  // The kit's segmented control: the chosen segment in the selection yellow, the others quiet on a sunken well.
+  const segmentClass = (selected: boolean) =>
+    `relative inline-flex h-10 items-center justify-center rounded-full px-4 text-sm font-semibold antialiased transition-colors touch-feedback ${
+      selected ? 'text-(--pos-s-sel-fg)' : 'text-(--pos-s-muted) active:bg-(--pos-s-surface)'
+    }`;
+  // Founder 01/11/2026 («καπιο micro animation οταν αλλαζω τα κουμπια αυτα»): the yellow slides to the new choice
+  // (180 ms ease-out, as the order tabs). Visual only: the choice changes on the same press; "reduce motion" jumps.
+  const segmentIndicator = (group: 'flavor' | 'mode') => (
+    <motion.span
+      layoutId={`ingredients-${group}-indicator`}
+      aria-hidden="true"
+      transition={{ duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
+      className="absolute inset-0 rounded-full bg-(--pos-s-sel-bg) shadow-(--pos-s-depth-yellow)"
+    />
+  );
+  const segmentWellClass = 'inline-flex shrink-0 items-center gap-1 rounded-full bg-(--pos-s-surface-2) p-1 shadow-(--pos-s-well)';
+  const categoriesOnScreen = Object.entries(filteredByColor);
 
   const modalHeader = (
-    <div className="shrink-0 px-5 pt-3 pb-1.5 space-y-2">
-      <div className="flex items-center justify-between">
-        <div>
+    <div className="shrink-0 px-5 pt-3 pb-2 space-y-2.5" data-ingredients-layout="calm-grid">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
           <h3 className="text-[1.05rem] font-semibold liquid-glass-modal-text">
             {menuItem.is_customizable
               ? t('menu.itemModal.customizeTitle', { item: menuItem.name })
               : t('menu.itemModal.extrasTitle') || 'Extras & Modifications'}
           </h3>
-          {menuItem.is_customizable && menuItem.max_ingredients && (
-            <p className="text-xs liquid-glass-modal-text-muted mt-0.5">
-              {t('menu.itemModal.maxIngredientsHint', { count: menuItem.max_ingredients })}
-            </p>
+          {menuItem.is_customizable && selectedIngredients.length > 0 && (
+            <span data-ingredients-count className="shrink-0 rounded-full bg-(--pos-s-ok-bg) px-2.5 py-0.5 text-xs font-semibold text-(--pos-s-ok)">
+              {t('menu.itemModal.selectedCount', { count: selectedIngredients.length, defaultValue: '{{count}} ingredients' })}
+            </span>
           )}
           {!menuItem.is_customizable && (
-            <p className="text-xs liquid-glass-modal-text-muted mt-0.5">
+            <p className="text-xs liquid-glass-modal-text-muted">
               {t('menu.itemModal.extrasHint') || 'Add extras or mark ingredients as "without"'}
             </p>
           )}
         </div>
+        <button
+          onClick={onClose}
+          className="liquid-glass-modal-close"
+          aria-label={t('common.actions.close')}
+        >
+          <X className="h-5 w-5" aria-hidden="true" />
+        </button>
+      </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => {
-              setIsWithoutMode(!isWithoutMode);
-              if (!isWithoutMode) setIsLittleMode(false);
-            }}
-            className={`px-3.5 py-1.5 rounded-full font-semibold text-sm transition-all duration-300 ${
-              isWithoutMode
-                ? 'bg-red-500 text-white scale-105 border-2 border-(--pos-s-border)'
-                : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent active:bg-red-100 dark:active:bg-zinc-800 active:border-red-300 dark:active:border-red-700'
-            }`}
-            style={{
-              textRendering: 'geometricPrecision',
-              WebkitFontSmoothing: 'subpixel-antialiased'
-            }}
-          >
-            {t('menu.itemModal.without') || 'Without'}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-56 flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <input
+            ref={ingredientSearchRef}
+            type="text"
+            autoFocus
+            value={ingredientSearch}
+            onChange={(e) => setIngredientSearch(e.target.value)}
+            placeholder={t('menu.itemModal.searchIngredients', 'Search ingredients...')}
+            className="liquid-glass-modal-input w-full h-11 pl-9 pr-8 rounded-xl text-sm focus:ring-1 focus:ring-amber-400"
+          />
+          {ingredientSearch && (
+            <button
+              onClick={() => setIngredientSearch('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted active:opacity-70"
+              aria-label={t('common.actions.clear', { defaultValue: 'Clear' })}
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+        <div className={segmentWellClass} role="group" aria-label={t('menu.itemModal.savory') + ' / ' + t('menu.itemModal.sweet')}>
+          <button type="button" aria-pressed={activeFlavorType === 'savory'} onClick={() => setActiveFlavorType('savory')} className={segmentClass(activeFlavorType === 'savory')}>
+            {activeFlavorType === 'savory' && segmentIndicator('flavor')}
+            <span className="relative">{t('menu.itemModal.savory')}</span>
           </button>
-
-          <button
-            onClick={() => {
-              setIsLittleMode(!isLittleMode);
-              if (!isLittleMode) setIsWithoutMode(false);
-            }}
-            className={`px-3.5 py-1.5 rounded-full font-semibold text-sm transition-all duration-300 ${
-              isLittleMode
-                ? 'bg-orange-500 text-white scale-105 border-2 border-(--pos-s-border)'
-                : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent active:bg-orange-100 dark:active:bg-zinc-800 active:border-orange-300 dark:active:border-orange-700'
-            }`}
-            style={{
-              textRendering: 'geometricPrecision',
-              WebkitFontSmoothing: 'subpixel-antialiased'
-            }}
-          >
-            {t('menu.itemModal.little')}
+          <button type="button" aria-pressed={activeFlavorType === 'sweet'} onClick={() => setActiveFlavorType('sweet')} className={segmentClass(activeFlavorType === 'sweet')}>
+            {activeFlavorType === 'sweet' && segmentIndicator('flavor')}
+            <span className="relative">{t('menu.itemModal.sweet')}</span>
           </button>
-
-          <button
-            onClick={onClose}
-            className="liquid-glass-modal-button p-1.5 min-h-0 min-w-0"
-            aria-label={t('common.actions.close')}
-          >
-            <X className="w-5 h-5" />
+        </div>
+        <div className={segmentWellClass} role="group" data-ingredient-mode={ingredientMode} aria-label={t('menu.itemModal.normal', { defaultValue: 'Normal' }) + ' / ' + t('menu.itemModal.little') + ' / ' + (t('menu.itemModal.without') || 'Without')}>
+          <button type="button" aria-pressed={ingredientMode === 'normal'} onClick={() => setIngredientMode('normal')} className={segmentClass(ingredientMode === 'normal')}>
+            {ingredientMode === 'normal' && segmentIndicator('mode')}
+            <span className="relative">{t('menu.itemModal.normal', { defaultValue: 'Normal' })}</span>
+          </button>
+          <button type="button" aria-pressed={ingredientMode === 'little'} onClick={() => setIngredientMode('little')} className={segmentClass(ingredientMode === 'little')}>
+            {ingredientMode === 'little' && segmentIndicator('mode')}
+            <span className="relative">{t('menu.itemModal.little')}</span>
+          </button>
+          <button type="button" aria-pressed={ingredientMode === 'without'} onClick={() => setIngredientMode('without')} className={segmentClass(ingredientMode === 'without')}>
+            {ingredientMode === 'without' && segmentIndicator('mode')}
+            <span className="relative">{t('menu.itemModal.without') || 'Without'}</span>
           </button>
         </div>
       </div>
 
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-        <input
-          ref={ingredientSearchRef}
-          type="text"
-          autoFocus
-          value={ingredientSearch}
-          onChange={(e) => setIngredientSearch(e.target.value)}
-          placeholder={t('menu.itemModal.searchIngredients', 'Search ingredients...')}
-          className="liquid-glass-modal-input w-full pl-9 pr-8 py-1.5 rounded-xl text-sm focus:ring-1 focus:ring-amber-400"
-        />
-        {ingredientSearch && (
-          <button
-            onClick={() => setIngredientSearch('')}
-            className="absolute right-2 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted active:opacity-70"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
-      </div>
-
-      <div className="flex gap-2 pb-2 border-b liquid-glass-modal-border">
-        <button
-          onClick={() => setActiveFlavorType('savory')}
-          className={`${flavorFilterButtonBaseClass} ${activeFlavorType === 'savory'
-              ? 'border-orange-600 bg-orange-500 text-white'
-              : 'liquid-glass-modal-icon-button liquid-glass-modal-text active:opacity-80'
-            }`}
-        >
-          {t('menu.itemModal.savory')}
-        </button>
-        <button
-          onClick={() => setActiveFlavorType('sweet')}
-          className={`${flavorFilterButtonBaseClass} ${activeFlavorType === 'sweet'
-              ? 'border-slate-300/70 bg-slate-500 text-white shadow-[0_8px_18px_rgba(82,82,91,0.22)]'
-              : 'liquid-glass-modal-icon-button liquid-glass-modal-text active:opacity-80'
-            }`}
-        >
-          {t('menu.itemModal.sweet')}
-        </button>
-      </div>
+      {categoriesOnScreen.length > 1 && (
+        <div className="pos-scroll-row flex items-center gap-2 pb-1 border-b liquid-glass-modal-border" data-ingredients-jump>
+          <span className="shrink-0 text-xs font-medium liquid-glass-modal-text-muted">
+            {t('menu.itemModal.jumpTo', { defaultValue: 'Go to' })}
+          </span>
+          {categoriesOnScreen.map(([color, ingredients]) => (
+            <button
+              key={color}
+              type="button"
+              onClick={() => jumpToCategory(color)}
+              className="pos-raised inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-semibold liquid-glass-modal-text"
+            >
+              <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: color }} aria-hidden="true" />
+              {ingredients[0]?.category_name || t('menu.itemModal.ingredients')}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 
   const modalFooter = (
     <div className="liquid-glass-modal-footer shrink-0 border-t px-5 py-2 space-y-2 relative z-10">
       {selectedIngredients.length > 0 && (
-        <div className="liquid-glass-modal-inset rounded-xl px-2.5 py-1.5 shadow-[0_8px_24px_rgba(0,0,0,0.12)]">
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="flex items-center gap-2 shrink-0 whitespace-nowrap">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.18em] liquid-glass-modal-text-muted">
-                {t('menu.itemModal.currentSelection', { defaultValue: 'Current selection' })}
+        // Founder 01/11/2026 («πολυ μεγαλα ... δεν φαινονται ολα ... δεν ειναι βολικο να τα σερνεις», «δε χρειαζεται
+        // απαραιτητα να ειναι pill shaped»): the choice as plain small rows in a grid that wraps, every one in view,
+        // each with its category's colour dot; nothing to drag.
+        <div data-ingredients-selection className="liquid-glass-modal-inset rounded-xl px-3 py-2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
+            <span className="font-semibold liquid-glass-modal-text">
+              {t('menu.itemModal.currentSelection', { defaultValue: 'Current selection' })}
+            </span>
+            {totalSelectedExtrasCount > 0 && (
+              <span className="liquid-glass-modal-text-muted">
+                {t('menu.itemModal.ingredientsSelected', { count: totalSelectedExtrasCount })}
+                {ingredientPrice > 0 && (
+                  <span className="ml-1 font-semibold text-green-700 dark:text-green-400">
+                    {t('menu.itemModal.extraPrice', {
+                      price: formatCurrency(ingredientPrice)
+                    })}
+                  </span>
+                )}
               </span>
-              {totalSelectedExtrasCount > 0 && (
-                <span className="text-xs liquid-glass-modal-text-muted">
-                  {t('menu.itemModal.ingredientsSelected', { count: totalSelectedExtrasCount })}
-                  {ingredientPrice > 0 && (
-                    <span className="ml-1 text-green-500 font-semibold">
-                      {t('menu.itemModal.extraPrice', {
-                        price: formatCurrency(ingredientPrice)
-                      })}
+            )}
+            {selectedWithoutItems.length > 0 && (
+              <span className="inline-flex items-center gap-1 text-red-700 dark:text-red-400">
+                <Ban className="w-3 h-3 shrink-0" aria-hidden="true" />
+                {t('menu.itemModal.withoutCount', { count: selectedWithoutItems.length })}
+              </span>
+            )}
+          </div>
+          <ul className="mt-1 grid grid-cols-2 gap-x-4 sm:grid-cols-3 lg:grid-cols-4">
+            {selectedExtras.map((selectedItem) => {
+              const ingredientName = getIngredientName(selectedItem.ingredient);
+              const priceImpact = getIngredientUnitPrice(selectedItem.ingredient) * selectedItem.quantity;
+
+              return (
+                <li
+                  key={`selected-${selectedItem.ingredient.id}`}
+                  className="flex h-8 min-w-0 items-center gap-1.5 border-b border-(--pos-s-border)/60 text-xs antialiased liquid-glass-modal-text"
+                >
+                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: selectedItem.ingredient.item_color || '#6B7280' }} aria-hidden="true" />
+                  <span className="min-w-0 truncate font-medium">{ingredientName}</span>
+                  {selectedItem.quantity > 1 && (
+                    <span className="shrink-0 font-bold">×{selectedItem.quantity}</span>
+                  )}
+                  {selectedItem.isLittle && (
+                    <span className="shrink-0 liquid-glass-modal-text-muted">({t('menu.itemModal.little')})</span>
+                  )}
+                  {priceImpact > 0 && (
+                    <span className="shrink-0 font-semibold text-green-700 dark:text-green-400">
+                      +{formatCurrency(priceImpact)}
                     </span>
                   )}
-                </span>
-              )}
-              {selectedWithoutItems.length > 0 && (
-                <span className="text-xs text-red-400 inline-flex items-center gap-1">
-                  <Ban className="w-3 h-3 shrink-0" />
-                  {t('menu.itemModal.withoutCount', { count: selectedWithoutItems.length })}
-                </span>
-              )}
-              <span className="text-[11px] liquid-glass-modal-text-muted">
-                {menuItem.max_ingredients
-                  ? `${selectedIngredients.length}/${menuItem.max_ingredients}`
-                  : selectedIngredients.length}
-              </span>
-            </div>
-            <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden scrollbar-hide touch-pan-x">
-              <div className="flex items-center gap-1.5 w-max min-w-full pb-0.5">
-                {selectedExtras.map((selectedItem) => {
-                  const ingredientName = getIngredientName(selectedItem.ingredient);
-                  const priceImpact = getIngredientUnitPrice(selectedItem.ingredient) * selectedItem.quantity;
-
-                  return (
-                    <span
-                      key={`selected-${selectedItem.ingredient.id}`}
-                      className="inline-flex shrink-0 items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium antialiased bg-slate-500/15 text-slate-700 dark:bg-slate-500/25 dark:text-slate-200 border border-slate-500/20 dark:border-zinc-700"
-                    >
-                      <span className="max-w-[180px] truncate">
-                        + {ingredientName}
-                      </span>
-                      {selectedItem.quantity > 1 && (
-                        <span className="font-bold text-slate-800 dark:text-slate-100">
-                          x{selectedItem.quantity}
-                        </span>
-                      )}
-                      {selectedItem.isLittle && (
-                        <span className="opacity-80">
-                          ({t('menu.itemModal.little')})
-                        </span>
-                      )}
-                      {priceImpact > 0 && (
-                        <span className="font-semibold text-green-600 dark:text-green-300">
-                          +{formatCurrency(priceImpact)}
-                        </span>
-                      )}
-                      <button
-                        onClick={() => handleSelectedIngredientRemove(selectedItem.ingredient.id)}
-                        className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-500/20 active:bg-slate-500/35 transition-colors"
-                        aria-label={t('common.actions.remove')}
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  );
-                })}
-
-                {selectedWithoutItems.map((selectedItem) => (
-                  <span
-                    key={`without-${selectedItem.ingredient.id}`}
-                    className="inline-flex shrink-0 items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium antialiased bg-(--pos-s-surface-2) text-red-700 dark:bg-zinc-800 dark:text-red-200 border border-(--pos-s-border)"
+                  <button
+                    type="button"
+                    onClick={() => handleSelectedIngredientRemove(selectedItem.ingredient.id)}
+                    className="ml-auto inline-flex shrink-0 items-center justify-center rounded-md text-(--pos-s-bad) active:bg-(--pos-s-bad-bg)"
+                    style={{ width: 28, height: 28, minWidth: 28, minHeight: 28 }}
+                    aria-label={`${t('common.actions.remove')} ${ingredientName}`}
                   >
-                    <Ban className="w-3 h-3" aria-hidden="true" />
-                    <span className="max-w-[180px] truncate line-through">
-                      {getIngredientName(selectedItem.ingredient)}
-                    </span>
-                    <button
-                      onClick={() => handleSelectedIngredientRemove(selectedItem.ingredient.id)}
-                      className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) transition-colors"
-                      aria-label={t('common.actions.remove')}
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
+                    <X className="w-3.5 h-3.5" aria-hidden="true" />
+                  </button>
+                </li>
+              );
+            })}
+
+            {selectedWithoutItems.map((selectedItem) => (
+              <li
+                key={`without-${selectedItem.ingredient.id}`}
+                className="flex h-8 min-w-0 items-center gap-1.5 border-b border-(--pos-s-border)/60 text-xs antialiased text-red-700 dark:text-red-400"
+              >
+                <Ban className="w-3 h-3 shrink-0" aria-hidden="true" />
+                <span className="min-w-0 truncate font-medium line-through">
+                  {getIngredientName(selectedItem.ingredient)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleSelectedIngredientRemove(selectedItem.ingredient.id)}
+                  className="ml-auto inline-flex shrink-0 items-center justify-center rounded-md text-(--pos-s-bad) active:bg-(--pos-s-bad-bg)"
+                  style={{ width: 28, height: 28, minWidth: 28, minHeight: 28 }}
+                  aria-label={`${t('common.actions.remove')} ${getIngredientName(selectedItem.ingredient)}`}
+                >
+                  <X className="w-3.5 h-3.5" aria-hidden="true" />
+                </button>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -517,7 +531,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={() => setQuantity(Math.max(1, quantity - 1))}
-            className="liquid-glass-modal-icon-button flex h-9 w-9 items-center justify-center rounded-full"
+            className="pos-raised flex h-11 w-11 items-center justify-center rounded-full text-(--pos-s-fg)"
             aria-label={t('common.actions.decrease', { defaultValue: 'Decrease quantity' })}
           >
             <Minus className="h-5 w-5" strokeWidth={3.5} aria-hidden="true" />
@@ -527,7 +541,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
           </span>
           <button
             onClick={() => setQuantity(quantity + 1)}
-            className="liquid-glass-modal-icon-button flex h-9 w-9 items-center justify-center rounded-full"
+            className="pos-raised flex h-11 w-11 items-center justify-center rounded-full text-(--pos-s-fg)"
             aria-label={t('common.actions.increase', { defaultValue: 'Increase quantity' })}
           >
             <Plus className="h-5 w-5" strokeWidth={3.5} aria-hidden="true" />
@@ -577,12 +591,14 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
       footer={modalFooter}
       size="lg"
       className="menu-item-customizer-modal max-w-5xl max-h-[98vh]"
-      contentClassName="p-0 relative flex-1 overflow-hidden"
+      // The list scrolls inside the window (founder 01/11/2026: «Μετάβαση» did nothing and the last ingredients were
+      // out of reach): every level of the column is allowed to shrink, so the ingredient list is the one that scrolls.
+      contentClassName="p-0 relative flex flex-1 min-h-0 flex-col overflow-hidden"
       initialFocusRef={ingredientSearchRef}
       ariaLabel={menuItem.name}
     >
-      <div className="relative flex h-full flex-col">
-        <div className="flex-1 overflow-y-auto overflow-x-hidden px-5 pb-2 min-h-0 pos-scrollbar-glass">
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div ref={ingredientsScrollRef} data-ingredients-scroll className="flex-1 overflow-y-auto overflow-x-hidden px-5 pb-2 min-h-0 pos-scrollbar-glass">
           <div className="space-y-4">
                   {Object.keys(filteredByColor).length === 0 ? (
                     <div className="text-center py-8 liquid-glass-modal-text-muted">
@@ -594,18 +610,12 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                       // Get the category name from the first ingredient in this color group
                       const categoryName = ingredients[0]?.category_name || t('menu.itemModal.ingredients');
                       return (
-                      <div key={color}>
-                        {/* Color Header with Category Name */}
+                      <div key={color} ref={(el) => { categorySectionRefs.current[color] = el; }} className="scroll-mt-2">
+                        {/* The category: its colour dot and its name. */}
                         <div className="flex items-center gap-2 mb-2">
-                          <span
-                            className="h-4 w-4 rounded-full border-2 shadow-lg"
-                            style={{
-                              backgroundColor: color,
-                              borderColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.2)'
-                            }}
-                          />
-                          <span className="text-sm font-medium liquid-glass-modal-text-muted">
-                            {ingredients.length} {categoryName}
+                          <span className="h-3 w-3 rounded-full" style={{ backgroundColor: color }} aria-hidden="true" />
+                          <span className="text-sm font-semibold liquid-glass-modal-text">
+                            {categoryName}
                           </span>
                         </div>
 
@@ -627,7 +637,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                             };
                             const surfaceColor = isWithout ? '#EF4444' : color;
                             const neutral = resolvedTheme === 'dark' ? [15, 23, 42] : [255, 255, 255];
-                            const tint = isWithout ? 0.12 : isSelected ? 0.16 : 0.05;
+                            // Every ingredient keeps its category colours (founder 01/11/2026); a chosen one deepens them.
+                            const tint = isWithout ? 0.12 : isSelected ? 0.22 : 0.07;
                             const surfaceChannels = [1, 3, 5].map((offset, index) => {
                               const channel = parseInt(surfaceColor.slice(offset, offset + 2), 16);
                               return Math.round((Number.isFinite(channel) ? channel : neutral[index]) * tint + neutral[index] * (1 - tint));
@@ -636,17 +647,21 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                             return (
                               <div
                                 key={ingredient.id}
-                                className={`relative p-3 rounded-xl border-2 transition-all duration-200 text-left ${isSelected
+                                data-ingredient-selected={isSelected ? (isWithout ? 'without' : 'yes') : undefined}
+                                className={`relative p-3 rounded-xl border-2 transition-colors duration-200 text-left ${isSelected
                                     ? isWithout
-                                      ? 'border-red-400 shadow-lg scale-[1.02]'
-                                      : 'shadow-lg scale-[1.02]'
-                                    : 'active:scale-[0.98]'
+                                      ? 'border-red-400'
+                                      : ''
+                                    : 'active:translate-y-px'
                                   }`}
                                 style={{
                                   backgroundColor: `rgb(${surfaceChannels.join(', ')})`,
                                   borderColor: isSelected && !isWithout
                                     ? hexToVividRgba(color, 1)
                                     : hexToVividRgba(color, 0.6),
+                                  boxShadow: isSelected && !isWithout
+                                    ? `0 0 0 2px ${hexToVividRgba(color, 0.35)}, var(--pos-s-depth)`
+                                    : undefined,
                                 }}
                               >
                                 {/* Main clickable area for toggle */}
@@ -697,13 +712,10 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                         e.stopPropagation();
                                         handleIngredientQuantityChange(ingredient.id, currentQuantity - 1);
                                       }}
-                                      className="w-8 h-8 rounded-full flex items-center justify-center transition-all touch-feedback"
-                                      style={{
-                                        backgroundColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.15)',
-                                      }}
+                                      className="pos-raised w-8 h-8 rounded-full flex items-center justify-center text-(--pos-s-fg)"
                                       aria-label={t('common.actions.decrease')}
                                     >
-                                      <Minus className={`w-4 h-4 ${resolvedTheme === 'dark' ? 'text-white' : 'text-slate-900'}`} />
+                                      <Minus className="w-4 h-4" strokeWidth={3} aria-hidden="true" />
                                     </button>
 
                                     {/* Quantity display */}
@@ -712,7 +724,6 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       style={{
                                         color: resolvedTheme === 'dark' ? '#ffffff' : '#1e293b',
                                         fontWeight: 800,
-                                        textShadow: resolvedTheme === 'dark' ? '0 1px 3px rgba(0,0,0,0.5)' : '0 1px 2px rgba(255,255,255,0.8)'
                                       }}
                                     >
                                       {currentQuantity}
@@ -724,13 +735,10 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                         e.stopPropagation();
                                         handleIngredientQuantityChange(ingredient.id, currentQuantity + 1);
                                       }}
-                                      className="w-8 h-8 rounded-full flex items-center justify-center transition-all touch-feedback"
-                                      style={{
-                                        backgroundColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.15)',
-                                      }}
+                                      className="pos-raised w-8 h-8 rounded-full flex items-center justify-center text-(--pos-s-fg)"
                                       aria-label={t('common.actions.increase')}
                                     >
-                                      <span style={{ color: resolvedTheme === 'dark' ? '#ffffff' : '#1e293b', fontWeight: 700, fontSize: '16px', textShadow: '0 1px 2px rgba(0,0,0,0.2)' }}>+</span>
+                                      <Plus className="w-4 h-4" strokeWidth={3} aria-hidden="true" />
                                     </button>
                                   </div>
                                 ) : isSelected && isWithout ? (
@@ -752,13 +760,11 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       e.stopPropagation();
                                       handleIngredientToggle(ingredient, true);
                                     }}
-                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-full flex items-center justify-center transition-all touch-feedback opacity-70 active:opacity-100"
-                                    style={{
-                                      backgroundColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.1)',
-                                    }}
+                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-full flex items-center justify-center touch-feedback active:opacity-70"
+                                    style={{ color: hexToVividRgba(color, 1) }}
                                     aria-label={t('common.actions.add')}
                                   >
-                                    <span style={{ color: resolvedTheme === 'dark' ? '#ffffff' : '#1e293b', fontWeight: 700, fontSize: '16px' }}>+</span>
+                                    <Plus className="w-5 h-5" strokeWidth={3} aria-hidden="true" />
                                   </button>
                                 )}
                               </div>
@@ -807,7 +813,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
               <div className="flex gap-2 justify-end mt-3">
                 <button
                   onClick={() => setShowNotesOverlay(false)}
-                  className="px-4 py-2 text-sm font-semibold rounded-lg bg-(--pos-s-yellow) active:bg-yellow-500 text-black transition-colors"
+                  className="pos-raised pos-raised--yellow px-4 py-2 text-sm font-semibold rounded-lg bg-(--pos-s-yellow) active:bg-yellow-500 text-black transition-colors"
                 >
                   {t('common.actions.done', { defaultValue: 'Done' })}
                 </button>

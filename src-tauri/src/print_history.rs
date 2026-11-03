@@ -12,6 +12,66 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
 
+/// Persisted owner evidence on the caller's read-only support connection.
+/// Includes legacy jobs without a render snapshot; unknown emulation remains
+/// unknown rather than dropping a job or guessing ESC/POS.
+pub(crate) fn support_history_observation(conn: &Connection, profile: &str) -> serde_json::Value {
+    match support_recent_jobs(conn, profile) {
+        Ok(jobs) if jobs.as_array().is_some_and(|v| !v.is_empty()) => {
+            serde_json::json!({"status":"ok","jobs":jobs})
+        }
+        _ => serde_json::json!({"status":"unavailable","jobs":[]}),
+    }
+}
+
+fn support_recent_jobs(conn: &Connection, profile: &str) -> Result<serde_json::Value, String> {
+    let mut stmt = conn.prepare("SELECT j.created_at,
+        (SELECT a.bytes_requested FROM print_job_attempts a WHERE a.print_job_id=j.id ORDER BY a.attempt_number DESC LIMIT 1),
+        j.render_profile_snapshot_json,j.status FROM print_jobs j
+        WHERE j.printer_profile_id=?1 ORDER BY j.created_at DESC,j.id DESC LIMIT 20").map_err(|_|"unavailable")?;
+    let rows = stmt
+        .query_map([profile], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|_| "unavailable")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| "unavailable")?;
+    Ok(serde_json::json!(rows
+        .into_iter()
+        .map(|(at, bytes, snapshot, outcome)| {
+            let snapshot =
+                snapshot.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            let emulation = snapshot
+                .as_ref()
+                .and_then(|v| v.get("emulation"))
+                .and_then(serde_json::Value::as_str);
+            let emulation = match emulation {
+                Some("star_line") => Some("star_line"),
+                Some("escpos") => Some("escpos"),
+                Some("auto") => snapshot
+                    .as_ref()
+                    .and_then(|v| v.get("detected_brand"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(|b| {
+                        if b.eq_ignore_ascii_case("star") {
+                            "star_line"
+                        } else {
+                            "escpos"
+                        }
+                    }),
+                _ => None,
+            };
+            let normalised = match outcome.as_str() {"printed"|"completed"=>"printed","failed"=>"failed",_=>"pending"};
+            serde_json::json!({"at":at,"bytes":bytes,"emulation_used":emulation,"outcome":normalised,"retained_status":outcome})
+        })
+        .collect::<Vec<_>>()))
+}
+
 const RETRYABLE_STATUS: &str = "failed";
 const REPRINTABLE_STATUSES: [&str; 4] = ["printed", "dispatched", "failed", "cancelled"];
 const PURGE_ROW_LIMIT: usize = 200;
@@ -3871,5 +3931,46 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+}
+
+#[cfg(test)]
+mod support_observation_tests {
+    use super::*;
+    #[test]
+    fn history_keeps_legacy_jobs_and_caps_at_twenty() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        let writer = db.state.conn.lock().unwrap();
+        for n in 0..25 {
+            writer.execute("INSERT INTO print_jobs(id,entity_type,entity_id,printer_profile_id,status,created_at,updated_at,render_profile_snapshot_json) VALUES(?1,'order_receipt','your-order','your-printer','printed','2026-11-01','2026-11-01',?2)",params![format!("your-job-{n:02}"),if n==24 {None}else{Some(r#"{"emulation":"star_line"}"#)}]).unwrap();
+        }
+        let observed = support_history_observation(&writer, "your-printer");
+        assert_eq!(observed["status"], "ok");
+        assert_eq!(observed["jobs"].as_array().unwrap().len(), 20);
+        assert!(observed["jobs"][0]["emulation_used"].is_null());
+        assert_eq!(observed["jobs"][1]["emulation_used"], "star_line");
+    }
+    #[test]
+    fn recent_jobs_use_only_the_private_read_handle_with_writer_held() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        let gate = crate::support::critical_op::CriticalOpGate::new();
+        let permit = gate.try_begin_support(false, None).unwrap();
+        let read = crate::support::replica::read_connection(
+            db.db_path(),
+            &permit,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let _writer = db.state.conn.lock().unwrap();
+        let at = std::time::Instant::now();
+        assert_eq!(
+            support_history_observation(&read, "your-test-printer")["status"],
+            "unavailable"
+        );
+        assert!(at.elapsed() < std::time::Duration::from_millis(250));
     }
 }

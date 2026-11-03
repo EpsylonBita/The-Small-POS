@@ -370,9 +370,9 @@ export const EfoodWeeklyScheduleEditor: React.FC<EfoodWeeklyScheduleEditorProps>
           type="button"
           aria-label={t('settings.platforms.weeklySchedule.close', 'Close')}
           onClick={onClose}
-          className={liquidGlassModalButton('secondary', 'sm')}
+          className="liquid-glass-modal-close"
         >
-          <X className="h-4 w-4" />
+          <X className="h-5 w-5" aria-hidden="true" />
         </button>
       </div>
 

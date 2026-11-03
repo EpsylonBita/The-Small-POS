@@ -5,7 +5,6 @@ import ReactDOM from 'react-dom';
 import {
   ArrowRightLeft,
   Ban,
-  Banknote,
   Check,
   CreditCard,
   HandCoins,
@@ -25,6 +24,7 @@ import {
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import toast from 'react-hot-toast';
+import { paymentRefusalMessage } from '../../utils/paymentRefusalMessage';
 import { emitCompatEvent, getBridge, type RecordPaymentParams } from '../../../lib';
 import { useI18n } from '../../contexts/i18n-context';
 import { useCashierPortalProps } from '../../contexts/cashier-gate-context';
@@ -81,6 +81,7 @@ import {
   isRetainedTableMutationError,
   tableMutationOutcome,
 } from '../../utils/tableSessionOfflineQueue';
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 
 type PaymentMethod = 'cash' | 'card';
 type SecondaryModal = 'pay-table' | 'item-actions' | 'transfer-item' | 'batch-pay' | 'batch-transfer' | 'batch-discount' | 'move-table' | 'merge-table' | 'covers' | 'assign-waiter' | 'cancel-order' | null;
@@ -2158,7 +2159,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       console.error('[TableCheckManagerModal] Payment failed:', error);
       // Native payment persistence owns receipts and moved-money recovery.
       // A rejected collection must never become a raw server payment outbox.
-      toast.error(error instanceof Error ? error.message : tr('errors.paymentFailed', 'Payment failed'));
+      toast.error(paymentRefusalMessage(error, t) ?? (error instanceof Error ? error.message : tr('errors.paymentFailed', 'Payment failed')));
       return false;
     } finally {
       setIsSaving(false);
@@ -2696,7 +2697,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 <button
                   type="button"
                   onClick={openAssignWaiterModal}
-                  className="inline-flex max-w-[220px] items-center gap-1.5 rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) px-2.5 py-1 text-xs font-semibold text-blue-800 transition-colors dark:text-blue-200"
+                  className="pos-raised inline-flex max-w-[220px] items-center gap-1.5 rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) px-2.5 py-1 text-xs font-semibold text-blue-800 transition-colors dark:text-blue-200"
                 >
                   <UserCheck className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{currentWaiterLabel}</span>
@@ -3080,7 +3081,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               <MetricTile label={tr('labels.total', 'Total')} value={money(Number((parseMoneyInput(paymentAmount) + Math.max(0, parseMoneyInput(tipAmount))).toFixed(2)))} />
               <div className="grid grid-cols-2 gap-2">
                 <ActionButton onClick={() => void recordPayment('cash')} disabled={isSaving || isSavedSession} tone="cash">
-                  <Banknote className="h-4 w-4" />
+                  <CashHandIcon className="h-4 w-4" />
                   {tr('paymentMethods.cash', 'Cash')}
                 </ActionButton>
                 <ActionButton onClick={() => void recordPayment('card')} disabled={isSaving || isSavedSession} tone="card">
@@ -3131,7 +3132,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               <MetricTile label={tr('labels.total', 'Total')} value={money(Number((batchSelectedTotal + Math.max(0, parseMoneyInput(tipAmount))).toFixed(2)))} />
               <div className="grid grid-cols-2 gap-2">
                 <ActionButton onClick={() => void recordBatchPayment('cash')} disabled={isSaving || isSavedSession || batchSelectedTotal <= 0} tone="cash">
-                  <Banknote className="h-4 w-4" />
+                  <CashHandIcon className="h-4 w-4" />
                   {tr('paymentMethods.cash', 'Cash')}
                 </ActionButton>
                 <ActionButton onClick={() => void recordBatchPayment('card')} disabled={isSaving || isSavedSession || batchSelectedTotal <= 0} tone="card">
@@ -3321,7 +3322,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                       disabled={isSaving || isSavedSession}
                       tone="cash"
                     >
-                      <Banknote className="h-4 w-4" />
+                      <CashHandIcon className="h-4 w-4" />
                       {tr('paymentMethods.cash', 'Cash')}
                     </ActionButton>
                     <ActionButton

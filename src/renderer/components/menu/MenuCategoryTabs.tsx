@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useRef, useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 
@@ -31,60 +31,8 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
 }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const [isDragging, setIsDragging] = useState(false);
-  const [startX, setStartX] = useState(0);
-  const [scrollLeft, setScrollLeft] = useState(0);
-  const [showLeftFade, setShowLeftFade] = useState(false);
-
-  // Check scroll position to show/hide fade effects
-  const checkScroll = useCallback(() => {
-    if (scrollContainerRef.current) {
-      const { scrollLeft } = scrollContainerRef.current;
-      setShowLeftFade(scrollLeft > 10);
-    }
-  }, []);
-
-  // Update fade effects on mount and scroll
-  useEffect(() => {
-    checkScroll();
-    const container = scrollContainerRef.current;
-    if (container) {
-      container.addEventListener('scroll', checkScroll);
-      return () => container.removeEventListener('scroll', checkScroll);
-    }
-  }, [checkScroll, categories]);
-
-  // Mouse drag handlers
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (!scrollContainerRef.current) return;
-    setIsDragging(true);
-    setStartX(e.pageX - scrollContainerRef.current.offsetLeft);
-    setScrollLeft(scrollContainerRef.current.scrollLeft);
-    scrollContainerRef.current.style.cursor = 'grabbing';
-  };
-
-  const handleMouseLeave = () => {
-    setIsDragging(false);
-    if (scrollContainerRef.current) {
-      scrollContainerRef.current.style.cursor = 'grab';
-    }
-  };
-
-  const handleMouseUp = () => {
-    setIsDragging(false);
-    if (scrollContainerRef.current) {
-      scrollContainerRef.current.style.cursor = 'grab';
-    }
-  };
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDragging || !scrollContainerRef.current) return;
-    e.preventDefault();
-    const x = e.pageX - scrollContainerRef.current.offsetLeft;
-    const walk = (x - startX) * 2; // Scroll speed multiplier
-    scrollContainerRef.current.scrollLeft = scrollLeft - walk;
-  };
+  // Founder 01/11: the rows are kit scroll rows (glassmorphism.css .pos-scroll-row, utils/scroll-rows.ts) — they
+  // follow a mouse drag and fade at an edge that has more to show, like every sideways row of the till.
 
   const resolveItemCategoryId = (item: MenuCategoryFlavorItem): string | null => {
     if (typeof item.category_id === 'string' && item.category_id.trim()) return item.category_id;
@@ -153,34 +101,11 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
     }
   }, [onSubcategoryChange]);
 
-  const categoryScrollStyle: React.CSSProperties = {
-    scrollbarWidth: 'none',
-    msOverflowStyle: 'none',
-    WebkitOverflowScrolling: 'touch',
-    ...(showLeftFade
-      ? {
-          maskImage: 'linear-gradient(to right, transparent 0, black 2rem)',
-          WebkitMaskImage: 'linear-gradient(to right, transparent 0, black 2rem)',
-          maskRepeat: 'no-repeat',
-          WebkitMaskRepeat: 'no-repeat'
-        }
-      : {})
-  };
-
   return (
     <div className="border-b border-gray-200/20 pb-1">
       {/* Main Categories */}
       <div className="relative px-2 py-3 sm:px-3 sm:py-4">
-        <div
-          ref={scrollContainerRef}
-          className="flex max-w-full gap-1 overflow-x-auto scrollbar-hide cursor-grab select-none touch-pan-x py-1.5 pr-3 sm:gap-1.5"
-          data-testid="menu-categories"
-          onMouseDown={handleMouseDown}
-          onMouseLeave={handleMouseLeave}
-          onMouseUp={handleMouseUp}
-          onMouseMove={handleMouseMove}
-          style={categoryScrollStyle}
-        >
+        <div className="pos-scroll-row max-w-full select-none gap-1 sm:gap-1.5" data-testid="menu-categories">
           {categories.map((category) => (
             <button
               key={category.id}
@@ -204,7 +129,7 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
       {/* Subcategories - only show if there are subcategories */}
       {subcategories.length > 0 && (
         <div className="px-2 pb-4 pt-1 sm:px-4 sm:pb-5">
-          <div className="flex space-x-2 overflow-x-auto scrollbar-hide touch-pan-x py-1.5" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', WebkitOverflowScrolling: 'touch' }}>
+          <div className="pos-scroll-row gap-2" data-testid="menu-subcategories">
             {subcategories.map((subcategory) => (
               <button
                 key={subcategory.id}

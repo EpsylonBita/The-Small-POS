@@ -658,10 +658,10 @@ const InventoryPage: React.FC = () => {
               </div>
               <button
                 onClick={closeHistoryModal}
-                className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-zinc-700 bg-zinc-900 active:bg-zinc-800' : 'border-gray-200 bg-white active:bg-gray-100'}`}
+                className="liquid-glass-modal-close shrink-0"
                 aria-label={t('common.close', 'Close')}
               >
-                <X className="h-5 w-5" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 

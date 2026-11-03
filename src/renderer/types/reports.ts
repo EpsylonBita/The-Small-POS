@@ -246,6 +246,7 @@ export interface ZReportGiftCloseReadiness {
 }
 
 export interface ZReportData {
+  discardedCorrections?: Array<{ orderNumber: string | null; action: string; method: string | null; amountCents: number; actorName: string | null; at: string }>;
   /** Immutable aggregate unit; missing or mixed historical evidence stays null. */
   currency?: string | null;
   date: string; // ISO date (yyyy-mm-dd)

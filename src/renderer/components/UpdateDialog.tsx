@@ -362,7 +362,7 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
         <button
           type="button"
           onClick={handleInstall}
-          className="w-full min-h-12 rounded-2xl bg-(--pos-s-yellow) px-6 py-3 font-bold text-black transition-transform active:scale-[0.98] active:bg-yellow-500 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)"
+          className="pos-raised pos-raised--yellow w-full min-h-12 rounded-2xl bg-(--pos-s-yellow) px-6 py-3 font-bold text-black transition-transform active:scale-[0.98] active:bg-yellow-500 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)"
         >
           {t('updates.actions.installNow')}
         </button>

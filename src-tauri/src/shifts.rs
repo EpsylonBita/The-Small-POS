@@ -209,7 +209,7 @@ pub(crate) fn recorded_operating_currency(
     )
     .optional()
     .map(|value| value.flatten())
-    .map_err(|error| format!("read operating currency: {error}"))
+    .map_err(crate::edit_settlement_recovery::storage_error)
 }
 
 pub(crate) fn require_shift_operating_currency(
@@ -222,7 +222,7 @@ pub(crate) fn require_shift_operating_currency(
             params![shift_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .map_err(|error| format!("read shift currency: {error}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
     let currency = currency.ok_or_else(|| "SHIFT_CURRENCY_UNAVAILABLE".to_string())?;
     if require_operating_currency(conn, &branch_id)? != currency {
         return Err("SHIFT_CURRENCY_MISMATCH".to_string());
@@ -2732,7 +2732,8 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     // a cashier may collect a waiter/driver tip. Attribute by the durable
     // recipient shift written on order_payments, never by the payment owner.
     let tip_sql = format!(
-        "SELECT op.id, op.order_id, o.order_number,
+        "SELECT op.id, op.order_id,
+                COALESCE(NULLIF(TRIM(o.display_order_number), ''), o.order_number),
                 COALESCE(
                     op.tip_amount_cents,
                     CAST(ROUND(op.tip_amount * 100) AS INTEGER),
@@ -5228,10 +5229,11 @@ fn build_cashier_order_history(
     // The cashier UI consumes this value directly as the
     // presentation label.
     // W4b-ii: cents-with-real-fallback shim (removed in 4e).
+    // The staff-facing number first, as the order grid reads it (founder 01/11).
     let sql = format!(
         "SELECT
                 o.id,
-                o.order_number,
+                COALESCE(NULLIF(TRIM(o.display_order_number), ''), o.order_number),
                 o.created_at,
                 COALESCE(o.order_type, 'dine-in'),
                 o.table_number,
@@ -5501,7 +5503,8 @@ fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Ve
     let mut stmt = conn
         .prepare(
             // W4b-ii: cents-with-real-fallback shim (removed in 4e).
-            "SELECT o.id, o.order_number, COALESCE(o.table_number, 'Mobile POS') AS table_number,
+            "SELECT o.id, COALESCE(NULLIF(TRIM(o.display_order_number), ''), o.order_number),
+                    COALESCE(o.table_number, 'Mobile POS') AS table_number,
                     COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0),
                     COALESCE((
                         SELECT CASE
@@ -8335,10 +8338,7 @@ mod tests {
             }),
         )
         .expect_err("a gift card is never recorded on the till");
-        assert!(
-            refused.starts_with("Invalid method: gift_card"),
-            "{refused}"
-        );
+        assert!(refused == "PAYMENT_INVALID_REQUEST", "{refused}");
         let conn = db.conn.lock().unwrap();
         let payments: i64 = conn
             .query_row(
@@ -10053,6 +10053,19 @@ mod tests {
         assert_eq!(orders[0]["card_amount"], 10.0);
         assert_eq!(orders[0]["customer_name"], "Alex");
         assert_eq!(orders[0]["table_number"], "T1");
+
+        // Founder 01/11: the order history names an order as the order grid does, so the staff-facing
+        // number (a waiter phone's M1-0042) comes before the stored one.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE orders SET display_order_number = 'M1-0042' WHERE id = 'order-valid'",
+                [],
+            )
+            .unwrap();
+        let summary = get_shift_summary(&db, "cashier-orders").unwrap();
+        assert_eq!(summary["cashierOrders"][0]["order_number"], "M1-0042");
     }
 
     #[test]

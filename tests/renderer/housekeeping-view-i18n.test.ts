@@ -14,12 +14,12 @@ const locale = (language: string) =>
 test('Round 369: HousekeepingView renders the standard visible page title above its controls', () => {
   assert.match(
     viewSource,
-    /<h1 className=\{`truncate text-3xl font-bold tracking-tight \$\{isDark \? 'text-white' : 'text-gray-900'\}`\}>\s*\{t\('navigation\.menu\.housekeeping', \{ defaultValue: 'Housekeeping' \}\)\}\s*<\/h1>/,
+    /<h1 className="truncate text-3xl font-bold tracking-tight text-\(--pos-s-fg\)">\s*\{t\('navigation\.menu\.housekeeping', \{ defaultValue: 'Housekeeping' \}\)\}\s*<\/h1>/,
   );
   assert.match(
     viewSource,
-    /data-vertical-hero="housekeeping"[\s\S]*rounded-3xl border p-4 backdrop-blur-xl[\s\S]*navigation\.menu\.housekeeping[\s\S]*housekeepingView\.stats\.totalTasks/,
-    'Housekeeping title and stats should live in the same rounded glass hero',
+    /data-vertical-hero="housekeeping"[\s\S]*className="pos-card mb-4 p-4"[\s\S]*navigation\.menu\.housekeeping[\s\S]*housekeepingView\.stats\.totalTasks/,
+    'Housekeeping title and stats should live in the same kit card',
   );
   assert.ok(
     viewSource.indexOf('navigation.menu.housekeeping') < viewSource.indexOf('housekeepingView.stats.totalTasks'),
@@ -301,57 +301,50 @@ test('Round 256: the task board is full-width grouped status sections with a res
 });
 
 test('Round 256: the task area scrolls with the hidden scrollbar (no native white rail)', () => {
-  assert.match(viewSource, /flex-1 overflow-y-auto scrollbar-hide/);
+  assert.match(viewSource, /flex flex-1 flex-col gap-5 overflow-y-auto scrollbar-hide/);
   // The old per-column native-scrollbar lane is gone.
   assert.doesNotMatch(viewSource, /flex-1 overflow-y-auto space-y-2 pr-1/);
 });
 
-test('Round 256: stats / filters / headers / cards use the POS glass system, not gray blocks', () => {
-  // No old gray surface blocks survive.
+// Founder 01/11 (module pages one by one): Housekeeping in the kit.
+test('Housekeeping stats, filters, headers and cards are kit surfaces; priorities and counts are plain words', () => {
   assert.doesNotMatch(viewSource, /bg-gray-(700|800|900)/);
-  // Glass surfaces (translucent zinc + border + blur) are used for the chrome.
-  const glass = viewSource.match(/bg-zinc-900\/(50|60) border-white\/10/g) || [];
-  assert.ok(glass.length >= 4, `expected >=4 glass surfaces (stats/header/card/section), found ${glass.length}`);
-  assert.match(viewSource, /backdrop-blur-md/);
-  // The refresh control is an amber glass icon button.
-  assert.match(viewSource, /bg-\(--pos-s-surface-2\) text-amber-(?:700|800) dark:text-amber-300/);
+  assert.doesNotMatch(viewSource, /backdrop-blur|bg-white\/\d|bg-zinc-9\d\d\/\d/);
+  assert.doesNotMatch(viewSource, /isDark|resolvedTheme/, 'the kit tokens switch with the theme');
+  assert.match(viewSource, /className="rounded-xl border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) px-4 py-2"/);
+  assert.match(viewSource, /<motion\.div key=\{task\.id\} variants=\{pageMotionItem\} className=\{`pos-card p-4 \$\{priorityGlow\[task\.priority\] \?\? ''\}`\}/);
+  // Founder 01/11: the card glows inward in its priority colour — normal neutral, low yellow, high red, urgent
+  // bordeaux — whatever its status.
+  // Founder 01/11 (later): the colour glows behind the raised card, not inward.
+  assert.match(viewSource, /urgent: 'pos-glow-wine',\s*high: 'pos-glow-bad',\s*normal: '',\s*low: 'pos-glow-yellow',/);
+  // Founder 01/11: the filter dropdowns are raised kit buttons (no dark outline).
+  assert.match(viewSource, /const kitFilterClass = 'pos-select';/);
+  assert.equal((viewSource.match(/className=\{kitFilterClass\}/g) ?? []).length, 4, 'floor, type, priority and staff filters');
+  assert.doesNotMatch(viewSource, /kitFieldClass/);
+  // The refresh control is the neutral kit icon button (the orange said nothing about a state).
+  assert.match(viewSource, /aria-label=\{t\('common\.refresh', \{ defaultValue: 'Refresh' \}\)\}\s*className="pos-icon-btn"/);
+  // Priorities: coloured words, no filled chips (founder: chips without wrappers).
+  assert.match(viewSource, /urgent: 'font-bold text-rose-800 dark:text-rose-400'/);
+  assert.match(viewSource, /high: 'font-semibold text-\(--pos-s-bad\)'/);
+  assert.match(viewSource, /low: 'font-semibold text-yellow-700 dark:text-yellow-300'/);
+  assert.doesNotMatch(viewSource, /style=\{\{ backgroundColor: priorityColor/);
+  // Section counts are plain numbers.
+  assert.doesNotMatch(viewSource, /rounded-full text-sm font-semibold/);
 });
 
-test('Round 256/428: action buttons are non-blue semantic glass with a neutral disabled state', () => {
-  // Start/Create/Verify = amber glass, Complete = green glass (dark accents).
-  assert.match(viewSource, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-amber-(?:700|800) dark:text-amber-200/);
-  assert.match(viewSource, /border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\) text-black/);
+test('Round 256/428: action buttons are kit buttons, Complete the one yellow primary', () => {
+  assert.match(viewSource, /className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--primary mt-2 w-full"/);
+  assert.equal((viewSource.match(/className="pos-solid-btn pos-solid-btn--sm mt-2 w-full"/g) ?? []).length, 2, 'Start and Verify');
+  assert.match(viewSource, /className="pos-solid-btn pos-solid-btn--sm w-full"/, 'Create task');
   assert.doesNotMatch(viewSource, /purple-/);
   assert.doesNotMatch(viewSource, /rounded-lg/);
-  assert.match(viewSource, /w-full py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95/);
-  assert.match(viewSource, /w-full px-2 py-2 rounded-2xl border text-xs/);
-  // Every status/create action button shares the neutral disabled glass (Start/Create/Complete/Verify).
-  const neutralDisabled =
-    viewSource.match(
-      /disabled:bg-zinc-400\/20 disabled:text-zinc-400 disabled:border-zinc-400\/30 disabled:active:scale-100/g,
-    ) || [];
-  assert.ok(neutralDisabled.length >= 4, `expected >=4 neutral-disabled action buttons, found ${neutralDisabled.length}`);
-  // Touch feedback via active:, never the old dimmed-color buttons.
-  assert.match(viewSource, /active:scale-95/);
+  assert.match(viewSource, /className=\{`\$\{kitFilterClass\} block w-full`\}/, 'the staff select is the raised kit dropdown');
 });
 
 test('Round 359: Housekeeping light theme keeps cards, controls, and action buttons readable', () => {
-  assert.match(
-    viewSource,
-    /const lightGlassSurface = 'bg-white\/72 border-zinc-300\/80'/,
-  );
-  assert.match(
-    viewSource,
-    /const lightControlSurface = 'bg-white\/90 text-gray-950 border-zinc-300 shadow-xs shadow-black\/5'/,
-  );
-
-  // Light labels/body copy moved darker; the old washed-out gray-500 metadata should not remain in the
-  // task card/empty-state body areas.
-  assert.match(viewSource, /isDark \? 'text-zinc-400' : 'text-gray-700'/);
-  assert.match(viewSource, /isDark \? 'text-gray-400' : 'text-gray-600'/);
-
-  // Light action buttons are visibly active surfaces, not pale disabled-looking bg-*-50 buttons.
-  assert.match(viewSource, /border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\) text-amber-900 active:bg-\(--pos-s-surface-2\)/);
-  assert.match(viewSource, /border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\) text-black active:bg-yellow-500/);
+  // The kit tokens carry readable words in both themes (fg / muted); no pale bg-*-50 buttons.
+  assert.match(viewSource, /text-\(--pos-s-muted\)/);
+  assert.match(viewSource, /text-\(--pos-s-fg\)/);
+  assert.doesNotMatch(viewSource, /bg-(?:amber|yellow|purple)-50\b/);
   assert.doesNotMatch(viewSource, /border-purple-500\/60 bg-purple-100 text-purple-900 active:bg-purple-200/);
 });

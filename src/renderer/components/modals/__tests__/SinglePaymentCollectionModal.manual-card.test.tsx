@@ -224,6 +224,8 @@ describe('SinglePaymentCollectionModal manual card admission', () => {
     expect(bridge.adminApi.fetchFromAdmin).toHaveBeenCalledTimes(2);
     expect(bridge.payments.recordPayment).toHaveBeenCalledWith(expect.objectContaining({
       orderId, method: 'card', amount: 12.5, paymentOrigin: 'manual', terminalApproved: false,
+      // The admission travels with the card for the admin's review (founder 01/11/2026).
+      metadata: { admission_basis: 'live', admission_checked_at: expect.any(String) },
     }));
     expect(bridge.payments.recordPayment.mock.calls[0][0].terminalDeviceId).toBeUndefined();
     await waitFor(() => expect(onPaymentCollected).toHaveBeenCalledWith(expect.objectContaining({
@@ -289,6 +291,7 @@ describe('SinglePaymentCollectionModal manual card admission', () => {
     expect(bridge.adminApi.fetchFromAdmin).toHaveBeenCalledTimes(2);
     expect(bridge.payments.recordPayment).toHaveBeenCalledWith(expect.objectContaining({
       method: 'card', paymentOrigin: 'manual', terminalApproved: false,
+      metadata: { admission_basis: 'live', admission_checked_at: expect.any(String) },
     }));
     await waitFor(() => expect(onPaymentCollected).toHaveBeenCalledTimes(1));
   });

@@ -177,6 +177,20 @@ describe('SplitPaymentModal card portions only book money the card actually move
     clearTerminalCredentialCache();
   });
 
+  it.each(['reply', 'throw'])('explains an ordinary payment refusal from a native %s without resubmitting', async kind => {
+    const code = kind === 'reply' ? 'PAYMENT_INVALID_REQUEST' : 'EDIT_LOCAL_STORAGE_BUSY';
+    const key = kind === 'reply' ? 'invalidRequest' : 'storageBusy';
+    if (kind === 'reply') mocks.bridge.payments.recordPayment.mockResolvedValue({ success: false, error: code });
+    else mocks.bridge.payments.recordPayment.mockRejectedValue(new Error(code));
+    renderSplit(nextOrderId('native-refusal'));
+    await waitFor(() => expect(confirmButton()).toBeEnabled());
+    await act(async () => { fireEvent.click(confirmButton()); });
+    await waitFor(() => expect(errorToasts()).toContain(`modals.payment.refusals.${key}`));
+    expect(errorToasts()).not.toContain(code);
+    expect(mocks.bridge.payments.recordPayment).toHaveBeenCalledOnce();
+    expect(mocks.bridge.ecr.processPayment).not.toHaveBeenCalled();
+  });
+
   describe('C1: a declined card', () => {
     it.each([
       ['without a collection scope', undefined],

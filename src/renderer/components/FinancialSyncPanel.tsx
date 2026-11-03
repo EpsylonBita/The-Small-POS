@@ -1,3 +1,4 @@
+import { X } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -376,22 +377,10 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
             </div>
             <button
               onClick={onClose}
-              className="liquid-glass-modal-button min-h-0 min-w-0 rounded-xl p-2"
+              className="liquid-glass-modal-close"
               aria-label={t('common.actions.close')}
             >
-              <svg
-                className="h-6 w-6"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M6 18L18 6M6 6l12 12"
-                />
-              </svg>
+              <X className="h-5 w-5" aria-hidden="true" />
             </button>
           </div>
 
@@ -488,7 +477,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                     <button
                       onClick={handleRepairOrphanedAdjustments}
                       disabled={!!processing}
-                      className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2 text-sm font-bold text-amber-700 transition-all disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-amber-200"
+                      className="pos-raised rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2 text-sm font-bold text-amber-700 transition-all disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-amber-200"
                     >
                       {processing === 'repair-orphaned'
                         ? t('sync.financial.repairingOrphanedAdjustments', {

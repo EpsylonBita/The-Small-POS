@@ -21,7 +21,7 @@
 
 use serde_json::{json, Value};
 
-use crate::capture::{store, wia};
+use crate::capture::{files, store, wia};
 use crate::db;
 
 /// Pull a trimmed, non-empty string field out of the `arg0` payload.
@@ -142,6 +142,7 @@ pub async fn capture_scanner_acquire(
         store::list_pages(&conn, &capture_id)?.len()
     };
 
+    let guard_app_data_dir = app_data_dir.clone();
     let acquire_capture_id = capture_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         wia::WiaHost::global().acquire(
@@ -159,14 +160,20 @@ pub async fn capture_scanner_acquire(
         Err(error) => return Ok(scan_failure(error)),
     };
 
+    let lifecycle = files::lock_lifecycle_async(guard_app_data_dir, capture_id.clone()).await?;
+    let validated = outcome
+        .pages
+        .iter()
+        .map(|page| store::validate_written_page(&lifecycle, &capture_id, page))
+        .collect::<Result<Vec<_>, _>>()?;
     let conn = db
         .conn
         .lock()
         .map_err(|_| "database lock poisoned".to_string())?;
 
     let mut recorded = Vec::with_capacity(outcome.pages.len());
-    for page in &outcome.pages {
-        match store::record_page(&conn, &capture_id, page) {
+    for (page, validated) in outcome.pages.iter().zip(&validated) {
+        match store::record_validated_page(&conn, &capture_id, validated) {
             Ok(()) => recorded.push(json!({
                 "pageIndex": page.page_index,
                 "filePath": page.file_path.to_string_lossy(),

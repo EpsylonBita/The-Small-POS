@@ -8,7 +8,7 @@ const fixture = vi.hoisted(() => ({
   scope: { organizationId: '', branchId: '', terminalId: '' },
   bridge: {
     terminalConfig: { getOrganizationId: vi.fn(), getBranchId: vi.fn(), getTerminalId: vi.fn(), getSetting: vi.fn(), getSettings: vi.fn() },
-    shifts: { getActive: vi.fn(), getActiveByTerminal: vi.fn(), getActiveByTerminalLoose: vi.fn(), getById: vi.fn() },
+    shifts: { getActiveCashierByTerminal: vi.fn(), getActiveCashierByTerminalLoose: vi.fn(), getActive: vi.fn(), getActiveByTerminal: vi.fn(), getActiveByTerminalLoose: vi.fn(), getById: vi.fn() },
     shiftFinancialOpening: { begin: vi.fn(), authorize: vi.fn(), status: vi.fn(), clearAuthorization: vi.fn() },
   },
 }));
@@ -136,6 +136,22 @@ describe('ShiftProvider dedicated financial authority lifecycle', () => {
     fixture.scope.terminalId = SCOPE.terminalId;
     await emit('terminal-config-updated');
     expect(clears()).toBe(2);
+  });
+
+  it.each(['strict', 'loose'] as const)('restores an older cashier before a newer driver with the %s lookup', async lookup => {
+    const cashier = { ...row(), check_in_time: '2026-11-02T14:59:41Z' };
+    const driver = { ...cashier, id: 'driver-shift', staff_id: 'driver-1', role_type: 'driver',
+      check_in_time: '2026-11-02T15:00:22Z' };
+    bridge.shifts.getActiveCashierByTerminal.mockResolvedValue(lookup === 'strict' ? { success: true, data: cashier } : null);
+    bridge.shifts.getActiveCashierByTerminalLoose.mockResolvedValue(cashier);
+    bridge.shifts.getActiveByTerminal.mockResolvedValue(driver);
+    bridge.shifts.getActiveByTerminalLoose.mockResolvedValue(driver);
+    await mount();
+    expect(shiftApi().activeShift?.id).toBe('shift-1');
+    expect(shiftApi().staff?.staffId).toBe(CASHIER);
+    expect(bridge.shifts.getActiveCashierByTerminal).toHaveBeenCalledWith(SCOPE.branchId, SCOPE.terminalId);
+    if (lookup === 'loose') expect(bridge.shifts.getActiveCashierByTerminalLoose).toHaveBeenCalledWith(SCOPE.terminalId);
+    expect(bridge.shifts.getActiveByTerminal).not.toHaveBeenCalled();
   });
 
   it('verifies scope while an active shift exists and keeps that shift', async () => {

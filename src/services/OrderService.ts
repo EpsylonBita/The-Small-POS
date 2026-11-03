@@ -1008,6 +1008,10 @@ export class OrderService {
         paymentTransactionId: orderData.paymentTransactionId ?? orderData.payment_transaction_id,
         initialPayment: roomChargeCurrency ? undefined : normalizedInitialPayment,
         initial_payment: roomChargeCurrency ? undefined : normalizedInitialPayment,
+        // Founder 01/11/2026: a split's first portion saved with its order (native leaves the receipt to the split).
+        ...(orderDataAny.checkoutKind === 'split_first_portion' && normalizedInitialPayment
+          ? { checkoutKind: 'split_first_portion' }
+          : {}),
         staffShiftId: (orderData as any).staffShiftId ?? (orderData as any).staff_shift_id ?? null,
         staffId: (orderData as any).staffId ?? (orderData as any).staff_id ?? null,
       };
@@ -1097,6 +1101,24 @@ export class OrderService {
                 orderPersisted: false,
                 amountCents: resp?.amountCents,
                 unsavedPayment: resp?.unsavedPayment,
+              },
+            );
+          } else if (['CHECKOUT_CARD_SALE_UNRECORDED', 'CHECKOUT_CARD_SALE_UNRESOLVED', 'SPLIT_FIRST_PORTION_REFUSED'].includes(resp?.errorCode)) {
+            // Founder 01/11/2026: a card SALE of this checkout is not recorded or not known yet, or a split's first
+            // portion that may not start its order. Final here: an Admin API create or an offline retry would save
+            // the order around the till's guard (a second order, or the card dropped).
+            bridgeCreateHardFailure = true;
+            bridgeCreateError = Object.assign(
+              ErrorFactory.system(
+                typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError),
+              ),
+              {
+                code: resp.errorCode,
+                errorCode: resp.errorCode,
+                retryable: false,
+                checkoutCardSale: true,
+                amountCents: resp?.amountCents,
+                currency: resp?.currency,
               },
             );
           } else if (resp?.errorCode === 'CHECKOUT_IN_PROGRESS') {
@@ -1444,8 +1466,8 @@ export class OrderService {
 
       return newOrder;
     } catch (error) {
-      const retained = error as { paymentNotSaved?: boolean; checkoutInProgress?: boolean; twintReceipt?: boolean; code?: string } | null;
-      if (retained?.paymentNotSaved === true || retained?.checkoutInProgress === true || retained?.twintReceipt === true) throw error;
+      const retained = error as { paymentNotSaved?: boolean; checkoutInProgress?: boolean; twintReceipt?: boolean; checkoutCardSale?: boolean; code?: string } | null;
+      if (retained?.paymentNotSaved === true || retained?.checkoutInProgress === true || retained?.twintReceipt === true || retained?.checkoutCardSale === true) throw error;
       const currencyError = currencyAdmissionError(error);
       if (currencyError && retained?.code !== 'FISCAL_CHECKOUT_NOT_APPROVED') throw currencyError;
       if ((error as { code?: string } | null)?.code === 'FISCAL_CHECKOUT_NOT_APPROVED') {

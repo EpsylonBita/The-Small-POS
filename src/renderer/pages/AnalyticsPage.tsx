@@ -4,7 +4,6 @@ import { motion } from 'framer-motion';
 import {
   TrendingUp,
   TrendingDown,
-  Banknote,
   ShoppingCart,
   Users,
   Clock,
@@ -20,6 +19,7 @@ import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
 import { formatCurrency } from '../utils/format';
 import { posApiGet } from '../utils/api-helpers';
+import { CashHandIcon } from '../components/icons/PaymentMethodIcons';
 
 interface AnalyticsData {
   totalRevenue: number;
@@ -162,7 +162,7 @@ const AnalyticsPage: React.FC = () => {
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <StatCard
-          icon={Banknote}
+          icon={CashHandIcon}
           label={t('analytics.totalRevenue', 'Total Revenue')}
           value={formatMoney(analytics?.totalRevenue || 0)}
           change={analytics?.revenueChange}

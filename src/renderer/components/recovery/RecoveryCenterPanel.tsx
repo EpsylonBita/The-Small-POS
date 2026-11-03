@@ -22,12 +22,12 @@ import {
   type DiagnosticsTerminalContext,
   type RecoveryActionDescriptor,
   type RecoveryActionLogEntry,
-  type RecoveryActionRequest,
   type RecoveryIssue,
   type RecoveryRouteTarget,
 } from '../../../lib';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import { getErrorMessage } from '../../utils/privileged-actions';
+import { acquireRecoveryAction, buildRecoveryActionRequest, executeHealthRecoveryAction } from '../../services/support/SupportRemedyRunner';
 
 interface RecoveryCenterPanelProps {
   issues: RecoveryIssue[];
@@ -116,34 +116,6 @@ const actionButtonTone = (action: RecoveryActionDescriptor) => {
   }
   return 'border-slate-200/90 bg-white/90 text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:active:bg-white/9';
 };
-
-const buildActionRequest = (
-  issue: RecoveryIssue,
-  action: RecoveryActionDescriptor,
-): RecoveryActionRequest => ({
-  actionId: action.id,
-  issueId: issue.id,
-  issueCode: issue.code,
-  queueId: issue.queueId ?? null,
-  entityType: issue.entityType,
-  entityId: issue.entityId,
-  orderId: issue.orderId ?? null,
-  orderNumber: issue.orderNumber ?? null,
-  paymentId: issue.paymentId ?? null,
-  adjustmentId: issue.adjustmentId ?? null,
-  zReportId: issue.zReportId ?? null,
-  shiftId: issue.shiftId ?? null,
-  reportDate:
-    typeof issue.params?.reportDate === 'string'
-      ? issue.params.reportDate
-      : typeof issue.params?.pendingReportDate === 'string'
-        ? issue.params.pendingReportDate
-        : action.routeTarget?.zReportDate ?? null,
-  recipeId: action.recipeId ?? issue.knownSolution?.recipeId ?? null,
-  recipeVersion: action.recipeVersion ?? issue.knownSolution?.version ?? null,
-  routeTarget: action.routeTarget ?? null,
-  params: issue.params,
-});
 
 const dispatchRecoveryRoute = (target: RecoveryRouteTarget) => {
   window.dispatchEvent(
@@ -398,6 +370,8 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     usePrivilegedActionConfirmation();
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const actionInFlight = useRef(false);
+  const staleDiagnostics = useRef(diagnosticsStale);
+  staleDiagnostics.current = diagnosticsStale;
   const pendingIssueIdRef = useRef<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   useEffect(() => {
@@ -466,11 +440,13 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     issue: RecoveryIssue,
     action: RecoveryActionDescriptor,
   ) => {
-    if (actionInFlight.current || diagnosticsStale) return;
+    if (actionInFlight.current || diagnosticsStale) { return; }
+    const releaseRecovery = acquireRecoveryAction();
+    if (!releaseRecovery) { return; }
     actionInFlight.current = true;
     setActionFeedback(null);
     const actionKey = `${issue.id}:${action.id}`;
-    const request = buildActionRequest(issue, action);
+    const request = buildRecoveryActionRequest(issue, action);
     let snapshotPointId: string | null = null;
     let exportPath: string | null = null;
     let outcome: RecoveryActionLogEntry['outcome'] = 'unknown';
@@ -522,12 +498,6 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
 
     setBusyActionId(actionKey);
     try {
-      if (action.requiresSnapshot) {
-        const snapshot = await bridge.recovery.createPreActionSnapshot();
-        if (!snapshot?.id) throw new Error('Recovery snapshot was not confirmed');
-        snapshotPointId = snapshot.id;
-      }
-
       if (action.id === 'contactDev') {
         const diagnosticsExport = await bridge.diagnostics.export({
           includeLogs: true,
@@ -536,17 +506,10 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
         exportPath = diagnosticsExport.path || null;
       }
 
-      const executeAction = () => bridge.recovery.executeAction(request);
-      const result = await runWithPrivilegedConfirmation({
-        scope: 'cash_drawer_control',
-        action: executeAction,
-        title: t('recovery.confirmations.cashDrawerControl.title', {
-          defaultValue: 'Confirm recovery action',
-        }),
-        subtitle: t('recovery.confirmations.cashDrawerControl.subtitle', {
-          defaultValue:
-            'Enter the cashier or manager PIN to run this recovery action.',
-        }),
+      const result = await executeHealthRecoveryAction({
+        request, action, stale: () => staleDiagnostics.current,
+        authorize: runWithPrivilegedConfirmation, t,
+        onSnapshot: id => { snapshotPointId = id; },
       });
 
       // Route-only actions (open a screen) and contactDev (export diagnostics)
@@ -560,7 +523,13 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
       const succeeded = result?.success === true && verificationStatus !== 'failed';
       const pendingVerification = succeeded && isHealingAction && verificationStatus !== 'passed';
 
-      if (!succeeded) {
+      if (action.id === 'restoreLastKnownPrinterBrand' && verificationStatus === 'unknown') {
+        outcome = 'unknown';
+        const message = t('recovery.center.outcomes.unknown');
+        await persistLogEntry(false, message);
+        setActionFeedback(message);
+        toast(message);
+      } else if (!succeeded) {
         outcome = 'failed';
         const friendlyMessage = t('recovery.messages.actionFailed', {
           action: t(action.labelKey, { defaultValue: action.id }),
@@ -597,8 +566,9 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
 
       }
 
-      if (succeeded && (result?.routeTarget || action.routeTarget)) {
-        dispatchRecoveryRoute(result?.routeTarget || action.routeTarget!);
+      const routeTarget = result?.routeTarget || action.routeTarget;
+      if (succeeded && routeTarget) {
+        dispatchRecoveryRoute(routeTarget);
         onNavigate?.();
       }
 
@@ -625,6 +595,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
       setActionFeedback(friendlyMessage);
       toast.error(friendlyMessage);
     } finally {
+      releaseRecovery();
       actionInFlight.current = false;
       setBusyActionId(null);
       setConfirmingAction(null);
@@ -635,7 +606,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     issue: RecoveryIssue,
     action: RecoveryActionDescriptor,
   ) => {
-    if (diagnosticsStale || actionInFlight.current) return;
+    if (diagnosticsStale || actionInFlight.current) { return; }
     if (action.confirmationRequired) {
       setConfirmingAction({ issue, action });
       return;
@@ -644,7 +615,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
   };
 
   const handleConfirmDestructiveAction = () => {
-    if (!confirmingAction) return;
+    if (!confirmingAction) { return; }
     const pending = confirmingAction;
     setConfirmingAction(null);
     void runAction(pending.issue, pending.action);

@@ -550,6 +550,9 @@ export default function LoginPage({ onLogin, exitPhase = null, onLeft }: LoginPa
             <motion.div
                 variants={pageMotionItem}
                 data-testid="login-card"
+                // Founder 01/11 («γιατί τα νούμερα έγιναν λευκά και δεν είναι γυαλί;»): the sign-in card keeps its own
+                // glass keypad and field; the app-wide raise (glassmorphism.css) stays out of it.
+                data-depth="off"
                 // Founder 31/10: the card fades and settles back a little while the logo leaves it.
                 animate={
                     exitPhase === 'returning'

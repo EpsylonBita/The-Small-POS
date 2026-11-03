@@ -182,6 +182,172 @@ pub(crate) fn direct_sale_projection(
     })
 }
 
+/// The direct SALEs of a new-order checkout (founder 01/11/2026, «Τίποτα»): a split from the menu has no order
+/// until its first portion is paid, so that portion's card SALE is bound to the checkout id, which the order then
+/// carries as its `client_request_id`. Once the order exists, its own unresolved SALEs (through that alias) are
+/// the answer. Before, every SALE of the checkout that is not declined or given back is unresolved: nothing can
+/// represent it yet.
+pub(crate) fn unresolved_checkout_direct_sales(
+    conn: &rusqlite::Connection,
+    checkout_request_id: &str,
+) -> Result<Vec<UnresolvedDirectSale>, String> {
+    let order_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM orders WHERE client_request_id = ?1 LIMIT 1",
+            [checkout_request_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("read the order of a checkout: {error}"))?;
+    if let Some(order_id) = order_id {
+        return unresolved_direct_sales(conn, &order_id);
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, device_id, amount, currency, status, terminal_reference,
+                    authorization_code, card_type, card_last_four, receipt_data
+             FROM ecr_transactions
+             WHERE LOWER(TRIM(transaction_type)) = 'sale'
+               AND order_id = ?1
+               AND LOWER(TRIM(status)) <> 'declined'
+               AND (CASE WHEN json_valid(receipt_data)
+                         THEN json_extract(receipt_data, '$.returnedToCustomer') END) IS NULL
+             ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|error| format!("prepare checkout direct-sale read: {error}"))?;
+    let rows = stmt
+        .query_map([checkout_request_id], |row| {
+            let receipt_data: Option<String> = row.get(9)?;
+            let marker = receipt_data
+                .as_deref()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                .and_then(|value| {
+                    value
+                        .get("directSaleAdmissionVersion")
+                        .and_then(|v| v.as_i64())
+                })
+                == Some(1);
+            Ok(UnresolvedDirectSale {
+                id: row.get(0)?,
+                device_id: row.get(1)?,
+                amount_cents: row.get(2)?,
+                currency: row.get(3)?,
+                status: row.get(4)?,
+                terminal_reference: row.get(5)?,
+                authorization_code: row.get(6)?,
+                card_type: row.get(7)?,
+                card_last_four: row.get(8)?,
+                recoverable_original: marker,
+            })
+        })
+        .map_err(|error| format!("query checkout direct sales: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read checkout direct sale: {error}"))
+}
+
+/// The unresolved SALEs a split reserved for this checkout (`reserve_checkout_direct_sale`). With no order yet, only
+/// that reservation writes the versioned direct-sale marker under a checkout id; a card attempt of the ordinary
+/// checkout (no marker) keeps its own recovery (unsaved payments, the checkout inspection), never this one.
+pub(crate) fn reserved_checkout_direct_sales(
+    conn: &rusqlite::Connection,
+    checkout_request_id: &str,
+) -> Result<Vec<UnresolvedDirectSale>, String> {
+    Ok(unresolved_checkout_direct_sales(conn, checkout_request_id)?
+        .into_iter()
+        .filter(|sale| sale.recoverable_original)
+        .collect())
+}
+
+/// What a split on a cart shows for its checkout's SALE: nothing, the one approved original to record (never to
+/// charge again), or a SALE whose outcome is not known yet (no new SALE and no back-out until it is reconciled).
+pub(crate) fn checkout_direct_sale_projection(
+    conn: &rusqlite::Connection,
+    checkout_request_id: &str,
+) -> Result<serde_json::Value, String> {
+    let sales = reserved_checkout_direct_sales(conn, checkout_request_id)?;
+    Ok(match sales.as_slice() {
+        [] => serde_json::Value::Null,
+        [sale] if sale.recoverable_original && sale.status.eq_ignore_ascii_case("approved") => {
+            serde_json::json!({
+                "recoverable": true, "id": sale.id, "deviceId": sale.device_id,
+                "amount": sale.amount_cents as f64 / 100.0, "amountCents": sale.amount_cents,
+                "currency": sale.currency, "status": sale.status,
+                "terminalReference": sale.terminal_reference,
+                "authorizationCode": sale.authorization_code,
+                "cardType": sale.card_type, "cardLastFour": sale.card_last_four,
+            })
+        }
+        sales => serde_json::json!({
+            "recoverable": false,
+            "requiresReconciliation": true,
+            "amountCents": sales.iter().map(|sale| sale.amount_cents).sum::<i64>(),
+            "currency": sales.first().map(|sale| sale.currency.clone()),
+            "status": sales.first().map(|sale| sale.status.clone()),
+        }),
+    })
+}
+
+/// Reserves a checkout's SALE durably before the terminal can move money, in one short `BEGIN IMMEDIATE`. Refused
+/// while the checkout already has its order (the card is then charged on that order), a charged payment held as
+/// not saved, or a SALE in flight, approved and not recorded, or unknown: never a second charge, across restarts.
+fn reserve_checkout_direct_sale(
+    db: &db::DbState,
+    attempt: &serde_json::Value,
+    checkout_request_id: &str,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    db::with_full_sync(&conn, |conn| {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|error| format!("begin checkout direct-sale reservation: {error}"))?;
+        let reserved = (|| {
+            let has_order: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM orders WHERE client_request_id = ?1)",
+                    [checkout_request_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("read the order of a checkout: {error}"))?;
+            if has_order {
+                return Err("CHECKOUT_ORDER_EXISTS: this checkout's order is saved; take the card on that order".to_string());
+            }
+            if !crate::unsaved_payments::list(conn, Some(checkout_request_id))?.is_empty() {
+                return Err(
+                    crate::unsaved_payments::PAYMENT_NOT_SAVED_PENDING_ERROR_CODE.to_string(),
+                );
+            }
+            if !unresolved_checkout_direct_sales(conn, checkout_request_id)?.is_empty() {
+                return Err("CHECKOUT_DIRECT_SALE_UNRESOLVED: an earlier card SALE of this checkout must be recorded or reconciled first".to_string());
+            }
+            db::ecr_insert_transaction(conn, attempt)
+        })();
+        match reserved {
+            Ok(()) => conn
+                .execute_batch("COMMIT")
+                .map_err(|error| format!("commit checkout direct-sale reservation: {error}")),
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    })
+}
+
+/// The checkout counterpart of [`dispatch_after_durable_direct_sale`]: reserve and commit, then the device I/O with
+/// no writer held. The outcome is recorded afterwards in its own short transaction.
+async fn dispatch_after_durable_checkout_sale<T, Dispatch, Future>(
+    db: &db::DbState,
+    attempt: &serde_json::Value,
+    checkout_request_id: &str,
+    dispatch: Dispatch,
+) -> Result<T, String>
+where
+    Dispatch: FnOnce() -> Future,
+    Future: std::future::Future<Output = T>,
+{
+    reserve_checkout_direct_sale(db, attempt, checkout_request_id)?;
+    Ok(dispatch().await)
+}
+
 fn reserve_direct_sale(
     db: &db::DbState,
     attempt: &serde_json::Value,
@@ -1333,8 +1499,7 @@ fn persist_fiscal_receipt_transaction_and_enqueue_backfill(
     order_id: &str,
     fiscal_receipt_number: Option<&str>,
 ) -> Result<(), String> {
-    let tx = conn
-        .transaction()
+    let tx = crate::db::immediate_transaction(&conn)
         .map_err(|e| format!("begin fiscal receipt transaction: {e}"))?;
 
     db::ecr_insert_transaction(&tx, insert_payload)?;
@@ -1356,13 +1521,14 @@ fn persist_fiscal_receipt_transaction_and_enqueue_backfill(
             .map_err(|e| format!("load fiscal receipt order status: {e}"))?
             .unwrap_or_else(|| "completed".to_string());
 
-        let backfill_payload = serde_json::json!({
+        let mut backfill_payload = serde_json::json!({
             "orderId": order_id,
             "status": status,
             "fiscalReceiptNumber": fiscal_receipt_number,
             "fiscal_receipt_number": fiscal_receipt_number,
         });
 
+        crate::order_ownership::add_order_organization(&tx, order_id, &mut backfill_payload);
         crate::sync_queue::enqueue_payload_item(
             &tx,
             "orders",
@@ -2367,6 +2533,61 @@ fn resolve_new_ecr_currency(
     Ok(currency)
 }
 
+/// The answer to a direct SALE, recorded in its own short transaction after the device I/O: an order's SALE and a
+/// checkout's SALE alike.
+fn direct_sale_answer(
+    app: &tauri::AppHandle,
+    db: &db::DbState,
+    tx_id: &str,
+    did: &str,
+    amount: f64,
+    options: &serde_json::Value,
+    dispatched: Result<ecr::protocol::TransactionResponse, String>,
+) -> Result<serde_json::Value, String> {
+    match dispatched {
+        Ok(resp) => {
+            if resp.transaction_id != tx_id {
+                return Err("The terminal returned a different direct SALE identity; reconcile the reserved attempt".to_string());
+            }
+            let status_str = format!("{:?}", resp.status).to_lowercase();
+            persist_direct_sale_outcome(db, tx_id, &status_str, Some(&resp), None)?;
+            let transaction = serde_json::json!({
+                "id": resp.transaction_id,
+                "amount": amount,
+                "status": status_str,
+                "authorizationCode": resp.authorization_code,
+                "terminalReference": resp.terminal_reference,
+                "cardType": resp.card_type,
+                "cardLastFour": resp.card_last_four,
+                "entryMethod": resp.entry_method,
+                "errorMessage": resp.error_message,
+                "startedAt": resp.started_at,
+                "completedAt": resp.completed_at,
+            });
+            let _ = app.emit("ecr_event_transaction_completed", transaction.clone());
+            Ok(serde_json::json!({
+                "success": status_str == "approved",
+                "transaction": transaction,
+                "options": options
+            }))
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "ecr_event_error",
+                serde_json::json!({ "error": e, "deviceId": did }),
+            );
+            // The device error may hide an approval. Keep the
+            // reserved row blocking fresh money even after restart.
+            persist_direct_sale_outcome(db, tx_id, "error", None, Some(&e))?;
+            Ok(serde_json::json!({
+                "success": false,
+                "error": e,
+                "options": options
+            }))
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn ecr_process_payment(
     arg0: Option<serde_json::Value>,
@@ -2375,6 +2596,9 @@ pub async fn ecr_process_payment(
     mgr: tauri::State<'_, ecr::DeviceManager>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Card,
+    );
     let parsed = parse_amount_and_options_payload(arg0, arg1);
     let amount = parsed.amount;
     let amount_cents = validate_ecr_amount(amount)?;
@@ -2387,6 +2611,17 @@ pub async fn ecr_process_payment(
         .get("orderId")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    // A split's first portion of a new order: the SALE is bound to the checkout until its order exists.
+    let checkout_request_id = if order_id.is_none() {
+        options
+            .get("checkoutRequestId")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.len() <= 255)
+            .map(str::to_string)
+    } else {
+        None
+    };
     let currency = {
         let conn = db.conn.lock().map_err(|error| error.to_string())?;
         resolve_new_ecr_currency(
@@ -2420,6 +2655,47 @@ pub async fn ecr_process_payment(
             return Ok(refusal);
         }
         if mgr.is_connected(did) {
+            if let Some(checkout) = checkout_request_id.as_deref() {
+                // One press at a time per checkout: a second press, or the checkout's own create, waits.
+                let Some(_checkout) = crate::commands::orders::claim_checkout(&db, checkout)?
+                else {
+                    return Ok(serde_json::json!({
+                        "success": false,
+                        "error": "CHECKOUT_IN_PROGRESS",
+                        "options": options
+                    }));
+                };
+                let request = ecr::protocol::TransactionRequest {
+                    transaction_id: tx_id.clone(),
+                    transaction_type: ecr::protocol::TransactionType::Sale,
+                    amount: amount_cents,
+                    currency: currency.clone(),
+                    order_id: Some(checkout.to_string()),
+                    tip_amount: None,
+                    original_transaction_id: None,
+                    fiscal_data: None,
+                };
+                let attempt = serde_json::json!({
+                    "id": tx_id,
+                    "deviceId": did,
+                    "orderId": checkout,
+                    "transactionType": "sale",
+                    "amount": amount_cents,
+                    "currency": currency,
+                    "status": "processing",
+                    "startedAt": started,
+                    "receiptData": { "directSaleAdmissionVersion": 1, "checkoutRequestId": checkout,
+                        "requestReference": options.get("reference").and_then(|v| v.as_str()) },
+                });
+                let dispatched =
+                    dispatch_after_durable_checkout_sale(&db, &attempt, checkout, || {
+                        mgr.process_transaction_offloaded(did, request)
+                    })
+                    .await?;
+                return Ok(direct_sale_answer(
+                    &app, &db, &tx_id, did, amount, &options, dispatched,
+                )?);
+            }
             let canonical_order_id = if let Some(requested) = order_id.as_deref() {
                 let conn = db.conn.lock().map_err(|error| error.to_string())?;
                 Some(
@@ -2470,48 +2746,7 @@ pub async fn ecr_process_payment(
                 || mgr.process_transaction_offloaded(did, request),
             )
             .await?;
-            match dispatched {
-                Ok(resp) => {
-                    if resp.transaction_id != tx_id {
-                        return Err("The terminal returned a different direct SALE identity; reconcile the reserved attempt".to_string());
-                    }
-                    let status_str = format!("{:?}", resp.status).to_lowercase();
-                    persist_direct_sale_outcome(&db, &tx_id, &status_str, Some(&resp), None)?;
-                    let transaction = serde_json::json!({
-                        "id": resp.transaction_id,
-                        "amount": amount,
-                        "status": status_str,
-                        "authorizationCode": resp.authorization_code,
-                        "terminalReference": resp.terminal_reference,
-                        "cardType": resp.card_type,
-                        "cardLastFour": resp.card_last_four,
-                        "entryMethod": resp.entry_method,
-                        "errorMessage": resp.error_message,
-                        "startedAt": resp.started_at,
-                        "completedAt": resp.completed_at,
-                    });
-                    let _ = app.emit("ecr_event_transaction_completed", transaction.clone());
-                    return Ok(serde_json::json!({
-                        "success": status_str == "approved",
-                        "transaction": transaction,
-                        "options": options
-                    }));
-                }
-                Err(e) => {
-                    let _ = app.emit(
-                        "ecr_event_error",
-                        serde_json::json!({ "error": e, "deviceId": did }),
-                    );
-                    // The device error may hide an approval. Keep the
-                    // reserved row blocking fresh money even after restart.
-                    persist_direct_sale_outcome(&db, &tx_id, "error", None, Some(&e))?;
-                    return Ok(serde_json::json!({
-                        "success": false,
-                        "error": e,
-                        "options": options
-                    }));
-                }
-            }
+            return direct_sale_answer(&app, &db, &tx_id, did, amount, &options, dispatched);
         }
     }
 
@@ -2530,6 +2765,35 @@ pub async fn ecr_process_payment(
     }))
 }
 
+/// Founder 01/11/2026: what a split on a cart shows for its checkout's card SALE (see
+/// [`checkout_direct_sale_projection`]).
+#[tauri::command]
+pub async fn ecr_checkout_direct_sale(
+    arg0: Option<serde_json::Value>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    run_blocking_command("ecr_checkout_direct_sale", move || {
+        let checkout = arg0
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .or_else(|| value.get("checkoutRequestId").and_then(|v| v.as_str()))
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.len() <= 255)
+            .ok_or("CHECKOUT_REQUEST_ID_REQUIRED")?
+            .to_string();
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        Ok(serde_json::json!({
+            "success": true,
+            "directSale": checkout_direct_sale_projection(&conn, &checkout)?,
+        }))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn ecr_process_refund(
     arg0: Option<serde_json::Value>,
@@ -2538,6 +2802,9 @@ pub async fn ecr_process_refund(
     mgr: tauri::State<'_, ecr::DeviceManager>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Card,
+    );
     let parsed = parse_amount_and_options_payload(arg0, arg1);
     let amount = parsed.amount;
     let amount_cents = validate_ecr_amount(amount)?;
@@ -2690,6 +2957,9 @@ pub async fn ecr_void_transaction(
     mgr: tauri::State<'_, ecr::DeviceManager>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Card,
+    );
     let parsed = parse_void_transaction_payload(arg0, arg1)?;
     let txid = parsed.transaction_id;
     if txid.trim().is_empty() {
@@ -2740,6 +3010,9 @@ pub async fn ecr_cancel_transaction(
     mgr: tauri::State<'_, ecr::DeviceManager>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Card,
+    );
     let device_id = parse_optional_device_id(arg0);
     // If a device ID is provided and connected, attempt protocol-level cancel
     if let Some(ref did) = device_id {
@@ -2766,6 +3039,9 @@ pub async fn ecr_settlement(
     mgr: tauri::State<'_, ecr::DeviceManager>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Card,
+    );
     let device_id = parse_optional_device_id(arg0);
     if let Some(ref did) = device_id {
         if let Some(refusal) = refuse_unadmitted_device(&db, did)? {
@@ -4496,6 +4772,9 @@ pub async fn ecr_fiscal_print(
     db: tauri::State<'_, db::DbState>,
     mgr: tauri::State<'_, ecr::DeviceManager>,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Fiscal,
+    );
     let order_id = parse_required_order_id(arg0)?;
     let folio_lines = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -6943,4 +7222,300 @@ mod dto_tests {
             Some("completed")
         );
     }
+
+    // Coordinator decision (A), 01/11/2026: a split from the menu has no order until its first portion is paid, so
+    // that portion's card SALE is bound to its checkout. The dispatch closure is the paused terminal: it only counts
+    // the sends, and it checks that no writer is held while it runs.
+    const SPLIT_CHECKOUT: &str = "checkout-split-first";
+
+    fn checkout_sale_attempt(id: &str, status: &str, amount_cents: i64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "deviceId": "race-attempt-device",
+            "orderId": SPLIT_CHECKOUT,
+            "transactionType": "sale",
+            "amount": amount_cents,
+            "currency": "EUR",
+            "status": status,
+            "receiptData": { "directSaleAdmissionVersion": 1, "checkoutRequestId": SPLIT_CHECKOUT },
+            "startedAt": "2026-11-01T12:00:00Z",
+        })
+    }
+
+    #[tokio::test]
+    async fn a_checkout_sale_is_durable_before_the_terminal_and_never_charged_twice_across_restart()
+    {
+        let (_cleanup, first, restarted) =
+            file_backed_outstanding_attempt_test_dbs("unrelated-order");
+        let sends = std::sync::atomic::AtomicUsize::new(0);
+        dispatch_after_durable_checkout_sale(
+            &first,
+            &checkout_sale_attempt("checkout-sale-1", "processing", 1300),
+            SPLIT_CHECKOUT,
+            || async {
+                sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Point 6: the reservation is committed before the device I/O; no writer is held meanwhile.
+                let other = restarted.conn.lock().unwrap();
+                other
+                    .execute_batch("BEGIN IMMEDIATE; COMMIT;")
+                    .expect("another writer runs while the terminal works");
+                let visible: i64 = other
+                    .query_row(
+                        "SELECT COUNT(*) FROM ecr_transactions WHERE id = 'checkout-sale-1' AND order_id = ?1",
+                        [SPLIT_CHECKOUT],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(visible, 1, "the reservation is durable before the card is charged");
+            },
+        )
+        .await
+        .expect("the first SALE of the checkout reaches the terminal");
+
+        // Point 1: in flight, approved and not recorded, or unknown, a second SALE of the checkout is refused before
+        // the terminal, from another connection too (a restart).
+        for outcome in [None, Some("approved"), Some("error")] {
+            if let Some(outcome) = outcome {
+                let conn = first.conn.lock().unwrap();
+                conn.execute(
+                    "UPDATE ecr_transactions SET status = ?1 WHERE id = 'checkout-sale-1'",
+                    [outcome],
+                )
+                .unwrap();
+            }
+            let refused = dispatch_after_durable_checkout_sale(
+                &restarted,
+                &checkout_sale_attempt("checkout-sale-2", "processing", 1300),
+                SPLIT_CHECKOUT,
+                || async {
+                    sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                },
+            )
+            .await
+            .expect_err("a second SALE of the checkout never reaches the terminal");
+            assert!(
+                refused.contains("CHECKOUT_DIRECT_SALE_UNRESOLVED"),
+                "{outcome:?}: {refused}"
+            );
+        }
+        assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let conn = restarted.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM ecr_transactions WHERE order_id = ?1",
+                [SPLIT_CHECKOUT],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_checkout_reads_back_its_approved_sale_to_record_and_its_unknown_sale_to_reconcile() {
+        let (_cleanup, first, restarted) =
+            file_backed_outstanding_attempt_test_dbs("unrelated-order");
+        assert!(
+            checkout_direct_sale_projection(&first.conn.lock().unwrap(), SPLIT_CHECKOUT)
+                .unwrap()
+                .is_null()
+        );
+        reserve_checkout_direct_sale(
+            &first,
+            &checkout_sale_attempt("checkout-sale-1", "processing", 1300),
+            SPLIT_CHECKOUT,
+        )
+        .unwrap();
+        persist_direct_sale_outcome(&first, "checkout-sale-1", "approved", None, None).unwrap();
+        // Point 2: after a restart the approved original is read back to be recorded, never charged again.
+        let approved =
+            checkout_direct_sale_projection(&restarted.conn.lock().unwrap(), SPLIT_CHECKOUT)
+                .unwrap();
+        assert_eq!(approved["recoverable"], true, "{approved}");
+        assert_eq!(approved["id"], "checkout-sale-1");
+        assert_eq!(approved["amountCents"], 1300);
+        assert_eq!(approved["deviceId"], "race-attempt-device");
+        // Point 4: an outcome not known holds the checkout for reconciliation.
+        restarted
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE ecr_transactions SET status = 'error' WHERE id = 'checkout-sale-1'",
+                [],
+            )
+            .unwrap();
+        let unknown =
+            checkout_direct_sale_projection(&restarted.conn.lock().unwrap(), SPLIT_CHECKOUT)
+                .unwrap();
+        assert_eq!(unknown["recoverable"], false, "{unknown}");
+        assert_eq!(unknown["requiresReconciliation"], true);
+        assert_eq!(unknown["amountCents"], 1300);
+    }
+
+    #[tokio::test]
+    async fn a_declined_checkout_sale_leaves_nothing_and_a_new_sale_may_follow() {
+        let (_cleanup, first, _restarted) =
+            file_backed_outstanding_attempt_test_dbs("unrelated-order");
+        reserve_checkout_direct_sale(
+            &first,
+            &checkout_sale_attempt("checkout-declined", "processing", 1300),
+            SPLIT_CHECKOUT,
+        )
+        .unwrap();
+        persist_direct_sale_outcome(&first, "checkout-declined", "declined", None, None).unwrap();
+        // Point 5: nothing to record or reconcile; the checkout is free again.
+        assert!(
+            checkout_direct_sale_projection(&first.conn.lock().unwrap(), SPLIT_CHECKOUT)
+                .unwrap()
+                .is_null()
+        );
+        let sends = std::sync::atomic::AtomicUsize::new(0);
+        dispatch_after_durable_checkout_sale(
+            &first,
+            &checkout_sale_attempt("checkout-retry", "processing", 1300),
+            SPLIT_CHECKOUT,
+            || async {
+                sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect("a declined card may be tried again");
+        assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_checkout_whose_order_exists_or_whose_charge_is_held_takes_no_checkout_sale() {
+        let (_cleanup, first, _restarted) =
+            file_backed_outstanding_attempt_test_dbs("unrelated-order");
+        {
+            let conn = first.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, client_request_id, items, total_amount, total_amount_cents)
+                 VALUES ('order-of-checkout', ?1, '[]', 26.0, 2600)",
+                [SPLIT_CHECKOUT],
+            )
+            .unwrap();
+        }
+        let refused = reserve_checkout_direct_sale(
+            &first,
+            &checkout_sale_attempt("checkout-after-order", "processing", 1300),
+            SPLIT_CHECKOUT,
+        )
+        .expect_err("a saved order takes its cards on the order");
+        assert!(refused.contains("CHECKOUT_ORDER_EXISTS"), "{refused}");
+        {
+            let conn = first.conn.lock().unwrap();
+            conn.execute("DELETE FROM orders WHERE id = 'order-of-checkout'", [])
+                .unwrap();
+            let entry = crate::unsaved_payments::UnsavedChargedPayment::for_new_order_checkout(
+                SPLIT_CHECKOUT,
+                &serde_json::json!({ "clientRequestId": SPLIT_CHECKOUT, "initialPayment": { "method": "card", "amount": 13.0,
+                    "currency": "EUR", "transactionRef": "held-card", "terminalApproved": true } }),
+                "now",
+            )
+            .expect("a charged first card held as not saved")
+            .0;
+            crate::unsaved_payments::record(&conn, &entry).unwrap();
+        }
+        let held = reserve_checkout_direct_sale(
+            &first,
+            &checkout_sale_attempt("checkout-while-held", "processing", 1300),
+            SPLIT_CHECKOUT,
+        )
+        .expect_err("a held charge is saved again, never charged twice");
+        assert!(held.contains("PAYMENT_NOT_SAVED_PENDING"), "{held}");
+        assert_eq!(
+            first
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM ecr_transactions WHERE order_id = ?1",
+                    [SPLIT_CHECKOUT],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+}
+
+/// Support's non-secret device record. Uses the persisted protocol keys consumed
+/// by the normal device owner, without constructing a transport or protocol.
+pub(crate) fn support_device_record(input: &Value, id: &str) -> Result<Value, String> {
+    let settings = &input["settings"];
+    let kind = match input["device_kind"].as_str() {
+        Some("card_terminal") => device_admission::CARD_TERMINAL,
+        Some("cash_register") => device_admission::CASH_REGISTER,
+        _ => return Err("POLICY_REFUSED".into()),
+    };
+    let protocol = match settings["protocol"].as_str() {
+        Some("cap") if kind == device_admission::CASH_REGISTER => "cap_driver",
+        Some("generic_fiscal") if kind == device_admission::CASH_REGISTER => "generic",
+        Some("zvt") if kind == device_admission::CARD_TERMINAL => "zvt",
+        Some("pax") if kind == device_admission::CARD_TERMINAL => "pax",
+        Some("generic") if kind == device_admission::CARD_TERMINAL => "generic",
+        _ => return Err("POLICY_REFUSED".into()),
+    };
+    let name = settings["name"]
+        .as_str()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or("POLICY_REFUSED")?;
+    Ok(serde_json::json!({"id":id,"name":name,"deviceType":kind,
+        "protocol":protocol,"connectionType":"network",
+        "connectionDetails":{"ip":input["discovered_device_ref"]["ip"],"port":settings["port"]}}))
+}
+
+/// Caller supplies a private support connection; no lifecycle/device I/O.
+pub(crate) fn support_read_device(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<Value>, String> {
+    // Do not collapse SQLite failure into an absent device.
+    let exists = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ecr_devices WHERE id=?1)",
+            [id],
+            |r| r.get::<_, bool>(0),
+        )
+        .map_err(|_| "INTERNAL_ERROR")?;
+    if !exists {
+        return Ok(None);
+    }
+    db::ecr_get_device(conn, id)
+        .map(Some)
+        .ok_or_else(|| "INTERNAL_ERROR".into())
+}
+pub(crate) fn support_save_device(
+    conn: &rusqlite::Connection,
+    record: &Value,
+    existing: bool,
+) -> Result<(), String> {
+    let id = record["id"].as_str().ok_or("PAYLOAD_MISMATCH")?;
+    if existing {
+        let previous = support_read_device(conn, id)?.ok_or("PAYLOAD_MISMATCH")?;
+        if previous["deviceType"] != record["deviceType"] {
+            return Err("POLICY_REFUSED".into());
+        }
+        let mut record = record.clone();
+        let mut details = previous["connectionDetails"].clone();
+        if let (Some(current), Some(patch)) = (
+            details.as_object_mut(),
+            record["connectionDetails"].as_object(),
+        ) {
+            current.remove("host");
+            current.extend(patch.clone());
+        }
+        record["connectionDetails"] = details;
+        db::ecr_update_device(conn, id, &record)
+    } else {
+        db::ecr_insert_device(conn, record)
+    }
+}
+pub(crate) fn support_remove_device(conn: &rusqlite::Connection, id: &str) -> Result<(), String> {
+    if !db::ecr_delete_device(conn, id)? {
+        return Err("PAYLOAD_MISMATCH".into());
+    }
+    Ok(())
 }

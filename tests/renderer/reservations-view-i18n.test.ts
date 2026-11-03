@@ -17,15 +17,17 @@ const hookSource = readFileSync(
 );
 
 test('Round 369: ReservationsView renders the standard visible page title above its tabs', () => {
+  // Founder 01/11: the hero is the kit card (no glass, no isDark ternary) — title, stat tiles, then the toolbar.
   assert.match(
     viewSource,
-    /<h1 className=\{`truncate text-3xl font-bold tracking-tight \$\{isDark \? 'text-white' : 'text-gray-900'\}`\}>\s*\{t\('navigation\.menu\.reservations', \{ defaultValue: 'Reservations' \}\)\}\s*<\/h1>/,
+    /<h1 className="truncate text-3xl font-bold tracking-tight text-\(--pos-s-fg\)">\s*\{t\('navigation\.menu\.reservations', \{ defaultValue: 'Reservations' \}\)\}\s*<\/h1>/,
   );
   assert.match(
     viewSource,
-    /data-vertical-hero="reservations"[\s\S]*rounded-3xl border p-4 backdrop-blur-xl[\s\S]*navigation\.menu\.reservations[\s\S]*availableReservationTabs\.length > 1[\s\S]*reservationsView\.stats\.total/,
-    'Reservations title, module tabs and stats should live in the same rounded glass hero',
+    /data-vertical-hero="reservations"\s*className="pos-card mb-4 p-4"[\s\S]*navigation\.menu\.reservations[\s\S]*statTiles\.map[\s\S]*availableReservationTabs\.length > 1[\s\S]*<\/motion\.section>/,
+    'Reservations title, stat tiles and module tabs should live in the same kit hero card',
   );
+  assert.doesNotMatch(viewSource, /backdrop-blur|isDark/);
   assert.ok(
     viewSource.indexOf('navigation.menu.reservations') < viewSource.indexOf('availableReservationTabs.length > 1'),
     'Reservations page title must render before the tab row',
@@ -86,11 +88,13 @@ test('ReservationsView uses the shared TableOrderIcon for the tables tab + heade
     viewSource,
     /const Icon = tab === 'rooms' \? BedDouble : tab === 'services' \? Scissors : TableOrderIcon;/,
   );
-  // Single-module header for the tables tab renders the shared TableOrderIcon.
+  // The hero's muted line for the tables tab renders the shared TableOrderIcon. Founder 01/11: icons are neutral
+  // (muted), never yellow decoration.
   assert.match(
     viewSource,
-    /<TableOrderIcon className=\{`w-6 h-6 shrink-0 \$\{isDark \? 'text-yellow-400' : 'text-yellow-600'\}`\} \/>/,
+    /<TableOrderIcon className="w-4 h-4 shrink-0 text-\(--pos-s-muted\)" \/>/,
   );
+  assert.doesNotMatch(viewSource, /text-yellow-\d00/);
 
   // UtensilsCrossed is fully gone from this view (no leftover import or render).
   assert.doesNotMatch(viewSource, /UtensilsCrossed/);
@@ -100,11 +104,11 @@ test('ReservationsView uses the shared TableOrderIcon for the tables tab + heade
   assert.match(viewSource, /\bScissors\b/);
   assert.match(
     viewSource,
-    /<BedDouble className=\{`w-6 h-6 shrink-0 \$\{isDark \? 'text-yellow-400' : 'text-yellow-600'\}`\} \/>/,
+    /<BedDouble className="w-4 h-4 shrink-0 text-\(--pos-s-muted\)" \/>/,
   );
   assert.match(
     viewSource,
-    /<Scissors className=\{`w-6 h-6 shrink-0 \$\{isDark \? 'text-yellow-400' : 'text-yellow-600'\}`\} \/>/,
+    /<Scissors className="w-4 h-4 shrink-0 text-\(--pos-s-muted\)" \/>/,
   );
 
   // No native title tooltip / hover utilities introduced by the icon swap.
@@ -113,15 +117,17 @@ test('ReservationsView uses the shared TableOrderIcon for the tables tab + heade
 });
 
 test('Round 431: ReservationsView quick actions and close buttons keep smooth touch radii', () => {
+  // Founder 01/11: quick actions are the kit buttons (44 px, raised) — the forward step is the yellow primary,
+  // No Show / Cancel are neutral with red words — in the list, the timeline, the services cards and the details.
   assert.match(
     viewSource,
-    /className=\{`inline-flex items-center justify-center text-center px-2 py-1 rounded-2xl text-xs font-medium transition-transform active:scale-95 \$\{/,
+    /const quickActionClass = \(variant: string\): string => \{\s*if \(variant === 'primary' \|\| variant === 'success'\) return 'pos-solid-btn pos-solid-btn--sm pos-solid-btn--primary';\s*if \(variant === 'danger'\) return 'pos-solid-btn pos-solid-btn--sm pos-solid-btn--danger';\s*return 'pos-solid-btn pos-solid-btn--sm';/,
   );
-  const roundedCloseButtons =
-    viewSource.match(
-      /className=\{`inline-flex items-center justify-center shrink-0 p-1\.5 rounded-full transition-transform active:scale-95/g,
-    ) || [];
-  assert.ok(roundedCloseButtons.length >= 3, `expected at least 3 rounded modal/detail close buttons, found ${roundedCloseButtons.length}`);
+  assert.ok((viewSource.match(/className=\{quickActionClass\(action\.variant\)\}/g) || []).length >= 4);
+  assert.doesNotMatch(viewSource, /bg-red-600 text-white|bg-yellow-400 text-black/);
+  // Founder 01/11: the modal and detail closes are the one shared close button.
+  const roundedCloseButtons = viewSource.match(/className="liquid-glass-modal-close[^"]*"/g) || [];
+  assert.ok(roundedCloseButtons.length >= 3, `expected at least 3 shared modal/detail close buttons, found ${roundedCloseButtons.length}`);
   assert.doesNotMatch(viewSource, /rounded-lg/);
 });
 
@@ -389,7 +395,8 @@ test('Reservations Create on the services tab opens the app-level service bookin
   assert.match(viewSource, /const openServiceModal = useCallback\(\(\) => \{[\s\S]*?setShowServiceModal\(true\);/);
   // App-level portal with a full-screen blurred backdrop, same contract as table/room.
   assert.match(viewSource, /\{showServiceModal && renderModalPortal\(/);
-  assert.match(viewSource, /const modalScrimClass = `absolute inset-0 backdrop-blur-xl/);
+  // Founder 01/11: the shared glass backdrop.
+  assert.match(viewSource, /const modalScrimClass = 'liquid-glass-modal-backdrop';/);
   assert.match(viewSource, /<div className=\{modalScrimClass\} onClick=\{closeServiceModal\}/);
   assert.match(viewSource, /className=\{modalPanelClass\}/);
   // Labelled dialog semantics on the panel, wired to the visible service-booking title.
@@ -557,8 +564,15 @@ test('Reservations table/room create modal closes on Escape via the topmost-dial
 });
 
 test('Reservations create modal uses light glass and disables Create until required fields are ready', () => {
-  assert.match(viewSource, /const modalPanelClass = `relative z-10[\s\S]*?bg-gray-950\/55[\s\S]*?bg-white\/28/);
-  assert.match(viewSource, /const modalScrimClass = `absolute inset-0 backdrop-blur-xl \$\{isDark \? 'bg-black\/55' : 'bg-black\/30'\}`/);
+  // Founder 01/11: the shared glass shell + backdrop (no custom translucent panel or scrim), a header and a footer
+  // on the glass line, and ONE kit field look for every input, select and KitDateField (no translucent fields).
+  assert.match(viewSource, /const modalPanelClass = 'liquid-glass-modal-shell relative flex w-full max-w-2xl flex-col text-\(--pos-s-fg\)';/);
+  assert.match(viewSource, /const modalScrimClass = 'liquid-glass-modal-backdrop';/);
+  assert.match(viewSource, /const modalHeaderClass = '[^']*border-b border-\(--modal-glass-line\)/);
+  assert.match(viewSource, /const modalFooterClass = '[^']*border-t border-\(--modal-glass-line\)/);
+  assert.match(viewSource, /const kitFieldLook = 'min-h-\[48px\] rounded-xl border border-\(--pos-s-control\) bg-\(--pos-s-surface\) px-3 text-base font-semibold text-\(--pos-s-fg\)/);
+  assert.match(viewSource, /const modalInputClass = `w-full \$\{kitFieldLook\}`;/);
+  assert.doesNotMatch(viewSource, /bg-white\/\d+|bg-gray-\d+\/\d+|bg-black\/\d+|shadow-\[/);
   assert.match(viewSource, /const isCreateReservationReady =[\s\S]*?Boolean\(createForm\.customerName\.trim\(\)\)[\s\S]*?Boolean\(createForm\.customerPhone\.trim\(\)\)/);
   assert.match(viewSource, /Number\.isFinite\(createPartySize\)[\s\S]*?createPartySize > 0/);
   assert.match(viewSource, /activeTab !== 'rooms' \|\|[\s\S]*?Boolean\(createForm\.roomId\.trim\(\)\)[\s\S]*?Boolean\(createForm\.checkInDate\)[\s\S]*?roomStayNights\(createForm\.checkInDate, createForm\.checkOutDate\) > 0/);
@@ -568,7 +582,38 @@ test('Reservations create modal uses light glass and disables Create until requi
     viewSource.indexOf('</button>', viewSource.indexOf('onClick={() => void handleCreateReservation()}')),
   );
   assert.match(createButton, /disabled=\{isCreating \|\| !isCreateReservationReady\}/);
-  assert.match(createButton, /disabled:cursor-not-allowed/);
-  assert.match(createButton, /disabled:bg-gray-200\/70/);
-  assert.match(createButton, /disabled:text-gray-500/);
+  // The one yellow primary of the window; the kit dims a disabled primary (opacity + not-allowed cursor).
+  assert.match(createButton, /className=\{primaryButtonClass\}/);
+  assert.match(viewSource, /const primaryButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';/);
+  const createWindow = viewSource.slice(
+    viewSource.indexOf('{showCreateModal && renderModalPortal('),
+    viewSource.indexOf('{showServiceModal && renderModalPortal('),
+  );
+  assert.equal((createWindow.match(/className=\{primaryButtonClass\}/g) || []).length, 1, 'one yellow primary in the create window');
+  assert.match(createWindow, /onClick=\{\(\) => setShowCreateModal\(false\)\}\s*className=\{secondaryButtonClass\}/);
+});
+
+test('Founder 01/11: the Reservations page follows the kit (options, stat tiles, coloured state words)', () => {
+  // Module switch, period and view are kit options with the yellow selection.
+  assert.match(viewSource, /className=\{`pos-choice\$\{activeTab === tab \? ' is-selected' : ''\}`\}/);
+  assert.match(viewSource, /className=\{`pos-choice\$\{quickFilter === filter \? ' is-selected' : ''\}`\}/);
+  assert.match(viewSource, /className=\{`pos-choice\$\{viewMode === 'list' \? ' is-selected' : ''\}`\}/);
+  assert.match(viewSource, /className=\{`pos-choice\$\{viewMode === 'timeline' \? ' is-selected' : ''\}`\}/);
+  // The module count is plain words, no pill wrapper.
+  assert.match(viewSource, /<span className="tabular-nums">\{count\}<\/span>/);
+  assert.doesNotMatch(viewSource, /rounded-full text-xs/);
+  // Stat labels are neutral; only a number that states something is coloured, and only above zero.
+  assert.match(viewSource, /toneClass: visibleStats\.pending > 0 \? 'text-\(--pos-s-warn\)' : ''/);
+  assert.match(viewSource, /toneClass: visibleStats\.seated > 0 \? 'text-\(--pos-s-ok\)' : ''/);
+  assert.match(viewSource, /<p className="truncate text-sm text-\(--pos-s-muted\)">\{tile\.label\}<\/p>/);
+  assert.doesNotMatch(viewSource, /text-yellow-700 dark:text-yellow-500|text-green-700 dark:text-green-500/);
+  // Status is a coloured word (kit tokens), never a dynamic translucent pill or a coloured stripe.
+  assert.match(viewSource, /\$\{statusTextClass\[res\.status\]\}/);
+  assert.doesNotMatch(viewSource, /borderLeft|bg-\$\{/);
+  // Lists are kit cards in a grid; the scroll column keeps room for their shadows; one yellow primary in the hero.
+  assert.match(viewSource, /className="pos-card flex cursor-pointer flex-col gap-3 p-4/);
+  assert.match(viewSource, /className="pos-scroll-room flex-1 overflow-y-auto scrollbar-hide pb-6"/);
+  const hero = viewSource.slice(viewSource.indexOf('data-vertical-hero="reservations"'), viewSource.indexOf('</motion.section>'));
+  assert.equal((hero.match(/className=\{primaryButtonClass\}/g) || []).length, 1, 'Create is the one yellow primary of the page');
+  assert.match(hero, /className="pos-icon-btn"\s*aria-label=\{t\('reservationsView\.refresh'/);
 });

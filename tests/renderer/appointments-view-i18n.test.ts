@@ -358,7 +358,8 @@ test('Round 230: AppointmentsView icon buttons are named + touch-safe, with no h
   // Modal close button (anchored on its unique close key; still wires onClose elsewhere in the panel).
   const close = button("t('common.actions.close', 'Close')");
   assert.match(close, /aria-label=\{t\('common\.actions\.close', 'Close'\)\}/);
-  assert.match(close, /h-11 w-11 items-center justify-center/);
+  // Founder 01/11: the one shared close button (44 px round kit, glassmorphism.css).
+  assert.match(close, /className="liquid-glass-modal-close"/);
   assert.match(viewSource, /onClick=\{onClose\}/);
 
   // Customer clear: the native title is replaced by an aria-label only.
@@ -495,7 +496,7 @@ test('Round 240: modal Cancel is soft-destructive red, Create is green primary w
   // explicit neutral/muted glass; this guard only pins the enabled emerald + a disabled-* state.)
   assert.match(
     viewSource,
-    /onClick=\{handleCreateAppointment\}\s*disabled=\{[^}]*\}\s*className="px-5 py-2\.5 rounded-xl font-semibold bg-\(--pos-s-yellow\) text-black[^"]*disabled:cursor-not-allowed/,
+    /onClick=\{handleCreateAppointment\}\s*disabled=\{[^}]*\}\s*className="pos-raised pos-raised--yellow px-5 py-2\.5 rounded-xl font-semibold bg-\(--pos-s-yellow\) text-black[^"]*disabled:cursor-not-allowed/,
   );
   // Scope the negative check to the Create button (the old white/black slab also appears on unrelated
   // page action buttons, which are intentionally untouched).
@@ -509,7 +510,7 @@ test('Round 240: modal Cancel is soft-destructive red, Create is green primary w
   // The close (X) icon button stays centered at 44x44.
   assert.match(
     viewSource,
-    /aria-label=\{t\('common\.actions\.close', 'Close'\)\}[\s\S]*?inline-flex h-11 w-11 items-center justify-center/,
+    /aria-label=\{t\('common\.actions\.close', 'Close'\)\}\s*className="liquid-glass-modal-close"/,
   );
 });
 
@@ -754,7 +755,6 @@ test('Round 279: light modal header/footer/close are translucent warm glass, not
   // bg-gray-50 admin chrome.
   assert.match(viewSource, /border-b shrink-0 \$\{isDark \? 'border-white\/10 bg-zinc-950\/25' : 'border-white\/40 bg-white\/12'\}/);
   assert.match(viewSource, /border-t shrink-0 backdrop-blur-xl \$\{isDark \? 'border-white\/10 bg-zinc-950\/55' : 'border-white\/40 bg-white\/14'\}/);
-  assert.match(viewSource, /'bg-white\/25 border-white\/65 text-gray-800 active:bg-white\/45'/);
 
   // The old grey-admin modal chrome is gone (these exact modal strings).
   assert.doesNotMatch(viewSource, /border-b shrink-0 \$\{isDark \? 'border-zinc-800' : 'border-gray-200'\}/);
@@ -767,7 +767,7 @@ test('Round 279: light modal header/footer/close are translucent warm glass, not
   // Close button stays a 44x44 centered touch control with its accessible name.
   assert.match(
     viewSource,
-    /aria-label=\{t\('common\.actions\.close', 'Close'\)\}[\s\S]*?inline-flex h-11 w-11 items-center justify-center/,
+    /aria-label=\{t\('common\.actions\.close', 'Close'\)\}\s*className="liquid-glass-modal-close"/,
   );
 
   // Touch/glass invariants + the Round 240/278 panel-glass counts are preserved.

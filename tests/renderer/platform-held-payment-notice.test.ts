@@ -125,7 +125,9 @@ test('4. every collect surface shows it and disables the tender actions', () => 
   // Split payment: resolved by order id, folded into the existing collect
   // lock so every confirm/portion path is covered at once.
   const split = read(splitPath);
-  assert.match(split, /const platformHeldNotice = usePlatformHeldNoticeForOrderId\(orderId, isOpen\)/);
+  // Founder 01/11/2026: the live order (a split on a cart has none until its first portion saves it).
+  assert.match(split, /const platformHeldNotice = usePlatformHeldNoticeForOrderId\(liveOrderId, isOpen\)/);
+  assert.match(split, /const liveOrderId = orderId \|\| createdOrderId \|\| '';/);
   assert.match(split, /const platformHeld = platformHeldNotice !== null;/);
   assert.match(split, /<PlatformHeldPaymentNotice\s*\n\s*notice=\{platformHeldNotice\}\s*\n\s*showBlockedAction/);
   assert.match(split, /!isReconciliationPending && !platformHeld,/);

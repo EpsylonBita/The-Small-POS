@@ -32,6 +32,7 @@ import { getOfflineActionState } from '../services/offline-page-capabilities';
 import { ScanDevicePanel } from '../components/scanner/ScanDevicePanel';
 import { renderModalPortal } from '../utils/render-modal-portal';
 import { CentsMoneyInput } from '../components/ui/CentsMoneyInput';
+import { KitDateField } from '../components/ui/KitDateField';
 
 interface Coupon {
   id: string;
@@ -840,7 +841,7 @@ const CouponsPage: React.FC = () => {
                 </label>
                 <label className="text-sm">
                   <span className="block mb-1">{t('coupons.expires', 'Expires')}</span>
-                  <input
+                  <KitDateField
                     type="datetime-local"
                     value={form.expires_at}
                     onChange={(e) => setForm((prev) => ({ ...prev, expires_at: e.target.value }))}
@@ -895,7 +896,7 @@ const CouponsPage: React.FC = () => {
               <button
                 onClick={handleSaveCoupon}
                 disabled={saving || saveAction.disabled}
-                className="px-4 py-2 rounded-2xl disabled:opacity-50 disabled:active:scale-100 inline-flex items-center gap-2 font-semibold bg-(--pos-s-yellow) active:bg-yellow-500 text-black transition-transform duration-150 active:scale-[0.98]"
+                className="pos-raised pos-raised--yellow px-4 py-2 rounded-2xl disabled:opacity-50 disabled:active:scale-100 inline-flex items-center gap-2 font-semibold bg-(--pos-s-yellow) active:bg-yellow-500 text-black transition-transform duration-150 active:scale-[0.98]"
               >
                 {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : null}
                 {editingCoupon ? t('common.save', 'Save') : t('common.create', 'Create')}

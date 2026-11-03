@@ -189,9 +189,9 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
             <h3 className="font-medium text-gray-900">Settings Updates ({pendingUpdates.length})</h3>
             <button
               onClick={() => setShowNotificationPanel(false)}
-              className="text-gray-400 "
+              className="liquid-glass-modal-close"
             >
-              <X className="w-4 h-4" />
+              <X className="h-5 w-5" aria-hidden="true" />
             </button>
           </div>
 

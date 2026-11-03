@@ -1373,7 +1373,7 @@ fn adopt(
             "pending",
         )
     };
-    let tx = conn.unchecked_transaction().map_err(sql)?;
+    let tx = crate::db::immediate_transaction(&conn).map_err(sql)?;
     let record = load_record(&tx, key)
         .map_err(import)?
         .ok_or_else(|| import(String::new()))?;

@@ -17,9 +17,22 @@ This guide covers operational support for the native-only `pos-tauri` desktop ru
 
 The POS includes Remote Incident Reporting for serious support/diagnostic states.
 It is outbound-only: the terminal sends a redacted JSON report to the configured
-admin backend with the existing POS terminal authentication. It does not open an
-inbound port and does not allow remote shell, hidden access, command execution,
-raw database editing, or automatic destructive repairs.
+admin backend with the existing POS terminal authentication. It does not open an inbound port and does not allow remote shell, hidden access or automatic destructive repairs.
+
+Remote support sessions are also outbound-only. A session starts only when someone at this till taps «Σύνδεση υποστήριξης» and support exchanges the one-time code. While a session is active, the till shows «Συνδεδεμένη υποστήριξη» with «Τέλος», which ends the session at once, even offline. Support can:
+
+- read redacted diagnostics and run read-only queries on a redacted copy of the local data
+- run shipped Health remedies; any remedy that changes data needs a tap on this till
+
+A break-glass change needs the founder's approval of that exact change, confirmed with the founder's passkey and checked by this till itself. A full local snapshot is taken first and can be restored with one tap. A checkout always takes priority. Every change is recorded in the audit.
+
+- A database write, quarantine or restore through support never changes payments, refunds, cash, shifts, Z reports, fiscal documents, PINs or credentials.
+- A PowerShell command (Windows only) runs as the POS user and is never elevated. Like any program running as that user, it could technically read the local database, stored credentials and PIN hashes, or change records. For that reason:
+  - each command is shown in full to the founder and on this till
+  - the money and fiscal records are fingerprinted before and after the command, and a mismatch alerts the founder and offers a restore
+  - the till's API key is rotated after the session
+
+Support never asks for a PIN or password.
 
 Automatic upload is stricter than local export. It excludes raw DB snapshots,
 raw recovery exports, and raw logs. Redaction removes API keys, tokens,

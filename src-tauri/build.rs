@@ -24,8 +24,42 @@ fn main() {
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=BUILD_GIT_SHA={git_sha}");
 
-    // Rebuild when git HEAD changes
-    println!("cargo:rerun-if-changed=../.git/HEAD");
+    // Rebuild when the checked-out commit changes. Cargo runs this script in
+    // pos-tauri/src-tauri, where the old ../.git/HEAD watch never existed, and
+    // a missing watch path makes Cargo rerun the script on every build. Watch
+    // only existing git metadata: HEAD, the branch ref it names and
+    // packed-refs, since a commit updates the ref and not HEAD. In a worktree
+    // .git is a pointer file and the refs live in the common git directory.
+    // A .git directory itself is never watched: Cargo would scan all of it.
+    let checkout = env::current_dir().ok().and_then(|cwd| {
+        cwd.ancestors().find_map(|ancestor| {
+            let dot_git = ancestor.join(".git");
+            if dot_git.is_dir() {
+                return Some((None, dot_git));
+            }
+            let pointer = std::fs::read_to_string(&dot_git).ok()?;
+            let gitdir = ancestor.join(pointer.trim().strip_prefix("gitdir: ")?);
+            Some((Some(dot_git), gitdir))
+        })
+    });
+    if let Some((pointer, gitdir)) = checkout {
+        let common = std::fs::read_to_string(gitdir.join("commondir"))
+            .map(|path| gitdir.join(path.trim()))
+            .unwrap_or_else(|_| gitdir.clone());
+        let mut watched: Vec<std::path::PathBuf> = pointer.into_iter().collect();
+        watched.push(gitdir.join("HEAD"));
+        if let Ok(head) = std::fs::read_to_string(gitdir.join("HEAD")) {
+            if let Some(reference) = head.trim().strip_prefix("ref: ") {
+                watched.push(gitdir.join(reference));
+                watched.push(common.join(reference));
+            }
+        }
+        watched.push(common.join("packed-refs"));
+        watched.dedup();
+        for path in watched.into_iter().filter(|path| path.is_file()) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 }
 
 /// Caller ID offline activation is verified with a public Ed25519 key that is

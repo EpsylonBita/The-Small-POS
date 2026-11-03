@@ -821,7 +821,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
                   type="button"
                   onClick={() => void closeExternalDisplay()}
                   disabled={isDisplayBusy}
-                  className="p-3 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200 transition-all active:scale-95 active:bg-(--pos-s-surface-2) disabled:opacity-60 disabled:active:scale-100"
+                  className="pos-raised p-3 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200 transition-all active:scale-95 active:bg-(--pos-s-surface-2) disabled:opacity-60 disabled:active:scale-100"
                   aria-label={t('kitchen.externalDisplay.stop', 'Stop external display')}
                 >
                   <X className="w-5 h-5" />
@@ -944,7 +944,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
             </h2>
           </div>
           {externalDisplays.length > 0 && (
-            <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+            <div className="pos-scroll-row gap-2">
               {externalDisplays.map((display) => display.id === runningDisplayId ? (
                 <div
                   key={display.id}
@@ -1007,7 +1007,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
       )}
 
       {/* Station Filter */}
-      <div className="flex gap-2 mb-5 overflow-x-auto pb-2 scrollbar-hide">
+      <div className="pos-scroll-row mb-5 gap-2">
         {[{ id: 'all', name: t('kitchen.allStations', 'All'), station_type: 'all' } as KdsStation, ...stations].map((station) => (
           <button
             key={station.id}
@@ -1051,7 +1051,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
             onClick={() => {
               void refreshIdentity();
             }}
-            className="px-6 py-2 rounded-xl bg-yellow-400 text-black font-medium transition-all active:scale-[0.98] active:bg-yellow-300"
+            className="pos-raised pos-raised--yellow px-6 py-2 rounded-xl bg-yellow-400 text-black font-medium transition-all active:scale-[0.98] active:bg-yellow-300"
           >
             <RefreshCw className="w-4 h-4 inline mr-2" />
             {t('kitchen.contextMissing.action', 'Retry Context')}
@@ -1066,7 +1066,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
             onClick={() => {
               void fetchOrders(true);
             }}
-            className="px-6 py-2 rounded-xl bg-yellow-400 text-black font-medium transition-all active:scale-[0.98] active:bg-yellow-300"
+            className="pos-raised pos-raised--yellow px-6 py-2 rounded-xl bg-yellow-400 text-black font-medium transition-all active:scale-[0.98] active:bg-yellow-300"
           >
             <RefreshCw className="w-4 h-4 inline mr-2" />
             {t('common.retry', 'Retry')}

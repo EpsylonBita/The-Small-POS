@@ -47,10 +47,17 @@ const ADMIN_PERMISSIONS: &[&str] = &[
     "manage_staff",
     "system_settings",
     "force_sync",
+    "pos.support.connect",
+    "pos.support.connect",
 ];
 
 /// Permissions granted to regular staff.
-const STAFF_PERMISSIONS: &[&str] = &["view_orders", "update_order_status", "create_order"];
+const STAFF_PERMISSIONS: &[&str] = &[
+    "view_orders",
+    "update_order_status",
+    "create_order",
+    "pos.support.connect",
+];
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1206,6 +1213,10 @@ fn resolve_current_branch_id(db: &db::DbState) -> Result<String, String> {
 
 fn current_terminal_has_cash_drawer_role(db: &db::DbState) -> Result<bool, String> {
     let terminal_id = resolve_current_terminal_id(db)?;
+    terminal_has_cash_drawer_role(db, &terminal_id)
+}
+
+fn terminal_has_cash_drawer_role(db: &db::DbState, terminal_id: &str) -> Result<bool, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let role: Option<String> = conn
         .query_row(
@@ -2251,6 +2262,33 @@ fn authorize_privileged_action_at(
     auth: &AuthState,
     now: DateTime<Utc>,
 ) -> Result<StaffSession, PrivilegedActionError> {
+    authorize_privileged_action_with_role_at(scope, auth, now, || {
+        current_terminal_has_cash_drawer_role(db)
+    })
+}
+
+/// Support has already bound this non-secret identity to its live session.
+/// Reuse the manual role/shift and fresh-grant policy without resolving credentials.
+pub(crate) fn authorize_support_cash_drawer(
+    db: &db::DbState,
+    auth: &AuthState,
+    terminal_id: &str,
+) -> Result<(), PrivilegedActionError> {
+    authorize_privileged_action_with_role_at(
+        PrivilegedActionScope::CashDrawerControl,
+        auth,
+        Utc::now(),
+        || terminal_has_cash_drawer_role(db, terminal_id),
+    )
+    .map(|_| ())
+}
+
+fn authorize_privileged_action_with_role_at(
+    scope: PrivilegedActionScope,
+    auth: &AuthState,
+    now: DateTime<Utc>,
+    cash_drawer_role: impl FnOnce() -> Result<bool, String>,
+) -> Result<StaffSession, PrivilegedActionError> {
     let Some(session) = get_current_session(auth) else {
         return Err(PrivilegedActionError::unauthorized(
             Some(scope),
@@ -2266,7 +2304,7 @@ fn authorize_privileged_action_at(
     }
 
     if scope == PrivilegedActionScope::CashDrawerControl {
-        match current_terminal_has_cash_drawer_role(db) {
+        match cash_drawer_role() {
             Ok(true) => {}
             Ok(false) => {
                 return Err(PrivilegedActionError::unauthorized(
@@ -2646,7 +2684,7 @@ pub fn confirmation_asks_manager_approval(arg0: Option<&Value>) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use rusqlite::Connection;
     use std::path::PathBuf;
@@ -3037,7 +3075,7 @@ mod tests {
             .expect("seed strict terminal identity");
     }
 
-    fn insert_active_shift(db_state: &db::DbState, terminal_id: &str, role_type: &str) {
+    pub(crate) fn insert_active_shift(db_state: &db::DbState, terminal_id: &str, role_type: &str) {
         let now = Utc::now().to_rfc3339();
         let conn = db_state.conn.lock().expect("db lock");
         conn.execute(
@@ -3066,7 +3104,7 @@ mod tests {
             .expect("current session id")
     }
 
-    fn login_as_admin(db_state: &db::DbState, auth: &AuthState) {
+    pub(crate) fn login_as_admin(db_state: &db::DbState, auth: &AuthState) {
         set_pin_hash(db_state, "admin_pin_hash", "1234");
         login(Some(serde_json::json!({ "pin": "1234" })), db_state, auth).expect("admin login");
     }
@@ -3074,6 +3112,20 @@ mod tests {
     fn login_as_staff(db_state: &db::DbState, auth: &AuthState) {
         set_pin_hash(db_state, "staff_pin_hash", "4321");
         login(Some(serde_json::json!({ "pin": "4321" })), db_state, auth).expect("staff login");
+    }
+
+    pub(crate) fn grant_cash_drawer_for_test(auth: &AuthState) {
+        record_privileged_grant_at(
+            auth,
+            &current_session_id(auth),
+            PrivilegedActionScope::CashDrawerControl,
+            Utc::now(),
+        )
+        .unwrap();
+    }
+
+    pub(crate) fn clear_grants_for_test(auth: &AuthState) {
+        clear_privileged_grants_for_session(auth, &current_session_id(auth));
     }
 
     #[test]
@@ -3904,6 +3956,98 @@ mod tests {
     }
 
     #[test]
+    fn remote_test_print_and_sync_now_admission_are_keyring_free() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let db = test_db_state();
+        let auth = AuthState::new();
+        login_as_admin(&db, &auth);
+        insert_active_shift(&db, "your-terminal", "manager");
+        {
+            let conn = db.conn.lock().unwrap();
+            for (key, value) in [
+                ("terminal_id", "your-terminal"),
+                ("organization_id", "your-org"),
+                ("branch_id", "your-branch"),
+            ] {
+                crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+            }
+        }
+        record_privileged_grant_at(
+            &auth,
+            &current_session_id(&auth),
+            PrivilegedActionScope::CashDrawerControl,
+            Utc::now(),
+        )
+        .unwrap();
+        crate::tests::fake_keyring::before_each_read(|key| {
+            panic!("unexpected keyring read: {key}")
+        });
+        crate::support::remedy_run::tests::assert_remote_remedy_admission(&db, &auth);
+    }
+
+    #[test]
+    fn support_cash_drawer_preserves_shift_and_fresh_scope_grants_without_keyring() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let db = test_db_state();
+        let auth = AuthState::new();
+        login_as_admin(&db, &auth);
+        insert_active_shift(&db, "your-terminal", "manager");
+        let now = Utc::now();
+        let sid = get_current_session(&auth).unwrap().session_id;
+        crate::tests::fake_keyring::before_each_read(|key| {
+            panic!("unexpected keyring read: {key}")
+        });
+        assert_eq!(
+            authorize_support_cash_drawer(&db, &auth, "your-terminal")
+                .unwrap_err()
+                .code,
+            "REAUTH_REQUIRED"
+        );
+        record_privileged_grant_at(&auth, &sid, PrivilegedActionScope::SystemControl, now).unwrap();
+        assert_eq!(
+            authorize_support_cash_drawer(&db, &auth, "your-terminal")
+                .unwrap_err()
+                .code,
+            "REAUTH_REQUIRED"
+        );
+        record_privileged_grant_at(&auth, &sid, PrivilegedActionScope::CashDrawerControl, now)
+            .unwrap();
+        authorize_support_cash_drawer(&db, &auth, "your-terminal").unwrap();
+        assert_eq!(
+            authorize_support_cash_drawer(&db, &auth, "your-other-terminal")
+                .unwrap_err()
+                .code,
+            "UNAUTHORIZED"
+        );
+        record_privileged_grant_at(
+            &auth,
+            &sid,
+            PrivilegedActionScope::CashDrawerControl,
+            now - Duration::seconds(PRIVILEGED_ACTION_TTL_SECONDS + 1),
+        )
+        .unwrap();
+        assert_eq!(
+            authorize_support_cash_drawer(&db, &auth, "your-terminal")
+                .unwrap_err()
+                .code,
+            "REAUTH_REQUIRED"
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE staff_shifts SET role_type='server'", [])
+            .unwrap();
+        assert_eq!(
+            authorize_support_cash_drawer(&db, &auth, "your-terminal")
+                .unwrap_err()
+                .code,
+            "UNAUTHORIZED"
+        );
+    }
+
+    #[test]
     fn confirm_privileged_action_accepts_admin_system_control_pin() {
         let db_state = test_db_state();
         let auth = AuthState::new();
@@ -4277,5 +4421,22 @@ mod tests {
             expires_at: now,
         };
         assert!(placeholder_session.to_user_json()["databaseStaffId"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod support_permissions_tests {
+    use super::*;
+    #[test]
+    fn native_admin_and_staff_fallback_sessions_can_request_support() {
+        for role in ["admin", "staff"] {
+            let auth = AuthState::new();
+            let _session = create_session(&auth, role, "your-test-staff");
+            assert!(get_current_session(&auth)
+                .unwrap()
+                .permissions
+                .iter()
+                .any(|p| p == "pos.support.connect"));
+        }
     }
 }

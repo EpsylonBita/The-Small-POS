@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.4.141"
+version = "1.4.142"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -63,7 +63,7 @@ read-fonts = "0.46"
 ab_glyph_rasterizer = "0.1.10"
 
 # SQLite (bundled so no system dep needed)
-rusqlite = { version = "0.32", features = ["bundled", "trace"] }
+rusqlite = { version = "0.32", features = ["bundled", "trace", "hooks"] }
 
 # HTTP client (for admin dashboard API)
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
@@ -159,6 +159,9 @@ windows-sys = { version = "0.59", features = [
 # `DISPID_PROPERTYPUT`) and `Win32_System_Variant` (`VARIANT`). Three features,
 # no more — every extra one is generated code in every Windows build.
 windows = { version = "0.62", features = [
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
   "Win32_System_Com",
   "Win32_System_Ole",
   "Win32_System_Variant",

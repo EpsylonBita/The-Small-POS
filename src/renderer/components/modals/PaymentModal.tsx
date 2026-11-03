@@ -1,13 +1,15 @@
+import { useSupportPaymentCritical } from '../../hooks/useSupportPaymentCritical';
 import { getStoreCurrency } from '../../utils/store-currency';
 import { canChargeFolio } from '../../utils/folio-currency';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Banknote, Coins, AlertTriangle, BedDouble, HandCoins, Gift, Plus } from 'lucide-react';
+import { Coins, AlertTriangle, BedDouble, HandCoins, Gift, Plus } from 'lucide-react';
 import { CardsIcon, CashHandIcon, SplitReceiptIcon } from '../icons/PaymentMethodIcons';
 import { useTranslation } from 'react-i18next';
 import { roundMoney } from '@shared/utils/money';
 import { useFeatures } from '../../hooks/useFeatures';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import {
+  useOrderStore,
   claimOrdinaryCollectionOwner,
   ordinaryCollectionView,
   releaseOrdinaryOwnerBeforeSend,
@@ -18,6 +20,7 @@ import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
+import { paymentRefusalMessage } from '../../utils/paymentRefusalMessage';
 import { ActivityTracker } from '../../services/ActivityTracker';
 import type { GiftCardTenderEvent } from '../../services/GiftCardCheckoutService';
 import type { GiftCardScope } from '../../services/GiftCardsApiService';
@@ -26,7 +29,6 @@ import { TwintManualQrTender } from '../payment/TwintManualQrTender';
 import { loadTwintManualConfiguration, twintManualMetadata, type TwintManualConfiguration, type TwintConfirmationAction } from '../../services/TwintManualQrService';
 import twintLogo from '../../../../../shared/payments/assets/twint-logo.png';
 import { admitTwintCollection, loadPendingTwintReceipts, saveOriginalTwintReceipt, twintAdmissionReason } from '../../services/TwintReceiptRecoveryService';
-import { useOrderStore } from '../../hooks/useOrderStore';
 import type { UnsavedChargedPaymentSummary } from '../../../lib/ipc-adapter';
 import { ChangingValue } from '../ui/ChangingValue';
 import {
@@ -127,6 +129,11 @@ interface PaymentModalProps {
   ) => PaymentCompletionResult | Promise<PaymentCompletionResult>;
   /** When provided, a "Split" button is rendered alongside Cash/Card in the payment selection step. */
   onSplitPayment?: (tipSelection: TipSelection | null) => void;
+  /**
+   * The tip to show when the window opens (founder 01/11/2026): the tip chosen before a split the cashier backed
+   * out of comes back with the cart. Read only when the window opens.
+   */
+  initialTipSelection?: TipSelection | null;
   roomChargeContext?: RoomChargeContext | null;
   allowTips?: boolean;
   /** The order's stylists (`staff_id` on its lines): a tip may go to one of them. */
@@ -137,6 +144,11 @@ interface PaymentModalProps {
    * claim its ordinary collection, and the host may offer a fixed full gift card.
    */
   existingOrder?: PaymentModalExistingOrder;
+  /**
+   * When provided (the host passes it only while nothing is paid on the order), a «Cancel order» action is shown
+   * under the payment methods; the host runs its normal cancellation (coordinator 01/11, founder «Ναι, έτσι»).
+   */
+  onCancelOrder?: () => void;
 }
 
 type ModalStep = 'minimum_warning' | 'payment_selection' | 'cash_input' | 'gift' | 'twint';
@@ -225,7 +237,7 @@ export const CashChangeChip: React.FC<{
   item: CashChangeBreakdownItem;
   formattedValue: string;
 }> = ({ item, formattedValue }) => {
-  const Icon = item.type === 'bill' ? Banknote : Coins;
+  const Icon = item.type === 'bill' ? CashHandIcon : Coins;
 
   return (
     <span className={CASH_CHANGE_CHIP_CLASS}>
@@ -246,7 +258,7 @@ export const CashChangeChip: React.FC<{
 
 export const PaymentModal: React.FC<PaymentModalProps> = ({
   isOpen,
-  onClose,
+  onClose: onPaymentClose,
   orderTotal,
   currency,
   discountAmount = 0,
@@ -263,8 +275,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   allowTwint = true,
   existingOrder,
   tipStaffOptions,
+  initialTipSelection,
+  onCancelOrder,
 }) => {
   const { t } = useTranslation();
+  const supportPayment = useSupportPaymentCritical(isOpen);
+  const onClose = () => { supportPayment.close(); onPaymentClose(); };
   const { isFeatureEnabled, isMobileWaiter, loading: isFeatureLoading } = useFeatures();
   const { hasModule } = useAcquiredModules();
   const [twintConfiguration, setTwintConfiguration] = useState<TwintManualConfiguration | null>(null);
@@ -304,6 +320,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [roomChargeFallback, setRoomChargeFallback] = useState<RoomChargeFallbackPrompt | null>(null);
   const [showTipModal, setShowTipModal] = useState(false);
   const [tipSelection, setTipSelection] = useState<TipSelection | null>(null);
+  const initialTipSelectionRef = useRef<TipSelection | null>(null);
+  initialTipSelectionRef.current = initialTipSelection ?? null;
   const cashInputRef = useRef<HTMLInputElement | null>(null);
   // This modal's own existing-order cash/card attempt holds the order's claim.
   const ordinaryAttemptRef = useRef(false);
@@ -398,12 +416,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         amounts.push(rounded);
       }
 
-      if (amounts.length >= 5) {
+      // Founder 01/11/2026 («εδω λειπει το 100»): six, so the 100 note is there and the third column is full.
+      if (amounts.length >= 6) {
         break;
       }
     }
 
-    return amounts.sort((a, b) => a - b).slice(0, 5);
+    return amounts.sort((a, b) => a - b).slice(0, 6);
   }, [roundedOrderTotal]);
 
   const changeBreakdown = useMemo<CashChangeBreakdownItem[]>(() => {
@@ -448,7 +467,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setSelectedPaymentMethod(null);
       setRoomChargeFallback(null);
       setShowTipModal(false);
-      setTipSelection(null);
+      setTipSelection(initialTipSelectionRef.current);
     }
   }, [isOpen, isProcessing, isBelowMinimum, giftReceiptRecovery]);
 
@@ -570,7 +589,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     await onPaymentAdmissionCancelled?.();
   };
 
-  const handleTwintConfirm = async (action: TwintConfirmationAction, idempotencyKey: string): Promise<boolean> => {
+  const handleTwintConfirm = async (action: TwintConfirmationAction, idempotencyKey: string): Promise<boolean> => supportPayment.run(async () => {
     // Confirmed means the customer paid: once the QR was admitted, nothing
     // here may refuse the receipt before it reaches the native journal.
     if (twintSendRef.current || giftReceiptRecovery) return false;
@@ -607,10 +626,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       if (ordinaryOwner && ordinaryCollectionView(ordinaryOwner)?.phase === 'held') releaseOrdinaryOwnerBeforeSend(ordinaryOwner);
       twintSendRef.current = false; setIsProcessingPayment(false);
     }
-  };
+  });
 
   // Simple payment handler - just method, no amount input needed
-  const handleSimplePayment = async (method: Exclude<PaymentMethodSelection, 'twint'>) => {
+  const handleSimplePayment = async (method: Exclude<PaymentMethodSelection, 'twint'>) => supportPayment.run(async () => {
     if (pendingTwintReceipts.length) return;
     if (method === 'room_charge' && !canChargeFolio(roomChargeContext?.currency, getStoreCurrency())) return;
     // A receipt reentry never collects money.
@@ -722,7 +741,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           : t(`modals.payment.${method}Success`),
       );
     } catch (error) {
-      toast.error(t('modals.payment.paymentFailed'));
+      toast.error(paymentRefusalMessage(error, t) ?? t('modals.payment.paymentFailed'));
     } finally {
       if (ordinaryOwner) {
         ordinaryAttemptRef.current = false;
@@ -734,7 +753,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       }
       setIsProcessingPayment(false);
     }
-  };
+  });
 
   // Handle cash payment completion
   const handleCashPaymentComplete = () => {
@@ -911,7 +930,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         {/* Step: Minimum Order Warning */}
         {pendingTwintReceipts.length>0 && <div className="space-y-4" role="alert">
           <p>{t('twintPayment.receiptRecovery','A TWINT receipt is confirmed but its payment is not saved. Save the original receipt before taking another payment.')}</p>
-          <button type="button" disabled={twintRecovering} className="liquid-glass-modal-button" onClick={async()=>{
+          <button type="button" disabled={twintRecovering} className="liquid-glass-modal-button" onClick={async()=>supportPayment.run(async()=>{
             if(twintRecovering)return; setTwintRecovering(true);
             try {
               if(await saveOriginalTwintReceipt(pendingTwintReceipts[0])) {
@@ -921,7 +940,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               } else toast.error(t('twintPayment.saveFailed','The payment could not be saved. Check its status before trying again.'));
             } catch { toast.error(t('twintPayment.saveFailed','The payment could not be saved. Check its status before trying again.')); }
             finally {setTwintRecovering(false);}
-          }}>{t('twintPayment.saveOriginal','Save original TWINT receipt')}</button>
+          })}>{t('twintPayment.saveOriginal','Save original TWINT receipt')}</button>
         </div>}
         {pendingTwintReceipts.length===0 && currentStep === 'minimum_warning' && (
           <div className="space-y-4">
@@ -960,10 +979,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               type="button"
               onClick={() => setShowTipModal(true)}
               disabled={isProcessingPayment}
-              className={`mb-4 flex min-h-14 w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left transition-colors ${
+              data-depth="off"
+              // Founder 01/11: a glass card with the panel depth, like the payment choices under it; a tip already
+              // added keeps its green edge.
+              className={`payment-tip-row mb-4 flex min-h-14 w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left transition-colors ${
                 tipAmount > 0
-                  ? 'border-emerald-600 bg-(--pos-s-surface-2)'
-                  : 'border-white/10 bg-white/5 '
+                  ? 'border-emerald-600'
+                  : 'border-(--modal-glass-card-border)'
               } ${isProcessingPayment ? 'cursor-not-allowed opacity-50' : 'active:scale-[0.99]'}`}
             >
               <span className="flex items-center gap-3">
@@ -1154,6 +1176,20 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   </button>
                 )}
               </div>
+            )}
+
+            {/* An unpaid order taken to payment can still be cancelled (the host's normal cancel): the kit's
+                raised button with red words. */}
+            {onCancelOrder && (
+              <button
+                type="button"
+                data-testid="payment-cancel-order"
+                onClick={onCancelOrder}
+                disabled={isProcessingPayment}
+                className="pos-solid-btn pos-solid-btn--md pos-solid-btn--danger mt-4 w-full"
+              >
+                {t('modals.payment.cancelOrder', 'Cancel order')}
+              </button>
             )}
 
             {/* Processing indicator */}

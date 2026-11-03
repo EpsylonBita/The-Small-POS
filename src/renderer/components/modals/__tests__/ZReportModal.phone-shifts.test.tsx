@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ZReportModal from '../ZReportModal';
 import { formatCurrency } from '../../../utils/format';
+import { pickKitDate } from '../../ui/__tests__/pickKitDate';
 
 // Founder rule 13/10/2026: phones always hand over to the Main. The Z cannot
 // run while any phone shift of the unit is still open, and it names them; a
@@ -34,6 +35,7 @@ const mocks = vi.hoisted(() => {
   };
   return {
     listeners,
+    workCardEnabled: false,
     translate,
     features,
     bridge: {
@@ -49,6 +51,8 @@ const mocks = vi.hoisted(() => {
     clearShift: vi.fn(),
   };
 });
+
+vi.mock('../../../hooks/useWorkCardStatus', () => ({ useWorkCardStatus: () => ({ data: { enabled: mocks.workCardEnabled }, offline: false, scope: 'main' }) }));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: mocks.translate, i18n: { language: 'en', changeLanguage: vi.fn() } }),
@@ -195,6 +199,7 @@ const openStaffTab = () =>
 
 beforeEach(() => {
   localStorage.clear();
+  mocks.workCardEnabled = false;
   mocks.listeners.clear();
   mocks.features.isMainTerminal = true;
   mocks.features.isMobileWaiter = false;
@@ -209,6 +214,19 @@ afterEach(() => {
 });
 
 describe('ZReportModal phone shifts', () => {
+  it('adds the personal PIN hint only with an enabled work card and keeps the Z blocked', async () => {
+    mocks.workCardEnabled = true;
+    serveReport(liveReport());
+    mocks.bridge.shifts.unitReadiness.mockResolvedValue(readiness({ open: [openShift()] }));
+    const modal = renderModal();
+    await waitFor(() => expect(phoneShiftLines()).toContain('workCard.zHint'));
+    expect(commitButton().disabled).toBe(true);
+    mocks.workCardEnabled = false;
+    modal.rerender(<ZReportModal isOpen onClose={vi.fn()} branchId="branch-1" />);
+    await waitFor(() => expect(phoneShiftLines()).not.toContain('workCard.zHint'));
+    expect(commitButton().disabled).toBe(true);
+  });
+
   it('names every open phone shift and holds the commit', async () => {
     serveReport(liveReport());
     mocks.bridge.shifts.unitReadiness.mockResolvedValue(readiness({
@@ -343,7 +361,7 @@ describe('ZReportModal phone shifts', () => {
     renderModal();
     await waitFor(() => expect(phoneShiftLines()).toHaveLength(1));
 
-    fireEvent.change(screen.getByLabelText('modals.zReport.selectBusinessDay'), { target: { value: '2020-01-01' } });
+    pickKitDate(screen.getByLabelText('modals.zReport.selectBusinessDay'), '2020-01-01');
     await waitFor(() => expect(mocks.bridge.reports.generateZReport).toHaveBeenLastCalledWith({
       branchId: 'branch-1',
       date: '2020-01-01',

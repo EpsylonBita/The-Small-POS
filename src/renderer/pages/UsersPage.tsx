@@ -3,7 +3,6 @@ import { motion } from 'framer-motion';
 import { posApiFetch, posApiGet } from '../utils/api-helpers';
 import { renderModalPortal } from '../utils/render-modal-portal';
 import { useTranslation } from 'react-i18next';
-import { useTheme } from '../contexts/theme-context';
 import { useModuleAccess } from '../contexts/module-context';
 import { extractSavedAddressCoordinates } from '../utils/saved-address-geolocation';
 import { toValidLatLng } from '../utils/coordinates';
@@ -24,6 +23,7 @@ import {
   type UserStatusFilter,
 } from '../utils/userDirectoryFilters';
 import {
+  User,
   Users,
   Search,
   Filter,
@@ -36,9 +36,7 @@ import {
   MapPin,
   Star,
   ShoppingBag,
-  DollarSign,
   RefreshCw,
-  Clock,
   Trash2,
   Save,
   X
@@ -196,7 +194,6 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
-  const { resolvedTheme } = useTheme();
   const hasDeliveryModule = useModuleAccess('delivery').isEnabled;
   const hasDeliveryZonesModule = useModuleAccess('delivery_zones').isEnabled;
   const hasDeliveryPro = hasDeliveryModule && hasDeliveryZonesModule;
@@ -863,26 +860,34 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
     }
   };
 
+  // Founder 01/11: the loyalty tier is a plain word — no bronze/silver/gold/platinum colours and no star badge,
+  // because a tier is a fact about the customer, not a state that needs a look. Its points follow as muted words.
   const getLoyaltyBadge = (points: number) => {
     const tierKey = getLoyaltyTierKey(points);
-    const color =
-      tierKey === 'platinum'
-        ? 'text-amber-700 dark:text-amber-300'
-        : tierKey === 'gold'
-          ? 'text-yellow-800 dark:text-yellow-400'
-          : tierKey === 'silver'
-            ? 'text-zinc-600 dark:text-zinc-300'
-            : 'text-orange-700 dark:text-orange-500';
-
     const tierLabel = t(`users.loyaltyTier.${tierKey}`, tierKey.charAt(0).toUpperCase() + tierKey.slice(1));
 
-    return (
-      <span className={`inline-flex items-center text-xs font-medium ${color}`}>
-        <Star className="w-3 h-3 mr-1" />
-        {tierLabel}
-      </span>
-    );
+    return <span className="text-sm font-semibold">{tierLabel}</span>;
   };
+
+  // Founder 01/11 («διόρθωσε και επανασχεδίασε και αυτή την σελίδα»): the page and its windows in the POS kit — a
+  // pos-card hero with the refresh as a kit icon button, the kit search field and a kit filter trigger, the
+  // customers as kit list rows inside a pos-card (no yellow table header), neutral icons, status as a coloured
+  // word, kit icon buttons for view / block, kit pagination buttons with plain words, and the shared glass shell
+  // with ONE field look for the customer details and address-delete windows.
+  const subtleClass = 'text-(--pos-s-muted)';
+  const kitFieldLook = 'min-h-[48px] rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) px-3 text-base font-semibold text-(--pos-s-fg) outline-hidden transition-colors placeholder:font-normal placeholder:text-zinc-400 focus:border-(--pos-s-yellow) dark:placeholder:text-zinc-500';
+  const fieldClass = `w-full ${kitFieldLook}`;
+  // The same field with room for its leading search icon.
+  const searchFieldClass = 'min-h-[48px] w-full rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) pl-10 pr-3 text-base font-semibold text-(--pos-s-fg) outline-hidden transition-colors placeholder:font-normal placeholder:text-zinc-400 focus:border-(--pos-s-yellow) dark:placeholder:text-zinc-500';
+  const fieldLabelClass = 'mb-1 block text-sm font-semibold text-(--pos-s-fg)';
+  const sectionTitleClass = `mb-2 text-xs font-semibold uppercase tracking-wider ${subtleClass}`;
+  const primaryButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';
+  const secondaryButtonClass = 'pos-solid-btn pos-solid-btn--md';
+  const dangerButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--danger';
+  const smallButtonClass = 'pos-solid-btn pos-solid-btn--sm';
+  const modalShellClass = 'liquid-glass-modal-shell relative flex w-full flex-col overflow-hidden text-(--pos-s-fg)';
+  const modalHeaderClass = 'flex shrink-0 items-start justify-between gap-4 border-b border-(--modal-glass-line) p-5';
+  const modalFooterClass = 'flex shrink-0 flex-wrap items-center gap-3 border-t border-(--modal-glass-line) p-5';
 
   const filtersActive = hasActiveUserDirectoryFilters({ status: statusFilter, loyalty: loyaltyFilter });
 
@@ -920,15 +925,15 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
   }, [activePage, filteredUsers]);
 
   return (
-    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="p-6">
-      {/* Header */}
-      <motion.div variants={pageMotionItem} className="mb-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className={`truncate text-3xl font-bold tracking-tight ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="flex flex-col gap-4 p-4 md:p-5 text-(--pos-s-fg)">
+      {/* Header: the kit hero — title, one muted line, the refresh as a kit icon button. */}
+      <motion.div variants={pageMotionItem} className="pos-card p-4 md:p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="truncate text-3xl font-bold tracking-tight">
               {t('users.title') || 'Users Management'}
             </h1>
-            <p className={`mt-1 truncate text-sm ${resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
+            <p className={`mt-1 truncate text-sm ${subtleClass}`}>
               {t('users.description') || 'View and manage customer accounts'}
             </p>
           </div>
@@ -937,66 +942,52 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
             onClick={() => void loadUsers()}
             disabled={loading}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+            className="pos-icon-btn"
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </motion.div>
 
-      {/* Search & Filters */}
-      <motion.div variants={pageMotionItem} className={`mb-6 p-4 rounded-xl ${
-        resolvedTheme === 'dark' ? 'bg-zinc-900/70' : 'bg-gray-100'
-      }`}>
-        <div className="flex items-center">
-          <div className="relative w-full">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-4 w-4" />
+      {/* The customers: toolbar (kit search field + kit filter trigger), kit list rows, kit pagination. */}
+      <motion.div variants={pageMotionItem} className="pos-card">
+        <div className="flex items-center gap-2 border-b border-(--pos-s-border) p-3 md:p-4">
+          <div className="relative min-w-0 flex-1">
+            <Search className={`pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 ${subtleClass}`} aria-hidden="true" />
             <input
               type="text"
               placeholder={t('users.searchPlaceholder') || 'Search by name, email, or phone...'}
+              aria-label={t('users.searchPlaceholder') || 'Search by name, email, or phone...'}
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className={`w-full pl-10 pr-12 py-2 rounded-2xl ${
-                resolvedTheme === 'dark'
-                  ? 'bg-zinc-800 text-white border-zinc-600 focus:ring-white/40 focus:border-white/70'
-                  : 'bg-white text-gray-900 border-gray-300 focus:ring-gray-400 focus:border-gray-500'
-              } border focus:ring-2`}
+              className={searchFieldClass}
             />
+          </div>
+          {/* The filter trigger is a kit icon button; while a status or tier filter is on it shows the kit
+              selection (yellow with dark words) instead of the old yellow dot. */}
+          <div className="relative shrink-0">
             <button
               type="button"
               onClick={() => setShowFilterMenu(open => !open)}
               aria-label={t('users.filters.openLabel', 'Filter users')}
               aria-haspopup="menu"
               aria-expanded={showFilterMenu}
-              className={`absolute right-2 top-1/2 -translate-y-1/2 rounded-2xl p-1.5 transition-transform active:scale-95 ${
-                filtersActive
-                  ? 'text-yellow-500'
-                  : resolvedTheme === 'dark'
-                    ? 'text-zinc-400 active:bg-white/10'
-                    : 'text-gray-600 active:bg-gray-200'
-              }`}
+              className={`pos-icon-btn${filtersActive ? ' border-(--pos-s-sel-bg)! bg-(--pos-s-sel-bg)! text-(--pos-s-sel-fg)!' : ''}`}
             >
               <Filter className="h-5 w-5" />
-              {filtersActive && (
-                <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-yellow-500" aria-hidden="true" />
-              )}
             </button>
             {showFilterMenu && (
               <>
                 <div className="fixed inset-0 z-1190" onClick={() => setShowFilterMenu(false)} aria-hidden="true" />
                 <div
                   role="menu"
-                  className={`absolute right-0 top-full z-1200 mt-2 flex max-h-[calc(100vh-28rem)] min-h-48 w-64 flex-col rounded-2xl border p-3 shadow-2xl ${
-                    resolvedTheme === 'dark'
-                      ? 'bg-zinc-900 border-zinc-700 text-white'
-                      : 'bg-white border-gray-200 text-gray-900'
-                  }`}
+                  className="absolute right-0 top-full z-1200 mt-2 flex max-h-[calc(100vh-22rem)] min-h-48 w-64 flex-col rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface) p-3 text-(--pos-s-fg) shadow-xl"
                 >
                   <div className="-mr-1 min-h-0 flex-1 overflow-y-auto pr-1 scrollbar-hide">
-                  <p className={`mb-1.5 text-xs font-semibold uppercase tracking-wider ${resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-600'}`}>
+                  <p className={sectionTitleClass}>
                     {t('users.filters.statusLabel', 'Status')}
                   </p>
-                  <div className="mb-3 flex flex-col gap-1">
+                  <div className="mb-3 flex flex-col gap-1.5">
                     {USER_STATUS_FILTERS.map(option => (
                       <button
                         key={option}
@@ -1004,22 +995,16 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                         role="menuitemradio"
                         aria-checked={statusFilter === option}
                         onClick={() => setStatusFilter(option)}
-                        className={`rounded-2xl px-3 py-1.5 text-left text-sm transition-transform active:scale-[0.98] ${
-                          statusFilter === option
-                            ? 'bg-yellow-400 text-black'
-                            : resolvedTheme === 'dark'
-                              ? 'text-zinc-200 active:bg-white/10'
-                              : 'text-gray-700 active:bg-gray-100'
-                        }`}
+                        className={`pos-choice w-full justify-start! text-left${statusFilter === option ? ' is-selected' : ''}`}
                       >
                         {t(`users.filters.status.${option}`, option.charAt(0).toUpperCase() + option.slice(1))}
                       </button>
                     ))}
                   </div>
-                  <p className={`mb-1.5 text-xs font-semibold uppercase tracking-wider ${resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-600'}`}>
+                  <p className={sectionTitleClass}>
                     {t('users.filters.loyaltyLabel', 'Loyalty tier')}
                   </p>
-                  <div className="flex flex-col gap-1">
+                  <div className="flex flex-col gap-1.5">
                     {USER_LOYALTY_FILTERS.map(option => (
                       <button
                         key={option}
@@ -1027,13 +1012,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                         role="menuitemradio"
                         aria-checked={loyaltyFilter === option}
                         onClick={() => setLoyaltyFilter(option)}
-                        className={`rounded-2xl px-3 py-1.5 text-left text-sm transition-transform active:scale-[0.98] ${
-                          loyaltyFilter === option
-                            ? 'bg-yellow-400 text-black'
-                            : resolvedTheme === 'dark'
-                              ? 'text-zinc-200 active:bg-white/10'
-                              : 'text-gray-700 active:bg-gray-100'
-                        }`}
+                        className={`pos-choice w-full justify-start! text-left${loyaltyFilter === option ? ' is-selected' : ''}`}
                       >
                         {option === 'all'
                           ? t('users.filters.loyalty.all', 'All tiers')
@@ -1046,11 +1025,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                     <button
                       type="button"
                       onClick={() => { setStatusFilter('all'); setLoyaltyFilter('all'); }}
-                      className={`mt-3 shrink-0 w-full rounded-2xl border px-3 py-1.5 text-sm font-medium transition-transform active:scale-[0.98] ${
-                        resolvedTheme === 'dark'
-                          ? 'border-zinc-700 text-zinc-200 active:bg-white/10'
-                          : 'border-gray-200 text-gray-700 active:bg-gray-100'
-                      }`}
+                      className={`mt-3 shrink-0 w-full ${smallButtonClass}`}
                     >
                       {t('users.filters.clear', 'Clear filters')}
                     </button>
@@ -1060,26 +1035,22 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
             )}
           </div>
         </div>
-      </motion.div>
 
-      {/* Users Table */}
-      <motion.div variants={pageMotionItem} className={`rounded-xl overflow-hidden ${
-        resolvedTheme === 'dark' ? 'bg-zinc-950' : 'bg-gray-100'
-      }`}>
         {loading ? (
-          <div className="p-12 text-center">
-            <RefreshCw className="w-8 h-8 mx-auto mb-4 animate-spin text-yellow-500" />
-            <p className={resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'}>
+          <div className="flex min-h-[260px] flex-col items-center justify-center p-8 text-center">
+            <RefreshCw className={`mb-3 h-8 w-8 animate-spin ${subtleClass}`} aria-hidden="true" />
+            <p className={`text-sm ${subtleClass}`}>
               {t('common.loading') || 'Loading...'}
             </p>
           </div>
         ) : filteredUsers.length === 0 ? (
-          <div className="p-12 text-center">
-            <Users className="w-12 h-12 mx-auto mb-4 text-gray-400" />
-            <h3 className={`text-lg font-medium mb-2 ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+          // Empty state: a neutral icon without a wrapper, one title, one muted line.
+          <div className="flex min-h-[260px] flex-col items-center justify-center p-8 text-center">
+            <Users className={`mb-3 h-10 w-10 ${subtleClass}`} aria-hidden="true" />
+            <h3 className="text-base font-bold">
               {t('users.noUsers') || 'No users found'}
             </h3>
-            <p className={resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}>
+            <p className={`mt-1 max-w-sm text-sm ${subtleClass}`}>
               {searchTerm || filtersActive
                 ? t('users.noMatches') || 'No users match your search or filters'
                 : t('users.noUsersYet') || 'No users yet'}
@@ -1087,184 +1058,116 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
           </div>
         ) : (
           <>
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-yellow-400">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
-                    {t('users.customer') || 'Customer'}
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
-                    {t('users.contact') || 'Contact'}
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
-                    {t('users.activity') || 'Activity'}
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
-                    {t('users.loyalty') || 'Loyalty'}
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
-                    {t('users.status') || 'Status'}
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-black">
-                    {t('users.actions') || 'Actions'}
-                  </th>
-                </tr>
-              </thead>
-              <tbody className={`divide-y ${resolvedTheme === 'dark' ? 'divide-zinc-700' : 'divide-gray-300'}`}>
-                {paginatedUsers.map((user) => (
-                  <motion.tr
-                    key={user.id}
-                    variants={pageMotionItem}
-                    className={`transition-colors ${
-                      resolvedTheme === 'dark' ? 'active:bg-zinc-900' : 'active:bg-gray-200'
-                    } ${updatingUserId === user.id ? 'opacity-50 pointer-events-none' : ''}`}
+          {/* Kit list rows: who (initials + name + role), contact, orders, loyalty, status word, kit icon
+              actions. Icons are neutral; only the status word carries a colour (active ok, blocked bad). */}
+          {/* Each row is its own grid, so the short facts get fixed widths and the columns line up row to row. */}
+          <div role="list" className="divide-y divide-(--pos-s-border)">
+            {paginatedUsers.map((user) => (
+              <motion.div
+                key={user.id}
+                role="listitem"
+                variants={pageMotionItem}
+                className={`flex flex-wrap items-center gap-x-6 gap-y-3 px-4 py-3 lg:grid lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1.3fr)_6.5rem_8rem_7rem_6rem] lg:gap-3 ${updatingUserId === user.id ? 'opacity-50 pointer-events-none' : ''}`}
+              >
+                <div className="flex min-w-48 flex-1 items-center gap-3 lg:min-w-0">
+                  <div
+                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-(--pos-s-surface-2) text-sm font-semibold ${subtleClass}`}
+                    aria-hidden="true"
                   >
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        <div className={`h-10 w-10 rounded-full flex items-center justify-center ${
-                          resolvedTheme === 'dark' ? 'bg-zinc-700' : 'bg-gray-300'
-                        }`}>
-                          <span className={`text-sm font-medium ${
-                            resolvedTheme === 'dark' ? 'text-zinc-300' : 'text-gray-700'
-                          }`}>
-                            {user.name?.split(' ').map(n => n[0]).join('') || 'U'}
-                          </span>
-                        </div>
-                        <div className="ml-4">
-                          <div className={`text-sm font-medium ${
-                            resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-                          }`}>
-                            {user.name || t('users.unnamed', 'Unnamed User')}
-                          </div>
-                          <div className={`text-sm ${
-                            resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
-                          }`}>
-                            {user.type === 'app_user' ? t('users.filterAppUsers', 'App User') : t('users.customer', 'Customer')}
-                          </div>
-                        </div>
-                      </div>
-                    </td>
+                    {user.name?.split(' ').map(n => n[0]).join('') || 'U'}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate text-base font-bold">
+                      {user.name || t('users.unnamed', 'Unnamed User')}
+                    </p>
+                    <p className={`truncate text-sm ${subtleClass}`}>
+                      {user.type === 'app_user' ? t('users.filterAppUsers', 'App User') : t('users.customer', 'Customer')}
+                    </p>
+                  </div>
+                </div>
 
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="space-y-1">
-                        {user.email && (
-                          <div className={`flex items-center text-sm ${
-                            resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-                          }`}>
-                            <Mail className="w-4 h-4 mr-2 text-yellow-500" />
-                            {user.email}
-                          </div>
-                        )}
-                        {user.phone && (
-                          <div className={`flex items-center text-sm ${
-                            resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
-                          }`}>
-                            <Phone className="w-4 h-4 mr-2 text-yellow-500" />
-                            {user.phone}
-                          </div>
-                        )}
-                      </div>
-                    </td>
+                <div className={`min-w-48 flex-1 space-y-1 text-sm ${subtleClass} lg:min-w-0`}>
+                  {user.email && (
+                    <p className="flex min-w-0 items-center gap-2">
+                      <Mail className="h-4 w-4 shrink-0" aria-hidden="true" />
+                      <span className="truncate">{user.email}</span>
+                    </p>
+                  )}
+                  {user.phone && (
+                    <p className="flex min-w-0 items-center gap-2">
+                      <Phone className="h-4 w-4 shrink-0" aria-hidden="true" />
+                      <span className="truncate">{user.phone}</span>
+                    </p>
+                  )}
+                </div>
 
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="space-y-1">
-                        <div className={`flex items-center text-sm ${
-                          resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-                        }`}>
-                          <ShoppingBag className="w-4 h-4 mr-2 text-green-500" />
-                          {user.total_orders} {t('users.orders') || 'orders'}
-                        </div>
-                      </div>
-                    </td>
+                <div className="flex items-center gap-2 whitespace-nowrap">
+                  <ShoppingBag className={`h-4 w-4 shrink-0 ${subtleClass}`} aria-hidden="true" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold tabular-nums">{user.total_orders}</p>
+                    <p className={`text-xs ${subtleClass}`}>{t('users.orders') || 'orders'}</p>
+                  </div>
+                </div>
 
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="space-y-2">
-                        {getLoyaltyBadge(user.loyalty_points)}
-                        <div className={`text-xs ${
-                          resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
-                        }`}>
-                          {user.loyalty_points} {t('users.points') || 'points'}
-                        </div>
-                      </div>
-                    </td>
+                <div className="flex items-center gap-2 whitespace-nowrap">
+                  <Star className={`h-4 w-4 shrink-0 ${subtleClass}`} aria-hidden="true" />
+                  <div className="min-w-0">
+                    {getLoyaltyBadge(user.loyalty_points)}
+                    <p className={`text-xs tabular-nums ${subtleClass}`}>
+                      {user.loyalty_points} {t('users.points') || 'points'}
+                    </p>
+                  </div>
+                </div>
 
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="space-y-2">
-                        {user.is_banned ? (
-                          <span className="inline-flex items-center text-xs font-medium text-red-700 dark:text-red-400">
-                            <Ban className="w-3 h-3 mr-1" />
-                            {t('users.banned') || 'Banned'}
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center text-xs font-medium text-green-800 dark:text-green-400">
-                            <CheckCircle className="w-3 h-3 mr-1" />
-                            {t('users.active') || 'Active'}
-                          </span>
-                        )}
-                      </div>
-                    </td>
+                <span className={`text-sm font-semibold ${user.is_banned ? 'text-(--pos-s-bad)' : 'text-(--pos-s-ok)'}`}>
+                  {user.is_banned ? t('users.banned') || 'Banned' : t('users.active') || 'Active'}
+                </span>
 
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => handleViewUser(user)}
-                          className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-amber-500 transition-transform active:scale-[0.96] active:bg-(--pos-s-surface-2)"
-                          aria-label={t('users.viewDetails') || 'View details'}
-                        >
-                          <Eye className="w-5 h-5" />
-                        </button>
-                        {user.type !== 'app_user' && (
-                          <button
-                            onClick={() => handleToggleBan(user.id, user.is_banned || false)}
-                            className={`inline-flex h-10 w-10 items-center justify-center rounded-xl transition-transform active:scale-[0.96] ${
-                              user.is_banned
-                                ? 'text-green-600 dark:text-green-400 active:bg-(--pos-s-surface-2)'
-                                : 'text-red-600 dark:text-red-400 active:bg-(--pos-s-surface-2)'
-                            }`}
-                            aria-label={user.is_banned ? t('users.unban') || 'Unban' : t('users.ban') || 'Ban'}
-                          >
-                            {user.is_banned ? <CheckCircle className="w-5 h-5" /> : <Ban className="w-5 h-5" />}
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </motion.tr>
-                ))}
-              </tbody>
-            </table>
+                <div className="ml-auto flex items-center gap-2 lg:ml-0 lg:justify-end">
+                  <button
+                    type="button"
+                    onClick={() => handleViewUser(user)}
+                    className="pos-icon-btn"
+                    aria-label={t('users.viewDetails') || 'View details'}
+                  >
+                    <Eye className="h-5 w-5" />
+                  </button>
+                  {user.type !== 'app_user' && (
+                    <button
+                      type="button"
+                      onClick={() => handleToggleBan(user.id, user.is_banned || false)}
+                      className={user.is_banned ? 'pos-icon-btn' : 'pos-icon-btn pos-icon-btn--danger'}
+                      aria-label={user.is_banned ? t('users.unban') || 'Unban' : t('users.ban') || 'Ban'}
+                    >
+                      {user.is_banned ? <CheckCircle className="h-5 w-5" /> : <Ban className="h-5 w-5" />}
+                    </button>
+                  )}
+                </div>
+              </motion.div>
+            ))}
           </div>
-          <div className={`flex flex-col gap-3 border-t px-6 py-4 text-sm md:flex-row md:items-center md:justify-between ${
-            resolvedTheme === 'dark' ? 'border-zinc-700 text-zinc-300' : 'border-gray-300 text-gray-700'
-          }`}>
-            <span>
-              {pageStart}-{pageEnd} of {filteredUsers.length}
+          {/* Pagination: plain words ("1–9 of 9") and kit buttons. */}
+          <div className="flex flex-col gap-3 border-t border-(--pos-s-border) px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+            <span className="font-semibold tabular-nums">
+              {t('users.pagination.range', '{{start}}–{{end}} of {{total}}', { start: pageStart, end: pageEnd, total: filteredUsers.length })}
             </span>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => setCurrentPage(page => Math.max(1, page - 1))}
                 disabled={activePage === 1}
-                className={`rounded-2xl border px-3 py-2 font-medium transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
-                  resolvedTheme === 'dark'
-                    ? 'border-yellow-500 text-yellow-700 dark:text-yellow-400 active:bg-yellow-400 active:text-black'
-                    : 'border-yellow-500 text-yellow-700 active:bg-yellow-400 active:text-black'
-                }`}
+                className={smallButtonClass}
               >
                 {t('users.pagination.previous', 'Previous')}
               </button>
-              <span className={resolvedTheme === 'dark' ? 'text-zinc-400' : 'text-gray-600'}>
+              <span className={`px-1 tabular-nums ${subtleClass}`}>
                 {t('users.pagination.pageOf', 'Page {{current}} of {{total}}', { current: activePage, total: totalPages })}
               </span>
               <button
                 type="button"
                 onClick={() => setCurrentPage(page => Math.min(totalPages, page + 1))}
                 disabled={activePage === totalPages}
-                className={`rounded-2xl border px-3 py-2 font-medium transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
-                  resolvedTheme === 'dark'
-                    ? 'border-yellow-500 text-yellow-700 dark:text-yellow-400 active:bg-yellow-400 active:text-black'
-                    : 'border-yellow-500 text-yellow-700 active:bg-yellow-400 active:text-black'
-                }`}
+                className={smallButtonClass}
               >
                 {t('users.pagination.next', 'Next')}
               </button>
@@ -1274,281 +1177,221 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
         )}
       </motion.div>
 
-      {/* User Details Modal */}
+      {/* Customer details window: the shared glass shell — header (title, close X), body sections as pos-frost,
+          footer with Block / Unblock (danger / neutral) and the neutral Close. */}
       {showDetailsModal && selectedUser && renderModalPortal(
-        <div className="fixed inset-0 z-1200 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+        <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
+          <div className="liquid-glass-modal-backdrop" aria-hidden="true" />
           <div
             ref={detailsDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby={detailsTitleId}
-            className={`max-w-2xl w-full max-h-[calc(100dvh-2rem)] flex flex-col rounded-2xl overflow-hidden border shadow-xl ${
-            resolvedTheme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
-          }`}>
-            <div className={`shrink-0 px-6 py-4 border-b ${
-              resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-            }`}>
-              <h3 id={detailsTitleId} className={`text-xl font-semibold ${
-                resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-              }`}>
-                {t('users.customerDetails') || 'Customer Details'}
-              </h3>
+            className={`max-h-[calc(100dvh-2rem)] max-w-2xl ${modalShellClass}`}
+          >
+            <div className={modalHeaderClass}>
+              <div className="min-w-0">
+                <h3 id={detailsTitleId} className="truncate text-2xl font-bold">
+                  {t('users.customerDetails') || 'Customer Details'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={closeDetailsModal}
+                className="liquid-glass-modal-close"
+                aria-label={t('common.close', 'Close')}
+              >
+                <X className="h-5 w-5" aria-hidden="true" />
+              </button>
             </div>
 
-            <div className="min-h-0 overflow-y-auto p-6 space-y-6">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto scrollbar-hide p-5">
               {/* Basic Info */}
-              <div>
-                <h4 className={`text-sm font-medium mb-3 ${
-                  resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
-                }`}>
+              <section>
+                <h4 className={sectionTitleClass}>
                   {t('users.basicInfo') || 'Basic Information'}
                 </h4>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                      {t('users.name') || 'Name'}
-                    </p>
-                    <p className={`text-sm font-medium ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                      {selectedUser.name}
-                    </p>
-                  </div>
-                  <div>
-                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                      {t('users.phone') || 'Phone'}
-                    </p>
-                    <p className={`text-sm font-medium ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                      {selectedUser.phone || 'N/A'}
-                    </p>
-                  </div>
-                  <div>
-                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                      {t('users.email') || 'Email'}
-                    </p>
-                    <p className={`text-sm font-medium ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                      {selectedUser.email || 'N/A'}
-                    </p>
-                  </div>
-                  <div>
-                    <p className={`text-xs ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                      {t('users.status') || 'Status'}
-                    </p>
-                    <p className={`text-sm font-medium ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                      {selectedUser.is_banned ? (
-                        <span className="text-red-600 dark:text-red-400">{t('users.banned') || 'Banned'}</span>
-                      ) : (
-                        <span className="text-green-600 dark:text-green-400">{t('users.active') || 'Active'}</span>
-                      )}
-                    </p>
-                  </div>
+                <div className="pos-frost grid gap-4 rounded-xl border p-4 sm:grid-cols-2">
+                  <DetailLine icon={<User className="h-4 w-4" />} label={t('users.name') || 'Name'}>
+                    {selectedUser.name}
+                  </DetailLine>
+                  <DetailLine icon={<Phone className="h-4 w-4" />} label={t('users.phone') || 'Phone'}>
+                    {selectedUser.phone || '-'}
+                  </DetailLine>
+                  <DetailLine icon={<Mail className="h-4 w-4" />} label={t('users.email') || 'Email'}>
+                    {selectedUser.email || '-'}
+                  </DetailLine>
+                  <DetailLine
+                    icon={selectedUser.is_banned ? <Ban className="h-4 w-4" /> : <CheckCircle className="h-4 w-4" />}
+                    label={t('users.status') || 'Status'}
+                  >
+                    {selectedUser.is_banned ? (
+                      <span className="font-semibold text-(--pos-s-bad)">{t('users.banned') || 'Banned'}</span>
+                    ) : (
+                      <span className="font-semibold text-(--pos-s-ok)">{t('users.active') || 'Active'}</span>
+                    )}
+                  </DetailLine>
                 </div>
-              </div>
+              </section>
 
               {/* Addresses */}
               {userAddresses.length > 0 && (
-                <div>
-                  <h4 className={`text-sm font-medium mb-3 ${
-                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
-                  }`}>
+                <section>
+                  <h4 className={sectionTitleClass}>
                     {t('users.addresses') || 'Addresses'} ({userAddresses.length})
                   </h4>
                   <div className="space-y-3">
                     {userAddresses.map((address) => (
                       <div
                         key={address.id}
-                        className={`p-4 rounded-2xl border ${
-                          resolvedTheme === 'dark'
-                            ? 'bg-gray-700/50 border-gray-600'
-                            : 'bg-gray-50 border-gray-200'
-                        }`}
+                        className="pos-frost rounded-xl border p-4"
                       >
                         {editingAddressId === address.id ? (
-                          // Edit Mode
+                          // Edit Mode: one kit field look; neutral Cancel and the one yellow Save.
                           <div className="space-y-3">
-                            <div className="grid grid-cols-2 gap-3">
+                            <div className="grid gap-3 sm:grid-cols-2">
                               <div className="relative">
-                                <label className={`text-xs font-medium ${
-                                  resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                                }`}>
-                                  {t('users.address.street', 'Street Address')}
+                                <label className="block">
+                                  <span className={fieldLabelClass}>
+                                    {t('users.address.street', 'Street Address')}
+                                  </span>
+                                  <input
+                                    type="text"
+                                    value={editedAddress.street_address || ''}
+                                    onChange={(e) => handleAddressTextChange('street_address', e.target.value)}
+                                    onFocus={() => {
+                                      if (addressSuggestions.length > 0) {
+                                        setShowSuggestions(true);
+                                      }
+                                    }}
+                                    className={fieldClass}
+                                    placeholder={t('modals.addNewAddress.addressPlaceholder')}
+                                  />
                                 </label>
-                                <input
-                                  type="text"
-                                  value={editedAddress.street_address || ''}
-                                  onChange={(e) => handleAddressTextChange('street_address', e.target.value)}
-                                  onFocus={() => {
-                                    if (addressSuggestions.length > 0) {
-                                      setShowSuggestions(true);
-                                    }
-                                  }}
-                                  className={`w-full px-3 py-2 rounded-2xl text-sm ${
-                                    resolvedTheme === 'dark'
-                                      ? 'bg-gray-800 text-white border-gray-600'
-                                      : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-hidden focus:ring-2 focus:ring-yellow-500`}
-                                  placeholder={t('modals.addNewAddress.addressPlaceholder')}
-                                />
 
                                 {/* Address Suggestions Dropdown */}
                                 {showSuggestions && addressSuggestions.length > 0 && (
-                                  <div className={`absolute z-50 w-full mt-1 rounded-2xl shadow-lg max-h-60 overflow-y-auto scrollbar-hide ${
-                                    resolvedTheme === 'dark'
-                                      ? 'bg-gray-800 border-gray-600'
-                                      : 'bg-white border-gray-200'
-                                  } border`}>
+                                  <div className="absolute z-50 mt-1 max-h-60 w-full overflow-y-auto scrollbar-hide rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface) p-1 text-(--pos-s-fg) shadow-xl">
                                     {addressSuggestions.map((suggestion, index) => (
                                       <button
                                         key={index}
                                         type="button"
                                         onClick={() => handleAddressSuggestionClick(suggestion)}
-                                        className={`w-full px-3 py-2 text-left text-sm active:bg-(--pos-s-surface-2) transition-transform active:scale-[0.99] border-b last:border-b-0 ${
-                                          resolvedTheme === 'dark'
-                                            ? 'border-gray-700 text-white'
-                                            : 'border-gray-100 text-gray-900'
-                                        }`}
+                                        className="flex min-h-11 w-full items-start gap-2 rounded-[10px] px-3 py-2 text-left text-sm transition-colors active:bg-(--pos-s-surface-2)"
                                       >
-                                        <div className="flex items-start gap-2">
-                                          <MapPin className="w-4 h-4 text-gray-400 mt-0.5 shrink-0" />
-                                          <div className="flex-1 min-w-0">
-                                            <p className="font-medium truncate">
-                                              {suggestion.structured_formatting?.main_text || suggestion.description}
-                                            </p>
-                                            <p className={`text-xs truncate ${
-                                              resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
-                                            }`}>
-                                              {suggestion.structured_formatting?.secondary_text || suggestion.description}
-                                            </p>
-                                          </div>
+                                        <MapPin className={`mt-0.5 h-4 w-4 shrink-0 ${subtleClass}`} aria-hidden="true" />
+                                        <div className="min-w-0 flex-1">
+                                          <p className="truncate font-medium">
+                                            {suggestion.structured_formatting?.main_text || suggestion.description}
+                                          </p>
+                                          <p className={`truncate text-xs ${subtleClass}`}>
+                                            {suggestion.structured_formatting?.secondary_text || suggestion.description}
+                                          </p>
                                         </div>
                                       </button>
                                     ))}
                                   </div>
                                 )}
                               </div>
-                              <div>
-                                <label className={`text-xs font-medium ${
-                                  resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                                }`}>
+                              <label className="block">
+                                <span className={fieldLabelClass}>
                                   {t('users.address.city', 'City')}
-                                </label>
+                                </span>
                                 <input
                                   type="text"
                                   value={editedAddress.city || ''}
                                   onChange={(e) => handleAddressTextChange('city', e.target.value)}
-                                  className={`w-full px-3 py-2 rounded-2xl text-sm ${
-                                    resolvedTheme === 'dark'
-                                      ? 'bg-gray-800 text-white border-gray-600'
-                                      : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-hidden focus:ring-2 focus:ring-yellow-500`}
+                                  className={fieldClass}
                                 />
-                              </div>
-                              <div>
-                                <label className={`text-xs font-medium ${
-                                  resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                                }`}>
+                              </label>
+                              <label className="block">
+                                <span className={fieldLabelClass}>
                                   {t('users.address.postalCode', 'Postal Code')}
-                                </label>
+                                </span>
                                 <input
                                   type="text"
                                   value={editedAddress.postal_code || ''}
                                   onChange={(e) => handleAddressTextChange('postal_code', e.target.value)}
-                                  className={`w-full px-3 py-2 rounded-2xl text-sm ${
-                                    resolvedTheme === 'dark'
-                                      ? 'bg-gray-800 text-white border-gray-600'
-                                      : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-hidden focus:ring-2 focus:ring-yellow-500`}
+                                  className={fieldClass}
                                 />
-                              </div>
-                              <div>
-                                <label className={`text-xs font-medium ${
-                                  resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                                }`}>
+                              </label>
+                              <label className="block">
+                                <span className={fieldLabelClass}>
                                   {t('users.address.floor', 'Floor Number')}
-                                </label>
+                                </span>
                                 <input
                                   type="text"
                                   value={editedAddress.floor_number || ''}
                                   onChange={(e) => setEditedAddress({ ...editedAddress, floor_number: e.target.value })}
-                                  className={`w-full px-3 py-2 rounded-2xl text-sm ${
-                                    resolvedTheme === 'dark'
-                                      ? 'bg-gray-800 text-white border-gray-600'
-                                      : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-hidden focus:ring-2 focus:ring-yellow-500`}
+                                  className={fieldClass}
                                 />
-                              </div>
-                            </div>
-                            <div>
-                              <label className={`text-xs font-medium ${
-                                resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                              }`}>
-                                {t('users.address.deliveryNotes', 'Delivery Notes')}
                               </label>
+                            </div>
+                            <label className="block">
+                              <span className={fieldLabelClass}>
+                                {t('users.address.deliveryNotes', 'Delivery Notes')}
+                              </span>
                               <textarea
                                 value={editedAddress.delivery_notes || ''}
                                 onChange={(e) => setEditedAddress({ ...editedAddress, delivery_notes: e.target.value })}
                                 rows={2}
-                                className={`w-full px-3 py-2 rounded-2xl text-sm ${
-                                  resolvedTheme === 'dark'
-                                    ? 'bg-gray-800 text-white border-gray-600'
-                                    : 'bg-white text-gray-900 border-gray-300'
-                                } border focus:outline-hidden focus:ring-2 focus:ring-yellow-500`}
+                                className={`min-h-20 resize-none py-2.5 ${fieldClass}`}
                               />
-                            </div>
-                            <div className="flex items-center gap-2">
+                            </label>
+                            <div className="flex flex-wrap items-center justify-end gap-2">
                               <button
-                                onClick={() => handleSaveAddress(address.id)}
-                                className="liquid-glass-modal-button liquid-glass-modal-success rounded-xl text-sm disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
+                                type="button"
+                                onClick={handleCancelEdit}
+                                className={secondaryButtonClass}
                               >
-                                <Save className="w-4 h-4" />
-                                {t('common.actions.save', 'Save')}
+                                <X className="h-4 w-4" />
+                                {t('common.actions.cancel', 'Cancel')}
                               </button>
                               <button
-                                onClick={handleCancelEdit}
-                                className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2) active:scale-[0.98] transition-all"
+                                type="button"
+                                onClick={() => handleSaveAddress(address.id)}
+                                className={primaryButtonClass}
                               >
-                                <X className="w-4 h-4" />
-                                {t('common.actions.cancel', 'Cancel')}
+                                <Save className="h-4 w-4" />
+                                {t('common.actions.save', 'Save')}
                               </button>
                             </div>
                           </div>
                         ) : (
                           // View Mode
-                          <div className="flex items-start gap-2">
-                            <MapPin className="w-4 h-4 mt-0.5 text-gray-400 shrink-0" />
-                            <div className="flex-1 min-w-0">
-                              <p className={`text-sm font-medium ${
-                                resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-                              }`}>
+                          <div className="flex items-start gap-3">
+                            <MapPin className={`mt-0.5 h-4 w-4 shrink-0 ${subtleClass}`} aria-hidden="true" />
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-semibold">
                                 {address.street_address}, {address.city}
                               </p>
-                              <p className={`text-xs ${
-                                resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
-                              }`}>
+                              <p className={`text-xs ${subtleClass}`}>
                                 {address.postal_code}
                                 {address.floor_number && ` • ${t('users.address.floor', 'Floor')} ${address.floor_number}`}
                                 {address.is_default && ` • ${t('users.address.default', 'Default')}`}
                               </p>
                               {address.delivery_notes && (
-                                <p className={`text-xs mt-1 ${
-                                  resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
-                                }`}>
+                                <p className={`mt-1 text-xs ${subtleClass}`}>
                                   {address.delivery_notes}
                                 </p>
                               )}
                             </div>
-                            <div className="flex items-center gap-2 shrink-0">
+                            <div className="flex shrink-0 items-center gap-2">
                               <button
+                                type="button"
                                 onClick={() => handleEditAddress(address)}
-                                className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-amber-500 active:bg-(--pos-s-surface-2) active:scale-[0.96] transition-transform"
+                                className="pos-icon-btn"
                                 aria-label={t('customer.actions.editAddress')}
                               >
-                                <Edit3 className="w-5 h-5" />
+                                <Edit3 className="h-5 w-5" />
                               </button>
                               <button
+                                type="button"
                                 onClick={() => handleDeleteAddress(address.id)}
-                                className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-red-600 dark:text-red-400 active:bg-(--pos-s-surface-2) active:scale-[0.96] transition-transform"
+                                className="pos-icon-btn pos-icon-btn--danger"
                                 aria-label={t('customer.actions.deleteAddress')}
                               >
-                                <Trash2 className="w-5 h-5" />
+                                <Trash2 className="h-5 w-5" />
                               </button>
                             </div>
                           </div>
@@ -1556,29 +1399,26 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                       </div>
                     ))}
                   </div>
-                </div>
+                </section>
               )}
 
               {/* Notes */}
               {selectedUser.notes && (
-                <div>
-                  <h4 className={`text-sm font-medium mb-2 ${
-                    resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'
-                  }`}>
+                <section>
+                  <h4 className={sectionTitleClass}>
                     {t('users.notes') || 'Notes'}
                   </h4>
-                  <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+                  <p className="pos-frost rounded-xl border p-4 text-sm">
                     {selectedUser.notes}
                   </p>
-                </div>
+                </section>
               )}
             </div>
 
-            <div className={`shrink-0 px-6 py-4 border-t ${
-              resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-            } flex flex-wrap gap-3 justify-between items-center`}>
+            <div className={`${modalFooterClass} justify-between`}>
               {selectedUser.type !== 'app_user' && (
                 <button
+                  type="button"
                   onClick={() => {
                     handleToggleBan(selectedUser.id, selectedUser.is_banned || false);
                     setShowDetailsModal(false);
@@ -1586,32 +1426,25 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                     setUserAddresses([]);
                   }}
                   disabled={updatingUserId === selectedUser.id}
-                  className={`flex items-center justify-center gap-2 px-4 py-2 rounded-xl transition-all active:scale-[0.98] ${
-                    selectedUser.is_banned
-                      ? 'bg-(--pos-s-yellow) active:bg-yellow-500 text-black'
-                      : 'bg-red-600 active:bg-red-700 text-white'
-                  } disabled:opacity-50 disabled:cursor-not-allowed`}
+                  className={selectedUser.is_banned ? secondaryButtonClass : dangerButtonClass}
                 >
                   {selectedUser.is_banned ? (
                     <>
-                      <CheckCircle className="w-4 h-4" />
+                      <CheckCircle className="h-4 w-4" />
                       {t('users.unban') || 'Unban Customer'}
                     </>
                   ) : (
                     <>
-                      <Ban className="w-4 h-4" />
+                      <Ban className="h-4 w-4" />
                       {t('users.ban') || 'Ban Customer'}
                     </>
                   )}
                 </button>
               )}
               <button
+                type="button"
                 onClick={closeDetailsModal}
-                className={`min-h-11 px-4 py-2 rounded-xl transition-all active:scale-[0.98] ${
-                  resolvedTheme === 'dark'
-                    ? 'bg-white/10 active:bg-white/15 text-white'
-                    : 'bg-black/5 active:bg-black/10 text-gray-900'
-                }`}
+                className={`ml-auto ${secondaryButtonClass}`}
               >
                 {t('common.actions.close') || 'Close'}
               </button>
@@ -1620,39 +1453,49 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
         </div>
       )}
 
+      {/* Address-delete confirmation: the shared glass shell, neutral Cancel and the danger Delete. */}
       {addressPendingDelete && renderModalPortal(
         <div
-          className="fixed inset-0 z-1300 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+          className="fixed inset-0 z-1300 flex items-center justify-center p-4"
           onClick={() => setAddressPendingDelete(null)}
         >
+          <div className="liquid-glass-modal-backdrop" aria-hidden="true" />
           <div
             ref={deleteAddressDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby={deleteAddressTitleId}
-            className={`w-full max-w-sm rounded-3xl overflow-hidden border shadow-2xl backdrop-blur-2xl ${resolvedTheme === 'dark' ? 'bg-gray-900/70 border-white/10' : 'bg-white/75 border-white/50'}`}
+            className={`max-w-md ${modalShellClass}`}
             onClick={(event) => event.stopPropagation()}
           >
-            <div className={`px-6 py-4 border-b ${resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'}`}>
-              <h3 id={deleteAddressTitleId} className={`text-lg font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+            <div className={modalHeaderClass}>
+              <h3 id={deleteAddressTitleId} className="min-w-0 text-xl font-bold">
                 {t('users.deleteAddressTitle', 'Delete address')}
               </h3>
+              <button
+                type="button"
+                onClick={closeAddressDeleteModal}
+                className="liquid-glass-modal-close"
+                aria-label={t('common.close', 'Close')}
+              >
+                <X className="h-5 w-5" aria-hidden="true" />
+              </button>
             </div>
-            <div className={`px-6 py-4 text-sm ${resolvedTheme === 'dark' ? 'text-zinc-300' : 'text-gray-600'}`}>
+            <div className="p-5 text-sm">
               {t('users.confirmDeleteAddress', 'Are you sure you want to delete this address?')}
             </div>
-            <div className="flex justify-end gap-2 px-6 py-4">
+            <div className={`${modalFooterClass} justify-end`}>
               <button
                 type="button"
                 onClick={() => setAddressPendingDelete(null)}
-                className={`rounded-xl border px-4 py-2 text-sm font-medium transition-all active:scale-[0.98] ${resolvedTheme === 'dark' ? 'border-white/15 bg-white/5 text-zinc-200 active:bg-white/10' : 'border-black/10 bg-black/5 text-gray-700 active:bg-black/10'}`}
+                className={secondaryButtonClass}
               >
                 {t('common.actions.cancel', 'Cancel')}
               </button>
               <button
                 type="button"
                 onClick={() => void confirmDeleteAddress()}
-                className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white active:bg-red-700 active:scale-[0.98] transition-all"
+                className={dangerButtonClass}
               >
                 {t('common.actions.delete', 'Delete')}
               </button>
@@ -1663,5 +1506,16 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
     </motion.div>
   );
 };
+
+// Founder 01/11: a detail row in the customer window — a neutral (muted) icon, a muted label and its value.
+const DetailLine: React.FC<{ icon: React.ReactNode; label: string; children: React.ReactNode }> = ({ icon, label, children }) => (
+  <div className="flex min-w-0 items-start gap-3">
+    <div className="mt-0.5 shrink-0 text-(--pos-s-muted)" aria-hidden="true">{icon}</div>
+    <div className="min-w-0">
+      <p className="text-xs text-(--pos-s-muted)">{label}</p>
+      <p className="wrap-break-word text-sm font-medium">{children}</p>
+    </div>
+  </div>
+);
 
 export default UsersPage;

@@ -77,6 +77,7 @@ import {
 import type { CaptureSourceConfig, ConfidenceTier } from '../types/supplier-capture';
 import { parseInvoiceAmountInput } from '../../../../shared/invoice-amount-input';
 import { CentsMoneyInput } from '../components/ui/CentsMoneyInput';
+import { KitDateField } from '../components/ui/KitDateField';
 
 interface Supplier {
   id: string;
@@ -505,14 +506,26 @@ const SuppliersPage: React.FC = () => {
   const captureQueueDialogRef = useRef<HTMLDivElement>(null);
   const captureQueueTitleId = useId();
 
-  const panelClass = isDark ? 'bg-zinc-950 border-zinc-800 text-white' : 'bg-white border-gray-200 text-gray-950';
-  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-600';
-  const fieldClass = isDark
+  // Founder 01/11: the page, its tabs, cards and detail panel, and the supplier summary, import and scanned-invoice
+  // windows in the kit — a pos-card hero, kit options for the tabs, kit buttons (Scan invoice is the one yellow
+  // primary), neutral icons, coloured state words, the shared glass shell, and ONE kit field look.
+  const subtleClass = 'text-(--pos-s-muted)';
+  const kitFieldLook = 'min-h-[48px] rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) px-3 text-base font-semibold text-(--pos-s-fg) outline-hidden transition-colors placeholder:font-normal placeholder:text-zinc-400 focus:border-(--pos-s-yellow) dark:placeholder:text-zinc-500';
+  const fieldClass = `w-full ${kitFieldLook}`;
+  // The same field with room for its leading search icon.
+  const searchFieldClass = 'min-h-[48px] w-full rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) pl-10 pr-3 text-base font-semibold text-(--pos-s-fg) outline-hidden transition-colors placeholder:font-normal placeholder:text-zinc-400 focus:border-(--pos-s-yellow) dark:placeholder:text-zinc-500';
+  const primaryButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';
+  const secondaryButtonClass = 'pos-solid-btn pos-solid-btn--md';
+  const smallButtonClass = 'pos-solid-btn pos-solid-btn--sm';
+  const tileClass = 'rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3';
+  const modalShellClass = 'liquid-glass-modal-shell relative flex w-full flex-col text-(--pos-s-fg)';
+  const modalHeaderClass = 'flex shrink-0 items-start justify-between gap-4 border-b border-(--modal-glass-line) p-5';
+  // The invoice details window records supplier payments: payment windows are outside the 01/11 pass, so it keeps
+  // its own solid look (and money colours) through these constants until the founder decides on it.
+  const invoicePanelClass = isDark ? 'bg-zinc-950 border-zinc-800 text-white' : 'bg-white border-gray-200 text-gray-950';
+  const invoiceFieldClass = isDark
     ? 'bg-zinc-900 border-zinc-800 text-white placeholder:text-zinc-500'
     : 'bg-white border-gray-200 text-gray-950 placeholder:text-gray-400';
-  const iconButtonClass = isDark
-    ? 'border-zinc-800 bg-zinc-900 text-zinc-100 active:bg-zinc-800'
-    : 'border-gray-200 bg-white text-gray-800 active:bg-gray-100';
   const formatMoney = useCallback((amount: number) => formatCurrency(amount, currencyCode, i18n.language), [currencyCode, i18n.language]);
 
   // Close-only path for the import overlay. The X button and Escape share it; it only
@@ -1597,6 +1610,7 @@ const SuppliersPage: React.FC = () => {
     }
   };
 
+  // The invoice details (payment) window keeps its tinted status pill; see invoicePanelClass.
   const getInvoiceStatusClass = (status: PaymentStatus) => {
     switch (status) {
       case 'paid':
@@ -1613,6 +1627,23 @@ const SuppliersPage: React.FC = () => {
     }
   };
 
+  // Founder 01/11: on the page and the summary an invoice status is a coloured word, no pill (same mapping as the
+  // Android till): paid ok, partial / unpaid warn, overdue bad, cancelled muted.
+  const getInvoiceStatusTextClass = (status: PaymentStatus) => {
+    switch (status) {
+      case 'paid':
+        return 'text-(--pos-s-ok)';
+      case 'overdue':
+        return 'text-(--pos-s-bad)';
+      case 'cancelled':
+        return 'text-(--pos-s-muted)';
+      case 'partial':
+      case 'unpaid':
+      default:
+        return 'text-(--pos-s-warn)';
+    }
+  };
+
   const selectedInvoiceStatus = selectedInvoice ? getInvoicePaymentStatus(selectedInvoice) : null;
   const selectedInvoicePaid = selectedInvoice ? getInvoicePaidAmount(selectedInvoice) : 0;
   const selectedInvoiceRemaining = selectedInvoice ? getInvoiceRemainingAmount(selectedInvoice) : 0;
@@ -1623,9 +1654,9 @@ const SuppliersPage: React.FC = () => {
   const selectedInvoiceCanPay = Boolean(selectedInvoice && selectedInvoiceStatus !== 'paid' && selectedInvoiceStatus !== 'cancelled');
 
   return (
-    <div className={`h-full min-h-0 overflow-hidden p-4 md:p-5 ${isDark ? 'text-white' : 'text-gray-950'}`}>
+    <div className="h-full min-h-0 overflow-hidden p-4 md:p-5 text-(--pos-s-fg)">
       <div className="flex h-full min-h-0 flex-col gap-4">
-        <section className={`shrink-0 rounded-2xl border p-4 md:p-5 ${panelClass}`}>
+        <section className="pos-card shrink-0 p-4 md:p-5">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div className="min-w-0">
               <h1 className="truncate text-3xl font-bold tracking-tight">{t('suppliers.title', 'Suppliers')}</h1>
@@ -1635,8 +1666,10 @@ const SuppliersPage: React.FC = () => {
               {/*
                 Invoice capture entry points. One click from here to a scanner
                 spinning up; the settings button is the secondary, and the
-                badge is the "queued work cannot be forgotten" indicator.
+                count is the "queued work cannot be forgotten" indicator.
                 [R1.1, R11.5, R15.1]
+                Founder 01/11: Scan invoice is the one yellow primary of the page; every other action is a neutral
+                kit button, and the queued count is a plain amber word (no pill).
               */}
               {captureEnabled && (
                 <>
@@ -1644,7 +1677,7 @@ const SuppliersPage: React.FC = () => {
                     data-testid="capture-scan-invoice"
                     onClick={() => void startScan()}
                     disabled={scanStarting}
-                    className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${isDark ? 'border-(--pos-s-yellow) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'border-yellow-400 text-gray-950 active:bg-(--pos-s-surface-2)'}`}
+                    className={primaryButtonClass}
                   >
                     {scanStarting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScanLine className="h-4 w-4" />}
                     {t('suppliers.capture.scan.open', 'Scan invoice')}
@@ -1652,7 +1685,7 @@ const SuppliersPage: React.FC = () => {
                   <button
                     data-testid="capture-scan-settings"
                     onClick={() => setScanSettingsOpen(true)}
-                    className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${iconButtonClass}`}
+                    className={secondaryButtonClass}
                   >
                     <Settings className="h-4 w-4" />
                     {t('suppliers.capture.settings.open', 'Scan settings')}
@@ -1660,14 +1693,14 @@ const SuppliersPage: React.FC = () => {
                   <button
                     data-testid="capture-queue-open"
                     onClick={() => setCaptureQueueOpen(true)}
-                    className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${iconButtonClass}`}
+                    className={secondaryButtonClass}
                   >
                     <Clock className="h-4 w-4" />
                     {t('suppliers.capture.queue.open', 'Scanned invoices')}
                     {capturePending > 0 && (
                       <span
                         data-testid="capture-pending-badge"
-                        className={`rounded-full border px-2 py-0.5 text-xs font-bold ${isDark ? 'border-(--pos-s-yellow) text-amber-200' : 'border-amber-400 text-amber-700'}`}
+                        className="font-bold tabular-nums text-(--pos-s-warn)"
                       >
                         {capturePending}
                       </span>
@@ -1677,7 +1710,7 @@ const SuppliersPage: React.FC = () => {
               )}
               <button
                 onClick={() => setImportOpen(true)}
-                className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${isDark ? 'border-(--pos-s-yellow) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'border-yellow-400 text-gray-950 active:bg-(--pos-s-surface-2)'}`}
+                className={secondaryButtonClass}
               >
                 <Upload className="h-4 w-4" />
                 {t('suppliers.import.open', 'Import items')}
@@ -1686,33 +1719,31 @@ const SuppliersPage: React.FC = () => {
                 onClick={fetchData}
                 disabled={loading}
                 aria-label={t('common.refresh', 'Refresh')}
-                className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border) ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+                className="pos-icon-btn"
               >
                 <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
               </button>
             </div>
           </div>
 
+          {/* Founder 01/11: neutral icon + muted label + big number; only a number that states something is
+              coloured, and only above zero (unpaid / owed warn, overdue bad). The owed amount keeps its words. */}
           <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
             {[
-              { label: t('suppliers.total', 'Total'), value: stats.totalSuppliers, icon: Building2, iconClass: 'text-zinc-400' },
-              { label: t('suppliers.active', 'Active'), value: stats.activeSuppliers, icon: CheckCircle, iconClass: 'text-emerald-500' },
-              { label: t('suppliers.unpaid', 'Unpaid'), value: stats.unpaidInvoices, icon: Clock, iconClass: 'text-amber-500' },
-              { label: t('suppliers.overdue', 'Overdue'), value: stats.overdueInvoices, icon: AlertCircle, iconClass: 'text-red-500' },
-              { label: t('suppliers.owed', 'Total Owed'), value: formatMoney(stats.totalOwed), icon: Wallet, iconClass: 'text-amber-500' },
+              { label: t('suppliers.total', 'Total'), value: stats.totalSuppliers, icon: Building2, toneClass: '' },
+              { label: t('suppliers.active', 'Active'), value: stats.activeSuppliers, icon: CheckCircle, toneClass: '' },
+              { label: t('suppliers.unpaid', 'Unpaid'), value: stats.unpaidInvoices, icon: Clock, toneClass: stats.unpaidInvoices > 0 ? 'text-(--pos-s-warn)' : '' },
+              { label: t('suppliers.overdue', 'Overdue'), value: stats.overdueInvoices, icon: AlertCircle, toneClass: stats.overdueInvoices > 0 ? 'text-(--pos-s-bad)' : '' },
+              { label: t('suppliers.owed', 'Total Owed'), value: formatMoney(stats.totalOwed), icon: Wallet, toneClass: stats.totalOwed > 0.005 ? 'text-(--pos-s-warn)' : '' },
             ].map(stat => {
-              const Icon = 'icon' in stat ? stat.icon : null;
+              const Icon = stat.icon;
               return (
-                <div key={stat.label} className={`rounded-xl border p-3 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
-                  <div className="flex items-center gap-2">
-                    {Icon ? (
-                      <Icon className={`h-5 w-5 shrink-0 ${stat.iconClass}`} />
-                    ) : null}
-                    <div className="min-w-0">
-                      <p className={`truncate text-xs ${subtleClass}`}>{stat.label}</p>
-                      <p className="truncate text-lg font-bold">{stat.value}</p>
-                    </div>
-                  </div>
+                <div key={stat.label} className={tileClass}>
+                  <p className={`truncate text-sm ${subtleClass}`}>{stat.label}</p>
+                  <p className={`mt-1 flex min-w-0 items-center gap-2 text-2xl font-bold ${stat.toneClass}`}>
+                    <Icon className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
+                    <span className="truncate">{stat.value}</span>
+                  </p>
                 </div>
               );
             })}
@@ -1720,29 +1751,29 @@ const SuppliersPage: React.FC = () => {
         </section>
 
         {error && !loading && (
-          <div className={`shrink-0 rounded-xl border p-4 ${isDark ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800 dark:text-red-200' : 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-700'}`}>
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <AlertCircle className="h-5 w-5" />
-                <span className="font-medium">{error}</span>
-              </div>
-              <button onClick={fetchData} className={`rounded-2xl border px-3 py-2 text-sm ${iconButtonClass}`}>
-                {t('common.retry', 'Retry')}
-              </button>
+          <div className="pos-notice pos-notice--bad pos-notice--row shrink-0">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="pos-notice__icon h-5 w-5" />
+              <span className="font-semibold">{error}</span>
             </div>
+            <button onClick={fetchData} className={smallButtonClass}>
+              {t('common.retry', 'Retry')}
+            </button>
           </div>
         )}
 
         <section className={`grid min-h-0 flex-1 gap-4 ${activeTab === 'orders' ? '' : 'xl:grid-cols-[minmax(0,1fr)_360px]'}`}>
-          <div className={`flex min-h-0 flex-col rounded-2xl border ${panelClass}`}>
-            <div className="shrink-0 border-b border-inherit p-3 md:p-4">
+          <div className="pos-card flex min-h-0 flex-col">
+            <div className="shrink-0 border-b border-(--pos-s-border) p-3 md:p-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div className={`flex w-full rounded-xl border p-1 lg:w-auto ${isDark ? 'border-zinc-800 bg-zinc-900' : 'border-gray-200 bg-gray-100'}`}>
+                {/* Founder 01/11: the tabs are kit options — the selected one is the yellow selection, never black. */}
+                <div className="pos-scroll-row gap-2">
                   {(['suppliers', 'invoices', 'orders'] as const).map(tab => (
                     <button
                       key={tab}
                       onClick={() => setActiveTab(tab)}
-                      className={`inline-flex min-h-10 items-center gap-2 rounded-2xl px-4 text-sm font-semibold transition ${activeTab === tab ? (isDark ? 'bg-white text-black' : 'bg-black text-white') : subtleClass}`}
+                      aria-pressed={activeTab === tab}
+                      className={`pos-choice${activeTab === tab ? ' is-selected' : ''}`}
                     >
                       {tab === 'suppliers' ? <Building2 className="h-4 w-4" /> : tab === 'invoices' ? <FileText className="h-4 w-4" /> : <Package className="h-4 w-4" />}
                       {tab === 'suppliers'
@@ -1755,9 +1786,9 @@ const SuppliersPage: React.FC = () => {
                 </div>
 
                 {activeTab !== 'orders' && (
-                <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row lg:max-w-2xl">
-                  <div className={`relative min-w-0 flex-1 rounded-xl border ${fieldClass}`}>
-                    <Search className={`absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 ${subtleClass}`} />
+                <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center lg:max-w-2xl">
+                  <div className="relative min-w-0 flex-1">
+                    <Search className={`pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 ${subtleClass}`} />
                     <input
                       key={activeTab}
                       value={searchTerm}
@@ -1772,16 +1803,16 @@ const SuppliersPage: React.FC = () => {
                           ? t('suppliers.searchSuppliers', 'Search suppliers...')
                           : t('suppliers.searchInvoices', 'Search invoices...')
                       }
-                      className="h-11 w-full rounded-xl bg-transparent pl-10 pr-3 text-sm outline-hidden"
+                      className={searchFieldClass}
                     />
                   </div>
-                  <div className={`relative rounded-xl border ${fieldClass}`}>
-                    <Filter className={`pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 ${subtleClass}`} />
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Filter className={`pointer-events-none h-4 w-4 ${subtleClass}`} aria-hidden="true" />
                     {activeTab === 'suppliers' ? (
                       <select
                         value={supplierFilter}
                         onChange={(event) => setSupplierFilter(event.target.value as typeof supplierFilter)}
-                        className="h-11 rounded-xl bg-transparent pl-10 pr-8 text-sm outline-hidden"
+                        className="pos-select"
                       >
                         <option value="all">{t('common.all', 'All')}</option>
                         <option value="active">{t('suppliers.active', 'Active')}</option>
@@ -1791,7 +1822,7 @@ const SuppliersPage: React.FC = () => {
                       <select
                         value={invoiceFilter}
                         onChange={(event) => setInvoiceFilter(event.target.value as typeof invoiceFilter)}
-                        className="h-11 rounded-xl bg-transparent pl-10 pr-8 text-sm outline-hidden"
+                        className="pos-select"
                       >
                         <option value="all">{t('common.all', 'All')}</option>
                         <option value="unpaid">{t('suppliers.status.unpaid', 'Unpaid')}</option>
@@ -1807,13 +1838,13 @@ const SuppliersPage: React.FC = () => {
               </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-3 md:p-4">
+            <div className="pos-scroll-room min-h-0 flex-1 overflow-y-auto scrollbar-hide p-3 md:p-4">
               {activeTab === 'orders' ? (
                 <PurchaseOrdersTab />
               ) : loading ? (
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {[1, 2, 3, 4, 5, 6].map(item => (
-                    <div key={item} className={`h-40 animate-pulse rounded-xl border ${isDark ? 'border-zinc-800 bg-zinc-900' : 'border-gray-200 bg-gray-100'}`} />
+                    <div key={item} className="h-40 animate-pulse rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2)" />
                   ))}
                 </div>
               ) : activeTab === 'suppliers' ? (
@@ -1831,14 +1862,14 @@ const SuppliersPage: React.FC = () => {
                             setSelectedSupplierId(supplier.id);
                             setSupplierSummaryId(supplier.id);
                           }}
-                          className={`min-h-[180px] rounded-xl border p-4 text-left transition ${selectedSupplier?.id === supplier.id ? (isDark ? 'border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg) bg-transparent text-white' : 'border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg) bg-transparent text-gray-950') : isDark ? 'border-zinc-800 bg-zinc-900/60 active:bg-zinc-900' : 'border-gray-200 bg-white active:bg-gray-50'}`}
+                          className={`pos-card min-h-[180px] text-left transition-transform active:scale-[0.99] ${selectedSupplier?.id === supplier.id ? 'border-2! border-(--pos-s-sel-bg)! p-[15px]' : 'p-4'}`}
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
                               <h3 className="truncate text-base font-bold">{supplier.name}</h3>
                               <p className={`mt-1 truncate text-xs ${subtleClass}`}>{supplier.supplier_code || supplier.category || t('suppliers.noCategory', 'No category')}</p>
                             </div>
-                            <span className={`shrink-0 text-xs font-semibold ${supplier.is_active ? (isDark ? 'text-emerald-300' : 'text-emerald-700') : (isDark ? 'text-zinc-300' : 'text-gray-600')}`}>
+                            <span className={`shrink-0 text-xs font-semibold ${supplier.is_active ? 'text-(--pos-s-ok)' : 'text-(--pos-s-muted)'}`}>
                               {supplier.is_active ? t('suppliers.active', 'Active') : t('suppliers.inactive', 'Inactive')}
                             </span>
                           </div>
@@ -1847,7 +1878,7 @@ const SuppliersPage: React.FC = () => {
                             {supplier.phone && <p className="flex items-center gap-2 truncate"><Phone className="h-4 w-4" />{supplier.phone}</p>}
                             {supplier.email && <p className="flex items-center gap-2 truncate"><Mail className="h-4 w-4" />{supplier.email}</p>}
                           </div>
-                          <div className={`mt-4 grid grid-cols-2 gap-2 rounded-2xl border p-3 text-xs ${isDark ? 'border-zinc-800 bg-black/20' : 'border-gray-200 bg-gray-50'}`}>
+                          <div className={`mt-4 grid grid-cols-2 gap-2 text-xs ${tileClass}`}>
                             <div>
                               <p className={subtleClass}>{t('suppliers.invoices.totalSpent', 'Total spent')}</p>
                               <p className="mt-1 font-bold">{formatMoney(supplierTotal)}</p>
@@ -1863,8 +1894,7 @@ const SuppliersPage: React.FC = () => {
                   </div>
                 ) : (
                   <EmptyState
-                    isDark={isDark}
-                    icon={<Building2 className="h-8 w-8" />}
+                    icon={<Building2 className="h-10 w-10" />}
                     heading={t('suppliers.empty.title', 'No suppliers found')}
                     description={t('suppliers.empty.description', 'Add or import supplier items to start syncing inventory.')}
                   />
@@ -1888,16 +1918,16 @@ const SuppliersPage: React.FC = () => {
                             openInvoiceDetails(invoice);
                           }
                         }}
-                        className={`rounded-xl border p-4 text-left transition ${isDark ? 'border-zinc-800 bg-zinc-900/60 active:bg-zinc-900' : 'border-gray-200 bg-white active:bg-gray-50'}`}
+                        className="pos-card p-4 text-left transition-transform active:scale-[0.99]"
                       >
                         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                           <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                               <h3 className="font-bold">{formatDate(getInvoiceDisplayDate(invoice))}</h3>
-                              <span className={`rounded-full border px-2 py-1 text-xs font-semibold ${isDark ? 'border-zinc-700 bg-zinc-950 text-zinc-200' : 'border-gray-200 bg-gray-50 text-gray-700'}`}>
+                              <span className={`text-sm font-semibold ${subtleClass}`}>
                                 #{invoice.invoice_number}
                               </span>
-                              <span className={`rounded-full border px-2 py-1 text-xs font-semibold ${getInvoiceStatusClass(paymentStatus)}`}>
+                              <span className={`text-sm font-semibold ${getInvoiceStatusTextClass(paymentStatus)}`}>
                                 {t(`suppliers.status.${paymentStatus}`, paymentStatus)}
                               </span>
                             </div>
@@ -1920,7 +1950,7 @@ const SuppliersPage: React.FC = () => {
                                     event.stopPropagation();
                                     openInvoiceDetails(invoice, { partial: true });
                                   }}
-                                  className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold border-yellow-400 bg-(--pos-s-yellow) text-black active:bg-yellow-500 disabled:opacity-60`}
+                                  className={smallButtonClass}
                                 >
                                   <CreditCard className="h-4 w-4" />
                                   {t('suppliers.invoices.partialPayment', 'Partial')}
@@ -1931,7 +1961,7 @@ const SuppliersPage: React.FC = () => {
                                     event.stopPropagation();
                                     markInvoiceStatus(invoice.id, 'paid');
                                   }}
-                                  className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 active:bg-(--pos-s-surface-2)'}`}
+                                  className={smallButtonClass}
                                 >
                                   <Check className="h-4 w-4" />
                                   {t('suppliers.invoices.markPaid', 'Paid')}
@@ -1945,7 +1975,7 @@ const SuppliersPage: React.FC = () => {
                                   event.stopPropagation();
                                   markInvoiceStatus(invoice.id, 'unpaid');
                                 }}
-                                className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold border-yellow-400 bg-(--pos-s-yellow) text-black active:bg-yellow-500 disabled:opacity-60`}
+                                className={smallButtonClass}
                               >
                                 <Ban className="h-4 w-4" />
                                 {t('suppliers.invoices.markUnpaid', 'Unpaid')}
@@ -1959,8 +1989,7 @@ const SuppliersPage: React.FC = () => {
                 </div>
               ) : (
                 <EmptyState
-                  isDark={isDark}
-                  icon={<FileText className="h-8 w-8" />}
+                  icon={<FileText className="h-10 w-10" />}
                   heading={t('suppliers.invoices.emptyTitle', 'No invoices found')}
                   description={t('suppliers.invoices.emptyDescription', 'Supplier invoices will appear here when they sync from the admin dashboard.')}
                 />
@@ -1968,8 +1997,8 @@ const SuppliersPage: React.FC = () => {
             </div>
           </div>
 
-          <aside className={`${activeTab === 'orders' ? 'hidden' : 'hidden xl:flex'} min-h-0 flex-col rounded-2xl border ${panelClass}`}>
-            <div className="border-b border-inherit p-3">
+          <aside className={`${activeTab === 'orders' ? 'hidden' : 'hidden xl:flex'} pos-card min-h-0 flex-col`}>
+            <div className="border-b border-(--pos-s-border) p-3">
               <p className={`text-xs font-semibold uppercase ${subtleClass}`}>{t('suppliers.detail.title', 'Supplier detail')}</p>
               <h2 className="mt-1 truncate text-xl font-bold">{selectedSupplier?.name || t('suppliers.noSelection', 'No supplier selected')}</h2>
             </div>
@@ -1981,7 +2010,7 @@ const SuppliersPage: React.FC = () => {
                   <InfoLine icon={<Mail className="h-4 w-4" />} label={t('suppliers.email', 'Email')} value={selectedSupplier.email || '-'} subtleClass={subtleClass} />
                   <InfoLine icon={<MapPin className="h-4 w-4" />} label={t('suppliers.address', 'Address')} value={selectedSupplier.address || '-'} subtleClass={subtleClass} />
                   <InfoLine icon={<Clock className="h-4 w-4" />} label={t('suppliers.paymentTerms', 'Payment terms')} value={selectedSupplier.payment_terms || '-'} subtleClass={subtleClass} />
-                  <div className={`rounded-xl border p-3 ${isDark ? 'border-zinc-800 bg-zinc-900' : 'border-gray-200 bg-gray-50'}`}>
+                  <div className={tileClass}>
                     <p className={`text-sm ${subtleClass}`}>{t('suppliers.invoices.title', 'Invoices')}</p>
                     <p className="mt-2 text-2xl font-bold">
                       {invoices.filter(invoice => invoice.supplier_id === selectedSupplier.id).length}
@@ -1990,8 +2019,7 @@ const SuppliersPage: React.FC = () => {
                 </div>
               ) : (
                 <EmptyState
-                  isDark={isDark}
-                  icon={<Package className="h-8 w-8" />}
+                  icon={<Package className="h-10 w-10" />}
                   heading={t('suppliers.detail.emptyTitle', 'Pick a supplier')}
                   description={t('suppliers.detail.emptyDescription', 'Supplier contact and invoice information will show here.')}
                 />
@@ -2003,25 +2031,21 @@ const SuppliersPage: React.FC = () => {
 
       {supplierSummary && renderModalPortal(
           <motion.div
-            className="fixed inset-0 z-1200 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
+            className="fixed inset-0 z-1200 flex items-center justify-center p-4"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            onClick={() => setSupplierSummaryId(null)}
           >
-            <motion.div
+            <div className="liquid-glass-modal-backdrop" onClick={() => setSupplierSummaryId(null)} aria-hidden="true" />
+            <div
               ref={summaryDialogRef}
               role="dialog"
               aria-modal="true"
               aria-labelledby={summaryTitleId}
-              initial={{ scale: 0.98, y: 16 }}
-              animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.98, y: 16 }}
-              transition={{ type: 'spring', damping: 26, stiffness: 260 }}
               onClick={(event) => event.stopPropagation()}
-              className={`flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl border shadow-2xl ${panelClass}`}
+              className={`max-w-4xl ${modalShellClass}`}
             >
-              <div className="flex shrink-0 items-start justify-between gap-4 border-b border-inherit p-4">
+              <div className={modalHeaderClass}>
                 <div className="min-w-0">
                   <p className={`text-xs font-semibold uppercase ${subtleClass}`}>{t('suppliers.summary.title', 'Supplier summary')}</p>
                   <h2 id={summaryTitleId} className="mt-1 truncate text-2xl font-bold">{supplierSummary.supplier.name}</h2>
@@ -2029,14 +2053,15 @@ const SuppliersPage: React.FC = () => {
                 </div>
                 <button
                   onClick={() => setSupplierSummaryId(null)}
-                  className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border ${iconButtonClass}`}
+                  className="liquid-glass-modal-close"
                   aria-label={t('common.close', 'Close')}
                 >
-                  <X className="h-5 w-5" />
+                  <X className="h-5 w-5" aria-hidden="true" />
                 </button>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-4">
+              <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-5">
+                {/* Founder 01/11: neutral icons with no circle wrapper; the amounts keep their (neutral) words. */}
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   {[
                     { label: t('suppliers.invoices.totalSpent', 'Total spent'), value: formatMoney(supplierSummary.totalSpent), icon: Wallet },
@@ -2044,27 +2069,21 @@ const SuppliersPage: React.FC = () => {
                     { label: t('suppliers.invoices.unpaidTotal', 'Unpaid total'), value: formatMoney(supplierSummary.unpaidAmount), icon: Clock },
                     { label: t('suppliers.invoices.invoiceCount', 'Invoices'), value: supplierSummary.invoices.length, icon: Receipt },
                   ].map(tile => {
-                    const Icon = 'icon' in tile ? tile.icon : null;
+                    const Icon = tile.icon;
                     return (
-                      <div key={tile.label} className={`rounded-xl border p-3 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
-                        <div className="flex items-center gap-2">
-                          <div className={`flex h-9 w-9 items-center justify-center rounded-2xl ${isDark ? 'bg-zinc-800 text-zinc-200' : 'bg-white text-gray-700'}`}>
-                            {Icon ? (
-                              <Icon className="h-5 w-5" />
-                            ) : null}
-                          </div>
-                          <div className="min-w-0">
-                            <p className={`truncate text-xs ${subtleClass}`}>{tile.label}</p>
-                            <p className="truncate text-lg font-bold">{tile.value}</p>
-                          </div>
-                        </div>
+                      <div key={tile.label} className="pos-frost rounded-xl border p-3">
+                        <p className={`truncate text-sm ${subtleClass}`}>{tile.label}</p>
+                        <p className="mt-1 flex min-w-0 items-center gap-2 text-xl font-bold">
+                          <Icon className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
+                          <span className="truncate">{tile.value}</span>
+                        </p>
                       </div>
                     );
                   })}
                 </div>
 
                 <div className="mt-4 grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
-                  <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-gray-50'}`}>
+                  <div className="pos-frost rounded-xl border p-4">
                     <div className="space-y-4">
                       <InfoLine icon={<Phone className="h-4 w-4" />} label={t('suppliers.phone', 'Phone')} value={supplierSummary.supplier.phone || '-'} subtleClass={subtleClass} />
                       <InfoLine icon={<Mail className="h-4 w-4" />} label={t('suppliers.email', 'Email')} value={supplierSummary.supplier.email || '-'} subtleClass={subtleClass} />
@@ -2091,16 +2110,16 @@ const SuppliersPage: React.FC = () => {
                                 setSupplierSummaryId(null);
                                 openInvoiceDetails(invoice);
                               }}
-                              className={`w-full rounded-xl border p-3 text-left transition ${isDark ? 'border-zinc-800 bg-zinc-900/70 active:bg-zinc-900' : 'border-gray-200 bg-white active:bg-gray-50'}`}
+                              className="pos-frost w-full rounded-xl border p-3 text-left"
                             >
                               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                 <div className="min-w-0">
-                                  <div className="flex flex-wrap items-center gap-2">
+                                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                                     <span className="font-bold">{formatDate(getInvoiceDisplayDate(invoice))}</span>
-                                    <span className={`rounded-full border px-2 py-1 text-xs font-semibold ${isDark ? 'border-zinc-700 bg-zinc-950 text-zinc-200' : 'border-gray-200 bg-gray-50 text-gray-700'}`}>
+                                    <span className={`text-sm font-semibold ${subtleClass}`}>
                                       #{invoice.invoice_number}
                                     </span>
-                                    <span className={`rounded-full border px-2 py-1 text-xs font-semibold ${getInvoiceStatusClass(status)}`}>
+                                    <span className={`text-sm font-semibold ${getInvoiceStatusTextClass(status)}`}>
                                       {t(`suppliers.status.${status}`, status)}
                                     </span>
                                   </div>
@@ -2117,8 +2136,7 @@ const SuppliersPage: React.FC = () => {
                       </div>
                     ) : (
                       <EmptyState
-                        isDark={isDark}
-                        icon={<FileText className="h-8 w-8" />}
+                        icon={<FileText className="h-10 w-10" />}
                         heading={t('suppliers.invoices.emptyTitle', 'No invoices found')}
                         description={t('suppliers.invoices.emptyDescription', 'Supplier invoices will appear here when they sync from the admin dashboard.')}
                       />
@@ -2126,7 +2144,7 @@ const SuppliersPage: React.FC = () => {
                   </div>
                 </div>
               </div>
-            </motion.div>
+            </div>
           </motion.div>
       )}
 
@@ -2148,7 +2166,7 @@ const SuppliersPage: React.FC = () => {
               exit={{ scale: 0.98, y: 16 }}
               transition={{ type: 'spring', damping: 26, stiffness: 260 }}
               onClick={(event) => event.stopPropagation()}
-              className={`flex max-h-[90vh] w-full max-w-3xl flex-col rounded-2xl border shadow-2xl ${panelClass}`}
+              className={`flex max-h-[90vh] w-full max-w-3xl flex-col rounded-2xl border shadow-2xl ${invoicePanelClass}`}
             >
               <div className="flex shrink-0 items-start justify-between gap-4 border-b border-inherit p-4">
                 <div className="min-w-0">
@@ -2167,13 +2185,12 @@ const SuppliersPage: React.FC = () => {
                 <button
                   onClick={closeInvoiceDetails}
                   disabled={saving}
-                  className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border ${iconButtonClass}`}
+                  className="liquid-glass-modal-close shrink-0"
                   aria-label={t('common.close', 'Close')}
                 >
-                  <X className="h-5 w-5" />
+                  <X className="h-5 w-5" aria-hidden="true" />
                 </button>
               </div>
-
               <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-4">
                 <div className="grid gap-3 sm:grid-cols-3">
                   {[
@@ -2213,14 +2230,14 @@ const SuppliersPage: React.FC = () => {
                             aria-label={t('suppliers.invoices.paymentAmount', 'Payment amount')}
                             value={paymentAmount}
                             onValueChange={setPaymentAmount}
-                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
+                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${invoiceFieldClass}`}
                             placeholder={t('suppliers.invoices.paymentAmount', 'Payment amount')}
                           />
                           <select
                             value={paymentMethod}
                             disabled={saving}
                             onChange={(event) => setPaymentMethod(event.target.value as PaymentMethod)}
-                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
+                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${invoiceFieldClass}`}
                           >
                             <option value="cash">{t('suppliers.invoices.methods.cash', 'Cash')}</option>
                             <option value="bank_transfer">{t('suppliers.invoices.methods.bankTransfer', 'Bank transfer')}</option>
@@ -2228,12 +2245,12 @@ const SuppliersPage: React.FC = () => {
                             <option value="credit_card">{t('suppliers.invoices.methods.creditCard', 'Credit card')}</option>
                             <option value="other">{t('suppliers.invoices.methods.other', 'Other')}</option>
                           </select>
-                          <input
-                            type="date"
+                          <KitDateField
+                            type="date" required
                             value={paymentDate}
                             disabled={saving}
                             onChange={(event) => setPaymentDate(event.target.value)}
-                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
+                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${invoiceFieldClass}`}
                           />
                         </div>
                         <div className="grid gap-3 sm:grid-cols-2">
@@ -2241,14 +2258,14 @@ const SuppliersPage: React.FC = () => {
                             value={paymentReference}
                             disabled={saving}
                             onChange={(event) => setPaymentReference(event.target.value)}
-                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
+                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${invoiceFieldClass}`}
                             placeholder={t('suppliers.invoices.reference', 'Reference')}
                           />
                           <input
                             value={paymentNotes}
                             disabled={saving}
                             onChange={(event) => setPaymentNotes(event.target.value)}
-                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
+                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${invoiceFieldClass}`}
                             placeholder={t('suppliers.invoices.paymentNotes', 'Payment notes')}
                           />
                         </div>
@@ -2309,26 +2326,24 @@ const SuppliersPage: React.FC = () => {
 
       {importOpen && renderModalPortal(
           <motion.div
-            className="fixed inset-0 z-1200 flex justify-end bg-black/50 backdrop-blur-sm p-0 sm:p-4 md:p-6"
+            className="fixed inset-0 z-1200 flex items-center justify-end p-0 sm:p-4 md:p-6"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
           >
-            <motion.div
+            {/* The shared glass backdrop; the import window closes only by its X or Escape (never by a stray tap). */}
+            <div className="liquid-glass-modal-backdrop" aria-hidden="true" />
+            <div
               ref={importDialogRef}
               role="dialog"
               aria-modal="true"
               aria-labelledby={importTitleId}
-              initial={{ x: '100%' }}
-              animate={{ x: 0 }}
-              exit={{ x: '100%' }}
-              transition={{ type: 'spring', damping: 28, stiffness: 260 }}
-              className={`flex h-full w-full max-w-none flex-col border-l ${panelClass} sm:max-w-[min(72rem,calc(100vw-8rem))] sm:rounded-2xl sm:border`}
+              className={`h-full max-w-none ${modalShellClass} sm:max-w-[min(72rem,calc(100vw-8rem))]`}
             >
-              <div className="flex shrink-0 items-center justify-between border-b border-inherit p-4">
-                <div>
-                  <h2 id={importTitleId} className="text-xl font-bold">{t('suppliers.import.title', 'Import supplier items')}</h2>
-                  <p className={`text-sm ${subtleClass}`}>
+              <div className={modalHeaderClass}>
+                <div className="min-w-0">
+                  <h2 id={importTitleId} className="text-2xl font-bold">{t('suppliers.import.title', 'Import supplier items')}</h2>
+                  <p className={`mt-1 text-sm ${subtleClass}`}>
                     {correctInvoice
                       ? t('suppliers.capture.automation.noSaveNeeded', 'No saving needed — this invoice is already filed.')
                       : t('suppliers.import.subtitle', 'Review rows first, then sync stock to inventory.')}
@@ -2336,14 +2351,14 @@ const SuppliersPage: React.FC = () => {
                 </div>
                 <button
                   onClick={closeImport}
-                  className={`inline-flex h-10 w-10 items-center justify-center rounded-2xl border ${iconButtonClass}`}
+                  className="liquid-glass-modal-close"
                   aria-label={t('common.close', 'Close')}
                 >
-                  <X className="h-5 w-5" />
+                  <X className="h-5 w-5" aria-hidden="true" />
                 </button>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-4">
+              <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-5">
                 {correctInvoice ? (
                   /*
                     Correct mode: the office already recorded this invoice, so
@@ -2353,7 +2368,7 @@ const SuppliersPage: React.FC = () => {
                     [supplier-invoice-automation §4.13, R16.1]
                   */
                   <div className="space-y-4" data-testid="capture-correct-header">
-                    <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
+                    <div className="pos-frost rounded-xl border p-4">
                       <p className="font-bold">
                         {correctInvoice.outcome === 'recorded_stock_updated'
                           ? t('suppliers.capture.automation.recordedStockMark', 'Saved on its own · stock updated')
@@ -2367,14 +2382,14 @@ const SuppliersPage: React.FC = () => {
                       </p>
                     </div>
 
-                    <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
+                    <div className="pos-frost rounded-xl border p-4">
                       {correctLoading && (
                         <div className={`mb-3 flex items-center gap-2 text-sm ${subtleClass}`}>
                           <Loader2 className="h-4 w-4 animate-spin" />
                           <span>{t('common.loading', 'Loading…')}</span>
                         </div>
                       )}
-                      <div className="grid gap-2 sm:grid-cols-2">
+                      <div className="grid gap-3 sm:grid-cols-2">
                         <input
                           value={invoiceNumber}
                           disabled={correctLoading || !correctBaseline}
@@ -2382,7 +2397,7 @@ const SuppliersPage: React.FC = () => {
                             setInvoiceNumber(event.target.value);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden disabled:opacity-50 ${fieldClass}`}
+                          className={`disabled:opacity-50 ${fieldClass}`}
                           placeholder={t('suppliers.import.invoiceNumber', 'Invoice number')}
                         />
                         <input
@@ -2392,7 +2407,7 @@ const SuppliersPage: React.FC = () => {
                             setInvoiceDate(event.target.value);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden disabled:opacity-50 ${fieldClass}`}
+                          className={`disabled:opacity-50 ${fieldClass}`}
                           placeholder={t('suppliers.import.invoiceDate', 'Invoice date')}
                         />
                         <input
@@ -2402,7 +2417,7 @@ const SuppliersPage: React.FC = () => {
                             setCorrectDueDate(event.target.value);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden disabled:opacity-50 ${fieldClass}`}
+                          className={`disabled:opacity-50 ${fieldClass}`}
                           placeholder={t('suppliers.dueDate', 'Due date')}
                         />
                         <CentsMoneyInput
@@ -2413,7 +2428,7 @@ const SuppliersPage: React.FC = () => {
                             setCorrectAmount(value);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden disabled:opacity-50 ${fieldClass}`}
+                          className={`disabled:opacity-50 ${fieldClass}`}
                           placeholder={t('suppliers.amount', 'Amount')}
                         />
                       </div>
@@ -2424,32 +2439,32 @@ const SuppliersPage: React.FC = () => {
                           setCorrectNotes(event.target.value);
                           setImportError(null);
                         }}
-                        className={`mt-2 min-h-20 w-full resize-none rounded-xl border px-3 py-2 text-sm outline-hidden disabled:opacity-50 ${fieldClass}`}
+                        className={`mt-3 min-h-20 resize-none py-2.5 disabled:opacity-50 ${fieldClass}`}
                         placeholder={t('suppliers.fields.notes', 'Notes')}
                       />
                       {correctLoadError && (
-                        <div className={`mt-3 flex gap-2 rounded-2xl border px-3 py-2 text-sm ${isDark ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800 dark:text-red-200' : 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800'}`}>
-                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <div className="pos-notice pos-notice--bad mt-3 text-sm">
+                          <AlertCircle className="pos-notice__icon h-4 w-4" />
                           <span>{correctLoadError}</span>
                         </div>
                       )}
                       {importError && (
-                        <div className={`mt-3 flex gap-2 rounded-2xl border px-3 py-2 text-sm ${isDark ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800 dark:text-red-200' : 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800'}`}>
-                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <div className="pos-notice pos-notice--bad mt-3 text-sm">
+                          <AlertCircle className="pos-notice__icon h-4 w-4" />
                           <span>{importError}</span>
                         </div>
                       )}
-                      <div className="mt-3 flex flex-wrap justify-end gap-2">
+                      <div className="mt-4 flex flex-wrap justify-end gap-3 border-t border-(--modal-glass-line) pt-4">
                         <button
                           onClick={closeImport}
-                          className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${iconButtonClass}`}
+                          className={secondaryButtonClass}
                         >
                           {t('common.close', 'Close')}
                         </button>
                         <button
                           disabled={saving || correctLoading || !correctBaseline}
                           onClick={() => void saveHeaderCorrection()}
-                          className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold disabled:opacity-50 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500' : 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500'}`}
+                          className={primaryButtonClass}
                         >
                           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                           {t('common.save', 'Save')}
@@ -2460,8 +2475,8 @@ const SuppliersPage: React.FC = () => {
                 ) : (
                 <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
                   <div className="space-y-4">
-                    <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
-                      <label className={`text-sm font-semibold ${subtleClass}`}>{t('suppliers.import.supplierName', 'Supplier name')}</label>
+                    <div className="pos-frost rounded-xl border p-4">
+                      <label className="text-sm font-semibold text-(--pos-s-fg)">{t('suppliers.import.supplierName', 'Supplier name')}</label>
                       <input
                         value={supplierName}
                         onChange={(event) => {
@@ -2469,7 +2484,7 @@ const SuppliersPage: React.FC = () => {
                           setImportDraft(null);
                           setImportError(null);
                         }}
-                        className={`mt-2 h-11 w-full rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
+                        className={`mt-2 ${fieldClass}`}
                         placeholder={t('suppliers.import.supplierPlaceholder', 'Fresh Farms')}
                       />
                       <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
@@ -2480,7 +2495,7 @@ const SuppliersPage: React.FC = () => {
                             setImportDraft(null);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
+                          className={fieldClass}
                           placeholder={t('suppliers.import.supplierPhone', 'Phone')}
                         />
                         <input
@@ -2490,7 +2505,7 @@ const SuppliersPage: React.FC = () => {
                             setImportDraft(null);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
+                          className={fieldClass}
                           placeholder={t('suppliers.import.supplierEmail', 'Email')}
                         />
                       </div>
@@ -2502,7 +2517,7 @@ const SuppliersPage: React.FC = () => {
                             setImportDraft(null);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
+                          className={fieldClass}
                           placeholder={t('suppliers.import.invoiceNumber', 'Invoice number')}
                         />
                         <input
@@ -2512,7 +2527,7 @@ const SuppliersPage: React.FC = () => {
                             setImportDraft(null);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
+                          className={fieldClass}
                           placeholder={t('suppliers.import.invoiceDate', 'Invoice date')}
                         />
                       </div>
@@ -2523,12 +2538,12 @@ const SuppliersPage: React.FC = () => {
                           setImportDraft(null);
                           setImportError(null);
                         }}
-                        className={`mt-2 min-h-20 w-full resize-none rounded-xl border px-3 py-2 text-sm outline-hidden ${fieldClass}`}
+                        className={`mt-2 min-h-20 resize-none py-2.5 ${fieldClass}`}
                         placeholder={t('suppliers.import.supplierNotes', 'Supplier notes from invoice')}
                       />
                     </div>
 
-                    <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
+                    <div className="pos-frost rounded-xl border p-4">
                       <p className="font-semibold">{t('suppliers.import.addRows', 'Add rows')}</p>
                       <div className="mt-3 grid gap-2">
                         <button
@@ -2537,21 +2552,21 @@ const SuppliersPage: React.FC = () => {
                             setImportDraft(null);
                             setImportError(null);
                           }}
-                          className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border px-3 text-sm font-semibold ${iconButtonClass}`}
+                          className={secondaryButtonClass}
                         >
                           <Plus className="h-4 w-4" />
                           {t('suppliers.import.manualRow', 'Manual row')}
                         </button>
                         <button
                           onClick={() => fileInputRef.current?.click()}
-                          className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border px-3 text-sm font-semibold ${iconButtonClass}`}
+                          className={secondaryButtonClass}
                         >
                           <Upload className="h-4 w-4" />
                           {t('suppliers.import.file', 'File import')}
                         </button>
                         <button
                           onClick={() => cameraInputRef.current?.click()}
-                          className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border px-3 text-sm font-semibold ${iconButtonClass}`}
+                          className={secondaryButtonClass}
                         >
                           <Camera className="h-4 w-4" />
                           {t('suppliers.import.camera', 'Camera scan')}
@@ -2583,22 +2598,22 @@ const SuppliersPage: React.FC = () => {
                       {fileNotice && <p className={`mt-3 text-xs ${subtleClass}`}>{fileNotice}</p>}
                     </div>
 
-                    <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
+                    <div className="pos-frost rounded-xl border p-4">
                       <p className="font-semibold">{t('suppliers.import.hardwareScanner', 'Hardware scanner')}</p>
                       <p className={`mt-1 text-xs ${subtleClass}`}>{t('suppliers.import.hardwareHelp', 'Open this drawer and scan. The barcode is added automatically.')}</p>
-                      <div className="mt-3 flex gap-2">
+                      <div className="mt-3 flex items-center gap-2">
                         <input
                           value={manualBarcode}
                           onChange={(event) => setManualBarcode(event.target.value)}
                           onKeyDown={(event) => {
                             if (event.key === 'Enter') appendBarcodeRow(manualBarcode);
                           }}
-                          className={`min-w-0 flex-1 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
+                          className={`min-w-0 flex-1 ${kitFieldLook}`}
                           placeholder={t('suppliers.import.barcodePlaceholder', 'Barcode')}
                         />
                         <button
                           onClick={() => appendBarcodeRow(manualBarcode)}
-                          className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border ${iconButtonClass}`}
+                          className="pos-icon-btn"
                           aria-label={t('suppliers.import.addBarcode', 'Add barcode')}
                         >
                           <Package className="h-4 w-4" />
@@ -2616,19 +2631,19 @@ const SuppliersPage: React.FC = () => {
                     {reviewCapture && reviewQuality === 'poor' && (
                       <div
                         data-testid="capture-poor-quality"
-                        className={`rounded-xl border p-4 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800'}`}
+                        className="pos-notice pos-notice--warn pos-notice--stack"
                       >
                         <p className="font-semibold">
                           {t('suppliers.capture.review.poorTitle', 'This scan is hard to read')}
                         </p>
-                        <p className="mt-1 text-sm">
+                        <p className="text-sm">
                           {t('suppliers.capture.review.poorDescription', 'You can scan it again, or just type in what it says.')}
                         </p>
-                        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                        <div className="grid gap-2 sm:grid-cols-2">
                           <button
                             data-testid="capture-scan-again"
                             onClick={() => void rescanCurrentInvoice()}
-                            className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${iconButtonClass}`}
+                            className={secondaryButtonClass}
                           >
                             <RefreshCw className="h-4 w-4" />
                             {t('suppliers.capture.review.scanAgain', 'Scan it again')}
@@ -2636,7 +2651,7 @@ const SuppliersPage: React.FC = () => {
                           <button
                             data-testid="capture-fill-by-hand"
                             onClick={() => setReviewQuality('good')}
-                            className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${iconButtonClass}`}
+                            className={secondaryButtonClass}
                           >
                             <Save className="h-4 w-4" />
                             {t('suppliers.capture.review.fillByHand', 'Fill it in by hand')}
@@ -2654,7 +2669,7 @@ const SuppliersPage: React.FC = () => {
                     {reviewCapture && reviewPoOptions.length > 0 && (
                       <div
                         data-testid="capture-po-linkage"
-                        className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-gray-50'}`}
+                        className="pos-frost rounded-xl border p-4"
                       >
                         <p className="font-semibold">
                           {t('suppliers.capture.review.poTitle', 'This delivery was expected — is this it?')}
@@ -2663,12 +2678,12 @@ const SuppliersPage: React.FC = () => {
                           {reviewPoOptions.map(order => (
                             <label
                               key={order.id}
-                              className="flex min-h-10 items-center gap-3 text-sm"
+                              className="flex min-h-11 items-center gap-3 text-sm"
                             >
                               <input
                                 type="radio"
                                 name="capture-po-linkage"
-                                className="h-5 w-5"
+                                className="h-5 w-5 accent-(--pos-s-yellow)"
                                 checked={reviewPoId === order.id}
                                 onChange={() => setReviewPoId(order.id)}
                               />
@@ -2678,11 +2693,11 @@ const SuppliersPage: React.FC = () => {
                               </span>
                             </label>
                           ))}
-                          <label className="flex min-h-10 items-center gap-3 text-sm">
+                          <label className="flex min-h-11 items-center gap-3 text-sm">
                             <input
                               type="radio"
                               name="capture-po-linkage"
-                              className="h-5 w-5"
+                              className="h-5 w-5 accent-(--pos-s-yellow)"
                               checked={reviewPoId === null}
                               onChange={() => setReviewPoId(null)}
                             />
@@ -2692,22 +2707,23 @@ const SuppliersPage: React.FC = () => {
                       </div>
                     )}
 
-                    <div className={`rounded-xl border ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-white'}`}>
-                      <div className="flex items-center justify-between gap-3 border-b border-inherit p-3">
+                    <div className="pos-frost rounded-xl border">
+                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-(--modal-glass-line) p-3">
                         <div>
-                          <div className="flex flex-wrap items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                             <h3 className="font-bold">{t('suppliers.import.draftRows', 'Draft rows')}</h3>
-                            <span className={`rounded-full border px-2 py-1 text-xs font-semibold ${isDark ? 'border-zinc-700 bg-zinc-950 text-zinc-200' : 'border-gray-200 bg-gray-50 text-gray-700'}`}>
+                            <span className={`text-sm font-semibold ${subtleClass}`}>
                               {t('suppliers.import.rowCount', { count: draftRowCount, defaultValue: '{{count}} rows' })}
                             </span>
                           </div>
                           <p className={`text-xs ${subtleClass}`}>{t('suppliers.import.reviewBeforeSave', 'Edit quantities, costs, and categories before preview.')}</p>
                         </div>
+                        {/* One yellow primary at a time: Preview until the draft is checked, then Save. */}
                         <div className="flex flex-wrap items-center justify-end gap-2">
                           <button
                             onClick={previewImport}
                             disabled={saving}
-                            className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold border-yellow-400 bg-(--pos-s-yellow) text-black active:bg-yellow-500 disabled:opacity-60`}
+                            className={importDraft ? secondaryButtonClass : primaryButtonClass}
                           >
                             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
                             {t('suppliers.import.preview', 'Preview')}
@@ -2715,7 +2731,7 @@ const SuppliersPage: React.FC = () => {
                           <button
                             onClick={commitImport}
                             disabled={saving || !importDraft || importDraft.rows.some(row => row.status === 'error')}
-                            className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500' : 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500'}`}
+                            className={importDraft ? primaryButtonClass : secondaryButtonClass}
                           >
                             {saving && importDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                             {importDraft ? t('suppliers.import.commit', 'Save to inventory') : t('suppliers.import.saveAfterPreview', 'Save after preview')}
@@ -2723,8 +2739,8 @@ const SuppliersPage: React.FC = () => {
                         </div>
                       </div>
                       {importError && (
-                        <div className={`mx-3 mt-3 flex gap-2 rounded-2xl border px-3 py-2 text-sm ${isDark ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800 dark:text-red-200' : 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800'}`}>
-                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <div className="pos-notice pos-notice--bad mx-3 mt-3 text-sm">
+                          <AlertCircle className="pos-notice__icon h-4 w-4" />
                           <span>{importError}</span>
                         </div>
                       )}
@@ -2742,8 +2758,6 @@ const SuppliersPage: React.FC = () => {
                               index={index}
                               fieldClass={fieldClass}
                               subtleClass={subtleClass}
-                              iconButtonClass={iconButtonClass}
-                              isDark={isDark}
                               doubleCheck={needsDoubleCheck(reviewConfidence[index])}
                               onChange={updateDraftRow}
                               onRemove={removeDraftRow}
@@ -2755,8 +2769,8 @@ const SuppliersPage: React.FC = () => {
                     </div>
 
                     {importDraft && (
-                      <div className={`rounded-xl border ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-white'}`}>
-                        <div className="flex flex-col gap-3 border-b border-inherit p-3 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="pos-frost rounded-xl border">
+                        <div className="flex flex-col gap-3 border-b border-(--modal-glass-line) p-3 lg:flex-row lg:items-center lg:justify-between">
                           <div>
                             <h3 className="font-bold">{t('suppliers.import.review', 'Review inventory sync')}</h3>
                             <p className={`text-xs ${subtleClass}`}>
@@ -2766,7 +2780,7 @@ const SuppliersPage: React.FC = () => {
                           <button
                             onClick={commitImport}
                             disabled={saving || importDraft.rows.some(row => row.status === 'error')}
-                            className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-semibold border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500 disabled:opacity-50`}
+                            className={secondaryButtonClass}
                           >
                             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                             {t('suppliers.import.commit', 'Save to inventory')}
@@ -2774,12 +2788,13 @@ const SuppliersPage: React.FC = () => {
                         </div>
                         <div className="max-h-[38vh] overflow-y-auto scrollbar-hide p-3">
                           {importDraft.missingCategories.length > 0 && (
-                            <div className={`mb-3 rounded-2xl border p-3 text-sm ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800'}`}>
-                              {importDraft.missingCategories.map(category => (
-                                <span key={`${category.parentName}-${category.name}`} className="mr-2 inline-flex rounded-full border border-current/20 px-2 py-1 text-xs">
-                                  {category.parentName ? `${category.parentName} / ${category.name}` : category.name}
-                                </span>
-                              ))}
+                            <div className="pos-notice pos-notice--warn mb-3 text-sm">
+                              {/* The missing categories are plain words, no pills. */}
+                              <span>
+                                {importDraft.missingCategories
+                                  .map(category => (category.parentName ? `${category.parentName} / ${category.name}` : category.name))
+                                  .join(' · ')}
+                              </span>
                             </div>
                           )}
                           <div className="space-y-2">
@@ -2790,7 +2805,6 @@ const SuppliersPage: React.FC = () => {
                                 index={index}
                                 fieldClass={fieldClass}
                                 subtleClass={subtleClass}
-                                isDark={isDark}
                                 onChange={updateReviewRow}
                                 t={t}
                               />
@@ -2803,7 +2817,7 @@ const SuppliersPage: React.FC = () => {
                 </div>
                 )}
               </div>
-            </motion.div>
+            </div>
           </motion.div>
       )}
 
@@ -2836,19 +2850,17 @@ const SuppliersPage: React.FC = () => {
       )}
 
       {captureEnabled && captureQueueOpen && renderModalPortal(
-        <div
-          className="fixed inset-0 z-1200 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
-          onClick={() => setCaptureQueueOpen(false)}
-        >
+        <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
+          <div className="liquid-glass-modal-backdrop" onClick={() => setCaptureQueueOpen(false)} aria-hidden="true" />
           <div
             ref={captureQueueDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby={captureQueueTitleId}
             onClick={(event) => event.stopPropagation()}
-            className={`flex max-h-[90vh] w-full max-w-3xl flex-col rounded-2xl border shadow-2xl ${panelClass}`}
+            className={`max-w-3xl ${modalShellClass}`}
           >
-            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-inherit p-4">
+            <div className={modalHeaderClass}>
               <div className="min-w-0">
                 <h2 id={captureQueueTitleId} className="truncate text-2xl font-bold">
                   {t('suppliers.capture.queue.title', 'Scanned invoices')}
@@ -2860,12 +2872,12 @@ const SuppliersPage: React.FC = () => {
               <button
                 onClick={() => setCaptureQueueOpen(false)}
                 aria-label={t('common.close', 'Close')}
-                className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border ${iconButtonClass}`}
+                className="liquid-glass-modal-close"
               >
-                <X className="h-5 w-5" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-4">
+            <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-5">
               <CaptureQueuePanel
                 onReview={openCaptureReview}
                 onContinueCapture={(document) => {
@@ -2890,23 +2902,24 @@ const SuppliersPage: React.FC = () => {
 };
 
 interface EmptyStateProps {
-  isDark: boolean;
   icon: React.ReactNode;
   heading: string;
   description: string;
 }
 
-const EmptyState: React.FC<EmptyStateProps> = ({ isDark, icon, heading, description }) => (
-  <div className={`flex min-h-[260px] flex-col items-center justify-center rounded-xl border p-8 text-center ${isDark ? 'border-zinc-800 bg-zinc-900/40 text-zinc-300' : 'border-gray-200 bg-white text-gray-600'}`}>
-    <div className={`mb-3 flex h-14 w-14 items-center justify-center rounded-xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>{icon}</div>
+// Founder 01/11: an empty state is a neutral icon with no wrapper box, one title and one muted line.
+const EmptyState: React.FC<EmptyStateProps> = ({ icon, heading, description }) => (
+  <div className="flex min-h-[260px] flex-col items-center justify-center p-8 text-center">
+    <div className="mb-3 text-(--pos-s-muted)" aria-hidden="true">{icon}</div>
     <h3 className="text-base font-bold">{heading}</h3>
-    <p className="mt-1 max-w-sm text-sm">{description}</p>
+    <p className="mt-1 max-w-sm text-sm text-(--pos-s-muted)">{description}</p>
   </div>
 );
 
+// Founder 01/11: the detail rows carry a neutral (muted) icon, never an amber one.
 const InfoLine: React.FC<{ icon: React.ReactNode; label: string; value: string; subtleClass: string }> = ({ icon, label, value, subtleClass }) => (
   <div className="flex items-start gap-3">
-    <div className="text-yellow-700 dark:text-yellow-400">{icon}</div>
+    <div className="text-(--pos-s-muted)">{icon}</div>
     <div className="min-w-0">
       <p className={`text-xs ${subtleClass}`}>{label}</p>
       <p className="wrap-break-word text-sm font-medium">{value}</p>
@@ -2919,8 +2932,6 @@ interface ImportRowEditorProps {
   index: number;
   fieldClass: string;
   subtleClass: string;
-  iconButtonClass: string;
-  isDark: boolean;
   /**
    * True when the reader was not sure about this row and the user should look
    * at it. Derived from the server's tri-state confidence — the numeric score
@@ -2932,25 +2943,26 @@ interface ImportRowEditorProps {
   t: TFunction;
 }
 
-const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClass, subtleClass, iconButtonClass, isDark, doubleCheck, onChange, onRemove, t }) => (
-  <div className={`rounded-xl border p-3 ${doubleCheck ? (isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2)' : 'border-(--pos-s-yellow) bg-(--pos-s-surface-2)') : (isDark ? 'border-zinc-800 bg-black/20' : 'border-gray-200 bg-gray-50')}`}>
-    <div className="grid gap-2 md:grid-cols-[minmax(0,1.4fr)_120px_120px_86px_86px_42px]">
+// A row the reader was unsure of is outlined in the kit warn colour, with a plain amber word (no pill).
+const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClass, subtleClass, doubleCheck, onChange, onRemove, t }) => (
+  <div className={doubleCheck ? 'rounded-xl border-2 border-(--pos-s-warn) p-3' : 'rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3'}>
+    <div className="grid gap-2 md:grid-cols-[minmax(0,1.4fr)_120px_120px_86px_86px_44px]">
       <input
         value={row.name}
         onChange={(event) => onChange(index, { name: event.target.value })}
-        className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
+        className={fieldClass}
         placeholder={t('suppliers.import.itemName', 'Item name')}
       />
       <input
         value={row.sku || ''}
         onChange={(event) => onChange(index, { sku: event.target.value })}
-        className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
+        className={fieldClass}
         placeholder={t('suppliers.import.sku', 'SKU')}
       />
       <input
         value={row.barcode || ''}
         onChange={(event) => onChange(index, { barcode: event.target.value })}
-        className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
+        className={fieldClass}
         placeholder={t('suppliers.import.barcode', 'Barcode')}
       />
       <input
@@ -2958,7 +2970,7 @@ const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClas
         min="0"
         value={row.quantity}
         onChange={(event) => onChange(index, { quantity: toNumber(event.target.value, 0) })}
-        className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
+        className={fieldClass}
         placeholder={t('suppliers.import.quantity', 'Qty')}
       />
       <input
@@ -2966,29 +2978,29 @@ const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClas
         min="0"
         value={row.cost}
         onChange={(event) => onChange(index, { cost: toNumber(event.target.value, 0) })}
-        className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
+        className={fieldClass}
         placeholder={t('suppliers.import.cost', 'Cost')}
       />
       <button
         onClick={() => onRemove(index)}
-        className={`inline-flex h-10 w-10 items-center justify-center rounded-2xl border ${iconButtonClass}`}
+        className="pos-icon-btn self-center"
         aria-label={t('common.delete', 'Delete')}
       >
         <Trash2 className="h-4 w-4" />
       </button>
     </div>
     <div className="mt-2 grid gap-2 md:grid-cols-4">
-      <input value={row.unit} onChange={(event) => onChange(index, { unit: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} placeholder={t('suppliers.import.unit', 'Unit')} />
-      <input value={row.category || ''} onChange={(event) => onChange(index, { category: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} placeholder={t('suppliers.import.category', 'Category')} />
-      <input value={row.subcategory || ''} onChange={(event) => onChange(index, { subcategory: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} placeholder={t('suppliers.import.subcategory', 'Subcategory')} />
-      <input value={row.notes || ''} onChange={(event) => onChange(index, { notes: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} placeholder={t('suppliers.import.notes', 'Notes')} />
+      <input value={row.unit} onChange={(event) => onChange(index, { unit: event.target.value })} className={fieldClass} placeholder={t('suppliers.import.unit', 'Unit')} />
+      <input value={row.category || ''} onChange={(event) => onChange(index, { category: event.target.value })} className={fieldClass} placeholder={t('suppliers.import.category', 'Category')} />
+      <input value={row.subcategory || ''} onChange={(event) => onChange(index, { subcategory: event.target.value })} className={fieldClass} placeholder={t('suppliers.import.subcategory', 'Subcategory')} />
+      <input value={row.notes || ''} onChange={(event) => onChange(index, { notes: event.target.value })} className={fieldClass} placeholder={t('suppliers.import.notes', 'Notes')} />
     </div>
-    <div className="mt-2 flex flex-wrap items-center gap-2">
+    <div className="mt-2 flex flex-wrap items-center gap-3">
       <p className={`text-xs ${subtleClass}`}>{t('suppliers.import.rowNumber', 'Row')} {index + 1}</p>
       {doubleCheck && (
         <span
           data-testid={`capture-double-check-${index}`}
-          className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${isDark ? 'border-(--pos-s-yellow) text-amber-200' : 'border-(--pos-s-yellow) text-amber-800'}`}
+          className="text-xs font-semibold text-(--pos-s-warn)"
         >
           {t('suppliers.capture.review.doubleCheck', 'Double-check this')}
         </span>
@@ -3002,31 +3014,31 @@ interface ReviewRowProps {
   index: number;
   fieldClass: string;
   subtleClass: string;
-  isDark: boolean;
   onChange: (index: number, patch: Partial<SupplierImportRow>) => void;
   t: TFunction;
 }
 
-const ReviewRow: React.FC<ReviewRowProps> = ({ row, index, fieldClass, subtleClass, isDark, onChange, t }) => {
+// The row's sync status is a coloured word (no pill): error bad, update warn, skip muted, create ok.
+const ReviewRow: React.FC<ReviewRowProps> = ({ row, index, fieldClass, subtleClass, onChange, t }) => {
   const statusClass = row.status === 'error'
-    ? (isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-700')
+    ? 'text-(--pos-s-bad)'
     : row.status === 'update'
-      ? (isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700')
+      ? 'text-(--pos-s-warn)'
       : row.status === 'skip'
-        ? (isDark ? 'border-zinc-700 bg-zinc-800 text-zinc-300' : 'border-gray-200 bg-gray-100 text-gray-600')
-        : (isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700');
+        ? 'text-(--pos-s-muted)'
+        : 'text-(--pos-s-ok)';
 
   return (
-    <div className={`rounded-xl border p-3 ${isDark ? 'border-zinc-800 bg-black/20' : 'border-gray-200 bg-gray-50'}`}>
+    <div className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
       <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-3">
             <input
               value={row.name}
               onChange={(event) => onChange(index, { name: event.target.value })}
-              className={`h-10 min-w-[220px] rounded-2xl border px-3 text-sm font-semibold outline-hidden ${fieldClass}`}
+              className={`min-w-[220px] flex-1 ${fieldClass}`}
             />
-            <span className={`rounded-full border px-2 py-1 text-xs font-semibold ${statusClass}`}>
+            <span className={`text-sm font-semibold ${statusClass}`}>
               {t(`suppliers.import.status.${row.status}`, row.status)}
             </span>
           </div>
@@ -3035,9 +3047,9 @@ const ReviewRow: React.FC<ReviewRowProps> = ({ row, index, fieldClass, subtleCla
           </p>
         </div>
         <div className="grid grid-cols-3 gap-2">
-          <input type="number" min="0" value={row.quantity} onChange={(event) => onChange(index, { quantity: toNumber(event.target.value, 0) })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} />
-          <input type="number" min="0" value={row.cost} onChange={(event) => onChange(index, { cost: toNumber(event.target.value, 0) })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} />
-          <select value={row.status} onChange={(event) => onChange(index, { status: event.target.value as ImportRowStatus })} className={`h-10 rounded-2xl border px-2 text-sm outline-hidden ${fieldClass}`}>
+          <input type="number" min="0" value={row.quantity} onChange={(event) => onChange(index, { quantity: toNumber(event.target.value, 0) })} className={fieldClass} />
+          <input type="number" min="0" value={row.cost} onChange={(event) => onChange(index, { cost: toNumber(event.target.value, 0) })} className={fieldClass} />
+          <select value={row.status} onChange={(event) => onChange(index, { status: event.target.value as ImportRowStatus })} className={fieldClass}>
             <option value="create">{t('suppliers.import.status.create', 'Create')}</option>
             <option value="update">{t('suppliers.import.status.update', 'Update')}</option>
             <option value="skip">{t('suppliers.import.status.skip', 'Skip')}</option>
@@ -3045,9 +3057,9 @@ const ReviewRow: React.FC<ReviewRowProps> = ({ row, index, fieldClass, subtleCla
         </div>
       </div>
       {[...row.errors, ...row.warnings].length > 0 && (
-        <div className={`mt-2 rounded-2xl border px-3 py-2 text-xs ${row.errors.length > 0 ? (isDark ? 'border-(--pos-s-border) text-red-200' : 'border-(--pos-s-border) text-red-700') : (isDark ? 'border-(--pos-s-border) text-amber-200' : 'border-(--pos-s-border) text-amber-700')}`}>
+        <p className={`mt-2 text-xs font-semibold ${row.errors.length > 0 ? 'text-(--pos-s-bad)' : 'text-(--pos-s-warn)'}`}>
           {[...row.errors, ...row.warnings].join(' ')}
-        </div>
+        </p>
       )}
     </div>
   );

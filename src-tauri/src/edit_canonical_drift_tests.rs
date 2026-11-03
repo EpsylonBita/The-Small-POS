@@ -714,7 +714,8 @@ fn canonical_adoption_rolls_back_the_preimage_guard_and_all_fields_on_failure() 
         &capability(canonical),
     )
     .unwrap_err();
-    assert_eq!(refused.code, "EDIT_LOCAL_OPERATION_FAILED");
+    // Rule 6 (02/11/2026): the forced failure keeps its SQLite class.
+    assert_eq!(refused.code, "EDIT_LOCAL_STORAGE_CONSTRAINT");
     let (floor, total): (String, f64) = conn
         .query_row(
             "SELECT delivery_floor,total_amount FROM orders WHERE id=?1",

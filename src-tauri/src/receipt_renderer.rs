@@ -849,6 +849,8 @@ pub struct ZReportPlatformEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ZReportDoc {
     #[serde(default)]
+    pub discarded_corrections: Vec<serde_json::Value>,
+    #[serde(default)]
     pub vat_breakdown: serde_json::Value,
     #[serde(default)]
     pub hotel_report: serde_json::Value,
@@ -1360,6 +1362,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "TEST ORDER" => "ΔΟΚΙΜΗ TEST",
             "PHONE SHIFTS" => "ΒΑΡΔΙΕΣ ΚΙΝΗΤΩΝ",
             "TIPS BY STAFF" => "ΦΙΛΟΔΩΡΗΜΑΤΑ ΑΝΑ ΥΠΑΛΛΗΛΟ",
+            "Discarded corrections without money" => "Διορθώσεις που απορρίφθηκαν χωρίς χρήματα",
+            "Collection" => "Είσπραξη",
+            "Refund" => "Επιστροφή",
             "Mobile" => "Κινητό",
             "Handover" => "Παράδοση",
             "Handed over" => "Παραδόθηκε",
@@ -1544,6 +1549,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "TEST ORDER" => "TESTBESTELLUNG",
             "PHONE SHIFTS" => "HANDY-SCHICHTEN",
             "TIPS BY STAFF" => "TRINKGELD PRO MITARBEITER",
+            "Discarded corrections without money" => "Ohne Geldbewegung verworfene Korrekturen",
+            "Collection" => "Einzug",
+            "Refund" => "Erstattung",
             "Mobile" => "Handy",
             "Handover" => "Übergabe",
             "Handed over" => "Übergeben",
@@ -1729,6 +1737,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "TEST ORDER" => "COMMANDE TEST",
             "PHONE SHIFTS" => "SERVICES TELEPHONE",
             "TIPS BY STAFF" => "POURBOIRES PAR EMPLOYÉ",
+            "Discarded corrections without money" => "Corrections abandonnées sans mouvement d’argent",
+            "Collection" => "Encaissement",
+            "Refund" => "Remboursement",
             "Mobile" => "Telephone",
             "Handover" => "Remise",
             "Handed over" => "Remis",
@@ -1911,6 +1922,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "TEST ORDER" => "ORDINE DI PROVA",
             "PHONE SHIFTS" => "TURNI TELEFONI",
             "TIPS BY STAFF" => "MANCE PER DIPENDENTE",
+            "Discarded corrections without money" => "Correzioni scartate senza movimento di denaro",
+            "Collection" => "Incasso",
+            "Refund" => "Rimborso",
             "Mobile" => "Telefono",
             "Handover" => "Consegna",
             "Handed over" => "Consegnato",
@@ -2099,6 +2113,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "TEST ORDER" => "POROSI PROVË",
             "PHONE SHIFTS" => "TURNET NË TELEFON",
             "TIPS BY STAFF" => "BAKSHISHE SIPAS STAFIT",
+            "Discarded corrections without money" => "Korrigjime të hedhura poshtë pa lëvizje parash",
+            "Collection" => "Arkëtim",
+            "Refund" => "Rimbursim",
             "Mobile" => "Telefoni",
             "Handover" => "Dorëzimi",
             "Handed over" => "U dorëzua",
@@ -2239,6 +2256,35 @@ fn z_report_staff_payment_detail_label(lang: &str, payment: &ZReportStaffPayment
     } else {
         format!("{} ({})", staff_name, role)
     }
+}
+
+/// The discarded attempt's declaration and actor, separate from Z money.
+fn z_report_discarded_label(row: &serde_json::Value, lang: &str) -> String {
+    let text = |key: &str| row[key].as_str().unwrap_or("\u{2014}");
+    let action = receipt_label(
+        lang,
+        match text("action") {
+            "refund" => "Refund",
+            "collect" => "Collection",
+            _ => "\u{2014}",
+        },
+    );
+    let method = receipt_label(
+        lang,
+        match text("method") {
+            "cash" => "Cash",
+            "card" => "Card",
+            _ => "\u{2014}",
+        },
+    );
+    format!(
+        "{} \u{00b7} {} \u{00b7} {} \u{00b7} {} \u{00b7} {}",
+        text("orderNumber"),
+        action,
+        method,
+        text("actorName"),
+        text("at")
+    )
 }
 
 /// The "Tips by staff" rows: stylists with a non-zero tip, as the Z stored them.
@@ -6121,6 +6167,21 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     esc(receipt_label(lang, "Total Expenses")),
                     money(z_report_total_expenses_including_staff(doc)),
                 ));
+            }
+
+            if !doc.discarded_corrections.is_empty() {
+                body.push_str(&format!(
+                    "<div class=\"section\"><strong>{}</strong>",
+                    esc(receipt_label(lang, "Discarded corrections without money"))
+                ));
+                for row in &doc.discarded_corrections {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(&z_report_discarded_label(row, lang)),
+                        money(row["amountCents"].as_i64().unwrap_or(0) as f64 / 100.0)
+                    ));
+                }
+                body.push_str("</div>");
             }
 
             // Tips by staff, after the staff payments (salon, 21/10/2026).
@@ -10092,6 +10153,31 @@ fn render_classic_non_customer_raster_exact_ttf(
                 );
             }
 
+            if !doc.discarded_corrections.is_empty() {
+                canvas.draw_rule();
+                canvas.draw_wrapped(
+                    receipt_label(lang, "Discarded corrections without money"),
+                    BitmapAlign::Center,
+                    preset.section_style,
+                );
+                for row in &doc.discarded_corrections {
+                    canvas.draw_wrapped(
+                        &z_report_discarded_label(row, lang),
+                        BitmapAlign::Left,
+                        preset.item_style,
+                    );
+                    canvas.draw_pair(
+                        "",
+                        &money_with_currency_locale(
+                            row["amountCents"].as_i64().unwrap_or(0) as f64 / 100.0,
+                            &cur,
+                            comma,
+                        ),
+                        preset.item_style,
+                    );
+                }
+            }
+
             // --- Tips by staff, after the staff payments (salon, 21/10/2026) ---
             let staff_tip_rows = z_report_staff_tip_rows(doc);
             if !staff_tip_rows.is_empty() {
@@ -12709,6 +12795,28 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     ),
                     width,
                 );
+            }
+
+            if !doc.discarded_corrections.is_empty() {
+                emit_rule(&mut builder, width, '-');
+                builder
+                    .center()
+                    .bold(true)
+                    .text(receipt_label(lang, "Discarded corrections without money"))
+                    .lf()
+                    .bold(false)
+                    .left();
+                for row in &doc.discarded_corrections {
+                    emit_pair(
+                        &mut builder,
+                        &z_report_discarded_label(row, lang),
+                        &money_locale(
+                            row["amountCents"].as_i64().unwrap_or(0) as f64 / 100.0,
+                            comma,
+                        ),
+                        width,
+                    );
+                }
             }
 
             // --- Tips by staff, after the staff payments (salon, 21/10/2026) ---
@@ -18542,6 +18650,49 @@ mod tests {
         let mut noise = tomikro_z_report();
         noise.tax_total = 0.004;
         assert_eq!(height(noise), height(tomikro_z_report()));
+    }
+
+    #[test]
+    fn z_prints_discarded_corrections_as_information_in_all_six_languages() {
+        for lang in ["en", "el", "de", "fr", "it", "sq"] {
+            let cfg = slip_cfg(lang, "EUR");
+            let mut z = tomikro_z_report();
+            let original_total = z.net_sales;
+            z.discarded_corrections = vec![
+                serde_json::json!({"orderNumber":"00055","action":"collect",
+                "method":"card","amountCents":190,"actorName":"Maria","at":"2026-11-03T10:00:00Z"}),
+            ];
+            let html = render_html(&ReceiptDocument::ZReport(z.clone()), &cfg);
+            assert!(
+                html.contains(receipt_label(lang, "Discarded corrections without money")),
+                "{html}"
+            );
+            for output in html_and_text(&ReceiptDocument::ZReport(z.clone()), &cfg) {
+                assert!(
+                    output.contains("00055") && output.contains("Maria"),
+                    "{output}"
+                );
+                assert!(
+                    output.contains("1.90") || output.contains("1,90"),
+                    "{output}"
+                );
+            }
+            assert_eq!(z.net_sales, original_total);
+            let raster = LayoutConfig {
+                template: ReceiptTemplate::Classic,
+                classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+                ..cfg
+            };
+            let height = |doc| {
+                render_classic_non_customer_raster_exact_ttf(
+                    &ReceiptDocument::ZReport(doc),
+                    &raster,
+                )
+                .unwrap()
+                .height()
+            };
+            assert!(height(z) > height(tomikro_z_report()));
+        }
     }
 
     fn z_with_phone_shifts() -> ZReportDoc {

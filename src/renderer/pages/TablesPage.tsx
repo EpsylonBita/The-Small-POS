@@ -321,10 +321,10 @@ const FilterDropdown = memo<FilterDropdownProps>(({ filter, onFilterChange, isDa
           </h3>
           <button
             onClick={onClose}
-            className={`p-1 rounded-2xl ${isDark ? 'active:bg-white/10' : 'active:bg-gray-100'}`}
+            className="liquid-glass-modal-close"
             aria-label={t('common.actions.close', 'Close')}
           >
-            <X className={`w-4 h-4 ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
 
@@ -469,9 +469,9 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
           </div>
           <button
             onClick={onClose}
-            className={`p-2 rounded-2xl ${isDark ? 'active:bg-white/10 text-gray-400' : 'active:bg-gray-100 text-gray-500'}`}
+            className="liquid-glass-modal-close"
           >
-            <X className="w-5 h-5" />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
 
@@ -944,7 +944,7 @@ const TablesPage: React.FC = () => {
 
       {/* Stats Row */}
       <motion.div variants={pageMotionItem} className="px-6 pb-4">
-        <motion.div variants={pageMotionContainer} className="flex gap-3 overflow-x-auto scrollbar-hide">
+        <motion.div variants={pageMotionContainer} className="pos-scroll-row gap-3">
           {([
             { key: 'available', color: STATUS_COLORS.available, icon: CheckCircle, count: stats.availableTables },
             { key: 'occupied', color: STATUS_COLORS.occupied, icon: Users, count: stats.occupiedTables },
@@ -1093,7 +1093,7 @@ const TablesPage: React.FC = () => {
             {hasActiveFilters && (
               <button
                 onClick={handleClearFilters}
-                className="mt-4 px-4 py-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) font-medium active:bg-(--pos-s-border) transition-colors"
+                className="pos-raised mt-4 px-4 py-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) font-medium active:bg-(--pos-s-border) transition-colors"
               >
                 {t('tables.filters.clear', 'Clear Filters')}
               </button>

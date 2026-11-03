@@ -1,4 +1,3 @@
-import { formatCurrency } from '../utils/format';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -23,6 +22,9 @@ import {
 import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
 import { HealthSupportEntryPoint } from './support/HealthSupportEntryPoint';
+import { SupportConnectAction } from './support/SupportConnectAction';
+import { SupportDetailsPanel } from './support/SupportDetailsPanel';
+import { registerSupportHealthObservation } from '../services/support/SupportMatcherBridge';
 import { RecoveryCenterPanel } from './recovery/RecoveryCenterPanel';
 import type { SyncRecoveryOpenContext } from './recovery/SyncRecoveryModal';
 import {
@@ -34,13 +36,14 @@ import { useFeatures } from '../hooks/useFeatures';
 import { useShift } from '../contexts/shift-context';
 import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
 import { useSystemClock } from '../hooks/useSystemClock';
-import { formatDate, formatDateTime, formatNumber, formatTime } from '../utils/format';
+import { formatCurrency, formatDate, formatDateTime, formatNumber, formatTime } from '../utils/format';
 import { isPosDayOpenTooLong } from '../utils/pos-day-open';
 import { cn } from '../utils/cn';
 import { liquidGlassModalTone } from '../styles/designSystem';
 import { useBackgroundAccessibilityIsolation } from './ui/pos-glass-components';
 import { CashierRecovery } from '../contexts/cashier-gate-context';
 import { buildHealthSupportContext } from '../support';
+import { readRemoteSupportUnavailable } from '../support/adapters';
 import {
   getLocalizedPaymentBlockerFix,
   getLocalizedPaymentBlockerReason,
@@ -109,6 +112,12 @@ import {
   healthStatusLabelKey,
 } from '../../../../shared/pos/health/health-i18n';
 import { buildHealthView } from '../../../../shared/pos/health/diagnostics-bundle';
+import {
+  closeoutServiceTone,
+  healthServiceTone,
+  healthStateTone,
+  type HealthTone,
+} from '../../../../shared/pos/health/health-tone';
 import { buildIncomingOrderAlertSupportEvidence } from '../services/incomingOrderAlert';
 import { getSyncQueueBridge, type MadeDueRow } from '../services/SyncQueueBridge';
 import {
@@ -575,6 +584,42 @@ const PRIMARY_ACTION_ICONS: Partial<Record<HealthPrimaryActionId, LucideIcon>> =
   refresh: RefreshCw,
 };
 
+/** The kit colour of each status tone (shared/pos/health/health-tone.ts): only status words are coloured. */
+const HEALTH_TONE_TEXT: Record<HealthTone, string> = {
+  ok: 'text-(--pos-s-ok)',
+  warn: 'text-(--pos-s-warn)',
+  bad: 'text-(--pos-s-bad)',
+  neutral: 'text-(--pos-s-fg)',
+  muted: 'text-(--pos-s-muted)',
+};
+
+/**
+ * The headline state icon without a box (founder 01/11: «βγάλε από το εικονίδιο κινδύνου το wrapper και γέμισε
+ * με χρώμα το εικονίδιο»): the shape itself is filled with the state colour, the mark inside it contrasts.
+ */
+const HealthStateGlyph: React.FC<{ state: 'healthy' | 'attention' | 'support_needed' }> = ({ state }) =>
+  state === 'healthy' ? (
+    <svg viewBox="0 0 24 24" className="h-11 w-11 shrink-0" aria-hidden="true" data-health-state-glyph={state}>
+      <circle cx="12" cy="12" r="11" className="fill-emerald-600 dark:fill-emerald-400" />
+      <path d="m7.4 12.4 3.1 3.1 6.1-6.6" fill="none" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className="stroke-white dark:stroke-zinc-950" />
+    </svg>
+  ) : (
+    <svg viewBox="0 0 24 24" className="h-11 w-11 shrink-0" aria-hidden="true" data-health-state-glyph={state}>
+      <path
+        d="M10.27 3.1a2 2 0 0 1 3.46 0l8.66 15A2 2 0 0 1 20.66 21H3.34a2 2 0 0 1-1.73-3l8.66-14.9Z"
+        className={state === 'attention' ? 'fill-amber-500 dark:fill-amber-400' : 'fill-rose-600 dark:fill-rose-500'}
+      />
+      <path
+        d="M12 8.6v5.2"
+        fill="none"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        className={state === 'attention' ? 'stroke-zinc-950' : 'stroke-white'}
+      />
+      <circle cx="12" cy="17.3" r="1.35" className={state === 'attention' ? 'fill-zinc-950' : 'fill-white'} />
+    </svg>
+  );
+
 const resolveSyncErrorMessage = (
   error: string | null,
   t: ReturnType<typeof useTranslation>['t'],
@@ -915,7 +960,7 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
                     onClick={() => void handleAction(row)}
                     disabled={busyQueueId !== null}
                     aria-busy={busy}
-                    className="inline-flex min-h-[48px] shrink-0 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"
+                    className="pos-raised inline-flex min-h-[48px] shrink-0 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"
                   >
                     {row.setAside
                       ? t('sync.zGate.undo', { defaultValue: 'Bring back' })
@@ -999,6 +1044,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   // --- System health state (eager on modal open) ---
   const [systemHealth, setSystemHealth] =
     useState<DiagnosticsSystemHealth | null>(null);
+  const remoteSupportUnavailable = readRemoteSupportUnavailable(systemHealth);
   const [healthAvailability, setHealthAvailability] =
     useState<HealthAvailability>('loading');
   const [lastHealthCheckedAt, setLastHealthCheckedAt] = useState<string | null>(null);
@@ -1991,6 +2037,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     systemHealth,
   ]);
 
+  useEffect(() => registerSupportHealthObservation({ problem: simpleHealthSummary.problem, realtime: realtimeStatus,
+    stale: healthAvailability !== 'ready' }), [simpleHealthSummary.problem, realtimeStatus, healthAvailability]);
+
   // After a primary "Sync now" and a fresh check, the shared rule both apps
   // apply (judgeSyncAttempt), on the rows it worked on as Android does: only
   // a verified failure — a row the cycle tried that is still stuck, failed
@@ -2524,7 +2573,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           <button
             type="button"
             onClick={handleOpenRecovery}
-            className="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:active:bg-white/8 inline-flex items-center gap-2"
+            className="pos-raised w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:active:bg-white/8 inline-flex items-center gap-2"
           >
             <Database className="h-4 w-4" />
             {t('sync.dashboard.openRecovery', { defaultValue: 'Open Recovery Center' })}
@@ -2677,7 +2726,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               <button
                 onClick={handleRetryBlockedOrder}
                 disabled={retryingBlockedOrder || syncStatus.syncInProgress}
-                className="inline-flex items-center justify-center rounded-xl bg-yellow-400 px-4 py-2.5 text-sm font-semibold text-black transition-all active:bg-yellow-500 disabled:cursor-not-allowed disabled:opacity-50"
+                className="pos-raised pos-raised--yellow inline-flex items-center justify-center rounded-xl bg-yellow-400 px-4 py-2.5 text-sm font-semibold text-black transition-all active:bg-yellow-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {retryingBlockedOrder ? t('sync.blocker.retrying') : t('sync.blocker.retryOrderNow')}
               </button>
@@ -2786,14 +2835,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   );
                 }
               }}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 transition-colors active:bg-(--pos-s-surface-2) dark:text-emerald-200"
+              className="pos-raised inline-flex h-9 w-9 items-center justify-center rounded-full border border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 transition-colors active:bg-(--pos-s-surface-2) dark:text-emerald-200"
               aria-label={t('sync.actions.refresh', { defaultValue: 'Refresh' })}
             >
               <RefreshCw className="h-4 w-4" />
             </button>
             <button
               onClick={() => setShowFinancialPanel(true)}
-              className="inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors active:bg-slate-50 dark:border-white/10 dark:bg-white/4 dark:text-slate-100 dark:active:bg-white/8"
+              className="pos-raised inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors active:bg-slate-50 dark:border-white/10 dark:bg-white/4 dark:text-slate-100 dark:active:bg-white/8"
             >
               {t('sync.actions.manage')}
             </button>
@@ -3228,38 +3277,27 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const renderDetailModal = () => {
     const summary = simpleHealthSummary;
     const needsRecovery = sharedRecoveryIssues.length > 0 || visibleSyncFailures.length > 0 || financialFailedCount > 0;
+    // Founder 01/11: the surface stays neutral; only the headline and the status words carry the state colour.
     const visual = {
-      healthy: {
-        icon: CheckCircle2,
-        shell: liquidGlassModalTone('success'),
-        iconBox: 'bg-emerald-700 text-white ring-1 ring-(--pos-s-border) dark:bg-emerald-400 dark:text-slate-950',
-        title: t('sync.healthModal.states.healthy.title'),
-      },
-      attention: {
-        icon: AlertTriangle,
-        shell: liquidGlassModalTone('warning'),
-        iconBox: 'bg-amber-500 text-slate-950',
-        title: t('sync.healthModal.states.attention.title'),
-      },
-      support_needed: {
-        icon: AlertTriangle,
-        shell: liquidGlassModalTone('danger'),
-        iconBox: 'bg-rose-600 text-white',
-        title: t('sync.healthModal.states.supportNeeded.title'),
-      },
-    }[summary.state];
-    const StatusIcon = visual.icon;
+      shell: liquidGlassModalTone('neutral'),
+      titleClassName: HEALTH_TONE_TEXT[healthStateTone(summary.state)],
+    };
+    const guidanceTone: HealthTone = summary.canContinueOrders
+      ? 'ok'
+      : summary.state === 'support_needed'
+        ? 'bad'
+        : 'warn';
     const statusLabel = (value: string) =>
       t(healthStatusLabelKey(value), {
         defaultValue: t('sync.healthModal.status.unknown'),
       });
     const serviceItems = [
-      { key: 'orders', label: t('sync.healthModal.services.orders'), value: statusLabel(summary.serviceStatuses.orders) },
-      { key: 'internet', label: t('sync.healthModal.services.internet'), value: statusLabel(summary.serviceStatuses.internet) },
-      { key: 'sync', label: t('sync.healthModal.services.sync'), value: statusLabel(summary.serviceStatuses.sync) },
-      { key: 'printer', label: t('sync.healthModal.services.printer'), value: statusLabel(summary.serviceStatuses.printer) },
-      { key: 'support', label: t('sync.healthModal.services.support'), value: statusLabel(summary.serviceStatuses.support) },
-      { key: 'closeout', label: t('sync.healthModal.services.closeout'), value: t(closeoutStatusLabelKey(summary.serviceStatuses.closeout)) },
+      { key: 'orders', label: t('sync.healthModal.services.orders'), value: statusLabel(summary.serviceStatuses.orders), tone: healthServiceTone(summary.serviceStatuses.orders) },
+      { key: 'internet', label: t('sync.healthModal.services.internet'), value: statusLabel(summary.serviceStatuses.internet), tone: healthServiceTone(summary.serviceStatuses.internet) },
+      { key: 'sync', label: t('sync.healthModal.services.sync'), value: statusLabel(summary.serviceStatuses.sync), tone: healthServiceTone(summary.serviceStatuses.sync) },
+      { key: 'printer', label: t('sync.healthModal.services.printer'), value: statusLabel(summary.serviceStatuses.printer), tone: healthServiceTone(summary.serviceStatuses.printer) },
+      { key: 'support', label: t('sync.healthModal.services.support'), value: statusLabel(summary.serviceStatuses.support), tone: healthServiceTone(summary.serviceStatuses.support) },
+      { key: 'closeout', label: t('sync.healthModal.services.closeout'), value: t(closeoutStatusLabelKey(summary.serviceStatuses.closeout)), tone: closeoutServiceTone(summary.serviceStatuses.closeout) },
     ];
     // The ONE recommended action. The desktop has no entry point from here to
     // the Z screen, the printer settings, the shift start or a live-updates
@@ -3331,7 +3369,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           >
             <div className="flex shrink-0 items-center justify-between border-b border-(--modal-glass-line) px-5 py-4">
               <div className="min-w-0">
-                <div className="text-xs font-bold uppercase tracking-[0.18em] text-amber-800 dark:text-yellow-200">
+                <div className="text-sm font-semibold text-(--pos-s-muted)">
                   {t('sync.healthModal.eyebrow')}
                 </div>
                 <h2 id={healthDialogTitleId} className="truncate text-xl font-black text-slate-950 dark:text-white">
@@ -3341,14 +3379,15 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               <button
                 ref={closeButtonRef}
                 onClick={() => setShowDetailPanel(false)}
-                className="flex h-11 w-11 items-center justify-center rounded-full border border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"
+                className="liquid-glass-modal-close"
                 aria-label={t('sync.healthModal.close')}
               >
-                <X className="h-5 w-5" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
             <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6">
+              <SupportConnectAction />
               {healthAvailability === 'unavailable' && (
                 <section
                   className={cn('pos-frost mb-5 rounded-3xl border p-5', liquidGlassModalTone('danger'))}
@@ -3367,7 +3406,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   className={cn('pos-frost mb-5 rounded-2xl border p-4', liquidGlassModalTone('neutral'))}
                   data-testid="health-primary-action"
                 >
-                  <h4 className="text-xs font-bold uppercase tracking-wide text-(--pos-s-muted)">
+                  <h4 className="text-sm font-semibold text-(--pos-s-muted)">
                     {t('sync.healthModal.sections.recommendedActions')}
                   </h4>
                   <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -3382,7 +3421,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                         onClick={runPrimaryAction}
                         disabled={primaryActionIsBusy}
                         aria-busy={primaryActionIsBusy}
-                        className="inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
+                        className="pos-raised pos-raised--yellow inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
                       >
                         <PrimaryActionIcon className={cn('h-5 w-5', primaryActionIsBusy && primaryActionBusyMotion)} aria-hidden="true" />
                         {t(primaryAction.labelKey)}
@@ -3413,15 +3452,13 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               {systemHealth !== null && healthAvailability !== 'unavailable' && (
               <section className={cn('pos-frost rounded-3xl border p-5', visual.shell)}>
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
-                  <div className={cn('flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl', visual.iconBox)}>
-                    <StatusIcon className="h-6 w-6" aria-hidden="true" />
-                  </div>
+                  <HealthStateGlyph state={summary.state} />
                   <div className="min-w-0 flex-1">
-                    <h3 className="mt-1 text-xl font-bold tracking-tight">{localizedHealthSummary.title}</h3>
-                    <p id={healthDialogDescriptionId} className="mt-2 max-w-2xl text-sm leading-6">{summary.state === 'healthy' ? localizedHealthSummary.message : localizedHealthSummary.problem}</p>
+                    <h3 className={cn('mt-1 text-xl font-bold tracking-tight', visual.titleClassName)}>{localizedHealthSummary.title}</h3>
+                    <p id={healthDialogDescriptionId} className="mt-2 max-w-2xl text-sm leading-6 text-(--pos-s-fg)">{summary.state === 'healthy' ? localizedHealthSummary.message : localizedHealthSummary.problem}</p>
                     {/* "Start a shift" is already the recommended action below. */}
                     {summary.primaryAction !== 'startShift' && (
-                      <div className="pos-frost mt-3 inline-flex min-h-10 items-center gap-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 text-sm font-black text-current">
+                      <div className={cn('mt-3 inline-flex items-center gap-2 text-sm font-bold', HEALTH_TONE_TEXT[guidanceTone])}>
                         {summary.canContinueOrders ? (
                           <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-300" />
                         ) : summary.state === 'support_needed' ? (
@@ -3433,7 +3470,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       </div>
                     )}
                     {localizedHealthSummary.impacts.length > 0 && (
-                      <ul className="mt-3 list-inside list-disc space-y-1 text-sm font-semibold leading-6">
+                      <ul className="mt-3 list-inside list-disc space-y-1 text-sm font-semibold leading-6 text-(--pos-s-fg)">
                         {localizedHealthSummary.impacts.map((impact) => (
                           <li key={impact}>{impact}</li>
                         ))}
@@ -3450,13 +3487,13 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                     className="pos-frost mt-4 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4"
                     data-testid="health-primary-action"
                   >
-                    <h4 className="text-xs font-bold uppercase tracking-wide text-(--pos-s-muted)">
+                    <h4 className="text-sm font-semibold text-(--pos-s-muted)">
                       {t('sync.healthModal.sections.recommendedActions')}
                     </h4>
                     <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0 space-y-1">
-                        {!runPrimaryAction && <p className="text-base font-black">{t(primaryAction.labelKey)}</p>}
-                        <p className="text-sm font-semibold leading-6">{t(primaryAction.detailKey)}</p>
+                        {!runPrimaryAction && <p className="text-base font-black text-(--pos-s-fg)">{t(primaryAction.labelKey)}</p>}
+                        <p className="text-sm font-semibold leading-6 text-(--pos-s-fg)">{t(primaryAction.detailKey)}</p>
                         <p className="text-sm leading-6 text-(--pos-s-muted)">{t(primaryAction.verificationKey)}</p>
                       </div>
                       {runPrimaryAction && (
@@ -3465,7 +3502,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                           onClick={runPrimaryAction}
                           disabled={primaryActionIsBusy}
                           aria-busy={primaryActionIsBusy}
-                          className="inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
+                          className="pos-raised pos-raised--yellow inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
                         >
                           <PrimaryActionIcon className={cn('h-5 w-5', primaryActionIsBusy && primaryActionBusyMotion)} aria-hidden="true" />
                           {t(primaryAction.labelKey)}
@@ -3476,7 +3513,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       <button
                         type="button"
                         onClick={handleOpenExportDir}
-                        className="mt-3 inline-flex min-h-[48px] items-center gap-2 rounded-xl border px-4 text-sm font-bold border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"
+                        className="pos-raised mt-3 inline-flex min-h-[48px] items-center gap-2 rounded-xl border px-4 text-sm font-bold border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"
                       >
                         <FolderOpen className="h-4 w-4" />
                         {t('sync.healthModal.actions.openFolder')}
@@ -3492,8 +3529,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       data-testid={`health-service-${item.key}`}
                       className="pos-frost rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2"
                     >
-                      <div className="text-xs font-bold uppercase tracking-wide text-(--pos-s-muted)">{item.label}</div>
-                      <div className="mt-1 text-sm font-black">{item.value}</div>
+                      <div className="text-sm font-semibold text-(--pos-s-muted)">{item.label}</div>
+                      <div className={cn('mt-1 text-base font-bold', HEALTH_TONE_TEXT[item.tone])} data-health-tone={item.tone}>{item.value}</div>
                     </div>
                   ))}
                 </div>
@@ -3502,9 +3539,22 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
               <ZGateSetAsidePanel className="mt-4" />
 
+              {remoteSupportUnavailable && (
+                <section
+                  aria-label={t('sync.healthModal.remoteSupport.title')}
+                  data-testid="health-remote-support"
+                  className="mt-4 space-y-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4 text-sm text-(--pos-s-fg)"
+                >
+                  <h3 className="font-bold">{t('sync.healthModal.remoteSupport.title')}</h3>
+                  <p className="text-(--pos-s-muted)">{t('sync.healthModal.remoteSupport.impact')}</p>
+                  <p className="font-semibold">{t('sync.healthModal.remoteSupport.action')}</p>
+                </section>
+              )}
+
               <details className={cn('pos-frost mt-4 rounded-2xl border', liquidGlassModalTone('neutral'))}>
                 <summary className="min-h-touch cursor-pointer px-4 py-3 text-sm font-bold">{t('sync.healthModal.sections.supportActions')}</summary>
                 <div className="space-y-4 border-t border-(--modal-glass-line) p-4">
+                  <SupportDetailsPanel />
                   <ul className="list-inside list-disc space-y-2 text-sm">{localizedHealthSummary.recommendedActions.map(action => <li key={action}>{action}</li>)}</ul>
                   {visibleSyncFailures.length > 0 && <h4 className="text-sm font-bold">{t('sync.healthModal.syncDetails', {defaultValue: 'Sync details'})}</h4>}
                   {visibleSyncFailures.map(failure => <div key={failure.id} className="rounded-xl border border-slate-300 p-3 text-sm dark:border-white/15"><strong>{failure.title} · {statusLabel(failure.status)}</strong><p className="mt-1">{t('sync.healthModal.failure.safeError')}</p>{failure.recordId && <p className="mt-2 break-all text-xs">{t('sync.healthModal.failure.recordValue', {id: failure.recordId})}</p>}{failure.nextRetryAt && <p className="mt-2 text-xs">{t('sync.healthModal.failure.nextRetryValue', {value: formatHealthDateTime(failure.nextRetryAt)})}</p>}</div>)}
@@ -3513,9 +3563,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                     onClick={handleSendDiagnosticsToSupport}
                     disabled={sendingSupport}
                     aria-busy={sendingSupport}
-                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-yellow-400 px-4 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
+                    className="pos-raised pos-raised--yellow inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-black disabled:opacity-50"
                   >
-                    <Send className={cn('h-5 w-5', sendingSupport && 'animate-pulse')} />
+                    <Send className={cn('h-5 w-5 text-white', sendingSupport && 'animate-pulse')} />
                     {sendingSupport
                       ? t('sync.healthModal.actions.sending')
                       : t('sync.healthModal.actions.sendSupport')}
@@ -3523,7 +3573,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   <button
                     onClick={handleExport}
                     disabled={exporting}
-                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-black disabled:opacity-50 border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"
+                    className="pos-raised inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-black text-(--pos-s-fg) disabled:opacity-50"
                   >
                     <Download className={cn('h-5 w-5', exporting && 'animate-bounce')} />
                     {t('sync.healthModal.actions.export')}
@@ -3532,8 +3582,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   <p className="text-sm text-(--pos-s-muted)">{t('sync.healthModal.support.safeLocal')}</p>
                   {incidentReport?.success && <p role="status">{t(!incidentReport.bundleStored ? 'sync.healthModal.support.reportReceived' : incidentReport.alertSent || incidentReport.alertStatus === 'throttled' ? 'sync.healthModal.support.received' : 'sync.healthModal.support.notificationFailed')}</p>}
                   {incidentReport?.error && <p role="alert">{t('sync.healthModal.support.sendFailed')}</p>}
-                  {exportPath && <button onClick={handleOpenExportDir} className="inline-flex min-h-touch items-center gap-2 rounded-xl border px-4 border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"><FolderOpen className="h-4 w-4" />{t('sync.healthModal.actions.openFolder')}</button>}
-                  <button onClick={() => setAdvancedExpanded(value => !value)} aria-expanded={advancedExpanded} aria-controls={healthAdvancedId} className="inline-flex min-h-touch items-center gap-2 rounded-xl border px-4 border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"><ChevronDown className="h-4 w-4" />{advancedExpanded ? t('sync.healthModal.actions.closeAdvanced') : t('sync.healthModal.actions.openAdvanced')}</button>
+                  {exportPath && <button onClick={handleOpenExportDir} className="pos-raised inline-flex min-h-touch items-center gap-2 self-start rounded-xl border px-4 text-(--pos-s-fg)"><FolderOpen className="h-4 w-4" />{t('sync.healthModal.actions.openFolder')}</button>}
+                  <button onClick={() => setAdvancedExpanded(value => !value)} aria-expanded={advancedExpanded} aria-controls={healthAdvancedId} className="pos-raised inline-flex min-h-touch items-center gap-2 self-start rounded-xl border px-4 text-(--pos-s-fg)"><ChevronDown className="h-4 w-4" />{advancedExpanded ? t('sync.healthModal.actions.closeAdvanced') : t('sync.healthModal.actions.openAdvanced')}</button>
 
               {advancedExpanded && (
                 <section id={healthAdvancedId} className={cn('pos-frost mt-5 space-y-4 rounded-3xl border p-5', liquidGlassModalTone('neutral'))}>
@@ -3545,6 +3595,12 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   </div>
 
                   <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {remoteSupportUnavailable && (
+                      <div data-testid="health-remote-support-details" className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface) p-3 text-sm">
+                        <h5 className="font-bold">{t('sync.healthModal.remoteSupport.details')}</h5>
+                        <p className="mt-1 break-words">{remoteSupportUnavailable.code} · {remoteSupportUnavailable.status}</p>
+                      </div>
+                    )}
                     {[
                       [t('sync.healthModal.advanced.fields.lastSync'), systemHealth?.lastSyncTime || syncStatus.lastSync ? formatHealthDateTime((systemHealth?.lastSyncTime || syncStatus.lastSync) as string) : t('sync.healthModal.advanced.values.never')],
                       [t('sync.healthModal.advanced.fields.syncBacklog'), backlogUnavailable ? t('sync.healthModal.status.unavailable') : formatNumber(totalBacklog, {}, locale)],
@@ -3553,7 +3609,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       [t('sync.healthModal.advanced.fields.crashCount'), formatNumber(systemHealth?.panicCount ?? 0, {}, locale)],
                     ].map(([label, value]) => (
                       <div key={String(label)} className="pos-frost rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface) p-3">
-                        <div className="text-xs font-bold uppercase tracking-wide text-(--pos-s-muted)">{label}</div>
+                        <div className="text-sm font-semibold text-(--pos-s-muted)">{label}</div>
                         <div className="mt-1 wrap-break-word text-sm font-black text-(--pos-s-fg)">{String(value)}</div>
                       </div>
                     ))}
@@ -3565,8 +3621,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               </details>
             </div>
             <div className="flex shrink-0 flex-wrap gap-3 border-t border-(--modal-glass-line) px-5 py-3">
-              {systemHealth && healthAvailability !== 'unavailable' && needsRecovery && <button type="button" onClick={handleOpenRecovery} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2 text-sm font-bold text-(--pos-s-fg) active:bg-(--pos-s-border)"><Database className="h-5 w-5" />{t('sync.dashboard.openRecovery', {defaultValue: 'Open Recovery Center'})}</button>}
-              <button type="button" onClick={loadSystemHealth} disabled={systemLoading} aria-busy={systemLoading} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2 text-sm font-bold text-(--pos-s-fg) active:bg-(--pos-s-border) disabled:opacity-50"><RefreshCw className={cn('h-5 w-5', systemLoading && 'animate-spin')} />{t('sync.healthModal.actions.refresh')}</button>
+              {systemHealth && healthAvailability !== 'unavailable' && needsRecovery && <button type="button" onClick={handleOpenRecovery} className="pos-raised inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2 text-sm font-bold text-(--pos-s-fg) active:bg-(--pos-s-border)"><Database className="h-5 w-5" />{t('sync.dashboard.openRecovery', {defaultValue: 'Open Recovery Center'})}</button>}
+              <button type="button" onClick={loadSystemHealth} disabled={systemLoading} aria-busy={systemLoading} className="pos-raised inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border px-4 py-2 text-sm font-bold text-(--pos-s-fg) disabled:opacity-50"><RefreshCw className={cn('h-5 w-5', systemLoading && 'animate-spin')} />{t('sync.healthModal.actions.refresh')}</button>
             </div>
           </div>
         </div>

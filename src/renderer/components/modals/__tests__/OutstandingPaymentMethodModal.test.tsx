@@ -38,6 +38,18 @@ describe('OutstandingPaymentMethodModal', () => {
     expect(capturedPaymentModalProps?.allowTwint).toBe(false);
   });
 
+  // Coordinator 01/11: the host's «Cancel order» reaches the payment modal only when the host offers it (nothing
+  // paid); the missing-payment repair passes none.
+  it('passes the host cancel through only when the host offers it', () => {
+    const onCancelOrder = vi.fn();
+    const { rerender } = render(
+      <OutstandingPaymentMethodModal isOpen amount={18.5} onClose={() => {}} onSelect={() => {}} onCancelOrder={onCancelOrder} />,
+    );
+    expect(capturedPaymentModalProps?.onCancelOrder).toBe(onCancelOrder);
+    rerender(<OutstandingPaymentMethodModal isOpen amount={18.5} onClose={() => {}} onSelect={() => {}} />);
+    expect(capturedPaymentModalProps?.onCancelOrder).toBeUndefined();
+  });
+
   it('retains TWINT and the manual original operation without fabricating a provider transaction', async () => {
     const onSelect = vi.fn().mockResolvedValue(true);
     render(<OutstandingPaymentMethodModal isOpen amount={18.5} onClose={() => {}} onSelect={onSelect} />);

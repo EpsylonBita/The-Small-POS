@@ -17,6 +17,47 @@ const GITHUB_RELEASE_API_BASE: &str =
     "https://api.github.com/repos/EpsylonBita/The-Small-POS/releases/tags/";
 const GITHUB_RELEASE_NOTES_TIMEOUT_SECS: u64 = 5;
 
+/// Pure retained-state projection. No reconciliation, artifacts or network.
+/// A fresh offer is unavailable: the normal check mutates state and its
+/// metadata requests do not provide the catalogue's cancellation contract.
+pub(crate) fn support_installed_state(
+    conn: &rusqlite::Connection,
+) -> Result<serde_json::Value, String> {
+    use rusqlite::OptionalExtension;
+    let raw: Option<(bool,bool,Option<String>)> = conn.query_row(
+        "SELECT json_valid(setting_value),CASE WHEN json_valid(setting_value) THEN coalesce(json_extract(setting_value,'$.available'),0) ELSE 0 END,
+        CASE WHEN json_valid(setting_value) THEN json_extract(setting_value,'$.updateInfo.version') END
+        FROM local_settings WHERE setting_category='local' AND setting_key='updater_state'", [],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|_| "unavailable")?;
+    let version = |text: &str| -> Result<[u64; 3], String> {
+        let parts = text
+            .split('.')
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "unavailable")?;
+        let parts: [u64; 3] = parts.try_into().map_err(|_| "unavailable")?;
+        if parts.iter().any(|v| *v > 9_007_199_254_740_991) {
+            return Err("unavailable".into());
+        }
+        Ok(parts)
+    };
+    let installed = version(env!("CARGO_PKG_VERSION"))?;
+    let offered = match raw {
+        Some((true, true, Some(text))) => Some(version(&text)?),
+        Some((false, _, _)) => return Err("unavailable".into()),
+        _ => None,
+    };
+    let state = match &offered {
+        Some(v) if *v > installed => "newer_offer",
+        Some(v) if *v < installed => "lower_offer",
+        _ => "unknown",
+    };
+    Ok(
+        serde_json::json!({"state":state,"installed_version":installed,
+        "offered_version":offered,"artifact_verified":false}),
+    )
+}
+
 fn parse_update_channel_payload(arg0: Option<serde_json::Value>) -> String {
     let raw = match arg0 {
         Some(serde_json::Value::Object(obj)) => {

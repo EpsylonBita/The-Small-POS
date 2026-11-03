@@ -92,7 +92,9 @@ test('MenuItemModal commit button is the solid yellow cart CTA: centered, touch-
     assert.ok(rule.includes(declaration), `cart CTA must keep "${declaration}"`);
   }
   assert.doesNotMatch(rule, /opacity|rgba\(/, 'the cart CTA is a solid, opaque surface');
-  assert.match(ctaCss, /\.menu-item-cart-action:active \{ background: #eab308; border-color: #eab308; \}/);
+  // Founder 01/11/2026 («οχι ολα τα κουμπια εχουν βαθος»): the kit's raised yellow, sunk while pressed.
+  assert.match(rule, /box-shadow: var\(--pos-s-depth-yellow\);/);
+  assert.match(ctaCss, /\.menu-item-cart-action:active \{ background: #eab308; border-color: #eab308; box-shadow: var\(--pos-s-depth-yellow-press\); translate: 0 1px; \}/);
   assert.match(ctaCss, /\.menu-item-cart-action:focus-visible \{ outline: 2px solid #ca8a04;/);
   assert.doesNotMatch(ctaCss, /:hover/);
 

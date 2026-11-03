@@ -1,10 +1,12 @@
+import { useSupportPaymentCritical } from '../../hooks/useSupportPaymentCritical';
 import { getStoreCurrency } from '../../utils/store-currency';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { roundMoney } from '@shared/utils/money';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Banknote, BadgePercent, Check, ChevronDown, CreditCard, Loader2, Plus, ShoppingCart, Split, Trash2, Users } from 'lucide-react';
+import { BadgePercent, Check, ChevronDown, CreditCard, Loader2, Plus, ShoppingCart, Split, Trash2, Users } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { paymentRefusalMessage } from '../../utils/paymentRefusalMessage';
 
 import { getBridge } from '../../../lib';
 import type { PaymentSettlementSnapshot } from '../../../lib/ipc-adapter';
@@ -21,9 +23,12 @@ import { UnsavedChargedPaymentBanner } from '../ui/UnsavedChargedPaymentBanner';
 import {
   admitManualCard,
   lookupCardTerminal,
+  manualCardAdmissionMetadata,
   manualCardNoticeText,
   manualCardRecordRefusalText,
   terminalLookupNotice,
+  type ManualCardAdmission,
+  type ManualCardAdmissionMetadata,
 } from '../../services/ManualCardAdmissionService';
 import {
   claimOrdinaryCollectionOwner,
@@ -44,6 +49,7 @@ import {
   type OrdinaryCollectionVerdict,
   type OrdinaryTerminalVerdict,
 } from '../../hooks/useOrderStore';
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 
 const formatMoney = formatCurrency;
 
@@ -88,8 +94,30 @@ export interface SplitPaymentCollectionMode {
   description?: string;
 }
 
+/** The first portion of a split that has no order yet: the order is created with exactly this payment. */
+export interface SplitFirstPayment {
+  method: 'cash' | 'card'; amount: number; discountAmount: number; cashReceived?: number; changeGiven?: number;
+  transactionRef?: string; paymentOrigin: PaymentOrigin; terminalApproved: boolean; terminalDeviceId?: string;
+  collectedBy?: 'cashier_drawer' | 'driver_shift';
+  items?: Array<{ itemIndex: number; itemName: string; itemQuantity: number; itemAmount: number }>;
+  /** A manual card's admission (`manualCardAdmissionMetadata`), for the admin's review. */
+  metadata?: ManualCardAdmissionMetadata;
+}
+
+/**
+ * Founder 01/11/2026 («Τίποτα»): a counter order that starts with Split is saved only with its first payment. With
+ * `draft`, the window opens on the cart (`orderId` empty): nothing is read, claimed or written until a portion is
+ * paid, a card is charged against the checkout `reference`, and `createOrder` saves the order together with that
+ * first payment (the menu's checkout create) and answers its id. Every later portion records on that order.
+ */
+export interface SplitDraftCheckout {
+  reference: string;
+  createOrder: (payment: SplitFirstPayment) => Promise<string>;
+}
+
 interface SplitPaymentModalProps {
   isOpen: boolean; onClose: () => void; orderId: string; orderTotal: number; items: CartItem[];
+  draft?: SplitDraftCheckout;
   onSplitComplete: (result: SplitPaymentResult) => void | Promise<void>; existingPayments?: any[];
   initialTender?: 'cash' | 'card'; currency?: string;
   initialMode?: TabMode; isGhostOrder?: boolean; collectionMode?: SplitPaymentCollectionMode;
@@ -194,15 +222,34 @@ const SplitAmountInput: React.FC<{
   />
 );
 
-export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, onClose, orderId, orderTotal, items, onSplitComplete, existingPayments = EMPTY_EXISTING_PAYMENTS, initialMode = 'by-amount', isGhostOrder = false, collectionMode, allowDiscounts = true, isReconciliationPending = false, collectionScope, initialTender, currency }) => {
+export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, onClose: onPaymentClose, orderId, orderTotal, items, onSplitComplete, existingPayments = EMPTY_EXISTING_PAYMENTS, initialMode = 'by-amount', isGhostOrder = false, collectionMode, allowDiscounts = true, isReconciliationPending = false, collectionScope, initialTender, currency, draft }) => {
   const formatCurrency = (value: number) => formatMoney(value, currency ?? getStoreCurrency());
   const { t } = useTranslation();
+  const supportPayment = useSupportPaymentCritical(isOpen);
+  const onClose = useCallback(() => { supportPayment.close(); onPaymentClose(); }, [supportPayment, onPaymentClose]);
   const bridge = getBridge();
+  // The order this window collects. A draft has none until its first portion creates it: the money paths read the
+  // ref, so a Confirm that settles several portions records the second on the order the first one created, and the
+  // window keeps its people and amounts (it is keyed by the checkout, not by the order id it gains).
+  const orderIdRef = useRef(orderId);
+  if (orderId) orderIdRef.current = orderId;
+  const [createdOrderId, setCreatedOrderId] = useState<string | null>(null);
+  const liveOrderId = orderId || createdOrderId || '';
+  const isDraftView = Boolean(draft) && !liveOrderId;
+  // The checkout's card SALE held before the order exists (coordinator 01/11/2026): read on open and after each card.
+  const [draftSale, setDraftSale] = useState<DirectSale | null>(null);
+  // The checkout's card SALE (a split on a cart): none, the approved original to record, or one not known yet.
+  const readDraftSale = useCallback(async (): Promise<DirectSale | null> => {
+    if (!draft || orderIdRef.current) return null;
+    const answer: any = await bridge.ecr.checkoutDirectSale(draft.reference);
+    return (answer?.directSale ?? null) as DirectSale | null;
+  }, [bridge, draft]);
+  const sessionKey = draft?.reference ?? orderId;
   const viewEpoch = useRef(0);
   useEffect(() => {
     const epoch = ++viewEpoch.current;
     return () => { if (viewEpoch.current === epoch) viewEpoch.current++; };
-  }, [isOpen, orderId, collectionScope?.organizationId, collectionScope?.terminalId]);
+  }, [isOpen, sessionKey, collectionScope?.organizationId, collectionScope?.terminalId]);
   // Mirrors the module-scoped guard into render state so the UI can lock the
   // modal (close, inputs, Confirm) for the WHOLE guarded window — including
   // the pre-flight IPC that runs before portion.status flips to 'processing'.
@@ -252,10 +299,13 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     };
   }, [existingPayments, orderTotal]);
   const fetchLatestSplitState = useCallback(async (): Promise<SplitStateSnapshot> => {
+    const currentOrderId = orderIdRef.current;
+    // A cart with no order yet: its state is the cart itself, and no order is read.
+    if (!currentOrderId) return buildFallbackSplitState();
     const [paymentResult, paidItemsResult, orderResult] = await Promise.all([
-      bridge.payments.getOrderPayments(orderId),
-      bridge.payments.getPaidItems(orderId),
-      bridge.orders.getById(orderId),
+      bridge.payments.getOrderPayments(currentOrderId),
+      bridge.payments.getPaidItems(currentOrderId),
+      bridge.orders.getById(currentOrderId),
     ]);
     const payments = unwrapBridgeArray<any>(paymentResult).filter(isCompletedPaymentRecord);
     const paidIndices = unwrapBridgeArray<any>(paidItemsResult)
@@ -268,7 +318,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       financials,
       outstanding: round2(Math.max(0, financials.totalAmount - payments.reduce((sum, payment) => sum + getNetRecordedPaymentAmount(payment), 0))),
     };
-  }, [bridge, orderId, orderTotal]);
+  }, [bridge, buildFallbackSplitState, orderTotal]);
 
   const alreadyPaidAmount = useMemo(
     () => round2(completedPayments.reduce((sum, payment) => sum + getNetRecordedPaymentAmount(payment), 0)),
@@ -294,7 +344,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   // Read from the order's own disposition, NOT from `payment_status`: a failed
   // settlement honestly lowers that to `pending`, which reads exactly like
   // money still owed.
-  const platformHeldNotice = usePlatformHeldNoticeForOrderId(orderId, isOpen);
+  const platformHeldNotice = usePlatformHeldNoticeForOrderId(liveOrderId, isOpen);
   const platformHeld = platformHeldNotice !== null;
   // A card of this order charged on this till and not saved yet (30/09/2026):
   // shown with Save payment again, and no portion is charged or confirmed
@@ -304,7 +354,8 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   // as it now stands (`onUnsavedSavedRef` is set once the state readers exist).
   const onUnsavedSavedRef = useRef<() => Promise<void>>(async () => undefined);
   const onUnsavedSaved = useCallback(() => onUnsavedSavedRef.current(), []);
-  const unsaved = useUnsavedChargedPayments(orderId, isOpen, t, formatCurrency, onUnsavedSaved);
+  // A first card charged before its order was saved is held under the checkout reference.
+  const unsaved = useUnsavedChargedPayments(liveOrderId || draft?.reference || '', isOpen, t, formatCurrency, onUnsavedSaved);
   const unsavedLocked = unsaved.payments.length > 0;
   const isCloseLocked = isReconciliationPending || Boolean(processingPortionId) || isProcessing || isTerminalChargeInFlight;
   const activeDiscountTotal = useMemo(() => round2(portions.filter((portion) => portion.status !== 'paid').reduce((sum, portion) => sum + portion.discountAmount, 0)), [portions]);
@@ -383,11 +434,13 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     };
     void loadState();
     return () => { cancelled = true; };
-  }, [applySplitStateSnapshot, buildFallbackSplitState, fetchLatestSplitState, initialMode, isOpen]);
+    // `fetchLatestSplitState` reads the live order id; `sessionKey` reloads for another order or checkout, never
+    // for the id a draft gains from its first portion.
+  }, [applySplitStateSnapshot, buildFallbackSplitState, fetchLatestSplitState, initialMode, isOpen, sessionKey]);
 
   useEffect(() => {
     onUnsavedSavedRef.current = async () => {
-      const retained = collectionScope === undefined ? null : retainedOrdinaryOwner(collectionScope, orderId);
+      const retained = collectionScope === undefined || !orderIdRef.current ? null : retainedOrdinaryOwner(collectionScope, orderIdRef.current);
       if (retained) {
         await probeOrdinaryOwner(retained, async () => {
           const state = await fetchLatestSplitState();
@@ -400,7 +453,15 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         console.warn('[SplitPaymentModal] Split refresh after Save payment again failed:', error);
       }
     };
-  }, [activeTab, applySplitStateSnapshot, collectionScope, fetchLatestSplitState, orderId]);
+  }, [activeTab, applySplitStateSnapshot, collectionScope, fetchLatestSplitState]);
+
+  const refreshDraftSale = useCallback(async () => {
+    try { setDraftSale(await readDraftSale()); } catch (error) { console.warn('[SplitPaymentModal] Checkout SALE read failed:', error); }
+  }, [readDraftSale]);
+  useEffect(() => {
+    if (!isOpen || !isDraftView) { setDraftSale(null); return; }
+    void refreshDraftSale();
+  }, [isDraftView, isOpen, refreshDraftSale]);
 
   const ensureLatestOutstanding = useCallback(async (attemptedAmount: number, mode: TabMode) => {
     const snapshot = await fetchLatestSplitState();
@@ -442,32 +503,52 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   const appendCompletedPayment = useCallback((portion: SplitPortion, paymentId: string, paymentOrigin: PaymentOrigin, transactionRef?: string, terminalDeviceId?: string) => {
     const createdAt = new Date().toISOString();
     const paymentItems = portion.items.map((item) => ({ itemIndex: Number(item.itemIndex ?? 0), itemName: item.name, itemQuantity: item.quantity, itemAmount: item.totalPrice, createdAt }));
-    setCompletedPayments((current) => [{ id: paymentId, orderId, method: portion.method, amount: portion.amount, discountAmount: portion.discountAmount, status: 'completed', createdAt, updatedAt: createdAt, transactionRef, paymentOrigin, terminalApproved: paymentOrigin === 'terminal', terminalDeviceId, items: paymentItems }, ...current]);
+    setCompletedPayments((current) => [{ id: paymentId, orderId: orderIdRef.current, method: portion.method, amount: portion.amount, discountAmount: portion.discountAmount, status: 'completed', createdAt, updatedAt: createdAt, transactionRef, paymentOrigin, terminalApproved: paymentOrigin === 'terminal', terminalDeviceId, items: paymentItems }, ...current]);
     if (paymentItems.length > 0) setPaidItemIndices((current) => Array.from(new Set([...current, ...paymentItems.map((item) => item.itemIndex)])));
     setPortions((current) => current.map((currentPortion) => currentPortion.id === portion.id ? { ...currentPortion, status: 'paid', paymentId, paymentOrigin, transactionRef, terminalDeviceId, paidAt: createdAt } : currentPortion));
-  }, [orderId]);
+  }, []);
 
   const persistFinancials = useCallback(async (next: OrderFinancialState) => {
-    await bridge.orders.updateFinancials({ orderId, totalAmount: next.totalAmount, subtotal: next.subtotal, discountAmount: next.discountAmount, discountPercentage: next.discountPercentage, taxAmount: next.taxAmount, deliveryFee: next.deliveryFee, tipAmount: next.tipAmount });
+    await bridge.orders.updateFinancials({ orderId: orderIdRef.current, totalAmount: next.totalAmount, subtotal: next.subtotal, discountAmount: next.discountAmount, discountPercentage: next.discountPercentage, taxAmount: next.taxAmount, deliveryFee: next.deliveryFee, tipAmount: next.tipAmount });
     setOrderFinancials(next);
-  }, [bridge, orderId]);
+  }, [bridge]);
 
   const safePrintSplitReceipt = useCallback(async (paymentId: string) => { try { await bridge.payments.printSplitReceipt(paymentId); } catch (error) { console.warn('[SplitPaymentModal] Failed to print split receipt:', error); toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' })); } }, [bridge, t]);
   const printFinalOrderDocuments = useCallback(async () => {
+    const finalOrderId = orderIdRef.current;
     const shouldPrint = await askForPaymentPrint({
-      orderId,
+      orderId: finalOrderId,
       amount: orderFinancials.totalAmount,
     });
     if (!shouldPrint) return;
 
-    try { await bridge.payments.printReceipt(orderId); } catch (error) { console.warn('[SplitPaymentModal] Final receipt print failed:', error); toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' })); }
+    try { await bridge.payments.printReceipt(finalOrderId); } catch (error) { console.warn('[SplitPaymentModal] Final receipt print failed:', error); toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' })); }
     if (isGhostOrder) return;
     const fiscalEnabled = await bridge.settings.get('terminal', 'fiscal_print_enabled').catch(() => true);
     if (fiscalEnabled === false || fiscalEnabled === 'false' || fiscalEnabled === '0') return;
-    try { const fiscalResult: any = await bridge.ecr.fiscalPrint(orderId); if (fiscalResult?.skipped) return; } catch (error) { console.warn('[SplitPaymentModal] Fiscal print failed:', error); toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' })); }
-  }, [askForPaymentPrint, bridge, isGhostOrder, orderFinancials.totalAmount, orderId, t]);
-  const recordPortionPayment = useCallback(async (portion: SplitPortion, paymentOrigin: PaymentOrigin, transactionRef?: string, terminalDeviceId?: string, onReply?: (raw: unknown, threw: boolean) => void) => {
-    const result: any = await bridge.payments.recordPayment({ orderId, method: portion.method, amount: portion.amount, discountAmount: portion.discountAmount, cashReceived: portion.method === 'cash' ? portion.amount : undefined, changeGiven: portion.method === 'cash' ? 0 : undefined, transactionRef, paymentOrigin, terminalApproved: paymentOrigin === 'terminal', terminalDeviceId, collectedBy: portion.collectedBy ?? defaultCollectedBy, items: activeTab === 'by-items' ? portion.items.map((item) => ({ itemIndex: Number(item.itemIndex ?? 0), itemName: item.name, itemQuantity: item.quantity, itemAmount: item.totalPrice })) : undefined });
+    try { const fiscalResult: any = await bridge.ecr.fiscalPrint(finalOrderId); if (fiscalResult?.skipped) return; } catch (error) { console.warn('[SplitPaymentModal] Fiscal print failed:', error); toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' })); }
+  }, [askForPaymentPrint, bridge, isGhostOrder, orderFinancials.totalAmount, t]);
+  const recordPortionPayment = useCallback(async (portion: SplitPortion, paymentOrigin: PaymentOrigin, transactionRef?: string, terminalDeviceId?: string, onReply?: (raw: unknown, threw: boolean) => void, metadata?: ManualCardAdmissionMetadata) => {
+    const paymentItems = activeTab === 'by-items' ? portion.items.map((item) => ({ itemIndex: Number(item.itemIndex ?? 0), itemName: item.name, itemQuantity: item.quantity, itemAmount: item.totalPrice })) : undefined;
+    if (!orderIdRef.current && draft) {
+      // No order yet: it is saved now, together with this payment (a charged card's failed save is held by native
+      // under the checkout and comes back as the typed «not saved» error).
+      let createdId: string;
+      try {
+        createdId = await draft.createOrder({ method: portion.method, amount: portion.amount, discountAmount: portion.discountAmount, cashReceived: portion.method === 'cash' ? portion.amount : undefined, changeGiven: portion.method === 'cash' ? 0 : undefined, transactionRef, paymentOrigin, terminalApproved: paymentOrigin === 'terminal', terminalDeviceId, collectedBy: portion.collectedBy ?? defaultCollectedBy, items: paymentItems, ...(metadata ? { metadata } : {}) });
+      } catch (error) { onReply?.(undefined, true); throw error; }
+      orderIdRef.current = createdId;
+      setCreatedOrderId(createdId);
+      const ledger = unwrapBridgeArray<any>(await bridge.payments.getOrderPayments(createdId)).filter(isCompletedPaymentRecord);
+      const recorded = ledger.find((payment) => Math.abs(getNetRecordedPaymentAmount(payment) - portion.amount) < 0.01
+        && (!transactionRef || (payment.transactionRef ?? payment.transaction_ref) === transactionRef)) ?? (ledger.length === 1 ? ledger[0] : undefined);
+      const paymentId: string | undefined = recorded?.id ?? recorded?.paymentId;
+      if (!paymentId) throw new Error('Missing paymentId after creating the split order');
+      onReply?.({ success: true, paymentId, paymentPersisted: true }, false);
+      appendCompletedPayment(portion, paymentId, paymentOrigin, transactionRef, terminalDeviceId);
+      return paymentId;
+    }
+    const result: any = await bridge.payments.recordPayment({ orderId: orderIdRef.current, method: portion.method, amount: portion.amount, discountAmount: portion.discountAmount, cashReceived: portion.method === 'cash' ? portion.amount : undefined, changeGiven: portion.method === 'cash' ? 0 : undefined, transactionRef, paymentOrigin, terminalApproved: paymentOrigin === 'terminal', terminalDeviceId, collectedBy: portion.collectedBy ?? defaultCollectedBy, items: paymentItems, ...(metadata ? { metadata } : {}) });
     onReply?.(result, false);
     // A charged card whose payment could not be saved: kept, never a draft.
     throwIfPaymentNotSaved(result, t, formatCurrency);
@@ -477,7 +558,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     const paymentId = extractPaymentId(result); if (result?.success === false || !paymentId) throw new Error(result?.error || 'Missing paymentId after recording split payment');
     appendCompletedPayment(portion, paymentId, paymentOrigin, transactionRef, terminalDeviceId);
     return paymentId;
-  }, [activeTab, appendCompletedPayment, bridge, defaultCollectedBy, orderId, t]);
+  }, [activeTab, appendCompletedPayment, bridge, defaultCollectedBy, draft, t]);
 
   const completeAndClose = useCallback(async (recordedPortions: SplitPortion[], paymentIds: string[], updatedOrderTotal: number, recordedAmount: number) => {
     const remainingAmount = round2(Math.max(0, updatedOrderTotal - (alreadyPaidAmount + recordedAmount)));
@@ -488,7 +569,12 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     onClose();
   }, [activeTab, alreadyPaidAmount, onClose, onSplitComplete, printFinalOrderDocuments, receiptMode, t]);
 
-  const ordinaryRefusalText = useCallback((code: string) => (code === 'GIFT_CARD_TERMINAL_SCOPE_REQUIRED'
+  // The card terminal's binding: the order's SALE, or the checkout's SALE before the first portion creates the
+  // order (native binds it to the checkout and refuses a second one while it is not recorded or not known).
+  const chargeOptions = useCallback((deviceId: string, portionId: string) => (orderIdRef.current
+    ? { deviceId, orderId: orderIdRef.current, reference: `${orderIdRef.current}:${portionId}` }
+    : { deviceId, checkoutRequestId: draft?.reference ?? '', reference: `${draft?.reference ?? ''}:${portionId}` }), [draft]);
+  const ordinaryRefusalText = useCallback((code: string) => paymentRefusalMessage(code, t) ?? (code === 'GIFT_CARD_TERMINAL_SCOPE_REQUIRED'
     ? t('giftCardCheckout.refusal.scope', 'This terminal has no confirmed organization or terminal identity. Pair the POS again.')
     : t('giftCardCheckout.refusal.admission', 'Earlier gift card attempts must be checked first.')), [t]);
   // Existing-order guard for one terminal charge and its write. Only an exact
@@ -509,7 +595,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
               return { transactionId: directSale.id };
             }
             let rawPayment: unknown; let threw = false;
-            try { rawPayment = await bridge.ecr.processPayment(cardPortion.amount, { deviceId: terminal.deviceId, orderId, reference: `${orderId}:${cardPortion.id}` }); } catch { threw = true; }
+            try { rawPayment = await bridge.ecr.processPayment(cardPortion.amount, chargeOptions(terminal.deviceId, cardPortion.id)); } catch { threw = true; }
             const charge = classifyOrdinaryTerminalReply(rawPayment, threw);
             seen.charge = charge;
             if (charge.verdict !== 'approved') throw cardNotApproved(charge.message, isProvenDeclineReply(rawPayment, threw));
@@ -537,7 +623,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     if (run.status === 'completed' && run.value?.settlement) return run.value.settlement;
     const failure = run.value?.failure;
     throw failure instanceof Error ? failure : new Error(t('splitPayment.cardFailed', { defaultValue: 'Card payment failed' }));
-  }, [bridge, orderFinancials, orderId, ordinaryRefusalText, persistFinancials, recordPortionPayment, t]);
+  }, [bridge, chargeOptions, orderFinancials, ordinaryRefusalText, persistFinancials, recordPortionPayment, t]);
   // Existing-order guard for Confirm Split: every portion write under one
   // ordinary claim, each kept with its own reference. Any unknown write keeps
   // it; a booked write completes it; an earlier booked write never proves a
@@ -561,7 +647,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     const failure = run.value?.failure;
     throw failure instanceof Error ? failure : new Error(t('splitPayment.failed', 'Split payment failed. Please try again.'));
   }, [ordinaryRefusalText, t]);
-  const handleTerminalCardPayment = useCallback(async (portionId: string) => {
+  const handleTerminalCardPayment = useCallback(async (portionId: string) => supportPayment.run(async () => {
     if (isReconciliationPending || platformHeld) return;
     if (unsavedLocked) { toast.error(pendingNotSavedMessage(unsaved.payments, t, formatCurrency), { duration: PAYMENT_NOT_SAVED_TOAST_MS }); return; }
     const startedEpoch = viewEpoch.current;
@@ -575,14 +661,15 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     // queues a concurrent charge instead of rejecting it — the card was charged
     // twice. The state-based checks below stay as defense in depth only.
     if (!terminalChargeGuard.acquire(portionId)) { toast.error(t('splitPayment.cardBusy', { defaultValue: 'Another card payment is already in progress' })); return; }
-    // Existing-order guard: claim the order before the first await.
+    // Existing-order guard: claim the order before the first await (a cart with no order has none to claim).
     let ordinaryOwner: OrdinaryCollectionOwner | null = null;
-    if (collectionScope !== undefined) {
-      const claim = claimOrdinaryCollectionOwner(collectionScope, orderId);
+    const claimedOrderId = orderIdRef.current;
+    if (collectionScope !== undefined && claimedOrderId) {
+      const claim = claimOrdinaryCollectionOwner(collectionScope, claimedOrderId);
       if (!claim.claimed) {
         if (claim.retained) {
           try {
-            const sale = (await bridge.payments.getSettlementSnapshot(orderId)).unresolvedDirectSale;
+            const sale = (await bridge.payments.getSettlementSnapshot(claimedOrderId)).unresolvedDirectSale;
             const original = ordinaryCollectionView(claim.retained)?.original;
             let recoveredLabel: string | null = null;
             if (isCurrent() && sale?.recoverable && sale.id && sale.deviceId && /^[A-Z]{3}$/.test(sale.currency?.toUpperCase() || '')
@@ -635,9 +722,10 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       // Read fresh before any terminal is asked to charge.
       const pending = await unsaved.refresh();
       if (pending.length > 0) { toast.error(pendingNotSavedMessage(pending, t, formatCurrency), { duration: PAYMENT_NOT_SAVED_TOAST_MS }); return; }
-      try { await ensureLatestOutstanding(portion.amount, activeTab); } catch (error) { toast.error(error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.')); return; }
+      try { await ensureLatestOutstanding(portion.amount, activeTab); } catch (error) { toast.error(paymentRefusalMessage(error, t) ?? (error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.'))); return; }
       if (!isCurrent()) return;
-      const sale = (await bridge.payments.getSettlementSnapshot(orderId)).unresolvedDirectSale;
+      // The order's unresolved SALE, or the checkout's: an approved original is recorded (never charged again).
+      const sale = orderIdRef.current ? (await bridge.payments.getSettlementSnapshot(orderIdRef.current)).unresolvedDirectSale : await readDraftSale();
       if (!isCurrent()) return;
       if (sale && (!sale.recoverable || !sale.id || !sale.deviceId || !/^[A-Z]{3}$/.test(sale.currency?.toUpperCase() || '')
         || sale.amountCents !== Math.round(portion.amount * 100))) {
@@ -680,7 +768,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           processPayment: async () => {
             if (!isCurrent()) throw new Error('The split payment view changed before card collection');
             if (sale?.recoverable && sale.id) return { transactionId: sale.id };
-            const rawPayment: any = await bridge.ecr.processPayment(cardPortion.amount, { deviceId: terminal!.deviceId, orderId, reference: `${orderId}:${cardPortion.id}` });
+            const rawPayment: any = await bridge.ecr.processPayment(cardPortion.amount, chargeOptions(terminal!.deviceId, cardPortion.id));
             const tx = extractTransactionDetails(rawPayment);
             if (!tx.success || tx.status !== 'approved' || !tx.transactionId) throw cardNotApproved(tx.errorMessage, isProvenDeclineReply(rawPayment));
             return { transactionId: tx.transactionId };
@@ -721,7 +809,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         restorePortionMethod(portionId, methodBeforeTap);
         toast.error(error instanceof Error && provenCardDeclines.has(error)
           ? t('payment.messages.cardDeclinedNothingCharged', { defaultValue: 'The card was declined. Nothing was charged.' })
-          : error instanceof Error ? error.message : t('splitPayment.cardFailed', { defaultValue: 'Card payment failed' }));
+          : paymentRefusalMessage(error, t) ?? (error instanceof Error ? error.message : t('splitPayment.cardFailed', { defaultValue: 'Card payment failed' })));
         return;
       }
       if (!isCurrent()) return;
@@ -733,17 +821,28 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         toast.success(t('splitPayment.portionPaid', { defaultValue: '{{person}} paid successfully', person: cardPortion.label }));
       } catch (error) {
         console.error('[SplitPaymentModal] Split completion failed after payment was recorded:', error);
-        toast.error(error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.'));
+        toast.error(paymentRefusalMessage(error, t) ?? (error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.')));
       }
     } finally {
       // Ends the claim only while nothing was sent under it.
       if (ordinaryOwner) releaseOrdinaryOwnerBeforeSend(ordinaryOwner);
       terminalChargeGuard.release(portionId);
       setIsTerminalChargeInFlight(false);
+      if (draft && !orderIdRef.current) void refreshDraftSale();
     }
-  }, [activeTab, alreadyPaidAmount, applySplitStateSnapshot, bridge, collectionScope, completeAndClose, ensureLatestOutstanding, fetchLatestSplitState, getPortion, isOpen, isReconciliationPending, orderFinancials, orderId, ordinaryRefusalText, persistFinancials, platformHeld, processingPortionId, receiptMode, recordPortionPayment, restorePortionMethod, safePrintSplitReceipt, setPortionMethod, settleOrdinaryTerminalPortion, t, unsaved, unsavedLocked, updatePortion]);
+  }), [supportPayment, activeTab, alreadyPaidAmount, applySplitStateSnapshot, bridge, chargeOptions, collectionScope, completeAndClose, ensureLatestOutstanding, fetchLatestSplitState, getPortion, isOpen, isReconciliationPending, orderFinancials, orderId, ordinaryRefusalText, persistFinancials, platformHeld, processingPortionId, readDraftSale, receiptMode, recordPortionPayment, restorePortionMethod, safePrintSplitReceipt, setPortionMethod, settleOrdinaryTerminalPortion, t, unsaved, unsavedLocked, updatePortion]);
 
-  const handleConfirm = useCallback(async () => {
+  const saveDraftSale = useCallback(() => {
+    if (!draftSale?.recoverable || !draftSale.amountCents) return;
+    const amount = round2(draftSale.amountCents / 100);
+    const matching = portions.find((portion) => portion.status === 'draft' && Math.round(portion.amount * 100) === draftSale.amountCents);
+    if (matching) { void handleTerminalCardPayment(matching.id); return; }
+    // No person has that amount: one is added with it, and its Card records the held SALE.
+    setPortions((current) => [withCollectionDefaults({ ...createPortion(personLabel(current.length), amount), method: 'card' }), ...current]);
+    toast(t('splitPayment.checkoutSalePersonAdded', { defaultValue: 'A person with {{amount}} was added for the card already charged. Press Card on that person to save it.', amount: formatCurrency(amount) }));
+  }, [draftSale, handleTerminalCardPayment, personLabel, portions, t, withCollectionDefaults]);
+
+  const handleConfirm = useCallback(async () => supportPayment.run(async () => {
     if (!canConfirm) return;
     const startedEpoch = viewEpoch.current;
     const isCurrent = () => isOpen && viewEpoch.current === startedEpoch;
@@ -759,10 +858,10 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     // would record the portion as a manual payment while the terminal flow
     // proceeds to charge the card for it a second time.
     if (!terminalChargeGuard.acquire(CONFIRM_SETTLEMENT_GUARD_ID)) { toast.error(t('splitPayment.cardBusy', { defaultValue: 'Another card payment is already in progress' })); return; }
-    // Existing-order guard: claim the order before the first await.
+    // Existing-order guard: claim the order before the first await (a cart with no order has none to claim).
     let ordinaryOwner: OrdinaryCollectionOwner | null = null;
-    if (collectionScope !== undefined) {
-      const claim = claimOrdinaryCollectionOwner(collectionScope, orderId);
+    if (collectionScope !== undefined && orderIdRef.current) {
+      const claim = claimOrdinaryCollectionOwner(collectionScope, orderIdRef.current);
       if (!claim.claimed) { terminalChargeGuard.release(CONFIRM_SETTLEMENT_GUARD_ID); toast.error(ordinaryRefusalText(claim.code)); return; }
       ordinaryOwner = claim.owner;
     }
@@ -770,12 +869,13 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     try {
       const pending = await unsaved.refresh();
       if (pending.length > 0) { toast.error(pendingNotSavedMessage(pending, t, formatCurrency), { duration: PAYMENT_NOT_SAVED_TOAST_MS }); return; }
-      if ((await bridge.payments.getSettlementSnapshot(orderId)).unresolvedDirectSale) {
+      if (orderIdRef.current ? (await bridge.payments.getSettlementSnapshot(orderIdRef.current)).unresolvedDirectSale : await readDraftSale()) {
         throw new Error(ordinaryRefusalText('DIRECT_SALE_RECONCILIATION_REQUIRED'));
       }
       if (!isCurrent()) return;
       await ensureLatestOutstanding(round2(draftPortions.reduce((sum, portion) => sum + portion.amount, 0)), activeTab);
       if (!isCurrent()) return;
+      let manualAdmission: ManualCardAdmission | null = null;
       if (manualCardIds.size > 0) {
         // D (06/10/2026): the manual card admission is asked again right
         // before it is recorded. A refusal records nothing at all; a definite
@@ -789,6 +889,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           toast.error(manualCardRecordRefusalText(t, admission.reason));
           return;
         }
+        manualAdmission = admission;
       }
       const portionOrigins = new Map<string, PaymentOrigin>(draftPortions.map((portion) => [portion.id, portion.method === 'card' ? (portion.paymentOrigin || 'manual') : 'manual']));
       const settleDrafts = (onReply?: (raw: unknown, threw: boolean, transactionRef: string | null) => void) => settleDraftPortions(orderFinancials, draftPortions, {
@@ -796,7 +897,10 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           if (!isCurrent()) throw new Error('The split payment view changed before recording');
           let replied = false;
           const noteReply = onReply && ((raw: unknown, threw: boolean) => { replied = true; onReply(raw, threw, portion.transactionRef ?? null); });
-          try { return await recordPortionPayment(portion, portionOrigins.get(portion.id) ?? 'manual', portion.transactionRef, portion.terminalDeviceId, noteReply); }
+          const origin = portionOrigins.get(portion.id) ?? 'manual';
+          // A manual card carries its admission for the admin's review (founder 01/11/2026).
+          const metadata = portion.method === 'card' && origin === 'manual' ? manualCardAdmissionMetadata(manualAdmission) : undefined;
+          try { return await recordPortionPayment(portion, origin, portion.transactionRef, portion.terminalDeviceId, noteReply, metadata); }
           catch (error) { if (onReply && !replied) onReply(undefined, true, portion.transactionRef ?? null); throw error; }
         },
         persistFinancials,
@@ -815,14 +919,14 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         return;
       }
       console.error('[SplitPaymentModal] Split confirmation failed:', error);
-      toast.error(error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.'));
+      toast.error(paymentRefusalMessage(error, t) ?? (error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.')));
     } finally {
       // Ends the claim only while nothing was sent under it.
       if (ordinaryOwner) releaseOrdinaryOwnerBeforeSend(ordinaryOwner);
       terminalChargeGuard.release(CONFIRM_SETTLEMENT_GUARD_ID);
       setIsProcessing(false);
     }
-  }, [activeTab, applySplitStateSnapshot, bridge, canConfirm, collectionScope, completeAndClose, ensureLatestOutstanding, fetchLatestSplitState, isOpen, orderFinancials, orderId, ordinaryRefusalText, persistFinancials, portions, receiptMode, recordPortionPayment, safePrintSplitReceipt, settleOrdinaryDrafts, t, unsaved]);
+  }), [supportPayment, activeTab, applySplitStateSnapshot, bridge, canConfirm, collectionScope, completeAndClose, ensureLatestOutstanding, fetchLatestSplitState, isOpen, orderFinancials, orderId, ordinaryRefusalText, persistFinancials, portions, readDraftSale, receiptMode, recordPortionPayment, safePrintSplitReceipt, settleOrdinaryDrafts, t, unsaved]);
 
   const MethodToggle: React.FC<{ portion: SplitPortion }> = ({ portion }) => {
     const locked = portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight || isReconciliationPending || platformHeld;
@@ -835,7 +939,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           onClick={() => setPortionMethod(portion.id, 'cash')}
           className="split-payment-method"
         >
-          <Banknote className="h-3.5 w-3.5" />
+          <CashHandIcon className="h-3.5 w-3.5" />
           {t('splitPayment.cash', 'Cash')}
         </button>
         <button
@@ -866,12 +970,12 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         {collectionMode.description ? (
           <p className="text-xs liquid-glass-modal-text-muted">{collectionMode.description}</p>
         ) : null}
-        <div className="flex gap-1 rounded-2xl bg-slate-100/80 p-0.5 dark:bg-white/5">
+        <div className="flex gap-1 rounded-2xl bg-(--pos-s-surface-2) p-1 shadow-(--pos-s-well)">
           <button
             type="button"
             disabled={locked}
             onClick={() => setPortionCollectedBy(portion.id, 'cashier_drawer')}
-            className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner !== 'driver_shift' ? 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 dark:text-emerald-300' : 'text-slate-500 active:text-slate-700 dark:text-white/50 dark:active:text-white/70'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
+            className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner !== 'driver_shift' ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-(--pos-s-depth-yellow)' : 'text-(--pos-s-muted)'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
           >
             {t('splitPayment.cashierDrawer', { defaultValue: 'Cashier' })}
           </button>
@@ -880,7 +984,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
               type="button"
               disabled={locked}
               onClick={() => setPortionCollectedBy(portion.id, 'driver_shift')}
-              className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner === 'driver_shift' ? 'border border-slate-400/30 bg-slate-500/15 text-slate-700 dark:text-slate-200' : 'text-slate-500 active:text-slate-700 dark:text-white/50 dark:active:text-white/70'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
+              className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner === 'driver_shift' ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-(--pos-s-depth-yellow)' : 'text-(--pos-s-muted)'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
             >
               {t('splitPayment.driverShift', { defaultValue: 'Driver' })}
             </button>
@@ -918,7 +1022,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           {portion.paymentOrigin === 'terminal' ? ` • ${t('splitPayment.terminalApproved', { defaultValue: 'Terminal' })}` : ''}
         </div>
       ) : portion.status === 'processing' ? (
-        <div className="rounded-2xl border border-slate-400/30 bg-slate-500/10 px-3 py-2 text-xs text-slate-700 dark:text-slate-200">
+        <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-xs text-(--pos-s-fg)">
           {t('splitPayment.waitingForApproval', { defaultValue: 'Waiting for card approval on the payment terminal...' })}
         </div>
       ) : portion.status === 'unsaved' ? (
@@ -928,7 +1032,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       ) : (
         <>
           {renderCollectionOwner(portion)}
-          {allowDiscounts ? (
+          {allowDiscounts && !isDraftView ? (
             <>
               <button
                 type="button"
@@ -940,7 +1044,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                 {t('splitPayment.discount', { defaultValue: 'Discount' })}
               </button>
               {discountEditorPortionId === portion.id ? (
-                <div className="flex items-center gap-2 rounded-2xl border border-slate-200/90 bg-slate-50/80 p-2 dark:border-white/10 dark:bg-white/5">
+                <div className="flex items-center gap-2 rounded-2xl bg-(--pos-s-surface-2) p-2 shadow-(--pos-s-well)">
                   <div className="relative flex-1">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-(--pos-s-muted)">{currency ?? getStoreCurrency() ?? '—'}</span>
                     <SplitAmountInput
@@ -953,14 +1057,14 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                   <button
                     type="button"
                     onClick={() => saveDiscount(portion.id)}
-                    className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-xs font-semibold text-emerald-700 dark:text-emerald-300"
+                    className="pos-solid-btn pos-solid-btn--sm"
                   >
                     {t('common.actions.apply', { defaultValue: 'Apply' })}
                   </button>
                   <button
                     type="button"
                     onClick={() => { setDiscountEditorPortionId(null); setDiscountDraftValue(''); }}
-                    className="rounded-2xl border border-slate-200/90 bg-white/90 px-3 py-2 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-white/70"
+                    className="pos-solid-btn pos-solid-btn--sm"
                   >
                     {t('common.actions.cancel', { defaultValue: 'Cancel' })}
                   </button>
@@ -1010,7 +1114,8 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                 </span>
                 {portions.length > 2 && portion.status === 'draft' && (
                   <button type="button" onClick={() => removePerson(portion.id)}
-                    className="rounded-2xl p-1 text-red-700 dark:text-red-400 transition-colors active:bg-(--pos-s-surface-2) active:text-red-400">
+                    aria-label={t('splitPayment.removePerson', 'Remove person')}
+                    className="pos-icon-btn pos-icon-btn--danger">
                     <Trash2 className="h-4 w-4" />
                   </button>
                 )}
@@ -1030,7 +1135,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         </AnimatePresence>
       </div>
       <button type="button" onClick={addPerson} disabled={Boolean(processingPortionId) || isProcessing || isTerminalChargeInFlight}
-        className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300/90 py-2.5 text-sm font-medium text-slate-500 transition-colors active:border-slate-400 active:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:text-white/50 dark:active:border-white/25 dark:active:text-white/70">
+        className="pos-solid-btn pos-solid-btn--sm w-full gap-2">
         <Plus className="h-4 w-4" />{t('splitPayment.addPerson', 'Add Person')}
       </button>
     </div>
@@ -1055,7 +1160,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             return (
               <div
                 key={itemIndex}
-                className={`rounded-2xl border p-2.5 transition-colors ${assignedTo ? "border-(--pos-s-border) bg-(--pos-s-surface-2) dark:border-zinc-700 dark:bg-zinc-800" : "border-slate-200/90 bg-white/80 dark:border-white/10 dark:bg-white/5"}`}
+                className={`rounded-2xl border border-transparent p-2.5 shadow-(--pos-s-depth-card) transition-colors ${assignedTo ? "bg-(--pos-s-surface-2)" : "bg-(--pos-s-surface)"}`}
               >
                 <div className="mb-1.5 flex items-center justify-between">
                   <span className="flex-1 truncate text-sm font-medium liquid-glass-modal-text">
@@ -1148,7 +1253,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           {portions.map((portion) => (
             <div
               key={portion.id}
-              className={`space-y-2 rounded-2xl border p-2.5 ${portion.status === "paid" ? "border-(--pos-s-border) bg-(--pos-s-surface-2) dark:border-zinc-700 dark:bg-zinc-800" : portion.status === "processing" ? "border-slate-300/70 bg-slate-100/80 dark:border-slate-400/25 dark:bg-slate-500/5" : "border-slate-200/90 bg-white/80 dark:border-white/10 dark:bg-white/5"}`}
+              className={`space-y-2 rounded-2xl border p-2.5 shadow-(--pos-s-depth-card) ${portion.status === "paid" ? "border-transparent bg-(--pos-s-surface-2)" : portion.status === "processing" ? "border-(--pos-s-border) bg-(--pos-s-surface-2)" : "border-transparent bg-(--pos-s-surface)"}`}
             >
               <div className="flex items-center justify-between">
                 <span className="text-sm font-semibold liquid-glass-modal-text">
@@ -1158,7 +1263,8 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                   <button
                     type="button"
                     onClick={() => removePerson(portion.id)}
-                    className="rounded-full p-1 text-red-700 dark:text-red-400 transition-colors active:bg-(--pos-s-surface-2) active:text-red-400"
+                    aria-label={t("splitPayment.removePerson", "Remove person")}
+                    className="pos-icon-btn pos-icon-btn--danger"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -1200,7 +1306,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                       {t("splitPayment.noItems", "No items assigned")}
                     </p>
                   )}
-                  <div className="border-t border-slate-200/90 pt-2 dark:border-white/10">
+                  <div className="border-t border-(--pos-s-border) pt-2">
                     <div className="mb-2 flex items-center justify-between">
                       <span className="text-sm font-bold text-emerald-500 dark:text-emerald-400">
                         {formatCurrency(portion.amount)}
@@ -1221,7 +1327,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
               isProcessing ||
               isTerminalChargeInFlight
             }
-            className="flex w-full items-center justify-center gap-1.5 rounded-2xl border-2 border-dashed border-slate-300/90 py-2 text-xs font-medium text-slate-500 transition-colors active:border-slate-400 active:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:text-white/50 dark:active:border-white/25 dark:active:text-white/70"
+            className="pos-solid-btn pos-solid-btn--sm w-full gap-2"
           >
             <Plus className="h-3.5 w-3.5" />
             {t("splitPayment.addPerson", "Add Person")}
@@ -1232,7 +1338,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   };
   const footer = (
     <div className="split-payment-footer">
-      <div className="flex gap-1 rounded-2xl bg-slate-100/80 p-0.5 dark:bg-white/5">
+      <div className="flex gap-1 rounded-2xl bg-(--pos-s-surface-2) p-1 shadow-(--pos-s-well)">
         <button
           type="button"
           onClick={() => setReceiptMode("combined")}
@@ -1342,12 +1448,31 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             showBlockedAction
             className="shrink-0"
           />
+          {draftSale ? (
+            <div role="alert" data-testid="split-checkout-sale" className="split-payment-card-notice shrink-0">
+              <CreditCard aria-hidden="true" />
+              <div className="min-w-0 flex-1 space-y-2">
+                <p>{draftSale.recoverable
+                  ? t('splitPayment.checkoutSaleHeld', { defaultValue: 'A card payment of {{amount}} was already charged for this order and is not saved yet. Save it as this order\'s payment; do not charge the card again.', amount: formatCurrency((draftSale.amountCents ?? 0) / 100) })
+                  : t('splitPayment.checkoutSaleUnknown', { defaultValue: 'The card terminal did not answer for {{amount}}. Check the terminal\'s last transaction before taking another payment. This order cannot be left until the card is checked.', amount: formatCurrency((draftSale.amountCents ?? 0) / 100) })}</p>
+                {draftSale.recoverable ? (
+                  <button type="button" className="pos-solid-btn pos-solid-btn--sm" disabled={isTerminalChargeInFlight || isProcessing} onClick={saveDraftSale}>
+                    {t('splitPayment.saveCardPayment', 'Save card payment')}
+                  </button>
+                ) : (
+                  <button type="button" className="pos-solid-btn pos-solid-btn--sm" onClick={() => void refreshDraftSale()}>
+                    {t('splitPayment.checkAgain', 'Check again')}
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : null}
           <UnsavedChargedPaymentBanner
             payments={unsaved.payments}
-            onSaveAgain={async () => {
+            onSaveAgain={async () => supportPayment.run(async () => {
               await unsaved.saveAgain();
               try { applySplitStateSnapshot(await fetchLatestSplitState(), { resetDraft: true, mode: activeTab }); } catch (refreshError) { console.warn('[SplitPaymentModal] Split refresh after Save payment again failed:', refreshError); }
-            }}
+            })}
             isSaving={unsaved.isSaving}
             className="shrink-0"
           />
@@ -1369,7 +1494,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             )}
           </div>
           {isInitializing ? (
-            <div className="flex shrink-0 items-center gap-3 rounded-2xl border border-slate-200/90 bg-white/80 p-4 dark:border-white/10 dark:bg-white/5">
+            <div className="flex shrink-0 items-center gap-3 rounded-2xl bg-(--pos-s-surface) p-4 shadow-(--pos-s-depth-card)">
               <Loader2 className="h-5 w-5 animate-spin text-slate-600 dark:text-white/70" />
               <div>
                 <h3 className="font-semibold liquid-glass-modal-text">
@@ -1385,7 +1510,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             </div>
           ) : (
             <>
-              <div className="flex shrink-0 gap-1 rounded-xl border border-slate-200/90 bg-slate-100/80 p-1 dark:border-white/10 dark:bg-white/5">
+              <div className="flex shrink-0 gap-1 rounded-xl bg-(--pos-s-surface-2) p-1 shadow-(--pos-s-well)">
                 <button
                   type="button"
                   onClick={() => setActiveTab("by-amount")}

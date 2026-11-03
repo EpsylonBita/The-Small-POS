@@ -219,10 +219,10 @@ export const TrialModulePrompt: React.FC<TrialModulePromptProps> = ({
           {dismissible && (
             <button
               onClick={handleDismiss}
-              className="inline-flex min-h-touch min-w-touch items-center justify-center rounded-2xl text-gray-400 transition-transform active:scale-95 active:bg-white/10"
+              className="liquid-glass-modal-close"
               aria-label="Dismiss"
             >
-              <X className="h-4 w-4 text-gray-400" />
+              <X className="h-5 w-5" aria-hidden="true" />
             </button>
           )}
         </div>

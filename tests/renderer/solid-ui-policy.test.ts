@@ -17,11 +17,12 @@ test('modals are neutral glass (founder 30/10) over opaque controls; glass never
     assert.ok(values.length >= 2, `${token} is defined for light and dark`);
     for (const value of values) assert.match(value, /^#[0-9a-f]{6}$/i, `${token} must be an opaque colour, got ${value}`);
   }
-  // Glass: white or black frost only, never a hue.
+  // Glass: white, black or zinc frost only, never a hue. Founder 01/11: a window's panel in dark is the zinc-800
+  // frost (39, 39, 42), a step lighter than the window, so it reads raised on black.
   for (const token of ['--modal-glass', '--modal-glass-border', '--modal-glass-card', '--modal-glass-card-border', '--modal-glass-line', '--modal-backdrop']) {
     const values = [...css.matchAll(new RegExp(`${token}: ([^;]+);`, 'g'))].map(m => m[1].trim());
     assert.ok(values.length >= 2, `${token} is defined for light and dark`);
-    for (const value of values) assert.match(value, /^rgba\((?:255, 255, 255|0, 0, 0|9, 9, 11|24, 24, 27), 0?\.\d+\)$/, `${token} must be a neutral frost, got ${value}`);
+    for (const value of values) assert.match(value, /^rgba\((?:255, 255, 255|0, 0, 0|9, 9, 11|24, 24, 27|39, 39, 42), 0?\.\d+\)$/, `${token} must be a neutral frost, got ${value}`);
   }
   const shell = css.slice(css.indexOf('.liquid-glass-modal-shell {\n  position: relative;'), css.indexOf('/* Hide scrollbar while keeping scroll functional */'));
   assert.ok(shell.length > 100, 'found the modal shell rule');
@@ -30,11 +31,15 @@ test('modals are neutral glass (founder 30/10) over opaque controls; glass never
   assert.match(shell, /border-radius: 16px;/);
   const backdrop = css.slice(css.indexOf('.liquid-glass-modal-backdrop {'), css.indexOf('.dark .liquid-glass-modal-backdrop {'));
   assert.match(backdrop, /backdrop-filter: blur\(24px\);/);
-  // Inside a modal the kit's cards are frosted too; its buttons keep their solid colours.
-  assert.match(css, /:is\(\.liquid-glass-modal-shell, \.pos-glass-panel\) :is\(\.pos-group, \.pos-card, \.pos-seg, \.pos-checks, \.pos-choice-card:not\(\.is-selected\), \.pos-choice-row:not\(\.is-selected\)\) \{ border-color: var\(--modal-glass-card-border\); background: var\(--modal-glass-card\); \}/);
+  // Inside a modal the kit's cards are frosted too; its buttons (choice cards included) stay solid and raised
+  // (founder 01/11: the depth comes from the shadow, never from glass), and the segmented well stays sunken.
+  assert.match(css, /:is\(\.liquid-glass-modal-shell, \.pos-glass-panel\) :is\(\.pos-group, \.pos-card, \.pos-checks, \.pos-choice-row:not\(\.is-selected\)\) \{ border-color: var\(--modal-glass-card-border\); background: var\(--modal-glass-card\); \}/);
+  assert.match(css, /\.pos-choice-card \{[^}]*border: 1px solid transparent;[^}]*background: var\(--pos-s-raised\);[^}]*box-shadow: var\(--pos-s-depth\);/);
   const button = css.slice(css.indexOf('.liquid-glass-modal-button {'), css.indexOf('.liquid-glass-modal-button:active {'));
   assert.doesNotMatch(button, /backdrop-filter/);
-  assert.match(button, /border: 1px solid var\(--modal-border-strong\);/);
+  // Founder 01/11: raised — the kit's raised surface and soft shadow, no dark outline.
+  assert.match(button, /background: var\(--pos-s-raised\);\s*border: 1px solid transparent;/);
+  assert.match(button, /box-shadow: var\(--pos-s-depth\);/);
 });
 
 test('modal buttons: solid yellow primary, neutral secondary, red-text danger', () => {
@@ -42,7 +47,7 @@ test('modal buttons: solid yellow primary, neutral secondary, red-text danger', 
   assert.match(ds, /variant === 'primary'\s*\?\s*'pos-modal-primary'\s*:\s*variant === 'danger'\s*\?\s*'pos-modal-danger'/);
   assert.doesNotMatch(ds, /bg-yellow-400\/20/);
   const css = read('styles', 'glassmorphism.css');
-  assert.match(css, /\.liquid-glass-modal-button\.pos-modal-primary \{ border-color: var\(--pos-s-yellow\); background: var\(--pos-s-yellow\); color: var\(--pos-s-yellow-fg\); \}/);
+  assert.match(css, /\.liquid-glass-modal-button\.pos-modal-primary \{ border-color: var\(--pos-s-yellow\); background: var\(--pos-s-yellow\); box-shadow: var\(--pos-s-depth-yellow\); color: var\(--pos-s-yellow-fg\); \}/);
   assert.match(css, /\.liquid-glass-modal-button\.pos-modal-danger \{ color: var\(--pos-s-bad\); \}/);
   // State tones are opaque in dark too (no /10 washes).
   const tones = ds.slice(ds.indexOf('export const liquidGlassModalTone'), ds.indexOf('return tones[tone];'));
@@ -352,17 +357,22 @@ test('Wave ΣΤ2: order styles carry no coloured glow or wash', () => {
   assert.doesNotMatch(globals, /\.customer-search-yellow-input:focus \{[^}]*rgba\(250, 204, 21/);
 });
 
-test('Wave ΣΤ4: payment choices are kit surfaces with the kit focus outline', () => {
+test('Wave ΣΤ4: payment choices are glass cards with depth and the kit focus outline', () => {
   const css = read('styles', 'glassmorphism.css');
+  // Founder 01/11 («αν μπορεί να είναι γυαλί και αυτές»): the frosted card token and the panel depth, both themes.
   for (const method of ['cash', 'card', 'split']) {
-    assert.match(css, new RegExp(String.raw`\.liquid-glass-modal-shell button\.payment-option-${method} \{\s*border-color: var\(--pos-s-border\) !important;\s*background: var\(--pos-s-surface\) !important;`));
-    assert.match(css, new RegExp(String.raw`\.dark \.liquid-glass-modal-shell button\.payment-option-${method} \{\s*border-color: var\(--pos-s-border\) !important;\s*background: var\(--pos-s-surface-2\) !important;`));
+    assert.match(css, new RegExp(String.raw`\.liquid-glass-modal-shell button\.payment-option-${method} \{\s*border-color: var\(--modal-glass-card-border\) !important;\s*background: var\(--modal-glass-card\) !important;\s*box-shadow: var\(--pos-s-depth-card\);`));
+    assert.match(css, new RegExp(String.raw`\.dark \.liquid-glass-modal-shell button\.payment-option-${method} \{\s*border-color: var\(--modal-glass-card-border\) !important;\s*background: var\(--modal-glass-card\) !important;\s*box-shadow: var\(--pos-s-depth-card\);`));
   }
+  // The glyphs hide their back shapes through masks, so nothing shows as a box on the glass.
+  const icons = read('components', 'icons', 'PaymentMethodIcons.tsx');
+  assert.doesNotMatch(icons, /--pay-icon-fill/);
   assert.match(css, /button\.payment-option-split:focus-visible \{\s*outline: 3px solid var\(--pos-s-fg\);/);
-  // The floating checkout summary covers the content beneath it (opaque in both themes).
+  // The floating checkout summary covers the content beneath it: the opaque kit surface in both themes
+  // (founder 01/11; it was #ffffff / #18181b).
   const footer = read('components', 'modals', 'staff-shift-checkout-footer.css');
-  assert.match(footer, /\.staff-checkout-footer-panel \{\s*background: #ffffff !important;/);
-  assert.match(footer, /\.dark \.liquid-glass-modal-shell \.staff-checkout-footer-panel \{\s*background: #18181b !important;/);
+  assert.match(footer, /\.liquid-glass-modal-shell \.staff-checkout-footer-panel \{\s*background: var\(--pos-s-surface\) !important;/);
+  assert.doesNotMatch(footer, /staff-checkout-footer-panel \{[^}]*background: rgba?\(/);
 });
 
 // Founder 31/10 («ο κρυφός φωτισμός … μου άρεσε»): the warm light behind the navigation rail and the main
@@ -536,3 +546,15 @@ test('shared stylesheets parse (balanced blocks)', async () => {
     assert.doesNotThrow(() => postcss.parse(read(...file)), `${file.join('/')} must parse`);
   }
 });
+
+// Founder 01/11 («να σέρνεται δεξιά αριστερά αλλά να χάνονται χωρίς να κόβεται»): a sideways row hides its rail,
+// pans with a finger, fades only at an edge with more to show, and keeps room for the raised shadows.
+test('the kit scroll row: no rail, finger pan, edge fades, room for shadows, installed once', () => {
+  const css = read('styles', 'glassmorphism.css');
+  assert.match(css, /\.pos-scroll-row \{[^}]*margin-inline: -14px;[^}]*padding: 4px 14px 16px;[^}]*overflow-x: auto;[^}]*scrollbar-width: none;[^}]*touch-action: pan-x;/);
+  assert.match(css, /\.pos-scroll-row\[data-fade-start='on'\] \{ --pos-row-fade-start: 48px; \}/);
+  assert.match(css, /\.pos-scroll-row\[data-fade-end='on'\] \{ --pos-row-fade-end: 48px; \}/);
+  const entry = readFileSync(path.join(process.cwd(), 'src', 'main.tsx'), 'utf8');
+  assert.match(entry, /await import\('\.\/renderer\/utils\/scroll-rows'\);\s*installScrollRows\(\);/);
+});
+

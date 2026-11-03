@@ -27,6 +27,14 @@ fn select_original(conn: &Connection, id: &str, scope: &Scope) -> Result<Option<
     if !same_scope(scope, &crate::table_session_cache::current_scope(conn)?) {
         return Ok(None);
     }
+    select_original_scoped(conn, id, scope)
+}
+
+fn select_original_scoped(
+    conn: &Connection,
+    id: &str,
+    scope: &Scope,
+) -> Result<Option<Original>, String> {
     let original = conn.query_row(
         "SELECT q.id,q.record_id,q.organization_id,q.data,q.error_message,q.version,q.claim_generation
          FROM parity_sync_queue q JOIN conflict_audit_log a ON a.id='table-mutation-terminal:'||q.id
@@ -141,10 +149,20 @@ fn finish_confirmation(
     let mut proof = validate_confirmation(original, scope, reply)?;
     proof["snapshotId"] = json!(snapshot_id);
     proof["remedyVersion"] = json!(1);
-    let transaction = conn
-        .unchecked_transaction()
+    let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
+    if !same_scope(
+        scope,
+        &crate::table_session_cache::scope_from_snapshot(&captured)?,
+    ) {
+        return Err("TABLE_CLOSE_ORIGINAL_CHANGED".into());
+    }
+    if select_original_scoped(conn, &original.id, scope)?.as_ref() != Some(original) {
+        return Err("TABLE_CLOSE_ORIGINAL_CHANGED".into());
+    }
+    let transaction = crate::db::immediate_transaction(&conn)
         .map_err(|_| "TABLE_CLOSE_CONFIRMATION_WRITE_FAILED")?;
-    if select_original(&transaction, &original.id, scope)?.as_ref() != Some(original) {
+    captured.revalidate(&transaction)?;
+    if select_original_scoped(&transaction, &original.id, scope)?.as_ref() != Some(original) {
         return Err("TABLE_CLOSE_ORIGINAL_CHANGED".into());
     }
     transaction.execute("INSERT INTO conflict_audit_log
@@ -313,6 +331,7 @@ mod tests {
     }
     #[test]
     fn selects_only_the_exact_scoped_frozen_misclassified_close() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         assert_eq!(
             select_original(&conn, ID, &scope()).unwrap(),
@@ -327,12 +346,14 @@ mod tests {
     }
     #[test]
     fn confirms_a_closed_refunded_check_without_releasing_a_reused_table() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let proof = validate_confirmation(&original(), &scope(), &reply()).unwrap();
         assert_eq!(proof["sessionId"], SESSION);
         assert_eq!(proof["revision"], 7);
     }
     #[test]
     fn rejects_open_foreign_incomplete_and_invalid_canonical_answers() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for path in [
             "/success",
             "/session/id",
@@ -364,6 +385,7 @@ mod tests {
     }
     #[test]
     fn allocated_order_dto_keeps_session_scope_and_refuses_conflicting_explicit_parent_scope() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let canonical = reply();
         assert!(canonical["session"]["order"]
             .get("organization_id")
@@ -387,6 +409,7 @@ mod tests {
     }
     #[test]
     fn completes_only_the_selected_original_and_preserves_its_frozen_audit_and_money() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         let o = original();
         conn.execute("INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,created_at,attempts,error_message,module_type,version,claim_generation,status)
@@ -440,6 +463,7 @@ mod tests {
     }
     #[test]
     fn stale_claim_or_missing_snapshot_cannot_retire_the_original() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for stale in [false, true] {
             let conn = connection();
             let o = original();
@@ -525,6 +549,7 @@ mod tests {
     }
     #[tokio::test]
     async fn restart_confirmation_is_one_get_after_full_snapshot_and_is_idempotent() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         seed(&disk.state.conn.lock().unwrap());
         let disk = disk.restart();
@@ -565,6 +590,7 @@ mod tests {
     }
     #[tokio::test]
     async fn snapshot_failure_prevents_network_and_preserves_original() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         seed(&disk.state.conn.lock().unwrap());
         std::fs::write(
@@ -588,6 +614,7 @@ mod tests {
     }
     #[tokio::test]
     async fn uncertain_get_or_original_change_cannot_clear_any_intent() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for change in ["offline", "generation", "body", "owner", "auth"] {
             let disk = crate::tests::harness::TestDb::open();
             seed(&disk.state.conn.lock().unwrap());
@@ -622,5 +649,42 @@ mod tests {
                 4200
             );
         }
+    }
+
+    #[test]
+    fn admission_confirmation_resolves_optional_scope_before_writer_and_rechecks_original() {
+        use crate::admission_tests::{before_admission, no_write, writer};
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = crate::tests::harness::TestDb::open();
+        let conn = std::rc::Rc::new(Connection::open(db.db_path()).unwrap());
+        conn.busy_timeout(std::time::Duration::from_millis(5000))
+            .unwrap();
+        seed(&conn);
+        crate::db::delete_setting(&conn, "terminal", "owner_terminal_db_id").unwrap();
+        let checkout = crate::admission_tests::pause_credentials_for_checkout(
+            conn.clone(),
+            db.db_path().to_owned(),
+        );
+        let path = db.db_path().to_owned();
+        before_admission(move |_| {
+            Connection::open(path)
+                .unwrap()
+                .execute("UPDATE parity_sync_queue SET version=version+1", [])
+                .unwrap();
+        });
+        let before = conn.total_changes();
+        assert!(
+            finish_confirmation(&conn, &original(), &scope(), &reply(), "your-snapshot").is_err()
+        );
+        assert_eq!(conn.total_changes(), before);
+        checkout.join().unwrap();
+        let held = writer(db.db_path());
+        no_write(&conn, || {
+            assert!(
+                finish_confirmation(&conn, &original(), &scope(), &reply(), "your-snapshot")
+                    .is_err()
+            )
+        });
+        drop(held);
     }
 }

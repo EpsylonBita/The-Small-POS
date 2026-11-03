@@ -2,6 +2,12 @@ import type { DiagnosticsSystemHealth } from '../../lib';
 
 export type SupportSurface = 'health' | 'printer';
 
+/** Informational startup evidence, separate from sales/sync Health issues. */
+export interface RemoteSupportUnavailable {
+  status: 'unavailable';
+  code: 'SUPPORT_DATABASE_UNAVAILABLE';
+}
+
 export type HealthSupportIssueCode =
   | 'health.offline'
   | 'health.sync_error_active'

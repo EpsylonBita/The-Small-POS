@@ -333,5 +333,105 @@
         }
       }
     }
+  },
+  "connect": {
+    "action": "Connect support",
+    "permissionDisabled": "You do not have permission to connect support."
+  },
+  "code": {
+    "needsInternet": "An internet connection is needed to connect support.",
+    "retry": "Could not get a code. Try again.",
+    "expired": "The code expired. Request a new code.",
+    "cancel": "Cancel",
+    "warning": "Give this code only to The Small support.",
+    "label": "Support code",
+    "qr": "Scan to open the support connection page",
+    "timeLeft": "Time remaining",
+    "loading": "Requesting a code…",
+    "newCode": "Request a new code"
+  },
+  "banner": {
+    "activity": "Checking the till",
+    "waiting": "Waiting for support to connect",
+    "connected": "Support connected",
+    "executing": "Support action in progress",
+    "awaitingOnsite": "Support requests approval",
+    "deferredPayment": "Waiting for the payment to finish",
+    "pausedOffline": "Paused — offline",
+    "restarting": "Restoring data — the till is restarting",
+    "restoreRestarting": "Restarting to restore",
+    "ended": "Support ended",
+    "end": "End",
+    "endDuringWrite": {
+      "committed": "The change completed before support ended.",
+      "rolledBack": "The change was cancelled before support ended. Nothing changed."
+    },
+    "extend": "+30 minutes",
+    "noPinPromise": "Support will never ask for your PIN or password."
+  },
+  "onsite": {
+    "title": "Support requests to:",
+    "technicalDetails": "Technical details",
+    "execute": "Run",
+    "decline": "Decline",
+    "aiExplanation": "Assistant explanation (AI)",
+    "storePinNotice": "This is your store’s own PIN check. Support cannot see the PIN.",
+    "terminalCommandWarning": "The command runs as the till user and can read local data and change the system. The safeguards of other actions do not cover it.",
+    "cataloguePause": "Pause new sends to this printer.",
+    "catalogueResume": "Lift the pause this support session set.",
+    "catalogueCancel": "Cancel one stuck non-fiscal print job.",
+    "cataloguePauseScope": "Changes only this printer’s dispatch pause. It does not cancel jobs, recall bytes already sent or change receipts, payments, shifts or Z reports.",
+    "catalogueCancelScope": "Keeps the original print job and its history. Cancels only the selected uncertain send. It does not reprint or change payments, shifts, Z reports or fiscal documents.",
+    "cataloguePaperWarning": "Half-printed paper cannot be recalled. Any reprint must use the ordinary cashier workflow.",
+    "catalogueResumeCheck": "Confirm only after checking the printer and its configuration on site. This enables dispatch; it does not prove printing is fixed."
+  },
+  "restore": {
+    "preparing": "Preparing the restore. Restart the app when convenient to apply it.",
+    "notices": {
+      "staged": "Restore prepared. You can keep selling. Restart the app when convenient. Any new business activity will cancel the restore.",
+      "applied": "The support snapshot was restored.",
+      "refused": "The restore was refused because the till data changed or the snapshot is no longer compatible. Your current data was kept.",
+      "expired": "The prepared restore expired or support ended. Your current data was kept.",
+      "rolled_back": "The restore could not finish. Your original data was restored. You can keep selling."
+    },
+    "dismissNotice": "Dismiss",
+    "action": "Restore",
+    "snapshotFirst": "A full local snapshot will be taken first.",
+    "snapshots": "Support snapshots",
+    "quarantine": "Quarantined groups",
+    "resynced": "Re-synced from the server",
+    "confirm": "Restore this change? Your store's own authorization is required.",
+    "reasons": {
+      "pre_breakglass_sql": "Database repair",
+      "pre_quarantine": "Move to quarantine",
+      "pre_quarantine_restore": "Restore quarantined rows",
+      "pre_command": "Terminal command",
+      "pre_restore": "Restore snapshot"
+    }
+  },
+  "deviceApply": {
+    "undo": "Undo"
+  },
+  "physicalCheck": {
+    "done": "Done",
+    "notDone": "Not done",
+    "power_cycle_printer": "Turn the printer off and on.",
+    "check_printer_paper": "Check that the printer has paper.",
+    "check_printer_cable": "Check the printer cable.",
+    "check_network_cable": "Check the till’s network cable.",
+    "power_cycle_card_terminal": "Turn the card terminal off and on."
+  },
+  "consent": {
+    "title": "Consent to remote support",
+    "required": "The store’s consent is needed before support can connect.",
+    "agree": "I agree",
+    "decline": "No",
+    "onlyOwnerAdmin": "Only the store owner or an administrator can give consent.",
+    "accepted": "Consent recorded.",
+    "withdrawn": "The store withdrew consent. Support is unavailable.",
+    "outdated": "The consent text changed. New consent is needed.",
+    "textUnavailable": "The consent text is not yet available in the store’s language.",
+    "version": "Text version",
+    "storeAdminAlternative": "The owner or an administrator can also accept in the store admin."
   }
 }

@@ -35,7 +35,7 @@ mod api;
 mod auth;
 mod business_day;
 mod callerid;
-/// Invoice capture (scanner/MFP) subsystem — see
+/// Invoice capture (scanner/MFP) subsystem â€” see
 /// `.claude/specs/invoice-scan-capture/design.md`, surface D-Rust1.
 mod capture;
 mod checkout_drafts;
@@ -97,6 +97,7 @@ mod staff_pin_vault;
 mod startup_recovery;
 mod storage;
 mod store_time;
+mod support;
 mod sync;
 pub mod sync_queue; // pub so integration tests can call create_tables / enqueue_payload_item
 mod table_attempt_recovery;
@@ -225,7 +226,7 @@ pub(crate) async fn maybe_lazy_warm_menu_cache(
     }
 
     // Wave 11 L: explicit `u64::try_from` spells out what `.max(0) as u64`
-    // implicitly does — rejecting negative timestamps by falling back to 0
+    // implicitly does â€” rejecting negative timestamps by falling back to 0
     // instead of silently wrapping via the `as` cast.
     let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
     let last_attempt = MENU_WARMUP_LAST_ATTEMPT_MS.load(Ordering::Relaxed);
@@ -302,8 +303,8 @@ async fn admin_fetch(
 /// request credentials; publication belongs exclusively to the checked
 /// terminal lifecycle.
 ///
-/// Extracted verbatim from `admin_fetch_detailed` so that every transport —
-/// the JSON [`admin_fetch_detailed`] and the raw-bytes [`admin_fetch_raw`] —
+/// Extracted verbatim from `admin_fetch_detailed` so that every transport â€”
+/// the JSON [`admin_fetch_detailed`] and the raw-bytes [`admin_fetch_raw`] â€”
 /// resolves credentials through exactly the same code path rather than a copy
 /// that can drift.
 pub(crate) async fn resolve_admin_endpoint(
@@ -590,7 +591,7 @@ async fn admin_fetch_detailed(
 }
 
 /// [`admin_fetch_detailed`] with a caller-chosen request timeout, for the
-/// rare call whose server-side work is expected to outlast the default —
+/// rare call whose server-side work is expected to outlast the default â€”
 /// see `api::fetch_from_admin_detailed_with_timeout` for why this exists.
 async fn admin_fetch_detailed_with_timeout(
     db: Option<&db::DbState>,
@@ -617,7 +618,7 @@ async fn admin_fetch_detailed_with_timeout(
 /// Send a **raw byte body** to the admin dashboard over the terminal's
 /// authenticated channel.
 ///
-/// Spec: `.claude/specs/invoice-scan-capture/design.md` — decision **D11**.
+/// Spec: `.claude/specs/invoice-scan-capture/design.md` â€” decision **D11**.
 /// Requirement R17.4.
 ///
 /// The sibling of [`admin_fetch`] for captured invoice pages, which cannot ride
@@ -625,7 +626,7 @@ async fn admin_fetch_detailed_with_timeout(
 /// without that feature, and stays that way). It is deliberately the *same*
 /// function as `admin_fetch` in every respect that matters for trust:
 ///
-/// - the identical `/api/pos` allowlist via [`validate_admin_api_path`] — a raw
+/// - the identical `/api/pos` allowlist via [`validate_admin_api_path`] â€” a raw
 ///   upload can no more reach an arbitrary path than a JSON call can;
 /// - the identical keyring credential resolution via [`resolve_admin_endpoint`];
 /// - the identical base-URL normalisation, terminal-identity header, and typed
@@ -791,12 +792,133 @@ pub(crate) async fn reconcile_native_startup(
     // The LAN receiver needs a healthy binding: a binding latch set earlier in
     // startup (the protected-settings scrub) keeps it down, as before.
     drop(repairs::acquire_terminal_binding_lease()?);
+    {
+        let _lease = repairs::acquire_terminal_binding_lease()?;
+        let connection = db
+            .lock_traced("edit_settlement_startup")
+            .map_err(|error| error.to_string())?;
+        if edit_settlement_recovery::collapse_proven_chains_on_startup(&connection).is_err() {
+            warn!(target: "checkout::order_edit", event_code = "checkout_edit_chain_collapse_failed", "Held edit chain recovery deferred");
+        }
+    }
     restore_transport();
     commands::settings::reconcile_startup_repair_access(db).await;
     Ok(janitor)
 }
 
+// Tokenize Windows browser arguments without rewriting any retained argument.
+// Quotes can enclose a switch or its value; names are case insensitive.
+fn webview_arguments_for_profile(input: &str, release: bool) -> String {
+    if !release {
+        return input.to_owned();
+    }
+    let mut tokens = Vec::new();
+    let mut start = None;
+    let mut quote = None;
+    for (at, c) in input.char_indices() {
+        if start.is_none() && !c.is_whitespace() {
+            start = Some(at);
+        }
+        if c == '\'' || c == '"' {
+            if quote == Some(c) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(c);
+            }
+        }
+        if c.is_whitespace() && quote.is_none() {
+            if let Some(from) = start.take() {
+                tokens.push(&input[from..at]);
+            }
+        }
+    }
+    if let Some(from) = start {
+        tokens.push(&input[from..]);
+    }
+    let mut kept = Vec::new();
+    let mut removed = false;
+    let mut skip_value = false;
+    for token in tokens {
+        let decoded = token.replace(['\'', '"'], "");
+        let plain = decoded.as_str();
+        if skip_value && !plain.starts_with("--") {
+            skip_value = plain == "=";
+            continue;
+        }
+        skip_value = false;
+        let name = plain
+            .split('=')
+            .next()
+            .unwrap_or(plain)
+            .trim_matches(['\'', '"']);
+        if [
+            "--remote-debugging-port",
+            "--remote-debugging-pipe",
+            "--auto-open-devtools-for-tabs",
+        ]
+        .iter()
+        .any(|switch| name.eq_ignore_ascii_case(switch))
+        {
+            removed = true;
+            skip_value = !plain.contains('=');
+        } else {
+            kept.push(token);
+        }
+    }
+    if removed {
+        kept.join(" ")
+    } else {
+        input.to_owned()
+    }
+}
+static WEBVIEW_DEBUG_ARGUMENT_REMOVED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+fn warn_webview_debugging_removed() {
+    // Sanitization precedes logging setup as well as WebView creation. Emit
+    // once after the file subscriber exists, without retaining argument values.
+    WEBVIEW_DEBUG_ARGUMENT_REMOVED.store(true, Ordering::Release);
+}
+fn strip_release_webview_debugging_port() {
+    #[cfg(not(debug_assertions))]
+    strip_webview_environment_for_profile(true);
+}
+#[cfg(any(test, not(debug_assertions)))]
+fn strip_webview_environment_for_profile(release: bool) {
+    if !release {
+        return;
+    }
+    const KEY: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+    if let Some(original) = std::env::var_os(KEY) {
+        let clean = webview_arguments_for_profile(&original.to_string_lossy(), true);
+        if original != std::ffi::OsStr::new(&clean) {
+            std::env::set_var(KEY, clean);
+            warn_webview_debugging_removed();
+        }
+    }
+}
+fn strip_webview_windows(windows: &mut [tauri::utils::config::WindowConfig], release: bool) {
+    if !release {
+        return;
+    }
+    for window in windows {
+        if let Some(arguments) = &mut window.additional_browser_args {
+            let clean = webview_arguments_for_profile(arguments, true);
+            if *arguments != clean {
+                *arguments = clean;
+                warn_webview_debugging_removed();
+            }
+        }
+    }
+}
+fn strip_release_webview_config(context: &mut tauri::Context<tauri::Wry>) {
+    strip_webview_windows(
+        &mut context.config_mut().app.windows,
+        !cfg!(debug_assertions),
+    );
+}
+
 pub fn run() {
+    strip_release_webview_debugging_port();
     let startup_mode = match startup_recovery::parse_process_startup_mode() {
         Ok(mode) => mode,
         Err(error) => {
@@ -820,7 +942,8 @@ pub fn run() {
         return;
     }
 
-    let context = tauri::generate_context!();
+    let mut context = tauri::generate_context!();
+    strip_release_webview_config(&mut context);
     let compiled_identifier = context.config().identifier.clone();
     let emergency_mode = matches!(
         startup_mode,
@@ -897,8 +1020,11 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
         .with(console_layer)
         .with(file_layer)
         .init();
+    if WEBVIEW_DEBUG_ARGUMENT_REMOVED.swap(false, Ordering::AcqRel) {
+        warn!("SUPPORT_RELEASE_WEBVIEW_DEBUG_ARGUMENT_REMOVED");
+    }
 
-    // Keep the guard alive for the lifetime of the app — dropping it flushes logs.
+    // Keep the guard alive for the lifetime of the app â€” dropping it flushes logs.
     // We leak it intentionally since the app runs until process exit.
     std::mem::forget(_guard);
 
@@ -915,7 +1041,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
         // already a package.json dependency; without this registration every
         // `open()` call from the renderer failed at runtime. The capability
         // grant is narrowed to `dialog:allow-open` in
-        // `capabilities/default.json` — picking a folder is the only thing the
+        // `capabilities/default.json` â€” picking a folder is the only thing the
         // capture flow asks the user's file system for.
         .plugin(tauri_plugin_dialog::init())
         // Prevent the native window menu at the source instead of racing to
@@ -935,7 +1061,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
         //
         // Fix: disable the macOS default AND never set an app-wide menu, so
         // `AppHandle::menu()` stays `None`. Every window then gets `None` for
-        // its menu at creation time — the main window here, plus the
+        // its menu at creation time â€” the main window here, plus the
         // runtime-created customer/external display window in
         // `commands::system_ui::display_open_window` (which also inherits the
         // app menu). muda's `SetMenu` is therefore never invoked, so there is
@@ -1071,7 +1197,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             let db_for_sync = match db::init(&app_data_dir) {
                 Ok(db) => Some(Arc::new(db)),
                 Err(e) => {
-                    error!("Failed to init sync database: {e} — sync worker disabled");
+                    error!("Failed to init sync database: {e} â€” sync worker disabled");
                     None
                 }
             };
@@ -1117,7 +1243,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 }
             }
 
-            // Offline week Ω6 (22/10/2026): the saved LAN receiver started
+            // Offline week Î©6 (22/10/2026): the saved LAN receiver started
             // only at startup, and an offline boot cannot pass its cloud main
             // authority check. Retry the same restore when the till's own
             // connectivity check turns reachable. Transitions only: the sync
@@ -1174,7 +1300,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                     );
                 }
                 Err(e) => {
-                    error!("Failed to init heartbeat database: {e} — terminal heartbeat loop disabled");
+                    error!("Failed to init heartbeat database: {e} â€” terminal heartbeat loop disabled");
                 }
             }
 
@@ -1236,7 +1362,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                     );
                 }
                 Err(e) => {
-                    error!("Failed to init printer status database: {e} — printer status monitor disabled");
+                    error!("Failed to init printer status database: {e} â€” printer status monitor disabled");
                 }
             }
 
@@ -1253,7 +1379,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                     );
                 }
                 Err(e) => {
-                    error!("Failed to init system health database: {e} — system health monitor disabled");
+                    error!("Failed to init system health database: {e} â€” system health monitor disabled");
                 }
             }
 
@@ -1270,7 +1396,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                     );
                 }
                 Err(e) => {
-                    error!("Failed to init incident reporting database: {e} — remote incident reporter disabled");
+                    error!("Failed to init incident reporting database: {e} â€” remote incident reporter disabled");
                 }
             }
 
@@ -1279,7 +1405,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                     recovery::start_snapshot_monitor(Arc::new(db), 15 * 60, cancel_token.clone());
                 }
                 Err(e) => {
-                    error!("Failed to init recovery database: {e} — recovery snapshot monitor disabled");
+                    error!("Failed to init recovery database: {e} â€” recovery snapshot monitor disabled");
                 }
             }
 
@@ -1296,7 +1422,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                     );
                 }
                 Err(e) => {
-                    error!("Failed to init menu monitor database: {e} — menu monitor disabled");
+                    error!("Failed to init menu monitor database: {e} â€” menu monitor disabled");
                 }
             }
 
@@ -1316,7 +1442,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                     );
                 }
                 Err(e) => {
-                    error!("Failed to init capture watcher database: {e} — watched-folder capture disabled");
+                    error!("Failed to init capture watcher database: {e} â€” watched-folder capture disabled");
                 }
             }
 
@@ -1335,7 +1461,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                     );
                 }
                 Err(e) => {
-                    error!("Failed to init capture worker database: {e} — invoice recognition disabled");
+                    error!("Failed to init capture worker database: {e} â€” invoice recognition disabled");
                 }
             }
 
@@ -1408,12 +1534,34 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 checkout_drafts::checkout_draft_delete,
                 checkout_drafts::checkout_draft_inspect,
                 checkout_drafts::checkout_draft_park,
+                checkout_drafts::checkout_draft_set_aside_edit,
                 checkout_drafts::checkout_draft_report_failure,
                 checkout_drafts::checkout_draft_resume_declined,
                 table_attempt_recovery::table_attempt_recovery_status,
                 table_attempt_recovery::table_attempt_recovery_confirm_original,
                 table_attempt_recovery::table_attempt_recovery_discard_edit,
             // App lifecycle
+            support::session::support_request_code,
+            support::session::support_consent_fetch,
+            support::session::support_consent_accept,
+            support::session::support_consent_decline,
+            support::session::support_cancel_code,
+            support::session::support_banner_state,
+            support::session::support_end,
+            support::session::support_extend,
+            support::session::support_doorbell,
+            support::onsite::support_onsite_decision,
+            support::remedy_run::till_list_remedies,
+            support::remedy_run::support_remedy_result,
+            support::matcher::support_matcher_inputs,
+            support::device_apply::support_undo_device_apply,
+            support::restore::support_list_snapshots,
+            support::restore::support_restore_notice,
+            support::restore::support_restore_snapshot,
+            support::restore::support_list_quarantine,
+            support::restore::support_restore_quarantine,
+            support::critical_op::support_payment_open,
+            support::critical_op::support_payment_closed,
             memory_trim::memory_trim_webview,
             commands::runtime::app_shutdown,
             commands::runtime::app_restart,
@@ -1744,6 +1892,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::ecr::ecr_get_device_status,
             commands::ecr::ecr_get_all_statuses,
             commands::ecr::ecr_process_payment,
+            commands::ecr::ecr_checkout_direct_sale,
             commands::ecr::ecr_process_refund,
             commands::ecr::ecr_void_transaction,
             commands::ecr::ecr_cancel_transaction,
@@ -1768,7 +1917,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             // Cap Driver setup assistance (status + official installer launch)
             commands::cap_setup::ecr_cap_setup,
             commands::cap_discovery::ecr_cap_discover,
-            // Invoice capture — connected scanner (WIA)
+            // Invoice capture â€” connected scanner (WIA)
             commands::capture_scanner::capture_scanner_list,
             commands::capture_scanner::capture_scanner_test,
             commands::capture_scanner::capture_scanner_acquire,
@@ -1986,10 +2135,16 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
         .expect("error while building The Small POS")
         .run(|app, event| {
             use tauri::Manager;
+            if let tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } = &event {
+                support::critical_op::clear_payment_signals(Some(label));
+                if label == "main" { support::session::withdraw_banner(); }
+            }
             if let tauri::RunEvent::ExitRequested { .. } = event {
+                support::critical_op::clear_payment_signals(None);
+                support::session::withdraw_banner();
                 // Signal all background tasks to stop gracefully
                 if let Some(token) = app.try_state::<tokio_util::sync::CancellationToken>() {
-                    info!("Exit requested — cancelling background tasks");
+                    info!("Exit requested â€” cancelling background tasks");
                     token.cancel();
                 }
                 if let Err(error) = repair_attachment_cache::purge_all() {
@@ -1997,4 +2152,75 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod admission_tests;
+
+#[cfg(test)]
+mod release_webview_tests {
+    #[test]
+    #[serial_test::serial]
+    fn release_environment_is_sanitized_and_dev_environment_is_untouched() {
+        const KEY: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(value) = &self.0 {
+                    std::env::set_var(KEY, value);
+                } else {
+                    std::env::remove_var(KEY);
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os(KEY));
+        let input = "--remote-debugging-port=9222 --disable-gpu";
+        std::env::set_var(KEY, input);
+        super::strip_webview_environment_for_profile(false);
+        assert_eq!(std::env::var(KEY).unwrap(), input);
+        super::strip_webview_environment_for_profile(true);
+        assert_eq!(std::env::var(KEY).unwrap(), "--disable-gpu");
+    }
+    #[test]
+    fn release_window_configuration_cannot_open_a_debug_port() {
+        let mut windows = vec![tauri::utils::config::WindowConfig::default()];
+        let input = "--disable-gpu --REMOTE-DEBUGGING-PORT 9222 --lang=el";
+        windows[0].additional_browser_args = Some(input.into());
+        super::strip_webview_windows(&mut windows, false);
+        assert_eq!(windows[0].additional_browser_args.as_deref(), Some(input));
+        super::strip_webview_windows(&mut windows, true);
+        assert_eq!(
+            windows[0].additional_browser_args.as_deref(),
+            Some("--disable-gpu --lang=el")
+        );
+    }
+    #[test]
+    fn release_strips_debug_switches_but_dev_keeps_the_agent_door() {
+        for input in [
+            "--remote-debugging-port=9222",
+            "--remote-debugging-port = \"9222\" --lang=el",
+            "--\"remote-debugging-port\"=9222 --lang=el",
+            "--remote-debugging-pipe=true --auto-open-devtools-for-tabs false --disable-gpu",
+            "--REMOTE-debugging-PORT 9222 --disable-gpu",
+            "\"--remote-debugging-pipe\" --disable-gpu",
+            "--auto-open-devtools-for-tabs=true --disable-gpu",
+            "--disable-gpu \"--remote-debugging-port=9222\" --lang=el",
+            "--remote-debugging-port \"9222\" --remote-debugging-pipe --auto-open-devtools-for-tabs",
+        ] {
+            let clean = super::webview_arguments_for_profile(input, true);
+            assert!(!clean.to_ascii_lowercase().contains("--remote-debugging"), "{clean}");
+            assert!(!clean.contains("--auto-open-devtools"), "{clean}");
+            assert!(!clean.contains("9222"), "{clean}");
+            assert_eq!(super::webview_arguments_for_profile(input, false), input);
+        }
+        let safe = "--disable-gpu --lang=el --user-agent=\"Store Till\"";
+        assert_eq!(super::webview_arguments_for_profile(safe, true), safe);
+        assert_eq!(
+            super::webview_arguments_for_profile(
+                "--disable-gpu --remote-debugging-port=9222 --lang=el",
+                true
+            ),
+            "--disable-gpu --lang=el"
+        );
+    }
 }

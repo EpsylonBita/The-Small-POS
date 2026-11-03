@@ -509,3 +509,36 @@ it('releases an editable cart reservation before deleting its retained draft', a
   await owner.clear(draft.draftId, false);
   expect(commands).toEqual(['checkout_draft_get', 'loyalty_release_redemption', 'checkout_draft_delete']);
 });
+
+describe('setting aside edit lifecycle', () => {
+  it('fences an autosave already in flight before retiring the current edit', async () => {
+    const write = deferred<void>();
+    const original = { ...createCheckoutDraft(), ...snapshot, context: { editMode: true, editOrderId: 'order-19' } };
+    let saved: any = original; let generation = 3;
+    const native = vi.fn(async (command: string, input: any) => {
+      if (command === 'checkout_draft_inspect') return { success: true, outcome: 'not_found', canCollect: false };
+      if (command === 'checkout_draft_put') { await write.promise; saved = input.draft; generation++; }
+      if (command === 'checkout_draft_set_aside_edit') { saved = null; generation++; }
+      return { success: true, scope, generation, draft: saved };
+    });
+    mocks.getStore.mockResolvedValue(new CheckoutDraftStore(scope, native));
+    const { result } = renderHook(() => useCheckoutDraftPersistence(true));
+    await waitFor(() => expect(result.current.status).toBe('loaded'));
+    act(() => result.current.markHydrated());
+    let pending!: Promise<unknown>;
+    act(() => { pending = result.current.persist({ ...snapshot, context: original.context, state: { changed: true } }).catch(error => error); });
+    await waitFor(() => expect(native.mock.calls.some(call => call[0] === 'checkout_draft_put')).toBe(true));
+    let aside!: Promise<void>;
+    act(() => { aside = result.current.setAsideEdit(); });
+    await act(async () => { write.resolve(); await aside; });
+    expect(await pending).toEqual(new Error('CHECKOUT_DRAFT_CHANGED'));
+    expect(saved).toBeNull();
+    expect(result.current.restored).toBeNull();
+    expect(result.current.identity()).not.toBe(original.checkoutRequestId);
+    expect(result.current.error).toBeNull();
+    act(() => result.current.markHydrated());
+    await act(async () => { await result.current.persist({ cartItems: [], context: { editMode: false }, state: {} }); });
+    expect(saved.context.editMode).toBe(false);
+    expect(saved.cartItems).toEqual([]);
+  });
+});

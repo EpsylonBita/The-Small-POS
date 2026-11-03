@@ -241,6 +241,19 @@ export const resolvePersistedSplitDismissal = ({
   };
 };
 
+/**
+ * Whether any money is recorded on the order an outstanding window collects (coordinator 01/11, founder
+ * «Ναι, έτσι»). With nothing paid, closing the window leaves the order unpaid in Orders and «Cancel order» is
+ * offered; once a portion is recorded (or the order is paid, as on a gift-card receipt reentry), closing resumes
+ * the split and the window offers no cancel.
+ */
+export const outstandingHasRecordedPayment = (pending: {
+  existingPayments?: readonly unknown[] | null;
+  outstandingAmount: number;
+  orderTotal: number;
+}): boolean =>
+  (pending.existingPayments?.length ?? 0) > 0 || pending.orderTotal - pending.outstandingAmount >= 0.005;
+
 export const loadPersistedSplitDismissal = async (
   bridge: {
     payments: {

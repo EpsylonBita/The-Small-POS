@@ -41,3 +41,23 @@ test('zero-discount portions suppress redundant subtotal and discount rows', () 
   assert.match(modalSource, /\{hasDiscount && \(\s*<>[\s\S]*?modals\.orderDetails\.subtotal[\s\S]*?modals\.orderDetails\.discount/);
   assert.match(modalSource, /splitPayment\.payable/);
 });
+
+// Founder 01/11 («και εδώ δεν έχουν όλα βάθος σωστό!!!»): every split control is raised with the kit depth and no
+// dark outline, pressed sinks; person cards carry the card depth; money fields are sunken wells.
+test('split controls, cards and fields carry the kit depth', () => {
+  const splitCss = readFileSync(path.join(process.cwd(), 'src/renderer/components/modals/split-payment-modal.css'), 'utf8');
+  assert.doesNotMatch(splitCss, /box-shadow:\s*none/);
+  for (const selector of ['button.split-payment-method,', '.split-payment-quick button {', 'button.split-payment-assignment {']) {
+    const block = splitCss.slice(splitCss.indexOf(selector));
+    assert.match(block.slice(0, block.indexOf('}')), /background: var\(--pos-s-raised\) !important;\s*box-shadow: var\(--pos-s-depth\);/, selector);
+  }
+  assert.match(splitCss, /button\.split-payment-method\[aria-pressed='true'\] \{[^}]*box-shadow: var\(--pos-s-depth-yellow\);/);
+  assert.match(splitCss, /button\.split-payment-confirm \{[^}]*box-shadow: var\(--pos-s-depth-yellow\);/);
+  assert.match(splitCss, /button\.split-payment-segment-selected \{\s*box-shadow: var\(--pos-s-depth-yellow\);/);
+  assert.match(splitCss, /\.split-payment-person \{[^}]*box-shadow: var\(--pos-s-depth-card\);/);
+  assert.match(splitCss, /\.split-payment-money-input,[^{]*\{[^}]*box-shadow: var\(--pos-s-well\);/);
+  assert.equal((modalSource.match(/className="pos-solid-btn pos-solid-btn--sm w-full gap-2"/g) ?? []).length, 2, 'both Add Person buttons are raised');
+  assert.equal((modalSource.match(/className="pos-icon-btn pos-icon-btn--danger"/g) ?? []).length, 2, 'both remove buttons are kit icon buttons');
+  assert.doesNotMatch(modalSource, /border-dashed/);
+  assert.doesNotMatch(modalSource, /bg-slate-100\/80|bg-white\/80|bg-slate-500\/1[05]/);
+});

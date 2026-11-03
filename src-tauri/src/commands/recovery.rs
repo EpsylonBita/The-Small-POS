@@ -451,7 +451,7 @@ pub async fn recovery_record_action_log(
 ) -> Result<Value, String> {
     run_blocking_command("recovery_record_action_log", move || {
         let db = app.state::<db::DbState>();
-        let raw_entry = arg0.ok_or_else(|| "Missing recovery action log entry".to_string())?;
+        let mut raw_entry = arg0.ok_or_else(|| "Missing recovery action log entry".to_string())?;
         let entry = recovery_log_entry_from_payload(&raw_entry);
         let target_refs = entry
             .get("targetRefs")
@@ -467,10 +467,10 @@ pub async fn recovery_record_action_log(
             .get("success")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+        raw_entry = crate::incident_reporting::recipe_audit_scope(&conn, raw_entry);
         let payload_json = serde_json::to_string(&raw_entry)
             .map_err(|e| format!("serialize recovery log: {e}"))?;
-
-        let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
         conn.execute(
             "INSERT OR REPLACE INTO recovery_action_log (
             id, action_id, issue_code, issue_id, recipe_id, recipe_version,
@@ -702,8 +702,141 @@ pub async fn recovery_execute_action(
     cancellation: tauri::State<'_, tokio_util::sync::CancellationToken>,
     app: tauri::AppHandle,
 ) -> Result<Value, auth::GuardedCommandError> {
+    let _action = crate::support::remedies::action_gate().try_begin()?;
+    let support_authorized = if let Some(request) =
+        arg0.as_ref().filter(|r| r["source"] == "remote_support")
+    {
+        let native = app.clone();
+        let request = request.clone();
+        crate::database_lock::run_blocking_command("recovery_health_action_admission", move || {
+            crate::support::remedy_run::authorize_execution(&native, &request)
+        })
+        .await?;
+        true
+    } else {
+        false
+    };
+    if let Some(request) = arg0
+        .as_ref()
+        .filter(|r| r["actionId"] == "restoreLastKnownPrinterBrand")
+    {
+        let request = request.clone();
+        return run_blocking_command("recovery_restore_printer_brand", move || {
+            let db = app.state::<db::DbState>();
+            if request["recipeId"] != crate::printers::restore_brand::RECIPE_ID
+                || request["recipeVersion"] != crate::printers::restore_brand::RECIPE_VERSION
+            {
+                return Err(auth::GuardedCommandError::from("PAYLOAD_MISMATCH"));
+            }
+            let reference: crate::support::catalogue::contract::ConfiguredPrinterRef =
+                serde_json::from_value(request["params"]["configuredPrinterRef"].clone())
+                    .map_err(|_| "REMEDY_NOT_APPLICABLE")?;
+            if request["entityId"] != reference.id {
+                return Err("PAYLOAD_MISMATCH".into());
+            }
+            crate::printers::restore_brand::restore_last_known_brand(&db, &reference)
+                .map_err(Into::into)
+        })
+        .await;
+    }
+    if let Some(request) = arg0
+        .as_ref()
+        .filter(|r| matches!(r["actionId"].as_str(), Some("printerReprobe" | "testPrint")))
+    {
+        // Admission takes the database lock, so it runs on the blocking pool
+        // with state re-acquired from the AppHandle, never on a runtime worker.
+        let admission_app = app.clone();
+        let admission_request = request.clone();
+        let id = crate::database_lock::run_blocking_command(
+            "recovery_health_action_admission",
+            move || -> Result<String, auth::GuardedCommandError> {
+                let db = admission_app.state::<db::DbState>();
+                let auth_state = admission_app.state::<auth::AuthState>();
+                {
+                    let conn = db.conn.lock().map_err(|_| "REMEDY_NOT_APPLICABLE")?;
+                    let health = crate::support::collectors::health::collect(&conn)?;
+                    health_action_admission(
+                        &conn,
+                        &admission_request,
+                        chrono::Utc::now().timestamp_millis(),
+                        health["last_observation_ok"] != true,
+                        crate::support::critical_op::global().active(),
+                    )?;
+                }
+                if admission_request["source"] == "remote_support" {
+                    crate::support::remedy_run::authorize_recovery_cash_drawer(
+                        &admission_app,
+                        admission_request["sessionId"]
+                            .as_str()
+                            .ok_or("PAYLOAD_MISMATCH")?,
+                    )?;
+                } else {
+                    auth::authorize_privileged_action(
+                        auth::PrivilegedActionScope::CashDrawerControl,
+                        &db,
+                        &auth_state,
+                    )?;
+                }
+                // Health's defaultProfile is a display name, not a database identifier.
+                // Resolve it through the same receipt-profile owner as manual printing.
+                let profile =
+                    crate::printers::resolve_printer_profile_for_role(&db, None, Some("receipt"))?
+                        .ok_or("REMEDY_NOT_APPLICABLE")?;
+                Ok(profile["id"]
+                    .as_str()
+                    .ok_or("REMEDY_NOT_APPLICABLE")?
+                    .to_string())
+            },
+        )
+        .await?;
+        return match request["actionId"].as_str() {
+            Some("printerReprobe") => {
+                let status =
+                    super::print::printer_get_status(Some(json!({"printerId":id})), db, app)
+                        .await?;
+                Ok(
+                    json!({"success":status["connected"] == true,"requiresRefresh":true,"verification":{"status":"pending"}}),
+                )
+            }
+            Some("testPrint") => {
+                // printer_test always builds its own fixed TransportText sample.
+                let response =
+                    super::print::printer_test(Some(json!({"printerId":id})), db, app).await?;
+                let response =
+                    serde_json::to_value(response).map_err(|_| "REMEDY_NOT_APPLICABLE")?;
+                Ok(
+                    json!({"success":response["success"] == true,"requiresRefresh":true,"verification":{"status":"pending"}}),
+                )
+            }
+            _ => unreachable!(),
+        };
+    }
+    if arg0
+        .as_ref()
+        .is_some_and(|request| request["actionId"] == "nativeCustomerAddressDefaultRetry")
+    {
+        // The address owner takes business locks, including its local-mutation
+        // fence. Keep the whole local action on the blocking pool.
+        return run_blocking_command("recovery_address_retry", move || {
+            let db = app.state::<db::DbState>();
+            let auth = app.state::<auth::AuthState>();
+            let sync = app.state::<std::sync::Arc<sync::SyncState>>();
+            let cancellation = app.state::<tokio_util::sync::CancellationToken>();
+            tauri::async_runtime::block_on(recovery_execute_action_core(
+                arg0,
+                support_authorized,
+                &db,
+                &auth,
+                &sync,
+                &cancellation,
+                &app,
+            ))
+        })
+        .await;
+    }
     recovery_execute_action_core(
         arg0,
+        false,
         db.inner(),
         auth_state.inner(),
         sync_state.inner(),
@@ -717,8 +850,46 @@ pub async fn recovery_execute_action(
 /// must be closed through remote checkout, which counts its cash.
 const PHONE_SHIFT_REMOTE_CHECKOUT_REQUIRED: &str = "PHONE_SHIFT_REMOTE_CHECKOUT_REQUIRED";
 
+/// Both entry points use the shipped policy and the native recipe owner's
+/// persisted guard; source/session attribution never grants eligibility.
+pub(crate) fn health_action_admission(
+    conn: &rusqlite::Connection,
+    request: &Value,
+    now: i64,
+    stale: bool,
+    busy: bool,
+) -> Result<&'static crate::support::remedies::Remedy, String> {
+    use crate::support::remedies::{self, Match};
+    let action = request["actionId"].as_str().ok_or("INVALID_INPUT")?;
+    let id = request["recipeId"].as_str().unwrap_or(match action {
+        "nativeCustomerAddressDefaultRetry" => "customer-address-default.retry",
+        "printerReprobe" => "printerReprobe",
+        "testPrint" => "testPrint",
+        _ => return Err("REMEDY_NOT_APPLICABLE".into()),
+    });
+    let r = remedies::recipe(id, request["recipeVersion"].as_u64().unwrap_or(1))?;
+    if r.action_id != action {
+        return Err("PAYLOAD_MISMATCH".into());
+    }
+    let m = Match {
+        matches_now: json!(true),
+        target_count: 1,
+        ..Default::default()
+    };
+    remedies::eligible(
+        r,
+        &m,
+        &remedies::budget(conn, r, request["entityId"].as_str())?,
+        now,
+        stale,
+        busy,
+    )?;
+    Ok(r)
+}
+
 async fn recovery_execute_action_core(
     arg0: Option<Value>,
+    support_authorized: bool,
     db: &db::DbState,
     auth_state: &auth::AuthState,
     sync_state: &std::sync::Arc<sync::SyncState>,
@@ -732,6 +903,40 @@ async fn recovery_execute_action_core(
         .unwrap_or("");
 
     match action_id {
+        "nativeCustomerAddressDefaultRetry" => {
+            {
+                let conn = db.conn.lock().map_err(|_| "REMEDY_NOT_APPLICABLE")?;
+                let health = crate::support::collectors::health::collect(&conn)?;
+                health_action_admission(
+                    &conn,
+                    &request,
+                    chrono::Utc::now().timestamp_millis(),
+                    health["last_observation_ok"] != true,
+                    crate::support::critical_op::global().active(),
+                )?;
+            }
+            if !support_authorized {
+                auth::authorize_privileged_action(
+                    auth::PrivilegedActionScope::CashDrawerControl,
+                    db,
+                    auth_state,
+                )?;
+            }
+            let target = request["entityId"]
+                .as_str()
+                .ok_or("REMEDY_NOT_APPLICABLE")?;
+            let result = sync::guarded_renderer_local_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                |conn| sync_queue::schedule_customer_address_default_retry(conn, target),
+            )
+            .await?;
+            if result.retried == 0 {
+                return Err("REMEDY_NOT_APPLICABLE".into());
+            }
+            Ok(json!({"success":true,"requiresRefresh":true,"verification":{"status":"pending"}}))
+        }
         "openConnectionSettings" => Ok(json!({
             "success": true,
             "requiresRefresh": false,
@@ -1940,6 +2145,184 @@ mod tests {
         fn emit_json(&self, _event: &str, _payload: serde_json::Value) {}
     }
 
+    fn address_retry_fixture() -> (
+        crate::tests::harness::TestDb,
+        auth::AuthState,
+        String,
+        String,
+    ) {
+        let db = crate::tests::harness::TestDb::open();
+        let (target, other) = {
+            let conn = db.state.conn.lock().unwrap();
+            sync_queue::tests::seed_terminal_context(&conn);
+            let seed = sync_queue::tests::seed_failed_customer_address_default_conflict_row;
+            let target = seed(&conn, "your-target", "CUSTOMER_ADDRESS_DEFAULT_CONFLICT");
+            let other = seed(&conn, "your-other", "CUSTOMER_ADDRESS_DEFAULT_CONFLICT");
+            (target, other)
+        };
+        let auth = auth::AuthState::new();
+        auth::tests::login_as_admin(&db.state, &auth);
+        auth::tests::insert_active_shift(&db.state, "terminal-test", "manager");
+        auth::tests::grant_cash_drawer_for_test(&auth);
+        crate::diagnostics::get_system_health(&db.state).unwrap();
+        (db, auth, target, other)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn address_retry_success_parity_and_keyring_free_remote_admission() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let mut responses = Vec::new();
+        let mut queue_states = Vec::new();
+        let mut guards = Vec::new();
+        for support_authorized in [false, true] {
+            let _keys = crate::tests::fake_keyring::install_empty();
+            let (db, auth, target, other) = address_retry_fixture();
+            let source = if support_authorized {
+                "remote_support"
+            } else {
+                "manual"
+            };
+            let mut request = json!({"actionId":"nativeCustomerAddressDefaultRetry",
+                "recipeId":"customer-address-default.retry","recipeVersion":1,
+                "entityId":target,"source":source,"sessionId":"your-support-session"});
+            if support_authorized {
+                // Support admission checks the CashDrawer grant against the
+                // bound, non-secret identity and reads the keyring zero times.
+                crate::tests::fake_keyring::before_each_read(|key| {
+                    panic!("remote address retry admission read keyring: {key}")
+                });
+                request = crate::support::remedy_run::tests::authorize_address_retry_for_test(
+                    &db.state, &auth, &target,
+                );
+                crate::tests::fake_keyring::before_each_read(|_| {});
+                // Without the grant the manual check would refuse, so success
+                // proves the core does not repeat it for an admitted run.
+                auth::tests::clear_grants_for_test(&auth);
+            }
+            // The owner runs as for the manual Health button, with the till's
+            // own credentials, exactly as `syncNow` does (decision A, 02/11).
+            let url = "http://127.0.0.1:9";
+            crate::tests::fake_keyring::set("terminal_id", "terminal-test");
+            crate::tests::fake_keyring::set("admin_dashboard_url", url);
+            crate::tests::fake_keyring::set(
+                "pos_api_key",
+                &json!({"key":"your-test-key","tid":"terminal-test","url":url}).to_string(),
+            );
+            let request_session = request["sessionId"].clone();
+            let before = chrono::Utc::now();
+            responses.push(
+                recovery_execute_action_core(
+                    Some(request),
+                    support_authorized,
+                    &db.state,
+                    &auth,
+                    &std::sync::Arc::new(sync::SyncState::new()),
+                    &tokio_util::sync::CancellationToken::new(),
+                    &NoopTerminalEventSink,
+                )
+                .await
+                .unwrap(),
+            );
+            let after = chrono::Utc::now();
+            let conn = db.state.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT record_id,status,attempts,data,error_message FROM parity_sync_queue ORDER BY record_id").unwrap();
+            queue_states.push(
+                stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap(),
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT status FROM parity_sync_queue WHERE id=?1",
+                    [&target],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "pending"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT status FROM parity_sync_queue WHERE id=?1",
+                    [&other],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "failed"
+            );
+            let guard: Value = serde_json::from_str(
+                &db::get_setting(
+                    &conn,
+                    "recovery_probe",
+                    &format!("customer-address-default.retry.v1:{target}"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let probe =
+                chrono::DateTime::parse_from_rfc3339(guard["lastProbeAt"].as_str().unwrap())
+                    .unwrap()
+                    .with_timezone(&chrono::Utc);
+            assert!((before..=after).contains(&probe));
+            let mut guard = guard;
+            guard["lastProbeAt"] = json!("fresh");
+            guards.push(guard);
+            assert!(db::get_setting(
+                &conn,
+                "recovery_probe",
+                &format!("customer-address-default.retry.v1:{other}")
+            )
+            .is_none());
+            if support_authorized {
+                let payload: String = conn.query_row("SELECT payload_json FROM recovery_action_log WHERE entity_id=?1 AND action_id='nativeCustomerAddressDefaultRetry'", [&target], |r|r.get(0)).unwrap();
+                let audit: Value = serde_json::from_str(&payload).unwrap();
+                assert_eq!(audit["source"], "remote_support");
+                assert_eq!(audit["sessionId"], request_session);
+            }
+        }
+        assert_eq!(responses[0], responses[1]);
+        assert_eq!(
+            responses[0],
+            json!({"success":true,"requiresRefresh":true,"verification":{"status":"pending"}})
+        );
+        assert_eq!(queue_states[0], queue_states[1]);
+        assert_eq!(guards[0], guards[1]);
+        assert_eq!(guards[0]["attempts"], 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn address_retry_remote_source_text_cannot_bypass_manual_privileged_check() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let (db, _auth, target, _) = address_retry_fixture();
+        let before = recovery_boundary_fingerprint(&db.state.conn.lock().unwrap());
+        let error = recovery_execute_action_core(
+            Some(json!({"actionId":"nativeCustomerAddressDefaultRetry","entityId":target,"source":"remote_support"})),
+            false, &db.state, &auth::AuthState::new(),
+            &std::sync::Arc::new(sync::SyncState::new()),
+            &tokio_util::sync::CancellationToken::new(), &NoopTerminalEventSink,
+        ).await.unwrap_err();
+        assert!(
+            matches!(error, auth::GuardedCommandError::Structured(ref error) if error.code == "UNAUTHORIZED")
+        );
+        assert_eq!(
+            before,
+            recovery_boundary_fingerprint(&db.state.conn.lock().unwrap())
+        );
+    }
+
     fn recovery_test_state(
         cancelled: bool,
     ) -> (
@@ -2078,6 +2461,7 @@ mod tests {
 
             let error = recovery_execute_action_core(
                 Some(request),
+                false,
                 &db,
                 &auth_state,
                 &sync_state,
@@ -2153,6 +2537,7 @@ mod tests {
                 "actionId": "retryParityModule",
                 "params": { "moduleType": "customers" }
             })),
+            false,
             &db,
             &auth_state,
             &sync_state,

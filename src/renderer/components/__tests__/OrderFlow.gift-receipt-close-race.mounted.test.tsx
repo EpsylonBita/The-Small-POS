@@ -576,26 +576,19 @@ describe('OrderFlow gift receipt kept across an early Close (mounted host)', () 
     expect(h.native.recordPayment).not.toHaveBeenCalled();
   });
 
-  it('preserves the cashier collector when a restored delivery edit collects an extra amount', async () => {
+  // Tomikro #19 (02/11/2026): a stored correction reopened on every new order.
+  // An edit draft now returns only through its own order's edit; the till, not
+  // the screen, names who collects its money (edit-money-drawer-owner.test.ts).
+  it('never reopens a stored delivery edit by itself', async () => {
     targetOrder('cashier-delivery-edit');
     h.state.checkoutDraft = { draftId: 'delivery-edit', checkoutRequestId: 'delivery-edit-event', phase: 'editing', cartItems: [{}],
       context: { orderType: 'delivery', editMode: true, editOrderId: 'cashier-delivery-edit' } };
-    h.bridge.orders.previewEditSettlement.mockResolvedValue({ success: true, paidTotal: 12.5, nextTotal: 17,
-      requiredAction: 'collect', completedPayments: [{ id: 'original', method: 'cash', amount: 12.5 }], paymentStatus: 'paid',
-      canonicalExpectedVersion: 1, localExpectedVersion: 1, quotedFinancials: { totalAmount: 17, quote: 'proof' } });
     render(<OrderFlow />);
-    await screen.findByTestId('edit-complete');
-    const beforeCommit = vi.fn(async () => undefined);
-    let completion!: Promise<void>;
-    await act(async () => { completion = h.state.menuProps.onEditComplete({ orderId: 'cashier-delivery-edit',
-      client_event_id: 'delivery-edit-event', expected_version: 1, expected_local_version: 1, items: [], total: 17 }, { beforeCommit }); });
-    fireEvent.click(await screen.findByTestId('edit-settlement-delta-cash'));
-    await act(async () => { await completion; });
-    expect(beforeCommit).toHaveBeenCalledOnce();
-    expect(h.bridge.orders.applyEditSettlement).toHaveBeenCalledWith(expect.objectContaining({
-      action: { type: 'collect', payments: [expect.objectContaining({ amount: 4.5, method: 'cash', collectedBy: 'cashier_drawer',
-        staffId: '30000000-0000-4000-8000-000000000001', staffShiftId: '50000000-0000-4000-8000-000000000001' })] },
-    }));
+    await screen.findByTestId('new-order');
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('edit-complete')).toBeNull();
+    expect(h.bridge.orders.previewEditSettlement).not.toHaveBeenCalled();
+    expect(h.bridge.orders.applyEditSettlement).not.toHaveBeenCalled();
   });
 
   it('attributes an upfront delivery receipt to the collecting cashier without assigning courier custody', async () => {
@@ -629,7 +622,7 @@ describe('OrderFlow gift receipt kept across an early Close (mounted host)', () 
     expect(h.store.createOrder).not.toHaveBeenCalled();
   });
 
-  it('restores an editable draft and completes its edit before the next checkout gets its own persisted identity', async () => {
+  it('never restores a stored edit into the order flow; the next checkout gets its own identity', async () => {
     targetOrder('flow-after-edit');
     const request = { orderId: 'old-paid-order', client_event_id: 'restored-edit-event', expected_version: 3,
       expected_local_version: 1, items: [], action: { type: 'none' } };
@@ -637,9 +630,12 @@ describe('OrderFlow gift receipt kept across an early Close (mounted host)', () 
       context: { editMode: true, editOrderId: 'old-paid-order', orderType: 'pickup' },
       submission: { ...request, action: 'edit_settlement', settlementAction: request.action, settlementRequest: request } };
     render(<OrderFlow />);
-    fireEvent.click(await screen.findByTestId('edit-complete'));
-    await waitFor(() => expect(screen.queryByTestId('edit-complete')).toBeNull());
-    expect(h.bridge.orders.applyEditSettlement).toHaveBeenCalledWith(request);
+    await settle();
+    expect(screen.queryByTestId('edit-complete')).toBeNull();
+    expect(h.bridge.orders.applyEditSettlement).not.toHaveBeenCalled();
+    // The real menu sets the stored edit aside when it opens for a new order
+    // (MenuModal.money-settings.test.tsx); this host mock only models its result.
+    h.state.checkoutDraft = null;
     h.state.menuCreateId = 'flow-new-create';
     const calls = h.store.createOrder.mock.calls.length;
     await openOutstanding();

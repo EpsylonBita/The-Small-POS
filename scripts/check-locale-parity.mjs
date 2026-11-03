@@ -197,6 +197,22 @@ function findDamagedText(localeName, value, prefix = '', errors = []) {
 }
 
 function main() {
+  // All build stages ship in one release. Pin shared keys and Greek wording,
+  // even if an English bundle accidentally drops the same key as another locale.
+  const contracts = readJson(path.resolve(localesDir, '../../../shared/pos/support/generated/support-contracts.json'));
+  const remoteSupportErrors = [];
+  for (const locale of contracts.i18n.locales) {
+    const filePath = path.join(supportLocalesDir, `${locale}.json`);
+    const bundle = fs.existsSync(filePath) ? readJson(filePath) : {};
+    for (const [key, reference] of Object.entries(contracts.i18n.reference)) {
+      const value = getValue(bundle, key);
+      if (typeof value !== 'string' || !value.trim()) {
+        remoteSupportErrors.push(`${locale}: missing support.${key}`);
+      } else if (locale === 'el' && value !== reference) {
+        remoteSupportErrors.push(`el: reference mismatch support.${key}`);
+      }
+    }
+  }
   const files = fs
     .readdirSync(localesDir)
     .filter((file) => file.endsWith('.json'))
@@ -208,7 +224,10 @@ function main() {
 
   const mergedBaseLocale = readMergedLocale(baseLocale);
   const baseKeys = flattenKeys(mergedBaseLocale);
-  let hasFailure = false;
+  let hasFailure = remoteSupportErrors.length > 0;
+  if (remoteSupportErrors.length) {
+    printList('Remote support contract errors', remoteSupportErrors);
+  }
   const baseSupportErrors = validateSupportLocale(baseLocale, mergedBaseLocale);
 
   console.log('POS Tauri Locale Parity Report');

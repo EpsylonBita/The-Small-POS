@@ -84,6 +84,8 @@
   --modal-surface: #ffffff;
   --modal-surface-elevated: #ffffff;
   --modal-surface-subtle: #f4f4f5;
+  /* The opaque (no blur) modal shell, in the kit's neutral greys (founder 01/11: the same style everywhere). */
+  --modal-solid: #f4f4f5;
   --modal-border: #d4d4d8;
   --modal-border-strong: #71717a;
   --modal-control-bg: #ffffff;
@@ -143,6 +145,7 @@
   --modal-surface: #18181b;
   --modal-surface-elevated: #18181b;
   --modal-surface-subtle: #27272a;
+  --modal-solid: #09090b;
   --modal-border: #3f3f46;
   --modal-border-strong: #71717a;
   --modal-control-bg: #18181b;
@@ -150,7 +153,7 @@
   --modal-backdrop: rgba(0, 0, 0, 0.55);
   --modal-glass: rgba(9, 9, 11, 0.55);
   --modal-glass-border: rgba(255, 255, 255, 0.1);
-  --modal-glass-card: rgba(24, 24, 27, 0.35);
+  --modal-glass-card: rgba(39, 39, 42, 0.62);
   --modal-glass-card-border: rgba(255, 255, 255, 0.1);
   --modal-glass-line: rgba(255, 255, 255, 0.08);
   --modal-glass-selected: #27272a;
@@ -711,12 +714,9 @@
   -webkit-backdrop-filter: none;
 }
 
-.liquid-glass-modal-viewport--solid > .liquid-glass-modal-shell {
-  background: #f8fafc;
-}
-
+.liquid-glass-modal-viewport--solid > .liquid-glass-modal-shell,
 .dark .liquid-glass-modal-viewport--solid > .liquid-glass-modal-shell {
-  background: #071018;
+  background: var(--modal-solid);
 }
 
 /* Plugin configuration forms contain dense credential and device controls.
@@ -744,12 +744,6 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-title {
   color: #18181b !important;
 }
 
-html:not(.dark) .plugin-setup-modal .liquid-glass-modal-close {
-  background: rgba(244, 244, 245, 0.96);
-  border-color: #a1a1aa;
-  color: #3f3f46;
-}
-
 html:not(.dark) .plugin-setup-modal label {
   color: #3f3f46;
 }
@@ -771,7 +765,7 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-input::placeholder {
   opacity: 1;
 }
 
-html:not(.dark) .plugin-setup-modal .liquid-glass-modal-input option {
+html:not(.dark) .plugin-setup-modal .liquid-glass-modal-input option:not(:checked) {
   background: #ffffff;
   color: #18181b;
 }
@@ -922,8 +916,9 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 
 .liquid-glass-modal-button {
   /* Solid (UI audit wave 7): opaque control with a 1px border that identifies it. */
-  background: var(--modal-control-bg);
-  border: 1px solid var(--modal-border-strong);
+  /* Founder 01/11: raised — the kit's raised surface and soft shadow, no dark outline. */
+  background: var(--pos-s-raised);
+  border: 1px solid transparent;
   border-radius: var(--pos-glass-radius-small);
   padding: 0.75rem 1.5rem;
   color: var(--modal-c-content);
@@ -940,21 +935,14 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
   /* Consistent icon↔label spacing for every modal button (matches the gap-2 that
      16 call-sites already set explicitly; harmless for text-only buttons). */
   gap: 0.5rem;
-  box-shadow: none;
+  box-shadow: var(--pos-s-depth);
   /* Prevent scale transform from causing overflow */
   will-change: transform;
 }
 
 .liquid-glass-modal-button:active {
   transform: scale(0.98);
-  background: var(--modal-control-bg-active);
-}
-
-/* Dark mode button adjustments */
-.dark .liquid-glass-modal-button {
-  background: var(--modal-control-bg);
-  border-color: var(--modal-border-strong);
-  box-shadow: none;
+  background: var(--pos-s-raised-press);
 }
 
 /* .liquid-glass-modal-input rules moved to globals.css @layer components
@@ -1130,29 +1118,35 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
   text-shadow: 0 0 1px rgba(255, 255, 255, 0.1);
 }
 
+/* The one close button of every window (founder 01/11: «όλα τα Χ κουμπιά κλεισίματος να είναι ίδια σε όλα τα
+   modal»): a 44 px round raised kit button (soft shadow, no outline), kit words, a 20 px X. Windows that draw their
+   own header use this class too (or components/ui/ModalCloseButton). */
 .liquid-glass-modal-close {
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 10px;
-  width: 2.5rem;
-  height: 2.5rem;
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 9999px;
+  background: var(--pos-s-raised);
+  box-shadow: var(--pos-s-depth);
+  color: var(--pos-s-fg);
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  color: rgba(0, 0, 0, 0.6);
-  font-size: 1.25rem;
-  flex-shrink: 0;
+  transition: transform 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.dark .liquid-glass-modal-close {
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.7);
+.liquid-glass-modal-close svg {
+  width: 20px;
+  height: 20px;
 }
 
 .liquid-glass-modal-close:active {
+  background: var(--pos-s-raised-press);
   transform: scale(0.95);
 }
 
@@ -2173,12 +2167,14 @@ html[data-app-intro] [data-login-logo] {
   text-shadow: none !important;
 }
 
-/* Flat, opaque payment choices match the native POS and retain keyboard focus cues.
-   Founder 31/10: the method icons keep their colours (green cash, blue card, violet split). */
+/* Payment choices: frosted glass cards with the panel depth (founder 01/11: «εδώ δεν έχουν βάθος οι κάρτες και αν
+   μπορεί να είναι γυαλί και αυτές»), sinking while pressed; the glyphs hide their back shapes through masks, so
+   nothing shows as a box on the glass. Founder 31/10: the method icons keep their colours (green cash, blue card,
+   violet split). */
 .liquid-glass-modal-shell button.payment-option-cash {
-  border-color: var(--pos-s-border) !important;
-  background: var(--pos-s-surface) !important;
-  box-shadow: none;
+  border-color: var(--modal-glass-card-border) !important;
+  background: var(--modal-glass-card) !important;
+  box-shadow: var(--pos-s-depth-card);
   /* The shapes in front in the payment glyphs are filled with the card surface (founder 31/10). */
   --pay-icon-fill: var(--pos-s-surface);
 }
@@ -2188,9 +2184,9 @@ html[data-app-intro] [data-login-logo] {
 }
 
 .liquid-glass-modal-shell button.payment-option-card {
-  border-color: var(--pos-s-border) !important;
-  background: var(--pos-s-surface) !important;
-  box-shadow: none;
+  border-color: var(--modal-glass-card-border) !important;
+  background: var(--modal-glass-card) !important;
+  box-shadow: var(--pos-s-depth-card);
   --pay-icon-fill: var(--pos-s-surface);
 }
 
@@ -2199,9 +2195,9 @@ html[data-app-intro] [data-login-logo] {
 }
 
 .liquid-glass-modal-shell button.payment-option-split {
-  border-color: var(--pos-s-border) !important;
-  background: var(--pos-s-surface) !important;
-  box-shadow: none;
+  border-color: var(--modal-glass-card-border) !important;
+  background: var(--modal-glass-card) !important;
+  box-shadow: var(--pos-s-depth-card);
   --pay-icon-fill: var(--pos-s-surface);
 }
 
@@ -2214,6 +2210,13 @@ html[data-app-intro] [data-login-logo] {
   --pay-split-b: #2563eb;
 }
 
+.liquid-glass-modal-shell button.payment-tip-row { background: var(--modal-glass-card); box-shadow: var(--pos-s-depth-card); }
+.liquid-glass-modal-shell button.payment-tip-row:is(:active, [data-pressed]):not(:disabled) { box-shadow: var(--pos-s-depth-press); }
+.liquid-glass-modal-shell button:is(.payment-option-cash, .payment-option-card, .payment-option-split):is(:active, [data-pressed]):not(:disabled) {
+  box-shadow: var(--pos-s-depth-press);
+  translate: 0 1px;
+}
+
 /* Wave ΣΤ4: the kit focus outline (solid fg), not a coloured translucent ring. */
 .liquid-glass-modal-shell button.payment-option-cash:focus-visible,
 .liquid-glass-modal-shell button.payment-option-card:focus-visible,
@@ -2223,9 +2226,9 @@ html[data-app-intro] [data-login-logo] {
 }
 
 .dark .liquid-glass-modal-shell button.payment-option-cash {
-  border-color: var(--pos-s-border) !important;
-  background: var(--pos-s-surface-2) !important;
-  box-shadow: none;
+  border-color: var(--modal-glass-card-border) !important;
+  background: var(--modal-glass-card) !important;
+  box-shadow: var(--pos-s-depth-card);
   --pay-icon-fill: var(--pos-s-surface-2);
 }
 
@@ -2234,9 +2237,9 @@ html[data-app-intro] [data-login-logo] {
 }
 
 .dark .liquid-glass-modal-shell button.payment-option-card {
-  border-color: var(--pos-s-border) !important;
-  background: var(--pos-s-surface-2) !important;
-  box-shadow: none;
+  border-color: var(--modal-glass-card-border) !important;
+  background: var(--modal-glass-card) !important;
+  box-shadow: var(--pos-s-depth-card);
   --pay-icon-fill: var(--pos-s-surface-2);
 }
 
@@ -2245,9 +2248,9 @@ html[data-app-intro] [data-login-logo] {
 }
 
 .dark .liquid-glass-modal-shell button.payment-option-split {
-  border-color: var(--pos-s-border) !important;
-  background: var(--pos-s-surface-2) !important;
-  box-shadow: none;
+  border-color: var(--modal-glass-card-border) !important;
+  background: var(--modal-glass-card) !important;
+  box-shadow: var(--pos-s-depth-card);
   --pay-icon-fill: var(--pos-s-surface-2);
 }
 
@@ -2360,7 +2363,7 @@ html.dark {
 @layer base {
   :where(button, [role='button'], [role='tab'], [role='switch'], [role='radio'], [role='checkbox'], [role='menuitem'], [role='option'], a[href], summary) {
     touch-action: manipulation;
-    transition-property: scale, filter, color, background-color, border-color, box-shadow, opacity;
+    transition-property: scale, translate, filter, color, background-color, border-color, box-shadow, opacity;
     transition-duration: var(--pos-motion-fast, 150ms);
     transition-timing-function: var(--pos-ease, cubic-bezier(0.2, 0.8, 0.2, 1));
   }
@@ -2393,6 +2396,7 @@ html.dark {
   :active,
   [data-pressed] {
     scale: none !important;
+    translate: none !important;
   }
   .glass-button:active,
   .glass-fab:active,
@@ -2416,7 +2420,10 @@ html.dark {
 .pos-glass-scrim { background: var(--modal-backdrop); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
 .pos-glass-panel { border-color: var(--modal-glass-border); background: var(--modal-glass); backdrop-filter: blur(40px) saturate(1.15); -webkit-backdrop-filter: blur(40px) saturate(1.15); }
 .pos-glass-footer { border-color: var(--modal-glass-line); background: var(--modal-glass-card); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
-:is(.liquid-glass-modal-shell, .pos-glass-panel) :is(.pos-group, .pos-card, .pos-seg, .pos-checks, .pos-choice-card:not(.is-selected), .pos-choice-row:not(.is-selected)) { border-color: var(--modal-glass-card-border); background: var(--modal-glass-card); }
+:is(.liquid-glass-modal-shell, .pos-glass-panel) :is(.pos-group, .pos-card, .pos-checks, .pos-choice-row:not(.is-selected)) { border-color: var(--modal-glass-card-border); background: var(--modal-glass-card); }
+/* Founder 01/11: the opaque (no blur) shell has nothing to frost, so its kit surfaces stay solid. */
+.liquid-glass-modal-viewport--solid :is(.pos-group, .pos-card, .pos-checks, .pos-choice-row:not(.is-selected)) { border-color: var(--pos-s-border); background: var(--pos-s-surface); }
+.liquid-glass-modal-viewport--solid :is(.pos-row, .pos-disclosure) { border-color: var(--pos-s-border); }
 /* A status card keeps its own words colour (tone) and frosts only inside a glass modal (Health, founder 31/10). */
 :is(.liquid-glass-modal-shell, .pos-glass-panel) .pos-frost { border-color: var(--modal-glass-card-border); background: var(--modal-glass-card); }
 /* pos-shell-glow:start — Founder 31/10 («ο κρυφός φωτισμός που είχαν τα navbar και το κεντρικό τετράγωνο
@@ -2432,6 +2439,18 @@ html.dark {
    out towards the middle, like a neon behind glass. Opaque yellow; the blur of the inset shadow is the fade. */
 .pos-neon-card { border-color: #facc15 !important; box-shadow: inset 0 0 3px #facc15, inset 0 0 16px #facc15; }
 .dark .pos-neon-card { box-shadow: inset 0 0 3px #facc15, inset 0 0 20px #facc15; }
+/* Founder 01/11: the same neon in a state colour — red for what is wrong or pressing (a cancelled order, a high
+   housekeeping priority), bordeaux for an urgent one; a low priority glows in the yellow above. */
+.pos-neon-bad { border-color: #ef4444 !important; box-shadow: inset 0 0 3px #ef4444, inset 0 0 16px #ef4444; }
+.pos-neon-wine { border-color: #9f1239 !important; box-shadow: inset 0 0 3px #9f1239, inset 0 0 16px #9f1239; }
+.dark .pos-neon-bad { box-shadow: inset 0 0 3px #ef4444, inset 0 0 20px #ef4444; }
+.dark .pos-neon-wine { border-color: #be123c !important; box-shadow: inset 0 0 3px #be123c, inset 0 0 20px #be123c; }
+/* Founder 01/11 («μιας και δώσαμε βάθος, βάλε τα χρώματα από πίσω από τις κάρτες», housekeeping): the state colour
+   glows behind the raised card — its shadow in that colour — instead of inward. */
+.pos-glow-yellow { box-shadow: 0 0 16px -3px #facc15, 0 12px 28px -10px #facc15; }
+.pos-glow-bad { box-shadow: 0 0 16px -3px #ef4444, 0 12px 28px -10px #ef4444; }
+.pos-glow-wine { box-shadow: 0 0 16px -3px #9f1239, 0 12px 28px -10px #9f1239; }
+.dark .pos-glow-wine { box-shadow: 0 0 16px -3px #be123c, 0 12px 28px -10px #be123c; }
 :is(.liquid-glass-modal-shell, .pos-glass-panel) :is(.pos-row, .pos-disclosure, .pos-queue__list, .pos-queue__foot, .pos-queue__empty, .pos-queue__list > li + li) { border-color: var(--modal-glass-line); }
 /* Wave 7Δ2: the unsaved-changes bar sticks over scrolling rows, so it is opaque (frost let the rows under it read through). */
 :is(.liquid-glass-modal-shell, .pos-glass-panel) .pos-dirty-foot { border-color: var(--modal-glass-line); background: var(--modal-surface); box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.08); }
@@ -2465,6 +2484,18 @@ html.dark {
   --pos-s-bad-bg: #fee2e2;
   /* The open-section bar: the bright brand yellow in both themes (founder 30/10). */
   --pos-s-bar: #facc15;
+  /* Raised controls (founder 01/11: «με λίγο βάθος αλλά με τα χρώματα της εφαρμογής»): a button is a raised
+     surface with a soft, diffuse shadow and no dark outline; pressed, it sinks (a smaller shadow). The well is the
+     sunken track a segmented choice sits in. */
+  --pos-s-raised: #ffffff;
+  --pos-s-raised-press: #f4f4f5;
+  --pos-s-depth: 0 1px 2px rgb(24 24 27 / 0.08), 0 4px 10px -2px rgb(24 24 27 / 0.10), 0 12px 24px -10px rgb(24 24 27 / 0.28);
+  --pos-s-depth-press: 0 1px 2px rgb(24 24 27 / 0.14);
+  --pos-s-depth-yellow: inset 0 1px 0 rgb(255 255 255 / 0.45), 0 1px 2px rgb(24 24 27 / 0.12), 0 4px 10px -2px rgb(24 24 27 / 0.12), 0 12px 24px -10px rgb(24 24 27 / 0.32);
+  --pos-s-depth-yellow-press: inset 0 1px 3px rgb(24 24 27 / 0.22);
+  --pos-s-well: inset 0 1px 3px rgb(24 24 27 / 0.14);
+  /* A panel inside a page or window sits a little raised too, softer than a button (founder 01/11). */
+  --pos-s-depth-card: 0 1px 2px rgb(24 24 27 / 0.06), 0 10px 24px -10px rgb(24 24 27 / 0.30);
 }
 html.dark {
   --pos-s-surface: #18181b;
@@ -2482,6 +2513,16 @@ html.dark {
   --pos-s-warn-bg: #451a03;
   --pos-s-bad-bg: #450a0a;
   --pos-s-bar: #facc15;
+  /* Dark: the raised surface is lighter than the card it sits on, with a faint top light and edge; a black shadow
+     alone does not read on black. */
+  --pos-s-raised: #2e2e33;
+  --pos-s-raised-press: #232327;
+  --pos-s-depth: inset 0 1px 0 rgb(255 255 255 / 0.09), 0 0 0 1px rgb(255 255 255 / 0.05), 0 2px 4px rgb(0 0 0 / 0.45), 0 12px 24px -10px rgb(0 0 0 / 0.85);
+  --pos-s-depth-press: inset 0 1px 0 rgb(255 255 255 / 0.04), 0 0 0 1px rgb(255 255 255 / 0.05), 0 1px 2px rgb(0 0 0 / 0.5);
+  --pos-s-depth-yellow: inset 0 1px 0 rgb(255 255 255 / 0.45), 0 2px 4px rgb(0 0 0 / 0.45), 0 12px 24px -10px rgb(0 0 0 / 0.85);
+  --pos-s-depth-yellow-press: inset 0 1px 3px rgb(0 0 0 / 0.35);
+  --pos-s-well: inset 0 1px 3px rgb(0 0 0 / 0.6);
+  --pos-s-depth-card: inset 0 1px 0 rgb(255 255 255 / 0.10), 0 0 0 1px rgb(255 255 255 / 0.03), 0 2px 6px rgb(0 0 0 / 0.5), 0 14px 28px -12px rgb(0 0 0 / 0.9);
 }
 
 .pos-solid-btn {
@@ -2489,9 +2530,10 @@ html.dark {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 1px solid var(--pos-s-control);
+  border: 1px solid transparent;
   border-radius: 12px;
-  background: var(--pos-s-surface);
+  background: var(--pos-s-raised);
+  box-shadow: var(--pos-s-depth);
   color: var(--pos-s-fg);
   font-weight: 600;
   line-height: 1.2;
@@ -2499,7 +2541,7 @@ html.dark {
 }
 .pos-solid-btn--md { min-height: 48px; padding: 0 20px; font-size: 16px; }
 .pos-solid-btn--sm { min-height: 44px; padding: 0 16px; font-size: 15px; }
-.pos-solid-btn--primary { background: var(--pos-s-yellow); border-color: var(--pos-s-yellow); color: var(--pos-s-yellow-fg); }
+.pos-solid-btn--primary { background: var(--pos-s-yellow); border-color: var(--pos-s-yellow); box-shadow: var(--pos-s-depth-yellow); color: var(--pos-s-yellow-fg); }
 .pos-solid-btn--danger { color: var(--pos-s-bad); }
 .pos-solid-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Wave 7Ε: long labels in grid cells (recovery actions, every language) wrap instead of spilling. */
@@ -2518,11 +2560,11 @@ html.dark {
 .pos-row--stack { flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 8px; }
 .pos-row__label .pos-status { margin-top: 6px; font-size: 14px; }
 
-.pos-seg { display: flex; flex-wrap: wrap; gap: 4px; min-height: 52px; padding: 4px; border: 1px solid var(--pos-s-control); border-radius: 12px; background: var(--pos-s-surface-2); }
+.pos-seg { display: flex; flex-wrap: wrap; gap: 4px; min-height: 52px; padding: 4px; border: 1px solid transparent; border-radius: 12px; background: var(--pos-s-surface-2); box-shadow: var(--pos-s-well); }
 .pos-seg__opt { display: inline-flex; flex: 1; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 12px; white-space: nowrap; border: 0; border-radius: 8px; background: transparent; color: var(--pos-s-fg); font-size: 15px; font-weight: 500; }
 .pos-seg--grid { display: grid; grid-template-columns: repeat(var(--pos-seg-cols, 3), minmax(0, 1fr)); }
 @media (max-width: 640px) { .pos-seg--grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-.pos-seg__opt.is-selected { background: var(--pos-s-sel-bg); color: var(--pos-s-sel-fg); font-weight: 650; }
+.pos-seg__opt.is-selected { background: var(--pos-s-sel-bg); box-shadow: var(--pos-s-depth-yellow); color: var(--pos-s-sel-fg); font-weight: 650; }
 .pos-seg__opt:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .pos-checks { overflow: hidden; border: 1px solid var(--pos-s-control); border-radius: 12px; background: var(--pos-s-surface); }
@@ -2558,7 +2600,7 @@ html.dark {
 
 /* The shared modal button's variants (liquidGlassModalButton): unlayered, so they win
    over the layered .liquid-glass-modal-button surface in both themes. */
-.liquid-glass-modal-button.pos-modal-primary { border-color: var(--pos-s-yellow); background: var(--pos-s-yellow); color: var(--pos-s-yellow-fg); }
+.liquid-glass-modal-button.pos-modal-primary { border-color: var(--pos-s-yellow); background: var(--pos-s-yellow); box-shadow: var(--pos-s-depth-yellow); color: var(--pos-s-yellow-fg); }
 .liquid-glass-modal-button.pos-modal-primary:active { background: #eab308; }
 .liquid-glass-modal-button.pos-modal-danger { color: var(--pos-s-bad); }
 
@@ -2614,20 +2656,190 @@ html.dark {
 .pos-job__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .pos-queue__foot { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--pos-s-border); color: var(--pos-s-muted); font-size: 14px; }
 
-/* Kit buttons: pressed and disabled states (press scale comes from the shared base rule). */
+/* Kit buttons: pressed and disabled states (press scale comes from the shared base rule). Pressed, a raised
+   button sinks: a smaller shadow and a pixel lower; a disabled one lies flat. */
 .pos-solid-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.pos-solid-btn:not(.pos-solid-btn--primary):active { background: var(--pos-s-surface-2); }
-.pos-solid-btn--primary:active { border-color: #eab308; background: #eab308; }
+.pos-solid-btn:not(.pos-solid-btn--primary):is(:active, [data-pressed]) { background: var(--pos-s-raised-press); }
+.pos-solid-btn--primary:is(:active, [data-pressed]) { border-color: #eab308; background: #eab308; }
+:is(.pos-solid-btn, .pos-icon-btn, .pos-choice, .pos-choice-card, .liquid-glass-modal-button, .liquid-glass-modal-close):is(:active, [data-pressed]):not(:disabled) { box-shadow: var(--pos-s-depth-press); translate: 0 1px; }
+:is(.pos-solid-btn--primary, .pos-choice.is-selected, .liquid-glass-modal-button.pos-modal-primary):is(:active, [data-pressed]):not(:disabled) { box-shadow: var(--pos-s-depth-yellow-press); }
+:is(.pos-solid-btn, .pos-icon-btn, .pos-choice, .pos-choice-card, .liquid-glass-modal-button, .liquid-glass-modal-close):disabled { box-shadow: var(--pos-s-depth-press); }
 /* Options that are buttons (wave 7A2): a small option and a card option. Selected = the kit
    selection (yellow, founder 31/10); a card shows a strong yellow outline on a raised fill. */
-.pos-choice { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 16px; border: 1px solid var(--pos-s-control); border-radius: 12px; background: var(--pos-s-surface); color: var(--pos-s-fg); font-size: 15px; font-weight: 600; }
-.pos-choice.is-selected { border-color: var(--pos-s-sel-bg); background: var(--pos-s-sel-bg); color: var(--pos-s-sel-fg); }
+.pos-choice { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 16px; border: 1px solid transparent; border-radius: 12px; background: var(--pos-s-raised); box-shadow: var(--pos-s-depth); color: var(--pos-s-fg); font-size: 15px; font-weight: 600; }
+.pos-choice:not(.is-selected):is(:active, [data-pressed]) { background: var(--pos-s-raised-press); }
+.pos-choice.is-selected { border-color: var(--pos-s-sel-bg); background: var(--pos-s-sel-bg); box-shadow: var(--pos-s-depth-yellow); color: var(--pos-s-sel-fg); }
 .pos-choice:disabled, .pos-choice-card:disabled { opacity: 0.5; cursor: not-allowed; }
-.pos-choice-card { display: block; width: 100%; min-height: 56px; padding: 12px 16px; border: 1px solid var(--pos-s-border); border-radius: 16px; background: var(--pos-s-surface); color: var(--pos-s-fg); text-align: start; }
+.pos-choice-card { display: block; width: 100%; min-height: 56px; padding: 12px 16px; border: 1px solid transparent; border-radius: 16px; background: var(--pos-s-raised); box-shadow: var(--pos-s-depth); color: var(--pos-s-fg); text-align: start; }
 .pos-choice-card--row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; }
-.pos-choice-card.is-selected { padding: 11px 15px; border: 2px solid var(--pos-s-sel-bg); background: var(--pos-s-surface-2); }
+.pos-choice-card.is-selected { padding: 11px 15px; border: 2px solid var(--pos-s-sel-bg); background: var(--pos-s-raised); }
+.pos-choice-card:not(.is-selected):is(:active, [data-pressed]) { background: var(--pos-s-raised-press); }
 /* Icon-only kit button: a 44 px square, neutral; danger = red icon. */
-.pos-icon-btn { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 44px; height: 44px; border: 1px solid var(--pos-s-control); border-radius: 12px; background: var(--pos-s-surface); color: var(--pos-s-fg); }
+.pos-icon-btn { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 44px; height: 44px; border: 1px solid transparent; border-radius: 12px; background: var(--pos-s-raised); box-shadow: var(--pos-s-depth); color: var(--pos-s-fg); }
 .pos-icon-btn--danger { color: var(--pos-s-bad); }
-.pos-icon-btn:active { background: var(--pos-s-surface-2); }
+.pos-icon-btn:is(:active, [data-pressed]) { background: var(--pos-s-raised-press); }
 .pos-icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Dropdown lists (founder 01/11: «τα αναδυόμενα που δείχνουν επιλογές ... είναι τα παλιά στυλ Windows XP, θέλω
+   να τα κάνεις μοντέρνα όλα», the whole app). Chromium's customizable select (WebView2 135+): each field keeps
+   its own look from its classes; the list it opens is the kit's, a solid rounded panel with 44 px rows, the
+   chosen row in the kit selection yellow with dark words. Touch only: a row lights while pressed; the
+   rows' own transparent fill already outranks the browser's hover tint, so no hover rule is needed.
+   Without base-select support the native list stays. */
+@supports (appearance: base-select) {
+  select:not([multiple], [size]),
+  select:not([multiple], [size])::picker(select) {
+    appearance: base-select;
+  }
+  select:not([multiple], [size]) {
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+  }
+  /* A field drawn full width as a block keeps its arrow at the far end. */
+  select:not([multiple], [size]).block { display: flex; }
+  /* The arrow is a thin chevron (the lucide one used across the till), not the default filled triangle. */
+  select:not([multiple], [size])::picker-icon {
+    content: '';
+    flex: none;
+    width: 18px;
+    height: 18px;
+    margin-inline-start: auto;
+    background-color: currentColor;
+    opacity: 0.7;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+    transition: rotate 160ms ease;
+  }
+  select:not([multiple], [size]):open::picker-icon { rotate: 180deg; }
+  select:not([multiple], [size])::picker(select) {
+    margin-block: 6px;
+    padding: 6px;
+    border: 1px solid var(--pos-s-border);
+    border-radius: 14px;
+    background: var(--pos-s-surface);
+    color: var(--pos-s-fg);
+    box-shadow: 0 18px 48px rgb(0 0 0 / 0.18);
+    max-block-size: min(60vh, 420px);
+    overflow-y: auto;
+    scrollbar-width: thin;
+  }
+  html.dark select:not([multiple], [size])::picker(select) { box-shadow: 0 18px 48px rgb(0 0 0 / 0.55); }
+  select:not([multiple], [size]) option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-block-size: 44px;
+    padding-inline: 12px;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--pos-s-fg);
+    font-size: 15px;
+    font-weight: 500;
+    white-space: normal;
+  }
+  select:not([multiple], [size]) option::checkmark { display: none; }
+  select:not([multiple], [size]) option:active:not(:checked, :disabled) { background: var(--pos-s-surface-2); }
+  select:not([multiple], [size]) option:checked {
+    background: var(--pos-s-sel-bg);
+    color: var(--pos-s-sel-fg);
+    font-weight: 650;
+  }
+  select:not([multiple], [size]) option:focus-visible { outline: 2px solid var(--pos-s-fg); outline-offset: -2px; }
+  select:not([multiple], [size]) option:disabled { opacity: 0.45; }
+  select:not([multiple], [size]) optgroup {
+    padding-block: 6px 2px;
+    color: var(--pos-s-muted);
+    font-size: 13px;
+    font-weight: 600;
+  }
+}
+
+/* Founder 01/11 («και τα κοντέινερ μέσα σε κοντέινερ, δηλαδή τα ξεχωριστά παράθυρα, πρέπει να έχουν λίγο βάθος για
+   να δένουν με τα κουμπιά»): the kit's panels — cards, groups and the frosted sections of a window — sit a little
+   raised. In the components layer with no specificity, so a card's state glow (.pos-neon-*) and a page's own
+   shadow utility still win. */
+@layer components {
+  :where(.pos-card, .pos-group, .pos-frost) { box-shadow: var(--pos-s-depth-card); }
+}
+
+/* A kit panel in the «ok» state (founder 01/11/2026: the check-in's «on shift» card) sits on a green shadow instead of
+   the neutral one. Unlayered, so it outranks the panel depth above. */
+.pos-group--ok { box-shadow: 0 1px 2px rgb(21 128 61 / 0.14), 0 12px 28px -10px rgb(22 163 74 / 0.55); }
+.dark .pos-group--ok { box-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 12px 30px -10px rgb(74 222 128 / 0.45); }
+
+/* A button drawn with its own utilities (its own shape and size) takes the same raise with .pos-raised; the yellow
+   one adds .pos-raised--yellow. Unlayered, so it outranks the button's own border / background utilities. */
+.pos-raised { border-color: transparent; background-color: var(--pos-s-raised); box-shadow: var(--pos-s-depth); }
+.pos-raised--yellow { background-color: var(--pos-s-yellow); color: var(--pos-s-yellow-fg); box-shadow: var(--pos-s-depth-yellow); }
+.pos-raised:is(:active, [data-pressed]):not(:disabled) { background-color: var(--pos-s-raised-press); box-shadow: var(--pos-s-depth-press); translate: 0 1px; }
+.pos-raised--yellow:is(:active, [data-pressed]):not(:disabled) { background-color: #eab308; box-shadow: var(--pos-s-depth-yellow-press); }
+.pos-raised:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: var(--pos-s-depth-press); }
+/* Founder 02/11/2026 («τα χρώματα στα κουμπιά θέλω να είναι από πίσω στις σκιές τους»): a coloured button keeps the
+   neutral raised face, and its colour is the shadow behind it (--pos-tint, a solid colour). Pressed sinks it. */
+.pos-raised--tint { box-shadow: 0 1px 2px rgb(24 24 27 / 0.08), 0 4px 10px -2px rgb(24 24 27 / 0.10), 0 12px 26px -8px var(--pos-tint, transparent); }
+.dark .pos-raised--tint { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.09), 0 2px 4px rgb(0 0 0 / 0.45), 0 12px 26px -8px var(--pos-tint, transparent); }
+.pos-raised--tint:is(:active, [data-pressed]):not(:disabled) { box-shadow: 0 1px 2px rgb(24 24 27 / 0.10), 0 4px 12px -6px var(--pos-tint, transparent); }
+
+/* Founder 01/11 («όλη η εφαρμογή να είναι έτσι», «εδώ οι κάρτες δεν έχουν βάθος»): the buttons and cards that pages
+   draw with their own utilities take the kit's depth here, by the surface their classes draw, so the whole app
+   reads alike. A neutral button becomes the raised surface (solid; a translucent wash too), loses a neutral outline
+   (a coloured state border stays) and sinks while pressed; a yellow or coloured fill keeps its colour and gains the
+   depth. A rounded, bordered card on a neutral surface gets the softer panel depth. Kit classes, state glows and
+   anything under [data-depth='off'] keep their own look. Unlayered, so it outranks the utilities it reads. */
+:is(button, [role='button'], [role='tab']):is([class^='bg-white'], [class*=' bg-white'], [class^='bg-(--pos-s-surface'], [class*=' bg-(--pos-s-surface'], [class^='bg-(--pos-s-raised'], [class*=' bg-(--pos-s-raised'], [class^='bg-(--modal-control-bg'], [class*=' bg-(--modal-control-bg'], [class^='bg-(--modal-surface'], [class*=' bg-(--modal-surface'], [class^='bg-(--modal-glass-card'], [class*=' bg-(--modal-glass-card'], [class^='bg-[#fff'], [class*=' bg-[#fff'], [class~='bg-gray-50'], [class^='bg-gray-50/'], [class*=' bg-gray-50/'], [class~='bg-gray-100'], [class^='bg-gray-100/'], [class*=' bg-gray-100/'], [class~='bg-gray-800'], [class^='bg-gray-800/'], [class*=' bg-gray-800/'], [class~='bg-gray-900'], [class^='bg-gray-900/'], [class*=' bg-gray-900/'], [class~='bg-zinc-50'], [class^='bg-zinc-50/'], [class*=' bg-zinc-50/'], [class~='bg-zinc-100'], [class^='bg-zinc-100/'], [class*=' bg-zinc-100/'], [class~='bg-zinc-800'], [class^='bg-zinc-800/'], [class*=' bg-zinc-800/'], [class~='bg-zinc-900'], [class^='bg-zinc-900/'], [class*=' bg-zinc-900/'], [class~='bg-slate-50'], [class^='bg-slate-50/'], [class*=' bg-slate-50/'], [class~='bg-slate-100'], [class^='bg-slate-100/'], [class*=' bg-slate-100/'], [class~='bg-slate-800'], [class^='bg-slate-800/'], [class*=' bg-slate-800/'], [class~='bg-slate-900'], [class^='bg-slate-900/'], [class*=' bg-slate-900/'], [class~='bg-neutral-50'], [class^='bg-neutral-50/'], [class*=' bg-neutral-50/'], [class~='bg-neutral-100'], [class^='bg-neutral-100/'], [class*=' bg-neutral-100/'], [class~='bg-neutral-800'], [class^='bg-neutral-800/'], [class*=' bg-neutral-800/'], [class~='bg-neutral-900'], [class^='bg-neutral-900/'], [class*=' bg-neutral-900/'], [class~='bg-stone-50'], [class^='bg-stone-50/'], [class*=' bg-stone-50/'], [class~='bg-stone-100'], [class^='bg-stone-100/'], [class*=' bg-stone-100/'], [class~='bg-stone-800'], [class^='bg-stone-800/'], [class*=' bg-stone-800/'], [class~='bg-stone-900'], [class^='bg-stone-900/'], [class*=' bg-stone-900/']):not(.pos-solid-btn, .pos-icon-btn, .pos-choice, .pos-choice-card, .pos-raised, .pos-select, .pos-seg__opt, .pos-fab, .pos-fab-halo, .liquid-glass-modal-close, .liquid-glass-modal-button, [class*='pos-neon'], [class*='pos-glow-'], [data-depth='off'], [data-depth='off'] *, [data-kit-date-field], .kit-date-picker *) { background-color: var(--pos-s-raised); box-shadow: var(--pos-s-depth); }
+:is(button, [role='button'], [role='tab']):is([class^='bg-white'], [class*=' bg-white'], [class^='bg-(--pos-s-surface'], [class*=' bg-(--pos-s-surface'], [class^='bg-(--pos-s-raised'], [class*=' bg-(--pos-s-raised'], [class^='bg-(--modal-control-bg'], [class*=' bg-(--modal-control-bg'], [class^='bg-(--modal-surface'], [class*=' bg-(--modal-surface'], [class^='bg-(--modal-glass-card'], [class*=' bg-(--modal-glass-card'], [class^='bg-[#fff'], [class*=' bg-[#fff'], [class~='bg-gray-50'], [class^='bg-gray-50/'], [class*=' bg-gray-50/'], [class~='bg-gray-100'], [class^='bg-gray-100/'], [class*=' bg-gray-100/'], [class~='bg-gray-800'], [class^='bg-gray-800/'], [class*=' bg-gray-800/'], [class~='bg-gray-900'], [class^='bg-gray-900/'], [class*=' bg-gray-900/'], [class~='bg-zinc-50'], [class^='bg-zinc-50/'], [class*=' bg-zinc-50/'], [class~='bg-zinc-100'], [class^='bg-zinc-100/'], [class*=' bg-zinc-100/'], [class~='bg-zinc-800'], [class^='bg-zinc-800/'], [class*=' bg-zinc-800/'], [class~='bg-zinc-900'], [class^='bg-zinc-900/'], [class*=' bg-zinc-900/'], [class~='bg-slate-50'], [class^='bg-slate-50/'], [class*=' bg-slate-50/'], [class~='bg-slate-100'], [class^='bg-slate-100/'], [class*=' bg-slate-100/'], [class~='bg-slate-800'], [class^='bg-slate-800/'], [class*=' bg-slate-800/'], [class~='bg-slate-900'], [class^='bg-slate-900/'], [class*=' bg-slate-900/'], [class~='bg-neutral-50'], [class^='bg-neutral-50/'], [class*=' bg-neutral-50/'], [class~='bg-neutral-100'], [class^='bg-neutral-100/'], [class*=' bg-neutral-100/'], [class~='bg-neutral-800'], [class^='bg-neutral-800/'], [class*=' bg-neutral-800/'], [class~='bg-neutral-900'], [class^='bg-neutral-900/'], [class*=' bg-neutral-900/'], [class~='bg-stone-50'], [class^='bg-stone-50/'], [class*=' bg-stone-50/'], [class~='bg-stone-100'], [class^='bg-stone-100/'], [class*=' bg-stone-100/'], [class~='bg-stone-800'], [class^='bg-stone-800/'], [class*=' bg-stone-800/'], [class~='bg-stone-900'], [class^='bg-stone-900/'], [class*=' bg-stone-900/']):not(.pos-solid-btn, .pos-icon-btn, .pos-choice, .pos-choice-card, .pos-raised, .pos-select, .pos-seg__opt, .pos-fab, .pos-fab-halo, .liquid-glass-modal-close, .liquid-glass-modal-button, [class*='pos-neon'], [class*='pos-glow-'], [data-depth='off'], [data-depth='off'] *, [data-kit-date-field], .kit-date-picker *):not([class^='border-yellow'], [class*=' border-yellow'], [class*='dark:border-yellow'], [class^='border-amber'], [class*=' border-amber'], [class*='dark:border-amber'], [class^='border-orange'], [class*=' border-orange'], [class*='dark:border-orange'], [class^='border-red'], [class*=' border-red'], [class*='dark:border-red'], [class^='border-rose'], [class*=' border-rose'], [class*='dark:border-rose'], [class^='border-green'], [class*=' border-green'], [class*='dark:border-green'], [class^='border-emerald'], [class*=' border-emerald'], [class*='dark:border-emerald'], [class^='border-blue'], [class*=' border-blue'], [class*='dark:border-blue'], [class^='border-(--pos-s-sel'], [class*=' border-(--pos-s-sel'], [class*='dark:border-(--pos-s-sel'], [class^='border-(--pos-s-yellow'], [class*=' border-(--pos-s-yellow'], [class*='dark:border-(--pos-s-yellow'], [class^='border-(--pos-s-bad'], [class*=' border-(--pos-s-bad'], [class*='dark:border-(--pos-s-bad'], [class^='border-(--pos-s-ok'], [class*=' border-(--pos-s-ok'], [class*='dark:border-(--pos-s-ok'], [class^='border-(--pos-s-warn'], [class*=' border-(--pos-s-warn'], [class*='dark:border-(--pos-s-warn'], [class~='border-dashed']) { border-color: transparent; }
+:is(button, [role='button'], [role='tab']):is([class^='bg-white'], [class*=' bg-white'], [class^='bg-(--pos-s-surface'], [class*=' bg-(--pos-s-surface'], [class^='bg-(--pos-s-raised'], [class*=' bg-(--pos-s-raised'], [class^='bg-(--modal-control-bg'], [class*=' bg-(--modal-control-bg'], [class^='bg-(--modal-surface'], [class*=' bg-(--modal-surface'], [class^='bg-(--modal-glass-card'], [class*=' bg-(--modal-glass-card'], [class^='bg-[#fff'], [class*=' bg-[#fff'], [class~='bg-gray-50'], [class^='bg-gray-50/'], [class*=' bg-gray-50/'], [class~='bg-gray-100'], [class^='bg-gray-100/'], [class*=' bg-gray-100/'], [class~='bg-gray-800'], [class^='bg-gray-800/'], [class*=' bg-gray-800/'], [class~='bg-gray-900'], [class^='bg-gray-900/'], [class*=' bg-gray-900/'], [class~='bg-zinc-50'], [class^='bg-zinc-50/'], [class*=' bg-zinc-50/'], [class~='bg-zinc-100'], [class^='bg-zinc-100/'], [class*=' bg-zinc-100/'], [class~='bg-zinc-800'], [class^='bg-zinc-800/'], [class*=' bg-zinc-800/'], [class~='bg-zinc-900'], [class^='bg-zinc-900/'], [class*=' bg-zinc-900/'], [class~='bg-slate-50'], [class^='bg-slate-50/'], [class*=' bg-slate-50/'], [class~='bg-slate-100'], [class^='bg-slate-100/'], [class*=' bg-slate-100/'], [class~='bg-slate-800'], [class^='bg-slate-800/'], [class*=' bg-slate-800/'], [class~='bg-slate-900'], [class^='bg-slate-900/'], [class*=' bg-slate-900/'], [class~='bg-neutral-50'], [class^='bg-neutral-50/'], [class*=' bg-neutral-50/'], [class~='bg-neutral-100'], [class^='bg-neutral-100/'], [class*=' bg-neutral-100/'], [class~='bg-neutral-800'], [class^='bg-neutral-800/'], [class*=' bg-neutral-800/'], [class~='bg-neutral-900'], [class^='bg-neutral-900/'], [class*=' bg-neutral-900/'], [class~='bg-stone-50'], [class^='bg-stone-50/'], [class*=' bg-stone-50/'], [class~='bg-stone-100'], [class^='bg-stone-100/'], [class*=' bg-stone-100/'], [class~='bg-stone-800'], [class^='bg-stone-800/'], [class*=' bg-stone-800/'], [class~='bg-stone-900'], [class^='bg-stone-900/'], [class*=' bg-stone-900/']):not(.pos-solid-btn, .pos-icon-btn, .pos-choice, .pos-choice-card, .pos-raised, .pos-select, .pos-seg__opt, .pos-fab, .pos-fab-halo, .liquid-glass-modal-close, .liquid-glass-modal-button, [class*='pos-neon'], [class*='pos-glow-'], [data-depth='off'], [data-depth='off'] *, [data-kit-date-field], .kit-date-picker *):is(:active, [data-pressed]):not(:disabled) { background-color: var(--pos-s-raised-press); box-shadow: var(--pos-s-depth-press); translate: 0 1px; }
+:is(button, [role='button'], [role='tab']):is([class~='bg-yellow-300'], [class^='bg-yellow-300/'], [class*=' bg-yellow-300/'], [class~='bg-yellow-400'], [class^='bg-yellow-400/'], [class*=' bg-yellow-400/'], [class~='bg-yellow-500'], [class^='bg-yellow-500/'], [class*=' bg-yellow-500/'], [class~='bg-amber-400'], [class^='bg-amber-400/'], [class*=' bg-amber-400/'], [class~='bg-(--pos-s-yellow)'], [class^='bg-(--pos-s-yellow)/'], [class*=' bg-(--pos-s-yellow)/'], [class~='bg-(--pos-s-sel-bg)'], [class^='bg-(--pos-s-sel-bg)/'], [class*=' bg-(--pos-s-sel-bg)/']):not(.pos-solid-btn, .pos-icon-btn, .pos-choice, .pos-choice-card, .pos-raised, .pos-select, .pos-seg__opt, .pos-fab, .pos-fab-halo, .liquid-glass-modal-close, .liquid-glass-modal-button, [class*='pos-neon'], [class*='pos-glow-'], [data-depth='off'], [data-depth='off'] *, [data-kit-date-field], .kit-date-picker *) { border-color: transparent; box-shadow: var(--pos-s-depth-yellow); }
+:is(button, [role='button'], [role='tab']):is([class~='bg-yellow-300'], [class^='bg-yellow-300/'], [class*=' bg-yellow-300/'], [class~='bg-yellow-400'], [class^='bg-yellow-400/'], [class*=' bg-yellow-400/'], [class~='bg-yellow-500'], [class^='bg-yellow-500/'], [class*=' bg-yellow-500/'], [class~='bg-amber-400'], [class^='bg-amber-400/'], [class*=' bg-amber-400/'], [class~='bg-(--pos-s-yellow)'], [class^='bg-(--pos-s-yellow)/'], [class*=' bg-(--pos-s-yellow)/'], [class~='bg-(--pos-s-sel-bg)'], [class^='bg-(--pos-s-sel-bg)/'], [class*=' bg-(--pos-s-sel-bg)/']):not(.pos-solid-btn, .pos-icon-btn, .pos-choice, .pos-choice-card, .pos-raised, .pos-select, .pos-seg__opt, .pos-fab, .pos-fab-halo, .liquid-glass-modal-close, .liquid-glass-modal-button, [class*='pos-neon'], [class*='pos-glow-'], [data-depth='off'], [data-depth='off'] *, [data-kit-date-field], .kit-date-picker *):is(:active, [data-pressed]):not(:disabled) { box-shadow: var(--pos-s-depth-yellow-press); translate: 0 1px; }
+:is(button, [role='button'], [role='tab']):is([class~='bg-red-500'], [class^='bg-red-500/'], [class*=' bg-red-500/'], [class~='bg-red-600'], [class^='bg-red-600/'], [class*=' bg-red-600/'], [class~='bg-red-700'], [class^='bg-red-700/'], [class*=' bg-red-700/'], [class~='bg-rose-500'], [class^='bg-rose-500/'], [class*=' bg-rose-500/'], [class~='bg-rose-600'], [class^='bg-rose-600/'], [class*=' bg-rose-600/'], [class~='bg-rose-700'], [class^='bg-rose-700/'], [class*=' bg-rose-700/'], [class~='bg-green-500'], [class^='bg-green-500/'], [class*=' bg-green-500/'], [class~='bg-green-600'], [class^='bg-green-600/'], [class*=' bg-green-600/'], [class~='bg-green-700'], [class^='bg-green-700/'], [class*=' bg-green-700/'], [class~='bg-emerald-500'], [class^='bg-emerald-500/'], [class*=' bg-emerald-500/'], [class~='bg-emerald-600'], [class^='bg-emerald-600/'], [class*=' bg-emerald-600/'], [class~='bg-emerald-700'], [class^='bg-emerald-700/'], [class*=' bg-emerald-700/'], [class~='bg-blue-500'], [class^='bg-blue-500/'], [class*=' bg-blue-500/'], [class~='bg-blue-600'], [class^='bg-blue-600/'], [class*=' bg-blue-600/'], [class~='bg-blue-700'], [class^='bg-blue-700/'], [class*=' bg-blue-700/'], [class~='bg-orange-500'], [class^='bg-orange-500/'], [class*=' bg-orange-500/'], [class~='bg-orange-600'], [class^='bg-orange-600/'], [class*=' bg-orange-600/'], [class~='bg-orange-700'], [class^='bg-orange-700/'], [class*=' bg-orange-700/'], [class~='bg-amber-500'], [class^='bg-amber-500/'], [class*=' bg-amber-500/'], [class~='bg-amber-600'], [class^='bg-amber-600/'], [class*=' bg-amber-600/'], [class~='bg-amber-700'], [class^='bg-amber-700/'], [class*=' bg-amber-700/'], [class~='bg-(--pos-s-bad)'], [class^='bg-(--pos-s-bad)/'], [class*=' bg-(--pos-s-bad)/'], [class~='bg-(--pos-s-ok)'], [class^='bg-(--pos-s-ok)/'], [class*=' bg-(--pos-s-ok)/']):not(.pos-solid-btn, .pos-icon-btn, .pos-choice, .pos-choice-card, .pos-raised, .pos-select, .pos-seg__opt, .pos-fab, .pos-fab-halo, .liquid-glass-modal-close, .liquid-glass-modal-button, [class*='pos-neon'], [class*='pos-glow-'], [data-depth='off'], [data-depth='off'] *, [data-kit-date-field], .kit-date-picker *) { box-shadow: var(--pos-s-depth); }
+:is(button, [role='button'], [role='tab']):is([class~='bg-red-500'], [class^='bg-red-500/'], [class*=' bg-red-500/'], [class~='bg-red-600'], [class^='bg-red-600/'], [class*=' bg-red-600/'], [class~='bg-red-700'], [class^='bg-red-700/'], [class*=' bg-red-700/'], [class~='bg-rose-500'], [class^='bg-rose-500/'], [class*=' bg-rose-500/'], [class~='bg-rose-600'], [class^='bg-rose-600/'], [class*=' bg-rose-600/'], [class~='bg-rose-700'], [class^='bg-rose-700/'], [class*=' bg-rose-700/'], [class~='bg-green-500'], [class^='bg-green-500/'], [class*=' bg-green-500/'], [class~='bg-green-600'], [class^='bg-green-600/'], [class*=' bg-green-600/'], [class~='bg-green-700'], [class^='bg-green-700/'], [class*=' bg-green-700/'], [class~='bg-emerald-500'], [class^='bg-emerald-500/'], [class*=' bg-emerald-500/'], [class~='bg-emerald-600'], [class^='bg-emerald-600/'], [class*=' bg-emerald-600/'], [class~='bg-emerald-700'], [class^='bg-emerald-700/'], [class*=' bg-emerald-700/'], [class~='bg-blue-500'], [class^='bg-blue-500/'], [class*=' bg-blue-500/'], [class~='bg-blue-600'], [class^='bg-blue-600/'], [class*=' bg-blue-600/'], [class~='bg-blue-700'], [class^='bg-blue-700/'], [class*=' bg-blue-700/'], [class~='bg-orange-500'], [class^='bg-orange-500/'], [class*=' bg-orange-500/'], [class~='bg-orange-600'], [class^='bg-orange-600/'], [class*=' bg-orange-600/'], [class~='bg-orange-700'], [class^='bg-orange-700/'], [class*=' bg-orange-700/'], [class~='bg-amber-500'], [class^='bg-amber-500/'], [class*=' bg-amber-500/'], [class~='bg-amber-600'], [class^='bg-amber-600/'], [class*=' bg-amber-600/'], [class~='bg-amber-700'], [class^='bg-amber-700/'], [class*=' bg-amber-700/'], [class~='bg-(--pos-s-bad)'], [class^='bg-(--pos-s-bad)/'], [class*=' bg-(--pos-s-bad)/'], [class~='bg-(--pos-s-ok)'], [class^='bg-(--pos-s-ok)/'], [class*=' bg-(--pos-s-ok)/']):not(.pos-solid-btn, .pos-icon-btn, .pos-choice, .pos-choice-card, .pos-raised, .pos-select, .pos-seg__opt, .pos-fab, .pos-fab-halo, .liquid-glass-modal-close, .liquid-glass-modal-button, [class*='pos-neon'], [class*='pos-glow-'], [data-depth='off'], [data-depth='off'] *, [data-kit-date-field], .kit-date-picker *):is(:active, [data-pressed]):not(:disabled) { box-shadow: var(--pos-s-depth-press); translate: 0 1px; }
+:is(button, [role='button'], [role='tab']):is([class^='bg-white'], [class*=' bg-white'], [class^='bg-(--pos-s-surface'], [class*=' bg-(--pos-s-surface'], [class^='bg-(--pos-s-raised'], [class*=' bg-(--pos-s-raised'], [class^='bg-(--modal-control-bg'], [class*=' bg-(--modal-control-bg'], [class^='bg-(--modal-surface'], [class*=' bg-(--modal-surface'], [class^='bg-(--modal-glass-card'], [class*=' bg-(--modal-glass-card'], [class^='bg-[#fff'], [class*=' bg-[#fff'], [class~='bg-gray-50'], [class^='bg-gray-50/'], [class*=' bg-gray-50/'], [class~='bg-gray-100'], [class^='bg-gray-100/'], [class*=' bg-gray-100/'], [class~='bg-gray-800'], [class^='bg-gray-800/'], [class*=' bg-gray-800/'], [class~='bg-gray-900'], [class^='bg-gray-900/'], [class*=' bg-gray-900/'], [class~='bg-zinc-50'], [class^='bg-zinc-50/'], [class*=' bg-zinc-50/'], [class~='bg-zinc-100'], [class^='bg-zinc-100/'], [class*=' bg-zinc-100/'], [class~='bg-zinc-800'], [class^='bg-zinc-800/'], [class*=' bg-zinc-800/'], [class~='bg-zinc-900'], [class^='bg-zinc-900/'], [class*=' bg-zinc-900/'], [class~='bg-slate-50'], [class^='bg-slate-50/'], [class*=' bg-slate-50/'], [class~='bg-slate-100'], [class^='bg-slate-100/'], [class*=' bg-slate-100/'], [class~='bg-slate-800'], [class^='bg-slate-800/'], [class*=' bg-slate-800/'], [class~='bg-slate-900'], [class^='bg-slate-900/'], [class*=' bg-slate-900/'], [class~='bg-neutral-50'], [class^='bg-neutral-50/'], [class*=' bg-neutral-50/'], [class~='bg-neutral-100'], [class^='bg-neutral-100/'], [class*=' bg-neutral-100/'], [class~='bg-neutral-800'], [class^='bg-neutral-800/'], [class*=' bg-neutral-800/'], [class~='bg-neutral-900'], [class^='bg-neutral-900/'], [class*=' bg-neutral-900/'], [class~='bg-stone-50'], [class^='bg-stone-50/'], [class*=' bg-stone-50/'], [class~='bg-stone-100'], [class^='bg-stone-100/'], [class*=' bg-stone-100/'], [class~='bg-stone-800'], [class^='bg-stone-800/'], [class*=' bg-stone-800/'], [class~='bg-stone-900'], [class^='bg-stone-900/'], [class*=' bg-stone-900/'], [class~='bg-yellow-300'], [class^='bg-yellow-300/'], [class*=' bg-yellow-300/'], [class~='bg-yellow-400'], [class^='bg-yellow-400/'], [class*=' bg-yellow-400/'], [class~='bg-yellow-500'], [class^='bg-yellow-500/'], [class*=' bg-yellow-500/'], [class~='bg-amber-400'], [class^='bg-amber-400/'], [class*=' bg-amber-400/'], [class~='bg-(--pos-s-yellow)'], [class^='bg-(--pos-s-yellow)/'], [class*=' bg-(--pos-s-yellow)/'], [class~='bg-(--pos-s-sel-bg)'], [class^='bg-(--pos-s-sel-bg)/'], [class*=' bg-(--pos-s-sel-bg)/'], [class~='bg-red-500'], [class^='bg-red-500/'], [class*=' bg-red-500/'], [class~='bg-red-600'], [class^='bg-red-600/'], [class*=' bg-red-600/'], [class~='bg-red-700'], [class^='bg-red-700/'], [class*=' bg-red-700/'], [class~='bg-rose-500'], [class^='bg-rose-500/'], [class*=' bg-rose-500/'], [class~='bg-rose-600'], [class^='bg-rose-600/'], [class*=' bg-rose-600/'], [class~='bg-rose-700'], [class^='bg-rose-700/'], [class*=' bg-rose-700/'], [class~='bg-green-500'], [class^='bg-green-500/'], [class*=' bg-green-500/'], [class~='bg-green-600'], [class^='bg-green-600/'], [class*=' bg-green-600/'], [class~='bg-green-700'], [class^='bg-green-700/'], [class*=' bg-green-700/'], [class~='bg-emerald-500'], [class^='bg-emerald-500/'], [class*=' bg-emerald-500/'], [class~='bg-emerald-600'], [class^='bg-emerald-600/'], [class*=' bg-emerald-600/'], [class~='bg-emerald-700'], [class^='bg-emerald-700/'], [class*=' bg-emerald-700/'], [class~='bg-blue-500'], [class^='bg-blue-500/'], [class*=' bg-blue-500/'], [class~='bg-blue-600'], [class^='bg-blue-600/'], [class*=' bg-blue-600/'], [class~='bg-blue-700'], [class^='bg-blue-700/'], [class*=' bg-blue-700/'], [class~='bg-orange-500'], [class^='bg-orange-500/'], [class*=' bg-orange-500/'], [class~='bg-orange-600'], [class^='bg-orange-600/'], [class*=' bg-orange-600/'], [class~='bg-orange-700'], [class^='bg-orange-700/'], [class*=' bg-orange-700/'], [class~='bg-amber-500'], [class^='bg-amber-500/'], [class*=' bg-amber-500/'], [class~='bg-amber-600'], [class^='bg-amber-600/'], [class*=' bg-amber-600/'], [class~='bg-amber-700'], [class^='bg-amber-700/'], [class*=' bg-amber-700/'], [class~='bg-(--pos-s-bad)'], [class^='bg-(--pos-s-bad)/'], [class*=' bg-(--pos-s-bad)/'], [class~='bg-(--pos-s-ok)'], [class^='bg-(--pos-s-ok)/'], [class*=' bg-(--pos-s-ok)/']):not(.pos-solid-btn, .pos-icon-btn, .pos-choice, .pos-choice-card, .pos-raised, .pos-select, .pos-seg__opt, .pos-fab, .pos-fab-halo, .liquid-glass-modal-close, .liquid-glass-modal-button, [class*='pos-neon'], [class*='pos-glow-'], [data-depth='off'], [data-depth='off'] *, [data-kit-date-field], .kit-date-picker *):disabled { box-shadow: var(--pos-s-depth-press); }
+:where(:is(div, section, article, li, details, aside, fieldset):is([class^='rounded'], [class*=' rounded']):is([class~='border'], [class~='border-2']):is([class^='bg-white'], [class*=' bg-white'], [class^='bg-(--pos-s-surface'], [class*=' bg-(--pos-s-surface'], [class^='bg-(--pos-s-raised'], [class*=' bg-(--pos-s-raised'], [class^='bg-(--modal-control-bg'], [class*=' bg-(--modal-control-bg'], [class^='bg-(--modal-surface'], [class*=' bg-(--modal-surface'], [class^='bg-(--modal-glass-card'], [class*=' bg-(--modal-glass-card'], [class^='bg-[#fff'], [class*=' bg-[#fff'], [class~='bg-gray-50'], [class^='bg-gray-50/'], [class*=' bg-gray-50/'], [class~='bg-gray-100'], [class^='bg-gray-100/'], [class*=' bg-gray-100/'], [class~='bg-gray-800'], [class^='bg-gray-800/'], [class*=' bg-gray-800/'], [class~='bg-gray-900'], [class^='bg-gray-900/'], [class*=' bg-gray-900/'], [class~='bg-zinc-50'], [class^='bg-zinc-50/'], [class*=' bg-zinc-50/'], [class~='bg-zinc-100'], [class^='bg-zinc-100/'], [class*=' bg-zinc-100/'], [class~='bg-zinc-800'], [class^='bg-zinc-800/'], [class*=' bg-zinc-800/'], [class~='bg-zinc-900'], [class^='bg-zinc-900/'], [class*=' bg-zinc-900/'], [class~='bg-slate-50'], [class^='bg-slate-50/'], [class*=' bg-slate-50/'], [class~='bg-slate-100'], [class^='bg-slate-100/'], [class*=' bg-slate-100/'], [class~='bg-slate-800'], [class^='bg-slate-800/'], [class*=' bg-slate-800/'], [class~='bg-slate-900'], [class^='bg-slate-900/'], [class*=' bg-slate-900/'], [class~='bg-neutral-50'], [class^='bg-neutral-50/'], [class*=' bg-neutral-50/'], [class~='bg-neutral-100'], [class^='bg-neutral-100/'], [class*=' bg-neutral-100/'], [class~='bg-neutral-800'], [class^='bg-neutral-800/'], [class*=' bg-neutral-800/'], [class~='bg-neutral-900'], [class^='bg-neutral-900/'], [class*=' bg-neutral-900/'], [class~='bg-stone-50'], [class^='bg-stone-50/'], [class*=' bg-stone-50/'], [class~='bg-stone-100'], [class^='bg-stone-100/'], [class*=' bg-stone-100/'], [class~='bg-stone-800'], [class^='bg-stone-800/'], [class*=' bg-stone-800/'], [class~='bg-stone-900'], [class^='bg-stone-900/'], [class*=' bg-stone-900/'])):not(.pos-card, .pos-group, .pos-frost, .liquid-glass-modal-shell, .pos-solid-btn, .pos-icon-btn, .pos-choice, .pos-choice-card, .pos-raised, .pos-select, .pos-seg__opt, .pos-fab, .pos-fab-halo, .liquid-glass-modal-close, .liquid-glass-modal-button, [class*='pos-neon'], [class*='pos-glow-'], [data-depth='off'], [data-depth='off'] *, [data-kit-date-field], .kit-date-picker *, [class~='absolute'], [class~='fixed'], [class*='shadow-lg'], [class*='shadow-xl'], [class*='shadow-2xl']) { box-shadow: var(--pos-s-depth-card); }
+
+/* A row that scrolls sideways (founder 01/11: «να σέρνεται δεξιά αριστερά αλλά να χάνονται χωρίς να κόβεται»):
+   the items fade out at an edge that has more to show, the mouse can drag it (utils/scroll-rows.ts sets the
+   data-fade-* / data-dragging marks), and it keeps room around the items so their raised shadows are never cut
+   (the negative side margins give that room back to the layout; a row's own top / bottom margin still applies). */
+.pos-scroll-row {
+  --pos-row-fade-start: 0px;
+  --pos-row-fade-end: 0px;
+  display: flex;
+  margin-inline: -14px;
+  padding: 4px 14px 16px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  touch-action: pan-x;
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 var(--pos-row-fade-start), #000 calc(100% - var(--pos-row-fade-end)), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 var(--pos-row-fade-start), #000 calc(100% - var(--pos-row-fade-end)), transparent 100%);
+}
+.pos-scroll-row::-webkit-scrollbar { display: none; }
+.pos-scroll-row > * { flex-shrink: 0; }
+.pos-scroll-row[data-fade-start='on'] { --pos-row-fade-start: 48px; }
+.pos-scroll-row[data-fade-end='on'] { --pos-row-fade-end: 48px; }
+.pos-scroll-row[data-dragging] { cursor: grabbing; user-select: none; }
+/* A column that scrolls keeps the same room at its sides and foot for the shadows of what it holds. */
+.pos-scroll-room { margin-inline: -14px; padding-inline: 14px; }
+
+/* A filter dropdown in a page's toolbar (founder 01/11): the raised kit button with its chevron; dropdowns that are
+   fields of a form keep the field look. */
+.pos-select { min-height: 44px; padding: 0 12px; border: 1px solid transparent; border-radius: 12px; background: var(--pos-s-raised); box-shadow: var(--pos-s-depth); color: var(--pos-s-fg); font-size: 14px; font-weight: 600; outline: none; }
+.pos-select:is(:active, [data-pressed]):not(:disabled) { background: var(--pos-s-raised-press); box-shadow: var(--pos-s-depth-press); }
+.pos-select:focus-visible { outline: 2px solid var(--pos-focus-ring, #b45309); outline-offset: 2px; }
+.pos-select:disabled { opacity: 0.6; box-shadow: var(--pos-s-depth-press); }
+
+/* Kit date / time picker (components/ui/KitDateField.tsx): anchored under its field, flips above near the
+   bottom of the screen or to the left near the right edge, and follows the field when the page scrolls. */
+[data-kit-date-field] { anchor-name: var(--kit-date-anchor); }
+.kit-date-picker--anchored {
+  position: fixed;
+  inset: auto;
+  margin: 6px 0;
+  position-anchor: var(--kit-date-anchor);
+  position-area: bottom span-right;
+  position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+  max-block-size: calc(100vh - 16px);
+  overflow-y: auto;
+}

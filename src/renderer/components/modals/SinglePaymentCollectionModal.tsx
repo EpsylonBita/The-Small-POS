@@ -1,8 +1,10 @@
+import { useSupportPaymentCritical } from '../../hooks/useSupportPaymentCritical';
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { roundMoney } from '@shared/utils/money';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Banknote, CreditCard, Loader2 } from 'lucide-react';
+import { AlertTriangle, CreditCard, Loader2 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { paymentRefusalMessage } from '../../utils/paymentRefusalMessage';
 
 import { getBridge } from '../../../lib';
 import { formatCurrency } from '../../utils/format';
@@ -43,9 +45,12 @@ import { loadPersistedSplitDismissal } from '../../utils/splitCheckoutRecovery';
 import {
   admitManualCard,
   lookupCardTerminal,
+  manualCardAdmissionMetadata,
   manualCardNoticeText,
   manualCardRecordRefusalText,
   terminalLookupNotice,
+  type ManualCardAdmission,
+  type ManualCardAdmissionMetadata,
 } from '../../services/ManualCardAdmissionService';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { UnsavedChargedPaymentBanner } from '../ui/UnsavedChargedPaymentBanner';
@@ -53,6 +58,7 @@ import {
   PlatformHeldPaymentNotice,
   usePlatformHeldNoticeForOrderId,
 } from '../ui/PlatformHeldPaymentNotice';
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 
 type PaymentOrigin = 'manual' | 'terminal';
 
@@ -128,7 +134,7 @@ export const SinglePaymentCollectionModal: React.FC<
   SinglePaymentCollectionModalProps
 > = ({
   isOpen,
-  onClose,
+  onClose: onPaymentClose,
   onPaymentCollected,
   orderId,
   orderNumber,
@@ -139,6 +145,8 @@ export const SinglePaymentCollectionModal: React.FC<
   collectionScope,
 }) => {
   const { t } = useTranslation();
+  const supportPayment = useSupportPaymentCritical(isOpen);
+  const onClose = useCallback(() => { supportPayment.close(); onPaymentClose(); }, [supportPayment, onPaymentClose]);
   const bridge = getBridge();
   const [isProcessing, setIsProcessing] = useState(false);
   const viewEpoch = useRef(0);
@@ -191,6 +199,7 @@ export const SinglePaymentCollectionModal: React.FC<
       paymentOrigin: PaymentOrigin,
       transactionRef?: string,
       terminalDeviceId?: string,
+      metadata?: ManualCardAdmissionMetadata,
     ) => {
       const result: any = await bridge.payments.recordPayment({
         orderId,
@@ -202,6 +211,7 @@ export const SinglePaymentCollectionModal: React.FC<
         paymentOrigin,
         terminalApproved: paymentOrigin === 'terminal',
         terminalDeviceId,
+        ...(metadata ? { metadata } : {}),
       });
       // A card charged but not saved: kept, with Save payment again. Never
       // a generic failure that invites a second charge.
@@ -259,7 +269,7 @@ export const SinglePaymentCollectionModal: React.FC<
             toast.error(manualCardRecordRefusalText(t, admission.reason));
             return;
           }
-          await recordCollectedPayment('manual');
+          await recordCollectedPayment('manual', undefined, undefined, manualCardAdmissionMetadata(admission));
           toast.success(
             t('orderDashboard.cardPaymentRecorded', {
               defaultValue: 'Card payment recorded.',
@@ -341,11 +351,11 @@ export const SinglePaymentCollectionModal: React.FC<
         error,
       );
       toast.error(
-        error instanceof Error
+        paymentRefusalMessage(error, t) ?? (error instanceof Error
           ? error.message
           : t('orderDashboard.collectPaymentFailed', {
               defaultValue: 'Failed to collect payment.',
-            }),
+            })),
       );
     } finally {
       setIsProcessing(false);
@@ -366,13 +376,13 @@ export const SinglePaymentCollectionModal: React.FC<
   // order's ordinary claim before its first await, preflights it right before
   // the send, and only the original operation's own outcome settles it.
   const ordinaryRefusalText = useCallback(
-    (code: string) =>
+    (code: string) => paymentRefusalMessage(code, t) ?? (
       code === 'GIFT_CARD_TERMINAL_SCOPE_REQUIRED'
         ? t(
             'giftCardCheckout.refusal.scope',
             'This terminal has no confirmed organization or terminal identity. Pair the POS again.',
           )
-        : t('giftCardCheckout.refusal.admission', 'Earlier gift card attempts must be checked first.'),
+        : t('giftCardCheckout.refusal.admission', 'Earlier gift card attempts must be checked first.')),
     [t],
   );
 
@@ -470,6 +480,7 @@ export const SinglePaymentCollectionModal: React.FC<
       let terminal: { deviceId: string; name: string } | null = null;
       // A card is written without a terminal only as the manual card admitted on this very confirm.
       let manualCardAdmitted = false;
+      let manualCardAdmission: ManualCardAdmission | null = null;
       if (method === 'card' && !sale) {
         if (manualCardConfirmed) {
           // Asked again on the confirm that records it.
@@ -480,6 +491,7 @@ export const SinglePaymentCollectionModal: React.FC<
             return;
           }
           manualCardAdmitted = true;
+          manualCardAdmission = admission;
         } else {
           const lookup = await lookupCardTerminal();
           if (!isCurrent()) return;
@@ -510,6 +522,7 @@ export const SinglePaymentCollectionModal: React.FC<
         paymentOrigin: PaymentOrigin,
         transactionRef?: string,
         terminalDeviceId?: string,
+        metadata?: ManualCardAdmissionMetadata,
       ): Promise<{ verdict: OrdinaryCollectionVerdict; value: GuardedCollection }> => {
         let raw: unknown;
         let threw = false;
@@ -526,6 +539,7 @@ export const SinglePaymentCollectionModal: React.FC<
             terminalApproved: paymentOrigin === 'terminal',
             terminalDeviceId,
             ...(sale?.recoverable ? { currency: sale.currency } : {}),
+            ...(metadata ? { metadata } : {}),
           });
         } catch {
           threw = true;
@@ -574,7 +588,9 @@ export const SinglePaymentCollectionModal: React.FC<
                 value: { paymentId: null, paymentOrigin: 'manual' as const, message: manualCardNoticeText(t, 'unavailable') },
               };
             }
-            return writeCollected('manual');
+            // A manual card carries its admission for the admin's review (founder 01/11/2026).
+            return writeCollected('manual', undefined, undefined,
+              method === 'card' ? manualCardAdmissionMetadata(manualCardAdmission) : undefined);
           }
           let rawPayment: unknown;
           let threw = false;
@@ -628,12 +644,12 @@ export const SinglePaymentCollectionModal: React.FC<
       }
       if (run.status !== 'completed' || !collected?.paymentId) {
         toast.error(
-          collected?.message ||
+          paymentRefusalMessage(collected?.message, t) ?? (collected?.message ||
             (run.status === 'not_sent' && method === 'card'
               ? t('splitPayment.cardFailed', { defaultValue: 'Card payment failed' })
               : t('orderDashboard.collectPaymentFailed', {
                   defaultValue: 'Failed to collect payment.',
-                })),
+                }))),
         );
         return;
       }
@@ -657,11 +673,11 @@ export const SinglePaymentCollectionModal: React.FC<
         error,
       );
       toast.error(
-        error instanceof Error
+        paymentRefusalMessage(error, t) ?? (error instanceof Error
           ? error.message
           : t('orderDashboard.collectPaymentFailed', {
               defaultValue: 'Failed to collect payment.',
-            }),
+            })),
       );
     } finally {
       // Ends the claim only while nothing was sent under it.
@@ -684,7 +700,8 @@ export const SinglePaymentCollectionModal: React.FC<
     unsaved,
   ]);
 
-  const collect = collectionScope === undefined ? handleCollect : handleGuardedCollect;
+  const collect = (options?: CollectOptions) => supportPayment.run(() =>
+    (collectionScope === undefined ? handleCollect : handleGuardedCollect)(options));
   const confirmManualCard = () => {
     void collect({ manualCardConfirmed: true });
   };
@@ -705,7 +722,7 @@ export const SinglePaymentCollectionModal: React.FC<
       <div className="liquid-glass-modal-text space-y-5">
         <UnsavedChargedPaymentBanner
           payments={unsaved.payments}
-          onSaveAgain={unsaved.saveAgain}
+          onSaveAgain={() => supportPayment.run(unsaved.saveAgain)}
           isSaving={unsaved.isSaving}
         />
         {/* Money the platform is holding: say so plainly instead of letting
@@ -769,7 +786,7 @@ export const SinglePaymentCollectionModal: React.FC<
               {method === 'card' ? (
                 <CreditCard className="h-4 w-4 text-slate-600 dark:text-slate-300" />
               ) : (
-                <Banknote className="h-4 w-4 text-emerald-800 dark:text-emerald-300" />
+                <CashHandIcon className="h-4 w-4 text-emerald-800 dark:text-emerald-300" />
               )}
               {method === 'card'
                 ? t('splitPayment.card', 'Card')
@@ -851,7 +868,7 @@ export const SinglePaymentCollectionModal: React.FC<
             ) : method === 'card' ? (
               <CreditCard className="h-4 w-4" />
             ) : (
-              <Banknote className="h-4 w-4" />
+              <CashHandIcon className="h-4 w-4" />
             )}
             {method === 'card'
               ? t('orderDashboard.collectCardNow', {

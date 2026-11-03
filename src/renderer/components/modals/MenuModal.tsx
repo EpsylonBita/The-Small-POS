@@ -25,6 +25,7 @@ import { LoyaltyRedeemModal } from './LoyaltyRedeemModal';
 import { useCheckoutDraftPersistence } from '../../hooks/useCheckoutDraftPersistence';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import { deriveMenuEditChanges, MENU_EDIT_MAX_LINES, RendererEditRefusal, type MenuEditHeaders, type MenuOrderEditData, type MenuEditPreflight } from '../../services/MenuOrderEdit';
+import { DiscardEditConfirmation } from './DiscardEditConfirmation';
 import { editRefusalMessageKey } from '../../utils/editRefusalMessage';
 import { LegacyShiftCurrencyConfirmationRequired } from '../../services/CheckoutDraftStore';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
@@ -426,6 +427,17 @@ export function isMenuTopMostDialog(
   });
 }
 
+/**
+ * Founder 01/11/2026 («Τίποτα»): Split hands the admitted cart to the split window instead of saving the order.
+ * `commit` saves the order together with its first payment (the checkout's own confirmation and create);
+ * `backOut` ends the admission and shows the payment window again, the cart unchanged.
+ */
+export interface MenuSplitCheckoutSession {
+  submission: Record<string, any>;
+  commit: (firstPayment: Record<string, unknown>) => Promise<boolean>;
+  backOut: () => Promise<void>;
+}
+
 interface MenuModalProps {
   salonMode?: boolean;
   isOpen: boolean;
@@ -477,6 +489,11 @@ interface MenuModalProps {
     deliveryFee?: number;
     deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
   }) => Promise<boolean> | boolean;
+  /**
+   * Split for an order paid now: nothing is saved until the first portion is paid (see MenuSplitCheckoutSession).
+   * The host passes it for counter orders only; a table order is saved to its table and paid later.
+   */
+  onSplitCheckout?: (session: MenuSplitCheckoutSession) => void;
   // Edit mode props
   editMode?: boolean;
   editOrderId?: string;
@@ -512,6 +529,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   onRepickDeliveryAddress,
   roomChargeContext = null,
   onOrderComplete,
+  onSplitCheckout,
   // Edit mode props
   editMode = false,
   editOrderId,
@@ -573,12 +591,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const editOriginalOrderRef = useRef<Record<string, any> | null>(null);
   const editExpectedVersionRef = useRef<number | undefined>(undefined);
   const [draftRecoveryBusy, setDraftRecoveryBusy] = useState(false);
+  const [discardEditTarget, setDiscardEditTarget] = useState<'refused' | 'order' | null>(null);
   const draftRecoveryInFlight = useRef(false);
   // Fix 4 (06/10/2026): a confirmed correction the till proved was never
   // applied (its journal is refused and nothing carries its event) can be
   // prepared again under a new event that replaces it, or closed by a manager
   // without recording money. Neither collects or returns anything again.
   const [refusedEdit, setRefusedEdit] = useState<{ event: string; orderId: string } | null>(null);
+  const [heldEditOrderId, setHeldEditOrderId] = useState<string | null>(null);
   // Tomikro 25-26/10/2026: "Refresh the order" never re-read the server. A
   // refused correction now offers a real refresh of the order from the
   // server; the cashier then opens it again. Nothing was charged.
@@ -649,6 +669,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   useEffect(() => {
     if (!isOpen) {
       setShowPaymentModal(false);
+      setHeldEditOrderId(null);
       setCheckoutPhase('editing');
       setLegacyCurrency(null);
       setLegacyCurrencyPin('');
@@ -742,20 +763,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
   }, [showCustomerPopover]);
 
-  // Closing an editable cart before payment is an ordinary dismissal. Persist
-  // the tombstone before closing; an already submitted original stays recoverable.
-  // 1.4.125: an unsubmitted order correction is dismissed the same way. Its
-  // kept draft (context.editMode) reopened the same edit on every new order,
-  // even after a restart. A submitted financial step (pending phase or a
-  // recorded submission) and a renewed refused correction (it replaces an
-  // attempt the native journal still holds) stay protected: the menu just closes.
-  // A close while the saved draft is still loading (or not yet hydrated) stays
-  // pending until it is ready, then discards it: closing at once wrote no
-  // tombstone and the stored edit reopened later.
+  // Editing corrections leave the new-order slot; pending money keeps recovery.
+  // A close during loading waits until the saved draft has been classified.
   const requestClose = useCallback(async () => {
     if (!isOpen || closingDraft.current || editSubmissionInFlight.current || checkoutPhase !== 'editing') return;
     if (draftPersistence.isPending() && draftPersistence.error === 'draftSaveFailed') return;
-    if (draftPersistence.isPending() || draftPersistence.hasSubmission() || draftPersistence.supersedesEdit()) { onClose(); return; }
+    if (draftPersistence.isPending() || (!editMode && draftPersistence.hasSubmission())) { onClose(); return; }
     if (draftPersistence.status === 'loading' || (draftPersistence.status === 'loaded' && !draftPersistence.error)) {
       setCloseRequested(true);
       return;
@@ -763,13 +776,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     if (draftPersistence.status !== 'ready') { onClose(); return; }
     closingDraft.current = true;
     try {
-      await draftPersistence.clear(false);
+      if (editMode) await draftPersistence.setAsideEdit();
+      else await draftPersistence.clear(false);
       setCartItems([]);
       onClose();
     } catch {
       toast.error(t('modals.menu.draftDiscardFailed', { defaultValue: 'The saved cart could not be discarded. It has been retained.' }));
     } finally { closingDraft.current = false; }
-  }, [isOpen, checkoutPhase, draftPersistence.status, draftPersistence.error, draftPersistence.clear, onClose, t]);
+  }, [isOpen, editMode, checkoutPhase, draftPersistence.status, draftPersistence.error, draftPersistence.clear, draftPersistence.setAsideEdit, onClose, t]);
 
   // Hiding the menu for PaymentModal is not a request to abandon the cart.
   const handleMenuSurfaceClose = useCallback(() => {
@@ -2553,6 +2567,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     if (draftPersistence.status !== 'loaded') return;
     const saved = draftPersistence.restored;
     const restorationId = saved ? `${saved.draftId}:${saved.checkoutRequestId}` : null;
+    if (saved && saved.context.editMode === true && (!editMode || editOrderId !== saved.context.editOrderId)) {
+      if (contextRestoreRequestedRef.current !== restorationId) {
+        contextRestoreRequestedRef.current = restorationId;
+        setCartItems([]);
+        void draftPersistence.setAsideEdit().then(() => draftPersistence.markHydrated()).catch(() => {
+          toast.error(t('modals.menu.draftDiscardFailed'));
+        });
+      }
+      return;
+    }
     if (saved && restoredDraftRef.current !== restorationId) {
       // Restore controlled parent context in a separate commit. Its type/customer
       // effects must finish before applying the retained cart and form state.
@@ -2815,12 +2839,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   // A manager closes the refused attempt without recording money. Native
   // re-proves non-application before asking for approval and under its lock.
-  const closeRefusedEdit = async () => {
+  const closeRefusedEdit = async (discard = false) => {
     if (!refusedEdit || draftRecoveryBusy) return;
     setDraftRecoveryBusy(true);
     try {
       const target = refusedEdit;
-      const result: any = await runWithPrivilegedConfirmation({
+      const action = () => bridge.orders.applyEditSettlement({
+        orderId: target.orderId, client_event_id: target.event, items: [], action: { type: 'none' },
+        reconcile: { decision: 'discard_by_cashier', moneyChangedHands: false },
+      } as any);
+      const result: any = discard ? await action() : await runWithPrivilegedConfirmation({
         scope: 'cash_drawer_control',
         action: () => bridge.orders.applyEditSettlement({
           orderId: target.orderId, client_event_id: target.event, items: [], action: { type: 'none' },
@@ -2832,9 +2860,43 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       await draftPersistence.clear(true);
       toast.success(t('modals.menu.editClosedWithoutMoney', { defaultValue: 'The unsaved correction was closed. No money was recorded; count the drawer to confirm.' }));
       onClose();
-    } catch {
-      toast.error(t('modals.menu.editCloseWithoutMoneyFailed', { defaultValue: 'The correction could not be closed. It stays held; nothing was recorded.' }));
-    } finally { setDraftRecoveryBusy(false); }
+    } catch (error) {
+      toast.error(discard ? t(`modals.menu.${editRefusalMessageKey(String(error))}`) : t('modals.menu.editCloseWithoutMoneyFailed', { defaultValue: 'The correction could not be closed. It stays held; nothing was recorded.' }));
+    } finally { setDraftRecoveryBusy(false); setDiscardEditTarget(null); }
+  };
+
+  const closeOrderHeldEdit = async (discard = false) => {
+    if (!heldEditOrderId || heldEditOrderId !== editOrderId || draftRecoveryBusy) return;
+    setDraftRecoveryBusy(true);
+    try {
+      const action = () => bridge.orders.applyEditSettlement({
+        orderId: heldEditOrderId, items: [], action: { type: 'none' },
+        reconcile: { decision: 'discard_by_cashier', moneyChangedHands: false, scope: 'order' },
+      } as any);
+      const result: any = discard ? await action() : await runWithPrivilegedConfirmation({
+        scope: 'cash_drawer_control',
+        action: () => bridge.orders.applyEditSettlement({
+          orderId: heldEditOrderId, items: [], action: { type: 'none' },
+          reconcile: { decision: 'close_without_money', scope: 'order',
+            reason: String(t('modals.menu.editCloseWithoutMoneyReason')) },
+        } as any),
+        approvalSubtitle: t('modals.zReport.heldEditApprovalSubtitle'),
+      });
+      if (result?.success !== true || result?.state !== 'reconciled') throw new Error('EDIT_RECONCILIATION_NOT_PROVEN');
+      if (draftPersistence.isPending()) {
+        await draftPersistence.setAsideEdit();
+        supersedesEditEventRef.current = undefined;
+        setRefusedEdit(null);
+        draftPersistence.markHydrated();
+        const context = { ...draftSnapshot.context };
+        delete context.supersedesEditEvent;
+        await draftPersistence.persist({ ...draftSnapshot, context });
+      }
+      setHeldEditOrderId(null);
+      toast.success(t('modals.menu.editHeldClosedRetry'));
+    } catch (error) {
+      toast.error(discard ? t(`modals.menu.${editRefusalMessageKey(String(error))}`) : t('modals.menu.editCloseWithoutMoneyFailed'));
+    } finally { setDraftRecoveryBusy(false); setDiscardEditTarget(null); }
   };
 
   // Refresh the refused order from the server, then reopen it: its cart was
@@ -2978,6 +3040,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           : code.includes('EDIT_ORIGINAL_PROVIDER_REFUND_REQUIRED') ? 'editProviderRefundRequired'
           : null;
         if (specific) {
+          if (specific === 'editPreviousNotSaved') setHeldEditOrderId(editOrderId);
           toast.error(t(`modals.menu.${specific}`, { maxLines: MENU_EDIT_MAX_LINES }));
           return;
         }
@@ -3305,7 +3368,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     } catch { return false; }
   };
 
-  const cancelCheckoutPaymentAdmission = async (options: { confirmed?: boolean } = {}) => {
+  const cancelCheckoutPaymentAdmission = async (options: { confirmed?: boolean; keepLoyaltyReservation?: boolean } = {}) => {
     if (draftRecoveryInFlight.current) return false;
     const admission = admittedCheckoutRef.current;
     const pendingState = draftPersistence.isPending() ? draftPersistence.restored?.state.paymentAdmission : undefined;
@@ -3314,7 +3377,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     draftRecoveryInFlight.current = true;
     setDraftRecoveryBusy(true);
     try {
-      await draftPersistence.cancelPaymentAdmission(options.confirmed === true ? { confirmed: true } : {});
+      await draftPersistence.cancelPaymentAdmission({
+        ...(options.confirmed === true ? { confirmed: true } : {}),
+        ...(options.keepLoyaltyReservation === true ? { keepLoyaltyReservation: true } : {}),
+      });
       admittedCheckoutRef.current = null;
       setShowPaymentModal(false);
       setCheckoutPhase('editing');
@@ -3347,7 +3413,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     } catch { return false; }
   };
 
-  const handlePaymentComplete = async (paymentData?: any): Promise<boolean> => {
+  // `splitFirstPortion`: the split's first payment, saved with the order (founder 01/11, «Τίποτα»).
+  const handlePaymentComplete = async (paymentData?: any, splitFirstPortion?: Record<string, unknown>): Promise<boolean> => {
     setIsLocalProcessing(true);
     setCheckoutPhase('finishing');
     let confirmationRefused = false;
@@ -3368,7 +3435,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         : admission.submission;
       if (onOrderComplete) {
         const completionSubmission = { ...submission,
-          ...(paymentData?.ordinaryOwner ? { paymentData: { ...submission.paymentData, ordinaryOwner: paymentData.ordinaryOwner } } : {}),
+          ...(paymentData?.ordinaryOwner || splitFirstPortion ? { paymentData: { ...submission.paymentData,
+            ...(paymentData?.ordinaryOwner ? { ordinaryOwner: paymentData.ordinaryOwner } : {}),
+            ...(splitFirstPortion ? { splitFirstPortion } : {}) } } : {}),
         };
         const completionResult = await onOrderComplete(completionSubmission as any);
         if (paymentData && completionSubmission.paymentData) Object.assign(paymentData, completionSubmission.paymentData);
@@ -3415,13 +3484,41 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // The stylists on the ticket's lines: a tip may go to one of them (salon, 21/10/2026).
   const tipStaffOptions = React.useMemo(() => tipStaffOptionsFromItems(cartItems), [cartItems]);
 
-  // Split creates the frozen pending order before its payment modal collects.
+  // Split admits the frozen cart. For an order paid now (`onSplitCheckout`), nothing is saved yet: the split window
+  // collects on this cart and its first portion saves the order with that payment (founder 01/11, «Τίποτα»).
+  // Without it (a table order, paid later), the pending order is saved first, as before.
+  // The tip chosen before a split the cashier backed out of: the payment window opens with it again.
+  const [splitTipToRestore, setSplitTipToRestore] = useState<TipSelection | null>(null);
   const handleSplitPayment = async (tipSelection: TipSelection | null) => {
     if (!onOrderComplete) return;
+    setSplitTipToRestore(null);
     setIsLocalProcessing(true);
     const paymentData = { method: 'pending', status: 'pending', amount: 0,
       ...tipPaymentFields(tipSelection) };
     if (!await admitCheckoutPayment(paymentData)) { setIsLocalProcessing(false); return; }
+    const admitted = admittedCheckoutRef.current;
+    // A ghost order keeps the split it always had (saved pending first): only an order on the books starts a split
+    // on its cart.
+    if (onSplitCheckout && admitted && admitted.submission.is_ghost !== true) {
+      setShowPaymentModal(false);
+      setIsLocalProcessing(false);
+      onSplitCheckout({
+        submission: admitted.submission,
+        commit: async (firstPayment) => {
+          const saved = await handlePaymentComplete(paymentData, firstPayment);
+          // Nothing saved and the admission still stands: its payment window comes back for another try.
+          if (!saved && admittedCheckoutRef.current) setShowPaymentModal(true);
+          return saved;
+        },
+        backOut: async () => {
+          if (!await cancelCheckoutPaymentAdmission({ keepLoyaltyReservation: true })) return;
+          setSplitTipToRestore(tipSelection);
+          setShowPaymentModal(true);
+          setCheckoutPhase('payment');
+        },
+      });
+      return;
+    }
     const completionResult = await handlePaymentComplete(paymentData);
     if (completionResult === false) {
       setCheckoutPhase('payment');
@@ -3536,10 +3633,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 {/* Close button */}
                 <button
                   onClick={requestClose}
-                  className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
+                  className="liquid-glass-modal-close shrink-0"
                   aria-label={t('common.actions.close')}
                 >
-                  <X className="w-5 h-5" />
+                  <X className="h-5 w-5" aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -3631,6 +3728,18 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             </button>
           </div>
         )}
+        {heldEditOrderId === editOrderId && editMode && heldEditOrderId && (
+          <div role="alert" data-testid="menu-order-held-edit" className="px-4 py-3 border-b border-amber-500 text-amber-800 dark:text-amber-100 space-y-2">
+            <p>{t('modals.menu.editPreviousNotSaved')}</p>
+            <p>{t('modals.zReport.heldEditApprovalSubtitle')}</p>
+            <button type="button" disabled={draftRecoveryBusy} onClick={() => void closeOrderHeldEdit()}
+              className="underline font-semibold" data-testid="menu-order-close-held-edit">
+              {t('modals.menu.editCloseWithoutMoney')}
+            </button>
+            <button type="button" disabled={draftRecoveryBusy} onClick={() => setDiscardEditTarget('order')}
+              className="ml-3 underline font-semibold" data-testid="menu-order-discard-held-edit">{t('modals.menu.editDiscard')}</button>
+          </div>
+        )}
         {refusedEdit && draftPersistence.isPending() && (
           <div role="alert" data-testid="menu-edit-not-applied" className="px-4 py-3 border-b border-amber-500 text-amber-800 dark:text-amber-100 space-y-2">
             <p>{t('modals.menu.editNotApplied', { defaultValue: 'This correction was not saved, so its difference was not recorded anywhere. If money already changed hands, prepare the correction again and record that same money once; never collect or return it twice. Otherwise a manager can close it without recording money.' })}</p>
@@ -3638,9 +3747,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               <button type="button" disabled={draftRecoveryBusy} onClick={requoteRefusedEdit} className="underline font-semibold" data-testid="menu-edit-requote">
                 {t('modals.menu.editRequote', { defaultValue: 'Prepare the correction again' })}
               </button>
-              <button type="button" disabled={draftRecoveryBusy} onClick={closeRefusedEdit} className="underline" data-testid="menu-edit-close-without-money">
+              <button type="button" disabled={draftRecoveryBusy} onClick={() => void closeRefusedEdit()} className="underline" data-testid="menu-edit-close-without-money">
                 {t('modals.menu.editCloseWithoutMoney', { defaultValue: 'Close without recording money (manager)' })}
               </button>
+              <button type="button" disabled={draftRecoveryBusy} onClick={() => setDiscardEditTarget('refused')}
+                className="underline font-semibold" data-testid="menu-edit-discard">{t('modals.menu.editDiscard')}</button>
             </div>
           </div>
         )}
@@ -3803,6 +3914,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           isOpen={showPaymentModal}
           onClose={async () => {
             if (admittedCheckoutRef.current && !admittedCheckoutRef.current.confirmed && !await cancelCheckoutPaymentAdmission()) return;
+            setSplitTipToRestore(null);
             if (effectiveLoyaltyRedemption && checkoutPhase === 'payment' && !draftPersistence.isPending()) {
               setIsLocalProcessing(true);
               try {
@@ -3833,6 +3945,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           onPaymentAdmissionCancelled={cancelCheckoutPaymentAdmission}
           onPaymentComplete={handlePaymentComplete}
           onSplitPayment={onOrderComplete ? handleSplitPayment : undefined}
+          initialTipSelection={splitTipToRestore}
           isProcessing={effectiveProcessing}
           roomChargeContext={roomChargeContext}
           tipStaffOptions={tipStaffOptions}
@@ -3926,13 +4039,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             <button disabled={legacyCurrencyBusy} onClick={() => { setLegacyCurrency(null); setLegacyCurrencyPin(''); }}
               className="liquid-glass-modal-button rounded-lg px-4 py-2">{t('common.actions.cancel')}</button>
             <button disabled={legacyCurrencyBusy} onClick={() => void confirmLegacyCurrency()}
-              className="rounded-lg bg-(--pos-s-yellow) px-4 py-2 font-semibold text-gray-950 disabled:opacity-50">
+              className="pos-raised pos-raised--yellow rounded-lg bg-(--pos-s-yellow) px-4 py-2 font-semibold text-gray-950 disabled:opacity-50">
               {t('modals.menu.legacyCurrency.confirm', { currency: legacyCurrency?.currency })}
             </button>
           </div>
         </div>
       </LiquidGlassModal>
 
+      <DiscardEditConfirmation isOpen={discardEditTarget !== null} onClose={() => setDiscardEditTarget(null)}
+        onDiscard={() => discardEditTarget === 'order' ? closeOrderHeldEdit(true) : closeRefusedEdit(true)} />
       {confirmationModal}
 
       {/* Processing Overlay */}

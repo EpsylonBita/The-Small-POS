@@ -44,6 +44,6 @@ test('Round 394: GuestBillingView scroll panes hide native scrollbars and icon b
   assert.ok(scrollPanes.length >= 3, `expected at least 3 hidden-scroll panes, found ${scrollPanes.length}`);
 
   assert.match(source, /aria-label=\{t\('common\.close', \{ defaultValue: 'Close' \}\)\}/);
-  assert.match(source, /inline-flex h-11 w-11 items-center justify-center rounded-xl/);
+  assert.match(source, /className="liquid-glass-modal-close[^"]*"/);
   assert.match(source, /type="button"\s+onClick=\{onClose\}/);
 });

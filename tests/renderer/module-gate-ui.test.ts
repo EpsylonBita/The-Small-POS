@@ -25,8 +25,8 @@ test('module lock and upsell surfaces use amber/neutral touch styling, not old b
   assert.match(lockedFeature, /min-h-touch(?![\w.-])[\s\S]*active:scale-\[0\.98\]/);
   assert.match(upsellCard, /text-amber-300/);
   assert.match(upsellCard, /active:scale-\[0\.99\] active:bg-white\/10/);
-  assert.match(trialPrompt, /min-h-touch min-w-touch(?![\w.-])[\s\S]*rounded-2xl/);
-  assert.match(trialPrompt, /active:scale-95 active:bg-white\/10/);
+  // One close button in every window (2aec3f4c1): the shared 44 px glass close.
+  assert.match(trialPrompt, /className="liquid-glass-modal-close"/);
 });
 
 test('module gate components keep analytics, browser purchase review, and trial dismissal', () => {

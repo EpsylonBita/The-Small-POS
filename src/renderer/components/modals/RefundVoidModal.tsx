@@ -11,7 +11,6 @@ import {
   X,
   RotateCcw,
   XCircle,
-  Banknote,
   CreditCard,
   Clock,
   AlertTriangle,
@@ -55,6 +54,7 @@ import {
   useGiftReturnTerminalIdentity,
   type UsableGiftOriginal,
 } from "../../lib/gift-card-returns";
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 
 export interface RefundCompleteDetail {
   /** Set only for a confirmed native original-card gift return. */
@@ -1152,10 +1152,10 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
           type="button"
           data-testid="gift-return-close"
           onClick={closePanel}
-          className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
+          className="liquid-glass-modal-close shrink-0"
           aria-label={t("modals.refund.gift.close")}
         >
-          <X className="w-4 h-4" />
+          <X className="h-5 w-5" aria-hidden="true" />
         </button>
       </div>
 
@@ -1733,7 +1733,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
     }
     switch (method?.toLowerCase()) {
       case "cash":
-        return <Banknote className="w-5 h-5 text-green-700 dark:text-green-400" />;
+        return <CashHandIcon className="w-5 h-5 text-green-700 dark:text-green-400" />;
       case "card":
         return <CreditCard className="w-5 h-5 text-slate-300" />;
       default:
@@ -1808,10 +1808,10 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
         </div>
         <button
           onClick={requestClose}
-          className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
+          className="liquid-glass-modal-close shrink-0"
           aria-label={t("common.actions.close")}
         >
-          <X className="w-6 h-6" />
+          <X className="h-5 w-5" aria-hidden="true" />
         </button>
       </div>
     </div>
@@ -2079,7 +2079,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                         <div className="space-y-3 pt-2 border-t border-(--pos-s-border) animate-in fade-in slide-in-from-top-2 duration-200">
                           <div>
                             <label className="block text-sm font-medium liquid-glass-modal-text-muted mb-2">
-                              <Banknote className="w-4 h-4 inline mr-1" />
+                              <CashHandIcon className="w-4 h-4 inline mr-1" />
                               {t("modals.refund.refundAmount", {
                                 defaultValue: "Refund Amount",
                               })}
@@ -2094,7 +2094,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                                 placeholder="0,00"
                                 className="w-full p-3 pl-10 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-orange-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted"
                               />
-                              <Banknote className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted" />
+                              <CashHandIcon className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted" />
                             </div>
                             {balance && (
                               <p className="text-xs liquid-glass-modal-text-muted mt-1">

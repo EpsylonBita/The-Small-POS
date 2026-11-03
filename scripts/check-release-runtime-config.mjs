@@ -14,6 +14,41 @@ const workflowPath = path.resolve(
   'pos-tauri-auto-release.yml',
 );
 const repositoryRoot = path.resolve(__dirname, '..', '..');
+// This guard also runs in the public mirror, where the private workflow is absent.
+// Native startup must call this helper before constructing any WebView.
+const nativeSourceDir = path.join(repositoryRoot, 'pos-tauri', 'src-tauri', 'src');
+const nativeStartup = ['main.rs', 'lib.rs'].map(file => fs.readFileSync(path.join(nativeSourceDir, file), 'utf8')).join('\n');
+const startupBody = nativeStartup.slice(nativeStartup.indexOf('pub fn run()'));
+const guardCall = startupBody.indexOf('strip_release_webview_debugging_port();');
+const webviewStart = startupBody.search(/tauri::Builder|Builder::default/u);
+const configGuard = nativeStartup.slice(nativeStartup.indexOf('fn strip_release_webview_config'), nativeStartup.indexOf('pub fn run()'));
+const envGuard = nativeStartup.slice(nativeStartup.indexOf('fn strip_release_webview_debugging_port'), nativeStartup.indexOf('fn strip_webview_windows'));
+if (guardCall < 0 || (webviewStart >= 0 && guardCall > webviewStart)
+  || !nativeStartup.includes('#[cfg(not(debug_assertions))]')
+  || !nativeStartup.includes('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS')
+  || !nativeStartup.includes('--remote-debugging-port')
+  || !nativeStartup.includes('--remote-debugging-pipe')
+  || !nativeStartup.includes('--auto-open-devtools-for-tabs')
+  || !startupBody.includes('strip_release_webview_config(&mut context);')
+  || !nativeStartup.includes('window.additional_browser_args')
+  || !configGuard.includes('!cfg!(debug_assertions)')
+  || !envGuard.includes('#[cfg(not(debug_assertions))]')
+  || !envGuard.includes('strip_webview_environment_for_profile(true);')
+  || !/env::(?:set_var|remove_var)/u.test(nativeStartup)) {
+  console.error('POS release runtime config contract failed: release startup must strip --remote-debugging-port before constructing the WebView (strip_release_webview_debugging_port).');
+  process.exit(1);
+}
+// Code-created WebViews must use the startup-sanitized window configuration.
+// A new direct builder argument source requires a reviewed sanitizer binding.
+for (const file of fs.readdirSync(nativeSourceDir, { recursive: true })) {
+  if (typeof file === 'string' && file.endsWith('.rs')) {
+    const source = fs.readFileSync(path.join(nativeSourceDir, file), 'utf8');
+    if (/\.additional_browser_args\s*\(/iu.test(source)) {
+      console.error('POS release runtime config contract failed: unguarded code browser arguments.');
+      process.exit(1);
+    }
+  }
+}
 const callerIdPinsPath = path.join(
   repositoryRoot,
   'pos-tauri',
@@ -142,9 +177,11 @@ const manifestStep = workflow.slice(
 
 const requiredTokens = [
   'VITE_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}',
-  'VITE_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}',
+  'VITE_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}',
   'Missing required secret: NEXT_PUBLIC_SUPABASE_URL',
-  'Missing required secret: NEXT_PUBLIC_SUPABASE_ANON_KEY',
+  'Missing required secret: NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY',
+  // Stage 3 of the key rotation: a build that still carries the legacy anon JWT says so.
+  '::warning title=Legacy Supabase key::',
 ];
 const violations = requiredTokens
   .filter((token) => !buildStep.includes(token))

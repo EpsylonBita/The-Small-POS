@@ -472,7 +472,10 @@ pub fn cleanup_committed_captures(
         if !commit_is_confirmed_with_attachment(&result) {
             continue;
         }
-        if files::remove_capture_files(app_data_dir, &document.id).is_err() {
+        let Some(lifecycle) = files::try_lock_lifecycle(app_data_dir, &document.id)? else {
+            continue;
+        };
+        if files::remove_capture_files_guarded(&lifecycle, app_data_dir, &document.id).is_err() {
             // A file that will not delete is not a reason to lose the row; the
             // next pass tries again.
             continue;

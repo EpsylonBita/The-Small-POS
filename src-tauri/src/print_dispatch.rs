@@ -273,6 +273,8 @@ fn cancelled_reconciliation_result(stage: &str) -> OwnedWindowsReconcileResult {
 
 #[derive(Debug, Error)]
 pub(crate) enum DispatchError {
+    #[error("{0}")]
+    SupportRefusal(String),
     #[error("invalid printer target: {0}")]
     InvalidTarget(&'static str),
     #[error("invalid byte count")]
@@ -392,6 +394,134 @@ fn transport_and_resolved(target: &PrinterTargetKey) -> (&'static str, String) {
             "serial",
             length_prefixed("port", port_name, Some(u64::from(*baud_rate))),
         ),
+    }
+}
+
+/// Durable transport evidence only. Never consult the spooler or document data.
+pub(crate) fn support_inspect_transport(
+    conn: &Connection,
+    profile_id: &str,
+) -> Result<serde_json::Value, String> {
+    let profile = crate::printers::support_get_printer_profile(conn, profile_id)?;
+    let target = support_saved_target(&profile)?;
+    let (transport, resolved) = transport_and_resolved(&target);
+    let key = normalize_target(&target).map_err(|_| "unavailable")?;
+    let lane: Option<String> = conn
+        .query_row(
+            "SELECT circuit_state FROM print_target_state WHERE target_key=?1",
+            [&key],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| "unavailable")?;
+    let sql = format!(
+        "SELECT a.state,coalesce(a.last_seen_at,a.started_at),
+        (a.spool_job_id BETWEEN 1 AND 4294967295)
+        FROM print_job_attempts a WHERE a.transport=?1 AND a.resolved_target=?2 AND {}
+        ORDER BY julianday(a.started_at),a.id LIMIT 1",
+        shared_attempt_blocker_predicate_sql("a")
+    );
+    let attempt: Option<(String, String, Option<bool>)> = conn
+        .query_row(&sql, params![transport, resolved], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .optional()
+        .map_err(|_| "unavailable")?;
+    let (state, age, ownership) = if let Some((state, at, job)) = attempt {
+        let age = chrono::DateTime::parse_from_rfc3339(&at).map_err(|_| "unavailable")?;
+        let age = (Utc::now() - age.with_timezone(&Utc)).num_milliseconds();
+        if age < 0 {
+            return Err("unavailable".into());
+        }
+        let state = match state.as_str() {
+            "created" | "windows_queued" | "paused" => "queued",
+            "submitting" | "windows_printing" => "submitting",
+            _ => "unknown",
+        };
+        // A recorded JobId proves only the local association, never current OS ownership.
+        (
+            state,
+            age as u64,
+            if transport == "windows" && job == Some(true) {
+                "owned"
+            } else {
+                "unknown"
+            },
+        )
+    } else {
+        (
+            if lane.as_deref().is_none_or(|s| s == "closed") {
+                "idle"
+            } else {
+                "unknown"
+            },
+            0,
+            "not_applicable",
+        )
+    };
+    Ok(
+        serde_json::json!({"transport":match transport {"windows"=>"windows_spooler","raw_tcp"=>"raw_tcp",_=>"other"},
+        "ownership":ownership,"state":state,"service":if transport=="windows"{"unavailable"}else{"not_applicable"},"observed_age_ms":age}),
+    )
+}
+
+/// The normal resolver may enumerate Windows queues or serial devices. Support
+/// uses only the recorded capability or unambiguous saved configuration.
+fn support_saved_target(profile: &serde_json::Value) -> Result<PrinterTargetKey, String> {
+    let capability = crate::printers::read_capability_snapshot(profile);
+    if matches!(capability.status.as_str(), "verified" | "degraded") {
+        if let Some(address) = capability.resolved_address {
+            return match capability.resolved_transport.as_deref() {
+                Some("windows_queue") => Ok(PrinterTargetKey::WindowsQueue(address)),
+                Some("raw_tcp") => {
+                    let (host, port) = address.rsplit_once(':').ok_or("unavailable")?;
+                    Ok(PrinterTargetKey::RawTcp {
+                        host: host.into(),
+                        port: port.parse().map_err(|_| "unavailable")?,
+                    })
+                }
+                Some("serial") => Ok(PrinterTargetKey::Serial {
+                    port_name: address,
+                    baud_rate: capability.baud_rate.unwrap_or(9600),
+                }),
+                _ => Err("unavailable".into()),
+            };
+        }
+    }
+    let connection: serde_json::Value = profile["connectionJson"]
+        .as_str()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| "unavailable")?
+        .unwrap_or(serde_json::Value::Null);
+    let kind = connection["type"]
+        .as_str()
+        .or_else(|| profile["printerType"].as_str())
+        .unwrap_or("system");
+    let name = profile["printerName"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("unavailable")?;
+    match kind {
+        "network" | "wifi" => {
+            let host = ["ip", "hostname", "host", "address"]
+                .iter()
+                .find_map(|key| connection[key].as_str())
+                .unwrap_or(name);
+            let port = connection["port"]
+                .as_u64()
+                .unwrap_or(9100)
+                .try_into()
+                .map_err(|_| "unavailable")?;
+            Ok(PrinterTargetKey::RawTcp {
+                host: host.into(),
+                port,
+            })
+        }
+        "system" | "windows" => Ok(PrinterTargetKey::WindowsQueue(
+            connection["systemName"].as_str().unwrap_or(name).into(),
+        )),
+        _ => Err("unavailable".into()),
     }
 }
 
@@ -1793,6 +1923,13 @@ struct OrphanedAttempt {
 /// printer. Closing it here could release a printer while Windows still holds
 /// the output.
 fn orphaned_blocking_attempts(conn: &Connection) -> Result<Vec<OrphanedAttempt>, DispatchError> {
+    orphaned_blocking_attempts_for_target(conn, None)
+}
+fn orphaned_blocking_attempts_for_target(
+    conn: &Connection,
+    target: Option<&PrinterTargetKey>,
+) -> Result<Vec<OrphanedAttempt>, DispatchError> {
+    let selected = target.map(transport_and_resolved);
     let mut statement = conn.prepare(&format!(
         "SELECT a.id, a.transport, a.resolved_target,
                 json_object(
@@ -1815,6 +1952,7 @@ fn orphaned_blocking_attempts(conn: &Connection) -> Result<Vec<OrphanedAttempt>,
                 )
          FROM print_job_attempts a
          WHERE {}
+           AND (?1 IS NULL OR (a.transport = ?1 AND a.resolved_target = ?2))
            AND NOT EXISTS (SELECT 1 FROM print_jobs job WHERE job.id = a.print_job_id)
            AND NOT (a.transport = 'windows'
                     AND typeof(a.spool_job_id) = 'integer'
@@ -1823,14 +1961,20 @@ fn orphaned_blocking_attempts(conn: &Connection) -> Result<Vec<OrphanedAttempt>,
         shared_attempt_blocker_predicate_sql("a"),
     ))?;
     let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?
+        .query_map(
+            params![
+                selected.as_ref().map(|v| v.0),
+                selected.as_ref().map(|v| &v.1)
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
 
@@ -1873,6 +2017,15 @@ fn close_orphaned_attempts(
     orphans: Vec<OrphanedAttempt>,
     now: DateTime<Utc>,
 ) -> Result<Vec<OrphanedAttempt>, DispatchError> {
+    close_orphaned_attempts_checked(conn, lanes, orphans, now, &|| Ok(()))
+}
+fn close_orphaned_attempts_checked(
+    conn: &Connection,
+    lanes: &HashMap<String, LaneBlock>,
+    orphans: Vec<OrphanedAttempt>,
+    now: DateTime<Utc>,
+    checkpoint: &dyn Fn() -> Result<(), String>,
+) -> Result<Vec<OrphanedAttempt>, DispatchError> {
     let update_sql = format!(
         "UPDATE print_job_attempts
          SET state = 'cancelled',
@@ -1901,6 +2054,7 @@ fn close_orphaned_attempts(
         ) {
             continue;
         }
+        checkpoint().map_err(DispatchError::SupportRefusal)?;
         let changed = conn.execute(
             &update_sql,
             params![now, ORPHANED_ATTEMPT_ERROR, orphan.attempt_id],
@@ -1941,9 +2095,19 @@ fn record_orphaned_attempt_closures(
     released_keys: &[String],
     now: DateTime<Utc>,
 ) -> Result<(), DispatchError> {
+    record_orphaned_attempt_closures_checked(conn, closed, released_keys, now, &|| Ok(()))
+}
+fn record_orphaned_attempt_closures_checked(
+    conn: &Connection,
+    closed: &[OrphanedAttempt],
+    released_keys: &[String],
+    now: DateTime<Utc>,
+    checkpoint: &dyn Fn() -> Result<(), String>,
+) -> Result<(), DispatchError> {
     let now = timestamp(now);
     for orphan in closed {
         let printer_released = released_keys.contains(&orphan.target_key);
+        checkpoint().map_err(DispatchError::SupportRefusal)?;
         conn.execute(
             "INSERT INTO recovery_action_log (
                  id, action_id, issue_code, recipe_id, recipe_version,
@@ -1979,6 +2143,91 @@ fn record_orphaned_attempt_closures(
         )?;
     }
     Ok(())
+}
+
+fn close_orphan_target_circuit(
+    conn: &Connection,
+    key: &str,
+    now: DateTime<Utc>,
+) -> Result<(), DispatchError> {
+    // UPDATE preserves the sweep's rule: an absent circuit is not created.
+    conn.execute(
+        "UPDATE print_target_state SET circuit_state='closed',blocked_reason=NULL,blocked_at=NULL,updated_at=?2 WHERE target_key=?1",
+        params![key, timestamp(now)],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) struct SupportOrphanResult {
+    pub missing_job_proven: bool,
+    pub lane_released: bool,
+    pub live_worker: bool,
+}
+
+/// This owner can change only orphan lifecycle/circuit state and insert its
+/// existing recovery trail. No other business or audit mutation is admitted.
+pub(crate) fn support_orphan_connection(path: &std::path::Path) -> Result<Connection, String> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| "INTERNAL_ERROR")?;
+    conn.busy_timeout(std::time::Duration::from_millis(100))
+        .map_err(|_| "INTERNAL_ERROR")?;
+    conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF")
+        .map_err(|_| "INTERNAL_ERROR")?;
+    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+        .map_err(|_| "INTERNAL_ERROR")?;
+    conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+        AuthAction::Insert {
+            table_name: "recovery_action_log",
+        } if ctx.database_name == Some("main") => Authorization::Allow,
+        AuthAction::Update {
+            table_name,
+            column_name,
+        } if ctx.database_name == Some("main")
+            && ((table_name == "print_job_attempts"
+                && [
+                    "state",
+                    "cancel_requested_at",
+                    "cancel_confirmed_at",
+                    "completed_at",
+                    "last_seen_at",
+                    "last_error",
+                ]
+                .contains(&column_name))
+                || (table_name == "print_target_state"
+                    && [
+                        "circuit_state",
+                        "blocked_reason",
+                        "blocked_at",
+                        "updated_at",
+                    ]
+                    .contains(&column_name))) =>
+        {
+            Authorization::Allow
+        }
+        AuthAction::Read { .. } | AuthAction::Select | AuthAction::Transaction { .. } => {
+            Authorization::Allow
+        }
+        AuthAction::Function { function_name }
+            if [
+                "json_object",
+                "json_set",
+                "json",
+                "coalesce",
+                "typeof",
+                "count",
+            ]
+            .contains(&function_name) =>
+        {
+            Authorization::Allow
+        }
+        _ => Authorization::Deny,
+    }));
+    Ok(conn)
 }
 
 fn target_has_reconciliation_blockers(
@@ -2809,15 +3058,7 @@ impl DispatchManager {
                 // UPDATE, not UPSERT: without a row there is no circuit to close,
                 // and this avoids having to reconstruct a PrinterTargetKey (and
                 // its transport) from a normalized key string.
-                tx.execute(
-                    "UPDATE print_target_state
-                     SET circuit_state = 'closed',
-                         blocked_reason = NULL,
-                         blocked_at = NULL,
-                         updated_at = ?2
-                     WHERE target_key = ?1",
-                    params![key, timestamp(now)],
-                )?;
+                close_orphan_target_circuit(&tx, &key, now)?;
                 released.push(key);
             }
             record_orphaned_attempt_closures(&tx, &closed_orphans, &released, now)?;
@@ -2839,6 +3080,130 @@ impl DispatchManager {
         }
 
         Ok(released)
+    }
+
+    /// The support caller supplies its isolated connection and its existing
+    /// permit. Reuse the sweep's proof, row close and audit on one target only.
+    pub(crate) fn support_close_selected_profile(
+        &self,
+        conn: &Connection,
+        profile_id: &str,
+        permit: &crate::support::critical_op::SupportPermit,
+        checkpoint: &dyn Fn() -> Result<(), String>,
+        before_effect: &dyn Fn() -> Result<(), String>,
+        now: DateTime<Utc>,
+    ) -> Result<SupportOrphanResult, String> {
+        let check = || {
+            if permit.is_cancelled() {
+                return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+            }
+            checkpoint()
+        };
+        check()?;
+        let profile = crate::printers::support_get_printer_profile(conn, profile_id)?;
+        if profile["enabled"] != true {
+            return Err("PAYLOAD_DRIFT".into());
+        }
+        let resolved = crate::printers::resolve_printer_target(&profile)?;
+        let target = match resolved {
+            crate::printers::ResolvedPrinterTarget::WindowsQueue { printer_name } => {
+                PrinterTargetKey::WindowsQueue(printer_name)
+            }
+            crate::printers::ResolvedPrinterTarget::RawTcp { host, port } => {
+                PrinterTargetKey::RawTcp { host, port }
+            }
+            crate::printers::ResolvedPrinterTarget::SerialPort {
+                port_name,
+                baud_rate,
+            } => PrinterTargetKey::Serial {
+                port_name,
+                baud_rate,
+            },
+        };
+        let key = normalize_target(&target).map_err(|_| "PAYLOAD_DRIFT")?;
+        let tx = permit.begin_write(conn)?;
+        check()?;
+        // SQLite first, then lanes. A contended lane mutex is a cancellable wait.
+        let mut lanes = loop {
+            match self.lanes.try_lock() {
+                Ok(lanes) => break lanes,
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err("INTERNAL_ERROR".into()),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    check()?;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    check()?;
+                }
+            }
+        };
+        check()?;
+        if matches!(
+            lanes.get(&key),
+            Some(LaneBlock::Held(_) | LaneBlock::OpenHeld(_))
+        ) {
+            return Err("CONCURRENT_OPERATION".into());
+        }
+        let orphans = orphaned_blocking_attempts_for_target(&tx, Some(&target))
+            .map_err(|_| "INTERNAL_ERROR")?;
+        if orphans.is_empty() || !recovery_action_log_present(&tx).map_err(|_| "INTERNAL_ERROR")? {
+            return Err("REMEDY_NOT_APPLICABLE".into());
+        }
+        check()?;
+        before_effect()?;
+        let closed = close_orphaned_attempts_checked(&tx, &lanes, orphans, now, &check).map_err(
+            |e| match e {
+                DispatchError::SupportRefusal(code) => code,
+                _ => "INTERNAL_ERROR".into(),
+            },
+        )?;
+        if closed.is_empty() {
+            return Err("REMEDY_NOT_APPLICABLE".into());
+        }
+        let released =
+            !target_has_reconciliation_blockers(&tx, &target).map_err(|_| "INTERNAL_ERROR")?;
+        let released_keys = if released {
+            vec![key.clone()]
+        } else {
+            Vec::new()
+        };
+        if released {
+            check()?;
+            close_orphan_target_circuit(&tx, &key, now).map_err(|_| "INTERNAL_ERROR")?;
+        }
+        record_orphaned_attempt_closures_checked(&tx, &closed, &released_keys, now, &check)
+            .map_err(|e| match e {
+                DispatchError::SupportRefusal(code) => code,
+                _ => "INTERNAL_ERROR".into(),
+            })?;
+        check()?;
+        tx.commit().map_err(|_| "OUTCOME_UNKNOWN")?;
+        if released {
+            lanes.remove(&key);
+        }
+        drop(lanes);
+        check()?;
+        for orphan in closed {
+            let id = Uuid::parse_str(&orphan.attempt_id).map_err(|_| "OUTCOME_UNKNOWN")?;
+            if read_attempt(conn, id)
+                .map_err(|_| "OUTCOME_UNKNOWN")?
+                .is_none_or(|attempt| attempt.state != DispatchState::Cancelled)
+            {
+                return Err("OUTCOME_UNKNOWN".into());
+            }
+        }
+        let lane_released =
+            !target_has_reconciliation_blockers(conn, &target).map_err(|_| "OUTCOME_UNKNOWN")?;
+        let lanes = self.lanes.try_lock().map_err(|_| "OUTCOME_UNKNOWN")?;
+        let live_worker = matches!(
+            lanes.get(&key),
+            Some(LaneBlock::Held(_) | LaneBlock::OpenHeld(_))
+        );
+        let lane_released = lane_released && !lanes.contains_key(&key);
+        check()?;
+        Ok(SupportOrphanResult {
+            missing_job_proven: true,
+            lane_released,
+            live_worker,
+        })
     }
 
     /// Test seam over the live reconciliation commit.
@@ -3396,6 +3761,191 @@ mod tests {
             .unwrap();
         // Production runs with foreign keys on; the orphan must heal there.
         conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+    }
+
+    #[test]
+    fn support_orphan_close_is_selected_audited_and_preserves_live_workers() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        for live in [false, true] {
+            let conn = test_db();
+            let selected = "11111111-1111-4111-8111-111111111111";
+            conn.execute("INSERT INTO printer_profiles(id,name,printer_name,driver_type,printer_type,connection_json,created_at,updated_at) VALUES(?1,'Your selected printer','192.168.1.19','escpos','network',?2,'2026-11-02','2026-11-02')",params![selected,r#"{"type":"network","host":"192.168.1.19","port":9100}"#]).unwrap();
+            let manager = DispatchManager::isolated_for_test();
+            let job = Uuid::new_v4().to_string();
+            let (lease, attempt) = claimed_raw_attempt(&conn, &manager, &job, "192.168.1.19", 1);
+            delete_job_with_foreign_keys_off(&conn, &job);
+            let other = Uuid::new_v4().to_string();
+            let (other_lease, other_attempt) =
+                claimed_raw_attempt(&conn, &manager, &other, "192.168.1.20", 1);
+            drop(other_lease);
+            delete_job_with_foreign_keys_off(&conn, &other);
+            let lease = if live {
+                Some(lease)
+            } else {
+                drop(lease);
+                None
+            };
+            let permit = crate::support::critical_op::global()
+                .try_begin_support(true, None)
+                .unwrap();
+            crate::tests::fake_keyring::before_each_read(|key| {
+                panic!("support read keyring: {key}")
+            });
+            let result = manager.support_close_selected_profile(
+                &conn,
+                selected,
+                &permit,
+                &|| Ok(()),
+                &|| Ok(()),
+                at(30),
+            );
+            if live {
+                assert_eq!(result.unwrap_err(), "CONCURRENT_OPERATION");
+                assert_eq!(
+                    read_attempt(&conn, attempt.attempt_id)
+                        .unwrap()
+                        .unwrap()
+                        .state,
+                    DispatchState::Submitting
+                );
+                assert!(orphan_audit_rows(&conn).is_empty());
+            } else {
+                let result = result.unwrap();
+                assert!(result.missing_job_proven && result.lane_released && !result.live_worker);
+                assert_eq!(
+                    read_attempt(&conn, attempt.attempt_id)
+                        .unwrap()
+                        .unwrap()
+                        .state,
+                    DispatchState::Cancelled
+                );
+                assert_eq!(orphan_audit_rows(&conn).len(), 1);
+            }
+            assert_eq!(
+                read_attempt(&conn, other_attempt.attempt_id)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                DispatchState::Submitting
+            );
+            drop(permit);
+            drop(lease);
+        }
+    }
+
+    #[test]
+    fn support_orphan_close_rechecks_before_effects() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let conn = test_db();
+        let selected = "11111111-1111-4111-8111-111111111111";
+        conn.execute("INSERT INTO printer_profiles(id,name,printer_name,driver_type,printer_type,connection_json,created_at,updated_at) VALUES(?1,'Your printer','192.168.1.19','escpos','network',?2,'2026-11-02','2026-11-02')",params![selected,r#"{"type":"network","host":"192.168.1.19","port":9100}"#]).unwrap();
+        let manager = DispatchManager::isolated_for_test();
+        let job = Uuid::new_v4().to_string();
+        let (lease, attempt) = claimed_raw_attempt(&conn, &manager, &job, "192.168.1.19", 1);
+        drop(lease);
+        delete_job_with_foreign_keys_off(&conn, &job);
+        for code in [
+            "FEATURE_DISABLED",
+            "ONSITE_DECLINED",
+            "PREEMPTED_BY_CRITICAL_OPERATION",
+        ] {
+            let permit = crate::support::critical_op::global()
+                .try_begin_support(true, None)
+                .unwrap();
+            let result = manager.support_close_selected_profile(
+                &conn,
+                selected,
+                &permit,
+                &|| Ok(()),
+                &|| Err(code.into()),
+                at(30),
+            );
+            assert_eq!(result.unwrap_err(), code);
+            assert_eq!(
+                read_attempt(&conn, attempt.attempt_id)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                DispatchState::Submitting
+            );
+            assert!(orphan_audit_rows(&conn).is_empty());
+        }
+        let permit = crate::support::critical_op::global()
+            .try_begin_support(true, None)
+            .unwrap();
+        let critical = std::cell::RefCell::new(None);
+        let result = manager.support_close_selected_profile(
+            &conn,
+            selected,
+            &permit,
+            &|| Ok(()),
+            &|| {
+                *critical.borrow_mut() = Some(
+                    crate::support::critical_op::global()
+                        .begin_critical(crate::support::critical_op::CriticalKind::Checkout),
+                );
+                Ok(())
+            },
+            at(30),
+        );
+        assert_eq!(result.unwrap_err(), "PREEMPTED_BY_CRITICAL_OPERATION");
+        // The cancelled support reader stays interrupted. Inspect the rolled
+        // back state independently, after removing that test-only handler.
+        drop(permit);
+        conn.progress_handler(0, None::<fn() -> bool>);
+        assert_eq!(
+            read_attempt(&conn, attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            DispatchState::Submitting
+        );
+        assert!(orphan_audit_rows(&conn).is_empty());
+    }
+
+    #[test]
+    fn support_orphan_writer_runs_owner_with_business_lock_held_and_denies_protected_writes() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let id = "11111111-1111-4111-8111-111111111111";
+        conn.execute("INSERT INTO printer_profiles(id,name,printer_name,driver_type,printer_type,connection_json,created_at,updated_at) VALUES(?1,'Your printer','192.168.1.19','escpos','network',?2,'2026-11-02','2026-11-02')",params![id,r#"{"type":"network","host":"192.168.1.19","port":9100}"#]).unwrap();
+        let manager = DispatchManager::isolated_for_test();
+        let job = Uuid::new_v4().to_string();
+        let (lease, attempt) = claimed_raw_attempt(&conn, &manager, &job, "192.168.1.19", 1);
+        drop(lease);
+        delete_job_with_foreign_keys_off(&conn, &job);
+        let writer = support_orphan_connection(db.db_path()).unwrap();
+        for sql in [
+            "DELETE FROM order_payments",
+            "DELETE FROM staff_shifts",
+            "DELETE FROM z_reports",
+            "DELETE FROM recovery_action_log",
+            "UPDATE printer_profiles SET name='Your forbidden change'",
+            "UPDATE print_job_attempts SET bytes_written=1",
+            "CREATE TABLE your_forbidden(id TEXT)",
+        ] {
+            assert!(writer.execute_batch(sql).is_err(), "{sql}");
+        }
+        crate::tests::fake_keyring::before_each_read(|key| panic!("support read keyring: {key}"));
+        let permit = crate::support::critical_op::global()
+            .try_begin_support(true, None)
+            .unwrap();
+        let result = manager
+            .support_close_selected_profile(&writer, id, &permit, &|| Ok(()), &|| Ok(()), at(30))
+            .unwrap();
+        assert!(result.missing_job_proven && result.lane_released);
+        assert_eq!(
+            read_attempt(&writer, attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            DispatchState::Cancelled
+        );
+        assert_eq!(orphan_audit_rows(&conn).len(), 1);
     }
 
     fn claimed_raw_attempt(

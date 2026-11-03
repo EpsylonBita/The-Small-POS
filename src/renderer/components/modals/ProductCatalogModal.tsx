@@ -1129,7 +1129,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
               </div>
             </div>
             {/* Category Tabs */}
-            <div className="flex gap-2 mb-4 overflow-x-auto scrollbar-hide pb-2">
+            <div className="pos-scroll-row mb-4 gap-2">
               <button
                 onClick={() => setCategoryFilter('all')}
                 className={`px-4 py-2 rounded-2xl whitespace-nowrap transition-transform duration-150 active:scale-[0.98] ${
@@ -1419,7 +1419,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                 isProcessingOrder ||
                 (orderType === 'delivery' && hasDeliveryPro && !canCheckoutWithDeliveryFeeStatus(deliveryFeeStatus))
               }
-              className="mt-4 w-full py-3 rounded-2xl bg-(--pos-s-yellow) active:bg-yellow-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-black font-semibold flex items-center justify-center gap-2 transition-transform duration-150 active:scale-[0.98] disabled:active:scale-100"
+              className="pos-raised pos-raised--yellow mt-4 w-full py-3 rounded-2xl bg-(--pos-s-yellow) active:bg-yellow-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-black font-semibold flex items-center justify-center gap-2 transition-transform duration-150 active:scale-[0.98] disabled:active:scale-100"
             >
               <DollarSign className="w-5 h-5" />
               {isProcessingOrder 

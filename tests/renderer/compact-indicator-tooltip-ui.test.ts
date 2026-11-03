@@ -47,5 +47,5 @@ test('TerminalTypeIndicator badge + close button use aria-label, no native title
   // Close button: accessible label, close behavior preserved, active: press feedback (no hover).
   assert.match(source, /aria-label=\{t\('common\.actions\.close', 'Close'\)\}/);
   assert.match(source, /onClick=\{\(\) => setShowDetailPanel\(false\)\}/);
-  assert.match(source, /text-gray-400 active:text-white transition-colors p-1 rounded-lg active:bg-white\/10/);
+  assert.match(source, /className="liquid-glass-modal-close[^"]*"/);
 });

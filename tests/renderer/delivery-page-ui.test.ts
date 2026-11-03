@@ -26,7 +26,7 @@ test('DeliveryPage is touch-first with smooth rounded controls', () => {
   assert.match(source, /flex items-center gap-1\.5 px-2\.5 py-1 rounded-2xl text-xs font-medium/);
   assert.match(source, /px-2 py-0\.5 rounded-full text-xs font-medium/);
   assert.match(source, /flex items-center gap-2 mb-3 px-3 py-2 rounded-2xl/);
-  assert.match(source, /p-2 rounded-2xl inline-flex items-center justify-center transition-transform/);
+  assert.match(source, /className="liquid-glass-modal-close[^"]*"/);
   assert.match(source, /flex-1 px-3 py-2 rounded-2xl text-sm font-medium transition-transform active:scale-\[0\.98\]/);
 });
 

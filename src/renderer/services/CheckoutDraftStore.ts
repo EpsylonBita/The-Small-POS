@@ -282,7 +282,9 @@ export class CheckoutDraftStore {
    * native proof that nothing on this till could have charged a card. Native
    * must find nothing for the attempt and no press of it still running.
    */
-  cancelPaymentAdmission(options: { confirmed?: boolean; automatic?: boolean } = {}): Promise<CheckoutDraft> {
+  // `keepLoyaltyReservation`: a split the cashier backed out of returns to the same payment window, whose next
+  // tender keeps this checkout's points; released, the checkout could never redeem them again (founder 01/11/2026).
+  cancelPaymentAdmission(options: { confirmed?: boolean; automatic?: boolean; keepLoyaltyReservation?: boolean } = {}): Promise<CheckoutDraft> {
     return this.ordered(async () => {
       await this.load();
       if (this.draft?.phase === 'editing' && this.draft.state.paymentAdmissionCancelled === true) {
@@ -310,7 +312,7 @@ export class CheckoutDraftStore {
       // from this editable draft, never from its old secured submission.
       const result = this.accept(await this.transport('checkout_draft_put', { ...this.scope, expectedGeneration: this.generation, draft: editing }));
       this.loaded = Promise.resolve(result);
-      await this.releaseEditableLoyaltyReservation(editing);
+      if (options.keepLoyaltyReservation !== true) await this.releaseEditableLoyaltyReservation(editing);
       return result!;
     });
   }
@@ -429,6 +431,27 @@ export class CheckoutDraftStore {
       if (reply.draft || reply.generation <= this.generation!) throw new Error('CHECKOUT_DRAFT_RECOVERY_UNAVAILABLE');
       this.accept(reply);
       this.retired.add(previous.draftId);
+      this.retiredCheckouts.add(checkoutRequestId);
+      this.loaded = Promise.resolve(null);
+    });
+  }
+
+  /** Free the new-order slot while native retains the edit's recovery evidence. */
+  setAsideEdit(draftId: string, checkoutRequestId: string): Promise<void> {
+    return this.ordered(async () => {
+      await this.load();
+      const previous = this.draft;
+      if (!previous || previous.draftId !== draftId || previous.checkoutRequestId !== checkoutRequestId) {
+        throw new Error('CHECKOUT_DRAFT_CHANGED');
+      }
+      if (previous.context.editMode !== true) throw new Error('CHECKOUT_DRAFT_NOT_EDIT');
+      const reply: CheckoutDraftReply = await this.transport('checkout_draft_set_aside_edit', {
+        ...this.scope, expectedGeneration: this.generation, draftId, clientRequestId: checkoutRequestId,
+      });
+      this.validateReply(reply);
+      if (reply.draft || reply.generation <= this.generation!) throw new Error('CHECKOUT_DRAFT_RECOVERY_UNAVAILABLE');
+      this.accept(reply);
+      this.retired.add(draftId);
       this.retiredCheckouts.add(checkoutRequestId);
       this.loaded = Promise.resolve(null);
     });

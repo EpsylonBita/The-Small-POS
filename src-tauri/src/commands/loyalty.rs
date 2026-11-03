@@ -455,8 +455,11 @@ fn replace_loyalty_snapshot(
     org_id: &str,
     customers: &[Value],
 ) -> Result<usize, String> {
+    if has_pending_loyalty(connection, org_id)? {
+        return Err("Loyalty changes pending during snapshot".into());
+    }
     let now = Utc::now().to_rfc3339();
-    let conn = connection.transaction().map_err(|e| e.to_string())?;
+    let conn = crate::db::immediate_transaction(&connection).map_err(|e| e.to_string())?;
     if has_pending_loyalty(&conn, &org_id)? {
         return Err("Loyalty changes pending during snapshot".into());
     }
@@ -2811,3 +2814,7 @@ mod tests {
         assert_eq!(balance(&conn), 500);
     }
 }
+
+#[cfg(test)]
+#[path = "../admission_tests/loyalty.rs"]
+mod admission_regression_tests;

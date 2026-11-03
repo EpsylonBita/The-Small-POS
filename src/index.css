@@ -268,17 +268,34 @@
   }
 }
 
+/* Founder 01/11: the empty order list's one line is in Mansalva, a brush hand with Greek letters (SIL OFL 1.1,
+   renderer/assets/fonts/Mansalva-OFL.txt), bundled so it shows offline too. Declared here, in the app's entry
+   stylesheet, so the component stylesheets the tests bundle never pull a font file. */
+@font-face {
+  font-family: 'Mansalva';
+  src: url('./renderer/assets/fonts/Mansalva-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* ---- Base resets for POS touchscreen environment ---- */
 
-@layer utilities {
-
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+/* The element reset lives in the base layer, under every class (as Tailwind 3 had it by specificity).
+   In the utilities layer (bf86de12e, 28/10) it came after Tailwind's zero-specificity space-x/space-y
+   and every components-layer padding, so stacked lists lost their gaps and .liquid-glass-modal-input its
+   padding across the till (found 01/11 in the drawer outflows window). */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
 }
+
+@layer utilities {
 
 html,
 body,

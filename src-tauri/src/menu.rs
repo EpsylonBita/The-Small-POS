@@ -625,24 +625,28 @@ pub(crate) fn apply_menu_payload(
     validate_menu_sections(data)?;
     let overrides = complete_branch_overrides(data)?;
 
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("begin menu_cache write: {e}"))?;
-    let current_rows: i64 = tx
-        .query_row(
-            "SELECT COUNT(*) FROM menu_cache
+    let is_current = |conn: &Connection| -> Result<bool, String> {
+        let current_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM menu_cache
              WHERE (cache_key IN ('categories', 'subcategories', 'ingredients', 'combos')
                     OR (?2 AND cache_key = ?3))
                AND version = ?1",
-            params![version, overrides.is_some(), BRANCH_OVERRIDES_CACHE_KEY],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("read menu_cache version: {e}"))?;
-    let expected_rows = MENU_SECTIONS.len() + usize::from(overrides.is_some());
-    if current_rows == expected_rows as i64 {
+                params![version, overrides.is_some(), BRANCH_OVERRIDES_CACHE_KEY],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("read menu_cache version: {e}"))?;
+        let expected_rows = MENU_SECTIONS.len() + usize::from(overrides.is_some());
+        Ok(current_rows == expected_rows as i64)
+    };
+    if is_current(conn)? {
         return Ok(false);
     }
-
+    let tx = crate::db::immediate_transaction(&conn)
+        .map_err(|e| format!("begin menu_cache write: {e}"))?;
+    if is_current(&tx)? {
+        return Ok(false);
+    }
     for section in MENU_SECTIONS {
         let section_data = data
             .get(section)
@@ -1825,3 +1829,7 @@ mod tests {
         assert_eq!(by_id(&nested, "i1")["is_available"], false);
     }
 }
+
+#[cfg(test)]
+#[path = "admission_tests/menu.rs"]
+mod admission_regression_tests;

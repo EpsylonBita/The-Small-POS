@@ -63,18 +63,19 @@ export type ScreenKey =
   | 'none';
 
 /**
- * Class tokens the desktop uses for a primary (call-to-action) button in the
- * light theme, taken from the components themselves:
+ * Class tokens the desktop uses for a primary (call-to-action) button, taken
+ * from the components themselves.
  *
- * - `border-yellow-400` — the capture surface's primary treatment
- *   (`SuppliersPage` header, `CapturePagesPanel`, `CaptureQueuePanel`).
- * - `bg-amber-50` — the import drawer's Preview.
- * - `bg-emerald-600` — the import drawer's Save.
+ * Founder 01/11: every capture surface (`SuppliersPage` header and import
+ * drawer, `CapturePagesPanel`, `CaptureQueuePanel`, `CaptureScanSettingsModal`)
+ * draws its primary with the one kit primary, `pos-solid-btn--primary`, in both
+ * themes; the old yellow outline (`border-yellow-400`) and the Preview / Save
+ * fills are gone, so the kit modifier is the only primary token.
  *
- * Matching is on whole class tokens, never substrings, so `bg-amber-500/15`
- * (a dark-theme tint) can never be mistaken for one of these.
+ * Matching is on whole class tokens, never substrings, so a class that merely
+ * contains the word can never be mistaken for it.
  */
-const PRIMARY_TOKENS = ['border-yellow-400', 'bg-amber-50', 'bg-emerald-600'] as const;
+const PRIMARY_TOKENS = ['pos-solid-btn--primary'] as const;
 
 function dialogs(): HTMLElement[] {
   return Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]'));

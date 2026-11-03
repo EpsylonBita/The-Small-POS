@@ -310,7 +310,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
           (orderType === 'delivery' && !customerInfo.address) ||
           !isDiscountValid
         }
-        className="w-full bg-(--pos-s-yellow) text-black py-3 px-4 rounded-lg font-semibold disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+        className="pos-raised pos-raised--yellow w-full bg-(--pos-s-yellow) text-black py-3 px-4 rounded-lg font-semibold disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
       >
         {isPlacingOrder && <LoadingSpinner size="small" />}
         {t(isPlacingOrder ? 'menu.summary.placingOrder' : 'menu.summary.placeOrder')}

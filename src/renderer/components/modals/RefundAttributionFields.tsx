@@ -1,7 +1,8 @@
 import React from 'react';
-import { Banknote, CreditCard, Wallet, Wallet2 } from 'lucide-react';
+import { CreditCard, Wallet, Wallet2 } from 'lucide-react';
 import { DeliveryScooterIcon } from '../icons/OrderTypeGlyphs';
 import { useTranslation } from 'react-i18next';
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 
 /** The tender a refund names (shared rule R5): cash, card, or any other. */
 export type RefundTender = 'cash' | 'card' | 'other';
@@ -97,7 +98,7 @@ export const RefundAttributionFields: React.FC<RefundAttributionFieldsProps> = (
                 : ''
             } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
           >
-            <Banknote className="w-4 h-4" />
+            <CashHandIcon className="w-4 h-4" />
             {t('modals.refund.cashRefund', { defaultValue: 'Cash Refund' })}
           </button>
           <button

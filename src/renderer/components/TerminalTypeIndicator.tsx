@@ -1,3 +1,4 @@
+import { X } from 'lucide-react';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useFeatures } from '../hooks/useFeatures';
@@ -150,21 +151,9 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
               <button
                 onClick={() => setShowDetailPanel(false)}
                 aria-label={t('common.actions.close', 'Close')}
-                className="text-gray-400 active:text-white transition-colors p-1 rounded-lg active:bg-white/10"
+                className="liquid-glass-modal-close"
               >
-                <svg
-                  className="w-5 h-5"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M6 18L18 6M6 6l12 12"
-                  />
-                </svg>
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 

@@ -4429,7 +4429,7 @@ dependencies = [
 
 [[package]]
 name = "the-small-pos"
-version = "1.4.141"
+version = "1.4.142"
 dependencies = [
  "ab_glyph_rasterizer",
  "anyhow",

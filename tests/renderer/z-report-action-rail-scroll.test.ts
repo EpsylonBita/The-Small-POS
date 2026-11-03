@@ -280,7 +280,8 @@ test('Round 320: the details area carries the four tabs + the quiet (secondary) 
   assert.match(details, /activeTab === 'orders'/);
   assert.doesNotMatch(details, /activeTab === 'issues'/);
   assert.match(details, /const TabIcon = tab\.icon;/);
-  assert.match(details, /<TabIcon className="h-4 w-4" \/>/);
+  // Founder 01/11: the Money tab carries the app's cash glyph (a touch larger to read like the line icons).
+  assert.match(details, /<TabIcon className=\{tab\.key === 'money' \? 'h-5 w-5' : 'h-4 w-4'\} \/>/);
 
   // Refresh / Print / CSV are quiet secondary tools here (not above the close-day decision), handlers +
   // aria-labels intact, no native title tooltips.
@@ -319,7 +320,7 @@ test('Round 320: the details area carries the four tabs + the quiet (secondary) 
   assert.match(source, /clarity\.tabMoney/);
   assert.match(
     source,
-    /reportTabs[\s\S]*?icon: ListChecks[\s\S]*?icon: Banknote[\s\S]*?icon: Users[\s\S]*?icon: Receipt/,
+    /reportTabs[\s\S]*?icon: ListChecks[\s\S]*?icon: CashHandIcon[\s\S]*?icon: Users[\s\S]*?icon: Receipt/,
     'the four tabs must declare Review/Money/Staff/Orders icons in order',
   );
   // The Review tab is the default on open (guided close-day flow).

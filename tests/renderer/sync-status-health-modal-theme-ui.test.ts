@@ -50,8 +50,16 @@ const DARK_SURFACE = /(?:^|\s)dark:bg-\S+/;
 const DARK_TEXT = /(?:^|\s)dark:text-\S+/;
 const DARK_BORDER = /(?:^|\s)dark:border-\S+/;
 
+// Founder 01/11: a raised button (.pos-raised, glassmorphism.css) takes the kit's raised surface and depth from the
+// theme tokens, with no outline colour of its own.
+const RAISED = /(?:^|\s)pos-raised(?=\s|$)/;
+
 const describeMissingThemePairs = (classes: string, label: string): string[] => {
   const failures: string[] = [];
+  if (RAISED.test(classes)) {
+    if (!LIGHT_TEXT.test(classes) && !KIT_TEXT.test(classes)) failures.push(`${label}: missing readable light text`);
+    return failures;
+  }
   if (!LIGHT_SURFACE.test(classes) && !KIT_SURFACE.test(classes)) failures.push(`${label}: missing readable light background`);
   if (!LIGHT_TEXT.test(classes) && !KIT_TEXT.test(classes)) failures.push(`${label}: missing readable light text`);
   if (!DARK_SURFACE.test(classes) && !KIT_SURFACE.test(classes)) failures.push(`${label}: missing dark background override`);
@@ -83,21 +91,14 @@ test('Health Status modal shell, state cards, and sections opt into light-first 
     assert.ok(healthModal.includes(card), `card frosts inside the glass shell: ${card}`);
   }
 
-  assert.match(
-    healthModal,
-    /healthy:\s*\{[\s\S]*?shell:\s*liquidGlassModalTone\('success'\)/,
-    'healthy state card must use the shared success tone',
-  );
-  assert.match(
-    healthModal,
-    /attention:\s*\{[\s\S]*?shell:\s*liquidGlassModalTone\('warning'\)/,
-    'attention state card must use the shared warning tone',
-  );
-  assert.match(
-    healthModal,
-    /support_needed:\s*\{[\s\S]*?shell:\s*liquidGlassModalTone\('danger'\)/,
-    'support-needed state card must use the shared danger tone',
-  );
+  // Founder 01/11 («πολλά πολλά πορτοκαλί, κάνε τα να εκφράζουν καταστάσεις»): the state card is the neutral
+  // tone; only the headline and the status words carry the state colour (shared/pos/health/health-tone.ts).
+  assert.match(healthModal, /const visual = \{\s*shell: liquidGlassModalTone\('neutral'\),\s*titleClassName: HEALTH_TONE_TEXT\[healthStateTone\(summary\.state\)\],/);
+  assert.match(healthModal, /<HealthStateGlyph state=\{summary\.state\} \/>/, 'the state icon has no box: a filled glyph');
+  assert.doesNotMatch(healthModal, /iconBox/);
+  assert.match(healthModal, /className=\{cn\('mt-1 text-base font-bold', HEALTH_TONE_TEXT\[item\.tone\]\)\}/, 'each status word in its state colour');
+  assert.match(healthModal, /<Send className=\{cn\('h-5 w-5 text-white', sendingSupport && 'animate-pulse'\)\} \/>/, 'only the send icon is white');
+  assert.doesNotMatch(healthModal, /uppercase tracking/);
 
   // The compact layout groups support behind one disclosure. Check both real
   // neutral surfaces instead of requiring the retired duplicate sections.
@@ -126,7 +127,7 @@ test('Health Status modal neutral controls have light bases and dark overrides',
     (classes) =>
       !/\bbg-(?:amber|yellow|red|rose|emerald|green)-(?:400|500|600|700|800|900)\b/.test(
         classes,
-      ),
+      ) && !/(?:^|\s)pos-raised--yellow(?=\s|$)/.test(classes),
   );
   assert.ok(neutralControls.length >= 5, 'close, export, folder, advanced and refresh controls must be covered, including arrow-function handlers');
 
@@ -137,6 +138,13 @@ test('Health Status modal neutral controls have light bases and dark overrides',
   const failures = neutralControls.flatMap((classes, index) => {
     const label = `neutral control ${index + 1}`;
     const result: string[] = [];
+    // Founder 01/11: the one shared close button takes the kit surface and words from glassmorphism.css.
+    if (/(?:^|\s)liquid-glass-modal-close(?=\s|$)/.test(classes)) return result;
+    // Founder 01/11: a raised button's surface comes from the theme tokens; its words still need a kit colour.
+    if (RAISED.test(classes)) {
+      if (!LIGHT_TEXT.test(classes) && !KIT_TEXT.test(classes)) result.push(`${label}: missing readable light text`);
+      return result;
+    }
     // Wave ΣΤ1: kit tokens switch with the theme (the solid footer buttons use them).
     if (!LIGHT_SURFACE.test(classes) && !KIT_SURFACE.test(classes)) result.push(`${label}: missing readable light background`);
     if (!LIGHT_TEXT.test(classes) && !KIT_TEXT.test(classes)) result.push(`${label}: missing readable light text`);

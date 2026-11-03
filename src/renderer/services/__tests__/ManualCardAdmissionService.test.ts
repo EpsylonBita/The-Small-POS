@@ -9,13 +9,14 @@ const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
   getDefaultTerminal: vi.fn(),
   getDeviceStatus: vi.fn(),
+  getDeviceAdmission: vi.fn(),
   scope: { organizationId: 'org-a', branchId: 'branch-a', terminalId: 'terminal-a', apiKey: '' },
 }));
 
 vi.mock('../../../lib', () => ({
   getBridge: () => ({
     adminApi: { fetchFromAdmin: mocks.fetch },
-    ecr: { getDefaultTerminal: mocks.getDefaultTerminal, getDeviceStatus: mocks.getDeviceStatus },
+    ecr: { getDefaultTerminal: mocks.getDefaultTerminal, getDeviceStatus: mocks.getDeviceStatus, getDeviceAdmission: mocks.getDeviceAdmission },
   }),
 }));
 // Returns the same mutable object on purpose: the service must copy the scope it asked with.
@@ -24,6 +25,7 @@ vi.mock('../terminal-credentials', () => ({ getCachedTerminalCredentials: () => 
 import {
   admitManualCard,
   lookupCardTerminal,
+  manualCardAdmissionMetadata,
   MANUAL_CARD_ADMISSION_PATH,
 } from '../ManualCardAdmissionService';
 
@@ -49,6 +51,9 @@ beforeEach(() => {
   mocks.fetch.mockReset();
   mocks.getDefaultTerminal.mockReset();
   mocks.getDeviceStatus.mockReset();
+  mocks.getDeviceAdmission.mockReset();
+  // No last known answer unless a test sets one (a fresh till).
+  mocks.getDeviceAdmission.mockResolvedValue({ success: true, cardTerminal: { admitted: false, fetchedAt: null }, cashRegister: { admitted: false, fetchedAt: null } });
   // Native `ecr_get_default_terminal` with no enabled device.
   mocks.getDefaultTerminal.mockResolvedValue({ success: false, device: null });
   mocks.fetch.mockResolvedValue(answer());
@@ -56,13 +61,13 @@ beforeEach(() => {
 
 describe('admitManualCard', () => {
   it('admits only with no enabled terminal and a fresh exact-scope "no provider" answer', async () => {
-    expect(await admitManualCard()).toEqual({ admitted: true });
+    expect(await admitManualCard()).toMatchObject({ admitted: true, basis: 'live' });
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
     expect(mocks.fetch).toHaveBeenCalledWith(MANUAL_CARD_ADMISSION_PATH, { method: 'GET' });
   });
 
   it('asks the server again on every call; nothing is cached between the offer and the record', async () => {
-    expect(await admitManualCard()).toEqual({ admitted: true });
+    expect(await admitManualCard()).toMatchObject({ admitted: true, basis: 'live' });
     mocks.fetch.mockResolvedValue(answer({ provider_connected: true }));
     expect(await admitManualCard()).toEqual({ admitted: false, reason: 'provider_connected' });
     expect(mocks.fetch).toHaveBeenCalledTimes(2);
@@ -85,6 +90,7 @@ describe('admitManualCard', () => {
   });
 
   it.each<[string, () => void]>([
+    // With no last known answer on this till (a fresh till), every missing live answer refuses too.
     ['a cached offline answer', () => mocks.fetch.mockResolvedValue(answer({}, { source: 'cache', cachedAt: 'x', offlineFallback: true }))],
     ['a remote answer flagged as offline fallback', () => mocks.fetch.mockResolvedValue(answer({}, { source: 'remote', offlineFallback: true }))],
     ['an answer without its source', () => mocks.fetch.mockResolvedValue({ ...answer(), meta: undefined })],
@@ -112,7 +118,7 @@ describe('admitManualCard', () => {
     expect(await admitManualCard()).toEqual({ admitted: false, reason: 'unavailable' });
   });
 
-  it('fails closed while the browser reports no network', async () => {
+  it('fails closed while the browser reports no network and no answer was ever read', async () => {
     const onLine = vi.spyOn(window.navigator, 'onLine', 'get').mockReturnValue(false);
     try {
       expect(await admitManualCard()).toEqual({ admitted: false, reason: 'unavailable' });
@@ -120,6 +126,56 @@ describe('admitManualCard', () => {
     } finally {
       onLine.mockRestore();
     }
+  });
+
+  // Founder 01/11/2026 («Ναι, και offline»): offline, the last known server answer decides.
+  describe('offline, from the last known answer', () => {
+    const lastKnown = (admitted: boolean, fetchedAt: string | null = '2026-11-01T09:00:00.000Z') =>
+      mocks.getDeviceAdmission.mockResolvedValue({ success: true, cardTerminal: { admitted, fetchedAt }, cashRegister: { admitted: false, fetchedAt: null } });
+
+    it.each<[string, () => void]>([
+      ['no network', () => { vi.spyOn(window.navigator, 'onLine', 'get').mockReturnValue(false); }],
+      ['a network error', () => mocks.fetch.mockRejectedValue(new Error('network down'))],
+      ['a cached reply of the generic GET', () => mocks.fetch.mockResolvedValue(answer({}, { source: 'cache', offlineFallback: true }))],
+      ['an unavailable server', () => mocks.fetch.mockResolvedValue({ success: false, error: 'PAYMENT_ADMISSION_UNAVAILABLE', status: 503 })],
+    ])('admits on %s when the last answer said no provider, with its basis and time', async (_label, arrange) => {
+      lastKnown(false);
+      arrange();
+      try {
+        expect(await admitManualCard()).toEqual({ admitted: true, basis: 'cached', checkedAt: '2026-11-01T09:00:00.000Z' });
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it('refuses with its reason when the last answer said a provider is connected', async () => {
+      lastKnown(true);
+      mocks.fetch.mockRejectedValue(new Error('network down'));
+      expect(await admitManualCard()).toEqual({ admitted: false, reason: 'provider_connected' });
+    });
+
+    it('refuses when no answer was ever read, or the snapshot cannot be read', async () => {
+      mocks.fetch.mockRejectedValue(new Error('network down'));
+      lastKnown(false, null);
+      expect(await admitManualCard()).toEqual({ admitted: false, reason: 'unavailable' });
+      mocks.getDeviceAdmission.mockRejectedValue(new Error('db locked'));
+      expect(await admitManualCard()).toEqual({ admitted: false, reason: 'unavailable' });
+    });
+
+    it('never overrides a live answer: a live «provider connected» refuses whatever the last answer was', async () => {
+      lastKnown(false);
+      mocks.fetch.mockResolvedValue(answer({ provider_connected: true }));
+      expect(await admitManualCard()).toEqual({ admitted: false, reason: 'provider_connected' });
+      expect(mocks.getDeviceAdmission).not.toHaveBeenCalled();
+    });
+
+    it('keeps refusing a terminal on this till, offline too', async () => {
+      lastKnown(false);
+      mocks.fetch.mockRejectedValue(new Error('network down'));
+      mocks.getDefaultTerminal.mockResolvedValue({ success: true, device: { id: 'eft-1', name: 'EFT' } });
+      mocks.getDeviceStatus.mockResolvedValue({ connected: false, ready: false, busy: false });
+      expect(await admitManualCard()).toEqual({ admitted: false, reason: 'terminal_configured' });
+    });
   });
 });
 
@@ -159,5 +215,16 @@ describe('lookupCardTerminal', () => {
   ])('reports %s as unavailable', async (_label, reply) => {
     mocks.getDefaultTerminal.mockResolvedValue(reply);
     expect(await lookupCardTerminal()).toEqual({ kind: 'unavailable' });
+  });
+});
+
+// Founder 01/11/2026 («Ναι, και offline»): the admission travels with the recorded card so the admin can review
+// a card recorded offline (Android `manualCardAdmissionMetadata`).
+describe('manualCardAdmissionMetadata', () => {
+  it('carries the basis and the answer time, nothing without an admission', () => {
+    expect(manualCardAdmissionMetadata({ admitted: true, basis: 'cached', checkedAt: '2026-11-01T09:00:00.000Z' }))
+      .toEqual({ admission_basis: 'cached', admission_checked_at: '2026-11-01T09:00:00.000Z' });
+    expect(manualCardAdmissionMetadata({ admitted: false, reason: 'unavailable' })).toBeUndefined();
+    expect(manualCardAdmissionMetadata(null)).toBeUndefined();
   });
 });

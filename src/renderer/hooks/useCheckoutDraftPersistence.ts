@@ -204,7 +204,7 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     return draft.submission!;
   }, []);
 
-  const cancelPaymentAdmission = useCallback(async (options: { confirmed?: boolean; automatic?: boolean } = {}) => {
+  const cancelPaymentAdmission = useCallback(async (options: { confirmed?: boolean; automatic?: boolean; keepLoyaltyReservation?: boolean } = {}) => {
     if (!active.current || !store.current || freezeInFlight.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
     const owner = store.current;
     const draft = current.current;
@@ -237,6 +237,31 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     const generation = epoch.current;
     const draft = current.current;
     await owner.park(draft.checkoutRequestId);
+    if (generation !== epoch.current || owner !== store.current || current.current !== draft) throw new Error('CHECKOUT_DRAFT_CHANGED');
+    current.current = createCheckoutDraft();
+    lastSaved.current = '';
+    pendingSave.current = false;
+    active.current = false;
+    setError(null);
+    setRestored(null);
+  }, []);
+
+  const setAsideEdit = useCallback(async () => {
+    if (!store.current || freezeInFlight.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
+    const owner = store.current;
+    const generation = epoch.current;
+    const draft = current.current;
+    active.current = false;
+    ++persistRequest.current;
+    try { await owner.setAsideEdit(draft.draftId, draft.checkoutRequestId); }
+    catch (cause) {
+      if (generation === epoch.current && owner === store.current && current.current === draft) {
+        active.current = false;
+        setError('draftSaveFailed');
+        setStatus('error');
+      }
+      throw cause;
+    }
     if (generation !== epoch.current || owner !== store.current || current.current !== draft) throw new Error('CHECKOUT_DRAFT_CHANGED');
     current.current = createCheckoutDraft();
     lastSaved.current = '';
@@ -304,7 +329,7 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     return renewed;
   }, []);
 
-  return { status, restored, error, markHydrated, persist, freeze, clear, park, failedSave, resumeDeclined, renewRefusedEdit,
+  return { status, restored, error, markHydrated, persist, freeze, clear, park, setAsideEdit, failedSave, resumeDeclined, renewRefusedEdit,
     abandonFailedFreeze,
     /** A freeze whose write did not confirm, before any collection. */
     hasUncommittedFreeze: () => pendingSave.current && current.current.phase === 'checkout_pending' &&

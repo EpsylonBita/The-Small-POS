@@ -359,15 +359,13 @@ test('orders.clearSearch accessible label is localized in every POS locale', () 
 test('OrdersPage renders row chips without wrappers and uses yellow metadata icons', () => {
   const source = ordersPageSource();
 
-  // Round 220 (+ live-QA correction): the row status label is a compact but STRONG semantic PILL
-  // (rounded-full, bordered, px-3 py-1.5, text-[13px] leading-none font-bold whitespace-nowrap), driven by
-  // getOrderStatusPillClasses -- not the old loose `text-xs font-semibold` text, and not the first quiet
-  // `px-2.5 py-1 text-xs` pill.
-  assert.match(source, /getOrderStatusPillClasses/);
-  assert.match(
-    source,
-    /<span className=\{`inline-flex items-center justify-center rounded-full border px-3 py-1\.5 text-\[13px\] leading-none font-bold whitespace-nowrap \$\{getOrderStatusPillClasses\(order\.status\)\}`\}>/,
-  );
+  // Founder 01/11: the row status is a plain coloured word (no pill); completed / delivered say nothing; a
+  // cancelled row says so in larger red words and its card glows red inward.
+  assert.match(source, /getOrderStatusWordClasses/);
+  assert.match(source, /const ORDER_STATUS_SILENT = new Set\(\['completed', 'delivered'\]\);/);
+  assert.match(source, /<span className="text-xl font-black whitespace-nowrap text-\(--pos-s-bad\) first-letter:uppercase">/);
+  assert.match(source, /className=\{`p-5 rounded-xl border cursor-pointer transition-all \$\{orderStatus === 'cancelled' \? 'pos-neon-bad ' : ''\}/);
+  assert.doesNotMatch(source, /getOrderStatusPillClasses|ORDER_STATUS_PILL_CLASSES/);
   assert.doesNotMatch(source, /getOrderStatusTextClasses/);
   assert.doesNotMatch(source, /<span className=\{`text-xs font-semibold \$\{getOrderStatus\w+\(order\.status\)\}`\}>/);
   // The first too-quiet pill treatment is gone.
@@ -388,70 +386,23 @@ test('OrdersPage renders row chips without wrappers and uses yellow metadata ico
   assert.doesNotMatch(source, /<Package className="w-4 h-4 opacity-50" \/>/);
 });
 
-// Round 220 (+ live-QA correction): the row status label is a compact but STRONG semantic pill so it
-// reads clearly at 1282x802 without bloating the row. The pill span carries the stronger treatment
-// (px-3 py-1.5 text-[13px] leading-none font-bold whitespace-nowrap, no hover/active), and the per-status
-// skins in ORDER_STATUS_PILL_CLASSES must each be readable in light + dark with completed grey NOT faded.
-test('OrdersPage status pill uses the strong compact treatment and readable light+dark semantic skins, no hover', () => {
+// Founder 01/11: statuses are coloured words, never pills; the colours are the kit state tokens.
+test('OrdersPage status words use the kit state colours, no pill, no hover', () => {
   const source = ordersPageSource();
 
-  // --- The pill span treatment (sliced from the getOrderStatusPillClasses usage) ---
-  const pillIdx = source.indexOf('${getOrderStatusPillClasses(order.status)}');
-  assert.notEqual(pillIdx, -1, 'status pill span must use getOrderStatusPillClasses');
-  const pillStart = source.lastIndexOf('<span', pillIdx);
-  assert.notEqual(pillStart, -1, 'status pill <span> must exist');
-  const pillEnd = source.indexOf('>', pillIdx);
-  const pill = source.slice(pillStart, pillEnd + 1);
-
-  // Stronger, still-compact sizing/weight; single line so long localized labels never wrap.
-  assert.match(pill, /px-3/);
-  assert.match(pill, /py-1\.5/);
-  assert.match(pill, /text-\[13px\]/);
-  assert.match(pill, /leading-none/);
-  assert.match(pill, /font-bold/);
-  assert.match(pill, /whitespace-nowrap/);
-  assert.match(pill, /rounded-full/);
-  assert.match(pill, /\bborder\b/);
-  // Informational pill: no hover and no press/active feedback on it.
-  assert.doesNotMatch(pill, /hover:/);
-  assert.doesNotMatch(pill, /active:/);
-  // The earlier quiet treatment is gone.
-  assert.doesNotMatch(pill, /text-xs/);
-  assert.doesNotMatch(pill, /font-semibold/);
-
-  // --- The per-status skins ---
-  const mapStart = source.indexOf('const ORDER_STATUS_PILL_CLASSES');
-  assert.notEqual(mapStart, -1, 'ORDER_STATUS_PILL_CLASSES map must exist');
-  const mapEnd = source.indexOf('};', mapStart);
-  assert.notEqual(mapEnd, -1, 'ORDER_STATUS_PILL_CLASSES map must close');
-  const map = source.slice(mapStart, mapEnd);
-
-  // Every supervisor-listed status has its own skin: a light background, a border colour, and a dark:
-  // variant so it is readable in both themes.
-  for (const status of ['pending', 'confirmed', 'preparing', 'ready', 'completed', 'cancelled', 'out_for_delivery']) {
-    const line = map.split('\n').find((l) => new RegExp(`^\\s*${status}:`).test(l));
-    assert.ok(line, `pill map must define a skin for ${status}`);
-    assert.match(line, /bg-[a-z]+-\d{2,3}/, `${status} pill needs a light background`);
-    assert.match(line, /border-/, `${status} pill needs a border colour`);
-    assert.match(line, /dark:/, `${status} pill needs a dark variant`);
-  }
-
-  // Completed/delivered grey must read as solid/done, not the old faded `gray-100 text-gray-600` skin
-  // (which looked disabled on the live screen).
-  assert.doesNotMatch(map, /completed: 'bg-gray-100 text-gray-600/);
-  assert.doesNotMatch(map, /delivered: 'bg-gray-100 text-gray-600/);
-
-  // No hover utilities anywhere in the pill skins (informational, not an action).
-  assert.doesNotMatch(map, /hover:/);
-  // Round 423: the Orders page uses the current POS palette for status skins; blue/cyan/purple
-  // were old web-dashboard accents and should not return here.
-  assert.doesNotMatch(map, /\b(?:bg|text|border)-(?:blue|cyan|purple)-/);
-  assert.match(map, /confirmed: 'bg-yellow-200 text-yellow-950 border-yellow-300/);
-  assert.match(map, /out_for_delivery: 'bg-amber-300 text-amber-950 border-amber-400/);
-  assert.match(map, /preparing: 'bg-zinc-200 text-zinc-900 border-zinc-300/);
-
-  // Unknown statuses fall back to the yellow/amber pending skin (the app-palette base).
-  assert.match(source, /ORDER_STATUS_PILL_CLASSES\[normalized\] \|\| ORDER_STATUS_PILL_CLASSES\.pending/);
+  const mapStart = source.indexOf('const ORDER_STATUS_WORD_CLASSES');
+  assert.notEqual(mapStart, -1, 'ORDER_STATUS_WORD_CLASSES map must exist');
+  const map = source.slice(mapStart, source.indexOf('};', mapStart));
+  assert.match(map, /pending: 'text-\(--pos-s-warn\)'/);
+  assert.match(map, /ready: 'text-\(--pos-s-ok\)'/);
+  assert.match(map, /out_for_delivery: 'text-\(--pos-s-warn\)'/);
+  assert.doesNotMatch(map, /\bbg-|border-|hover:/);
+  assert.doesNotMatch(map, /\b(?:text)-(?:blue|cyan|purple)-/);
+  // Unknown statuses read as pending.
+  assert.match(source, /ORDER_STATUS_WORD_CLASSES\[normalized\] \|\| ORDER_STATUS_WORD_CLASSES\.pending/);
+  // The red inward glow is the shared neon in its bad colour.
+  const css = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'styles', 'glassmorphism.css'), 'utf8');
+  assert.match(css, /\.pos-neon-bad \{ border-color: #ef4444 !important; box-shadow: inset 0 0 3px #ef4444, inset 0 0 16px #ef4444; \}/);
 });
 
 test('Round 423: OrdersPage loading spinner is yellow, not legacy blue/cyan', () => {
@@ -1812,7 +1763,8 @@ test('OrderTabsBar inactive labels/counters are neutral grey; only the active ta
     /const tabTextClass = \(isActive: boolean, isDark: boolean\): string => \{\s*if \(isActive\) return 'text-\(--pos-s-sel-fg\)';\s*return isDark \? 'text-zinc-400' : 'text-gray-600';/,
   );
   assert.doesNotMatch(source, /return isDark \? 'text-white\/70'/);
-  assert.match(source, /className="absolute inset-0 rounded-lg bg-\(--pos-s-sel-bg\)"/);
+  // Founder 01/11: the chosen tab is raised (the kit's yellow depth) out of a sunken well.
+  assert.match(source, /className="absolute inset-0 rounded-lg bg-\(--pos-s-sel-bg\) shadow-\(--pos-s-depth-yellow\)"/);
   assert.doesNotMatch(source, /TAB_ACTIVE_TEXT|text-green-400|text-\[#3b82f6\]/);
 });
 
@@ -2489,8 +2441,8 @@ test('Round 238: the room picker scroll containers hide the native scrollbar (to
   // Every scrollable room grid hides the native rail while keeping scroll (overflow-y-auto).
   assert.match(source, /grid max-h-\[60vh\][^"]*overflow-y-auto scrollbar-hide/);
   assert.match(moduleSource, /grid max-h-\[60vh\][^"]*overflow-y-auto scrollbar-hide/);
-  // The horizontal floor-chip row also hides its rail.
-  assert.match(moduleSource, /flex gap-1\.5 overflow-x-auto scrollbar-hide/);
+  // The horizontal floor-chip row is the kit scroll row (founder 01/11): no rail, a drag, an edge fade.
+  assert.match(moduleSource, /className="pos-scroll-row mb-3 gap-1\.5" role="group"/);
   // No naked overflow-y-auto room grid is left without scrollbar-hide.
   assert.doesNotMatch(source, /grid max-h-\[60vh\][^"]*overflow-y-auto sm:grid-cols-2"/);
   assert.doesNotMatch(moduleSource, /grid max-h-\[60vh\][^"]*overflow-y-auto sm:grid-cols-2"/);
@@ -2965,7 +2917,8 @@ test('Round 348: OrderTabsBar full color map, inactive label+counter grey, activ
 
   // Founder 31/10 replaced the six tab colours with the kit selection: one yellow selected tab.
   assert.doesNotMatch(source, /color: '(?:green|orange|blue|purple|teal|red)'/);
-  assert.match(source, /className="absolute inset-0 rounded-lg bg-\(--pos-s-sel-bg\)"/);
+  // Founder 01/11: the chosen tab is raised (the kit's yellow depth) out of a sunken well.
+  assert.match(source, /className="absolute inset-0 rounded-lg bg-\(--pos-s-sel-bg\) shadow-\(--pos-s-depth-yellow\)"/);
 
   // Inactive (label and counter) is neutral grey; the selected tab reads in the selection ink.
   assert.match(source, /if \(isActive\) return 'text-\(--pos-s-sel-fg\)';\s*return isDark \? 'text-zinc-400' : 'text-gray-600';/);
@@ -3095,6 +3048,12 @@ test('dashboard cancellation prepares paid returns and preserves protected-order
   const prepareStart = source.indexOf('const beginOrderCancellation = async (orderIds: string[], refundHandoff = false): Promise<boolean> => {');
   const prepareEnd = source.indexOf('const handleBulkAction = async', prepareStart);
   assert.ok(prepareStart >= 0 && prepareEnd > prepareStart, 'shared cancel preparation must exist');
+  // Coordinator 01/11: the unpaid outstanding window's «Cancel order» uses the same preparation, and never once
+  // money is recorded.
+  assert.match(
+    source,
+    /const handleOutstandingCancelOrder = \(\) => \{[\s\S]*?outstandingHasRecordedPayment\(pendingPayment\)\) return;[\s\S]*?void beginOrderCancellation\(\[pendingPayment\.orderId\]\);/,
+  );
   const prepare = source.slice(prepareStart, prepareEnd);
   assert.match(prepare, /const refusals = await findCancelRefusals\(orderIds\);/);
   assert.match(prepare, /if \(refusals\.notRecorded\.length > 0\) announceCancelRefusedNotRecorded\(refusals\.notRecorded\);/);
@@ -3180,3 +3139,13 @@ test('the table check prepares a scoped cancellation before it asks the reason',
   assert.match(service, /typeof plan\.generation !== 'string' \|\| typeof plan\.requestId !== 'string' \|\| !plan\.requestId/);
   assert.match(service, /throw new Error\('CANCELLATION_PAYMENT_CHANGED'\);/);
 });
+
+// Founder 01/11 («εδώ δεν έχει βάθος και βγάλε από τα νούμερα που μετράνε τις παραγγελίες τα wrappers»).
+test('OrderTabsBar: a sunken well, the chosen tab raised, counts as plain numbers', () => {
+  const source = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'components', 'OrderTabsBar.tsx'), 'utf8');
+  assert.match(source, /className="flex rounded-xl bg-\(--pos-s-surface-2\) p-1\.5 shadow-\(--pos-s-well\)/);
+  assert.match(source, /<span\s+data-order-tab-count\s+className=\{`-mt-2 self-start text-\[10px\] font-bold tabular-nums/);
+  assert.doesNotMatch(source, /rounded-full px-1\.5 text-center/);
+  assert.doesNotMatch(source, /bg-white\/10 border-white\/20|bg-\[#fbf4e9\]/);
+});
+

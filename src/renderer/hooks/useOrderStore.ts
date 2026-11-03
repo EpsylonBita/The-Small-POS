@@ -15,6 +15,7 @@ import {
 import type { PaymentIntegrityErrorPayload } from '../../lib/ipc-contracts';
 import { pollFiscalReceiptStatus } from '../services/fiscal-status';
 import i18n from '../../lib/i18n';
+import { formatCurrency } from '../utils/format';
 import {
   formatSyncQueueFullMessage,
   syncQueueFullErrorCode,
@@ -1905,6 +1906,24 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
             outcomeUnknown: true,
             errorCode:
               unknown.checkoutInProgress === true ? CHECKOUT_IN_PROGRESS : CHECKOUT_OUTCOME_UNKNOWN,
+          };
+        }
+        // A card SALE of this checkout is not recorded or not known yet (founder 01/11/2026): the cashier's own
+        // sentence, never a generic failure the screen would retry as another payment.
+        const checkoutSale = error as { checkoutCardSale?: boolean; errorCode?: string; amountCents?: number; currency?: string } | null;
+        if (checkoutSale?.checkoutCardSale === true) {
+          get()._setLoading(operation, false);
+          const amount = formatCurrency((checkoutSale.amountCents ?? 0) / 100, checkoutSale.currency ?? undefined);
+          return {
+            success: false,
+            error: checkoutSale.errorCode === 'CHECKOUT_CARD_SALE_UNRESOLVED'
+              ? i18n.t('splitPayment.checkoutSaleUnknown', { amount, defaultValue: "The card terminal did not answer for {{amount}}. Check the terminal's last transaction before taking another payment. This order cannot be left until the card is checked." })
+              : checkoutSale.errorCode === 'CHECKOUT_CARD_SALE_UNRECORDED'
+                ? i18n.t('splitPayment.checkoutSaleHeld', { amount, defaultValue: "A card payment of {{amount}} was already charged for this order and is not saved yet. Save it as this order's payment; do not charge the card again." })
+                : i18n.t('orderDashboard.orderCreateFailed'),
+            savedForRetry: false,
+            errorCode: checkoutSale.errorCode,
+            amountCents: checkoutSale.amountCents,
           };
         }
         // The offline queue is full (offline-week audit, 13/10/2026): the

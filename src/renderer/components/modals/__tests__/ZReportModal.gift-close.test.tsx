@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ZReportModal from '../ZReportModal';
 import { formatCurrency } from '../../../utils/format';
 import { GIFT_CLOSE_LABELS } from '../../../utils/zReport';
+import { pickKitDate } from '../../ui/__tests__/pickKitDate';
 
 const mocks = vi.hoisted(() => {
   const noPhoneShifts = { success: true, open_shifts: [], closed_shifts: [], pending_returns: [], terminals: [] };
@@ -208,8 +209,7 @@ const submitButton = () => screen.getByRole('button', { name: 'modals.zReport.co
 const openMoneyTab = () => fireEvent.click(screen.getByRole('button', { name: /^Money(\s*\d+)?$/ }));
 const giftSection = () => document.querySelector<HTMLElement>('[data-z-report-gift-close]');
 const lastReportDate = () => mocks.bridge.reports.generateZReport.mock.lastCall?.[0]?.date;
-const pickBusinessDay = (date: string) =>
-  fireEvent.change(screen.getByLabelText('modals.zReport.selectBusinessDay'), { target: { value: date } });
+const pickBusinessDay = (date: string) => pickKitDate(screen.getByLabelText('modals.zReport.selectBusinessDay'), date);
 const emit = (event: string) => mocks.listeners.get(event)?.forEach((handler) => handler());
 // Matches rendered outside the gift close section, i.e. the modal's own headline/flow figures.
 const countOutsideGift = (text: string) =>

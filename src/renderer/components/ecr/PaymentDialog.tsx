@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { formatCurrency } from '../../utils/format'
 import { renderModalPortal } from '../../utils/render-modal-portal'
+import { useSupportPaymentCritical } from '../../hooks/useSupportPaymentCritical'
 
 type TransactionStatus =
   | 'pending'
@@ -49,6 +50,7 @@ export const PaymentDialog: React.FC<Props> = ({
   processPayment,
 }) => {
   const { t } = useTranslation()
+  const supportPayment = useSupportPaymentCritical(isOpen)
   const [status, setStatus] = useState<TransactionStatus>('pending')
   const [message, setMessage] = useState('')
   const [response, setResponse] = useState<TransactionResponse | null>(null)
@@ -56,7 +58,7 @@ export const PaymentDialog: React.FC<Props> = ({
 
   const formatAmount = (cents: number) => formatCurrency(cents / 100, currency)
 
-  const handleProcess = useCallback(async () => {
+  const handleProcess = useCallback(async () => supportPayment.run(async () => {
     if (isProcessing) return
 
     setIsProcessing(true)
@@ -67,12 +69,12 @@ export const PaymentDialog: React.FC<Props> = ({
       const result = await processPayment(amount)
       setResponse(result)
       setStatus(result.status)
+      setIsProcessing(false)
 
       if (result.status === 'approved') {
         setMessage(t('ecr.payment.approved', 'Payment approved'))
-        setTimeout(() => {
-          onComplete(result)
-        }, 2000)
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        await onComplete(result)
       } else {
         setMessage(result.errorMessage || t('ecr.payment.failed', 'Payment failed'))
       }
@@ -86,9 +88,10 @@ export const PaymentDialog: React.FC<Props> = ({
     } finally {
       setIsProcessing(false)
     }
-  }, [amount, isProcessing, onComplete, processPayment, t])
+  }), [supportPayment, amount, isProcessing, onComplete, processPayment, t])
 
   const handleCancel = () => {
+    supportPayment.close()
     if (isProcessing) {
       onCancel()
     }
@@ -147,9 +150,10 @@ export const PaymentDialog: React.FC<Props> = ({
         {status !== 'processing' && (
           <button
             onClick={handleCancel}
-            className="absolute top-4 right-4 p-2 rounded-lg text-gray-400 active:text-white active:bg-gray-700/50 transition-colors"
+            aria-label={t('common.actions.close', 'Close')}
+            className="liquid-glass-modal-close absolute top-4 right-4"
           >
-            <X className="w-5 h-5" />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         )}
 
@@ -200,7 +204,7 @@ export const PaymentDialog: React.FC<Props> = ({
             </button>
           ) : status === 'approved' ? (
             <button
-              onClick={() => onComplete(response!)}
+              onClick={() => { if (response) { void supportPayment.run(async () => { await onComplete(response) }) } }}
               className="w-full py-3 rounded-lg bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 active:bg-(--pos-s-surface-2) transition-colors font-medium"
             >
               {t('common.done', 'Done')}

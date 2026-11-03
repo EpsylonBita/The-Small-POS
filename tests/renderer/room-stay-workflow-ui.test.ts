@@ -80,7 +80,7 @@ test('Round 350: RoomFloorChips resets to all-floors on open, hides below 2 floo
   assert.match(modals, /t\('roomsView\.allFloors'/);
   assert.match(modals, /t\('roomsView\.floor', \{ floor/);
   // The chip rail and the room grid both hide the native scrollbar (touch POS).
-  assert.match(modals, /overflow-x-auto scrollbar-hide[^"]*" role="group"/);
+  assert.match(modals, /className="pos-scroll-row[^"]*" role="group"/);
   assert.match(modals, /<RoomFloorChips floors=\{floors\}/);
   assert.match(modals, /grid[\s\S]*?overflow-y-auto scrollbar-hide/);
 });
@@ -125,7 +125,7 @@ test('Round 350: New Reservation form has selected-room chip, required guest nam
 
   // Cancel = red destructive glass; Create = emerald, DISABLED until a name is entered (no submit on empty).
   assert.match(form, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\)[\s\S]*?text-\(--pos-s-fg\)/);
-  assert.match(form, /disabled=\{!name\.trim\(\) \|\| [^\n]+submitting[^\n]*\}\s*\n\s*className="flex-1 rounded-xl border border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\)/);
+  assert.match(form, /disabled=\{!name\.trim\(\) \|\| [^\n]+submitting[^\n]*\}\s*\n\s*className="pos-raised pos-raised--yellow flex-1 rounded-xl border border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\)/);
   assert.match(form, /t\('roomsView\.createReservation'/);
   // The submit handler also fails closed on an empty name.
   assert.match(form, /if \(!name\.trim\(\) \|\| !phone\.trim\(\)\)/);
@@ -142,7 +142,7 @@ test('Round 350: New Check-in form mirrors the required-name + red-cancel/green-
   assert.match(form, /<RoomChip room=\{(?:selectedRoom|room)\}/);
   assert.match(form, /label=\{t\('roomsView\.guestName'[\s\S]*?\n\s*required/);
   assert.match(form, /border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\)[\s\S]*?text-\(--pos-s-fg\)/);
-  assert.match(form, /disabled=\{!name\.trim\(\) \|\| [^\n]+submitting[^\n]*\}\s*\n\s*className="flex-1 rounded-xl border border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\)/);
+  assert.match(form, /disabled=\{!name\.trim\(\) \|\| [^\n]+submitting[^\n]*\}\s*\n\s*className="pos-raised pos-raised--yellow flex-1 rounded-xl border border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\)/);
   assert.match(form, /t\('roomsView\.completeCheckin'/);
 });
 

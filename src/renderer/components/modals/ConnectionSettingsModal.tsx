@@ -1071,7 +1071,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           </nav>
 
           {/* Right column — the active section body. */}
-          <div ref={detailScrollRef} key={activeSettingsSection} className="pos-enter min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1 scrollbar-thin lg:pr-2">
+          <div ref={detailScrollRef} key={activeSettingsSection} className="pos-enter pos-scroll-room min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pb-4 scrollbar-thin">
           <header className="pos-pane-head">
             <h3 className="pos-pane-title">{sectionLabels[activeSettingsSection]}</h3>
             {sectionIntros[activeSettingsSection] && <p className="pos-pane-intro">{sectionIntros[activeSettingsSection]}</p>}

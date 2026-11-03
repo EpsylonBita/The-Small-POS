@@ -57,13 +57,55 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 105;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 107;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
 /// Creates the directory if needed, opens the connection, sets pragmas,
 /// and runs any pending migrations. On corruption or open failure,
 /// deletes the file and retries once.
+/// Acquire the writer reservation before any read in a write transaction.
+/// A DEFERRED snapshot cannot wait when upgraded (SQLITE_BUSY_SNAPSHOT),
+/// even with busy_timeout: Tomikro 21/10/2026. Business callers retain their
+/// existing timeout; remote support uses its own bounded connection.
+pub(crate) fn immediate_transaction(
+    conn: &Connection,
+) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    #[cfg(test)]
+    BEFORE_WRITE_ADMISSION.with(|slot| {
+        let hook = slot.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook(conn);
+        }
+    });
+    rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_WRITE_ADMISSION: std::cell::RefCell<Option<Box<dyn FnOnce(&Connection)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Outermost SAVEPOINT is DEFERRED too. Reserve before entering a nested
+/// rollback scope, but leave an existing caller transaction in its ownership.
+pub(crate) fn with_immediate_admission<T>(
+    conn: &Connection,
+    body: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let reservation = if conn.is_autocommit() {
+        Some(immediate_transaction(conn).map_err(|e| format!("reserve write transaction: {e}"))?)
+    } else {
+        None
+    };
+    let value = body()?;
+    if let Some(reservation) = reservation {
+        reservation
+            .commit()
+            .map_err(|e| format!("commit write transaction: {e}"))?;
+    }
+    Ok(value)
+}
+
 pub fn init(app_data_dir: &Path) -> Result<DbState, String> {
     fs::create_dir_all(app_data_dir).map_err(|e| format!("Failed to create data dir: {e}"))?;
 
@@ -103,6 +145,10 @@ pub fn init(app_data_dir: &Path) -> Result<DbState, String> {
     }
 
     info!("Database initialized (schema v{CURRENT_SCHEMA_VERSION})");
+
+    if crate::support::db::initialize(app_data_dir).is_err() {
+        warn!("Support state unavailable; remote support disabled");
+    }
 
     Ok(DbState {
         conn: Mutex::new(conn),
@@ -370,6 +416,9 @@ where
     CreateSnapshot:
         Fn(&Path, &Connection) -> Result<Option<crate::recovery::RecoveryPointMetadata>, String>,
 {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Migration,
+    );
     let source_metadata = inspect_source_schema_metadata(conn)?;
     if source_metadata.create_schema_version {
         conn.execute_batch(
@@ -834,8 +883,56 @@ where
                 .map_err(|e| e.to_string())
         })?;
     }
+    if current < 106 {
+        run_migration_tx(conn, 106, |conn| {
+            conn.execute_batch("CREATE TABLE IF NOT EXISTS support_txn_marker(command_id TEXT PRIMARY KEY,committed_at TEXT NOT NULL); INSERT OR IGNORE INTO schema_version(version) VALUES(106);")
+                .map_err(|e| format!("v106 support commit marker: {e}"))
+        })?;
+    }
+    // v106 is the remote-support commit marker (pos-support-mcp). Ship v107
+    // with or after it, never alone: a till at 107 would skip v106 for good.
+    if current < 107 {
+        run_migration_tx(conn, 107, migrate_v107)?;
+    }
 
     Ok(())
+}
+
+/// An order's completed payments by key (migration v107): the business-day
+/// financial timestamp reads its first one from the index alone, and the
+/// paid-coverage columns go straight to its completed rows.
+const ORDER_PAYMENTS_ORDER_STATUS_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_order_payments_order_status
+         ON order_payments (order_id, status, created_at);";
+
+/// Migration v107 (02/11/2026): three indexes and no data change, so a
+/// checkout never waits for a Health scan and an enqueue never scans the
+/// whole parity queue. It reads and writes no native repair state.
+/// - `idx_parity_sync_queue_repair_lookalike`: the repair look-alike
+///   quarantine that runs on every enqueue.
+/// - `idx_orders_repair_settlement`: whether this till holds any repair
+///   settlement, asked once per statement by the queue's owner filter.
+/// - `idx_order_payments_order_status`: an order's completed payments.
+fn migrate_v107(conn: &Connection) -> Result<(), String> {
+    for (name, sql) in [
+        (
+            "repair look-alike",
+            crate::sync_queue::PARITY_QUEUE_REPAIR_LOOKALIKE_INDEX_SQL,
+        ),
+        (
+            "repair settlement",
+            crate::sync_queue::ORDERS_REPAIR_SETTLEMENT_INDEX_SQL,
+        ),
+        (
+            "order payment status",
+            ORDER_PAYMENTS_ORDER_STATUS_INDEX_SQL,
+        ),
+    ] {
+        conn.execute_batch(sql)
+            .map_err(|e| format!("v107 {name} index: {e}"))?;
+    }
+    conn.execute_batch("INSERT OR IGNORE INTO schema_version(version) VALUES(107);")
+        .map_err(|e| format!("v107 schema version: {e}"))
 }
 
 const ORDER_PAYMENT_TIP_ROLE_CHECK_V70: &str =
@@ -2313,7 +2410,7 @@ enum PreMigrationRecoveryMode {
 
 const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[
     56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-    98, 99, 100, 101, 102, 103, 104, 105,
+    98, 99, 100, 101, 102, 103, 104, 105, 106, 107,
 ];
 
 fn computed_pending_migrations(
@@ -8375,7 +8472,7 @@ mod tests {
         let (_tmp, conn) = current_file_fixture();
         assert!(super::column_exists(&conn, "orders", "tax_breakdown").unwrap());
         conn.execute("INSERT INTO orders(id,items,total_amount,tax_amount,created_at,updated_at) VALUES('v105','[]',12.4,2.4,'now','now')",[]).unwrap();
-        conn.execute_batch("ALTER TABLE orders DROP COLUMN tax_breakdown; DELETE FROM schema_version WHERE version=105;").unwrap();
+        conn.execute_batch("ALTER TABLE orders DROP COLUMN tax_breakdown; DELETE FROM schema_version WHERE version>=105;").unwrap();
         super::run_migrations_for_test(&conn);
         let row: (f64, f64, Option<String>) = conn
             .query_row(
@@ -8386,7 +8483,7 @@ mod tests {
             .unwrap();
         assert_eq!(row, (12.4, 2.4, None));
         super::run_migrations_for_test(&conn);
-        assert_eq!(super::CURRENT_SCHEMA_VERSION, 105);
+        assert_eq!(max_schema_version(&conn), super::CURRENT_SCHEMA_VERSION);
     }
 
     use super::*;
@@ -9485,6 +9582,7 @@ mod tests {
              DROP TRIGGER IF EXISTS folio_settlement_fixed_lines;
              DROP INDEX IF EXISTS idx_parity_sync_queue_repair_aggregate_order;
              DROP INDEX IF EXISTS idx_parity_sync_queue_repair_dependencies;
+             DROP INDEX IF EXISTS idx_orders_repair_settlement;
              DROP TABLE IF EXISTS repair_conflicts;
              DROP TABLE IF EXISTS repair_attachment_staging;
              DROP TABLE IF EXISTS repair_alias_cache;
@@ -9955,7 +10053,7 @@ mod tests {
 
         assert_eq!(
             computed_pending_migrations(102, false, false, false, false),
-            vec![103, 104, 105]
+            vec![103, 104, 105, 106, 107]
         );
         run_migrations(&conn).expect("v102 to the current schema");
 
@@ -10119,21 +10217,21 @@ mod tests {
             computed_pending_migrations(75, true, false, false, false),
             vec![
                 56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
-                96, 97, 98, 99, 100, 101, 102, 103, 104, 105
+                96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107
             ]
         );
         assert_eq!(
             computed_pending_migrations(78, false, false, false, false),
             vec![
                 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-                100, 101, 102, 103, 104, 105
+                100, 101, 102, 103, 104, 105, 106, 107
             ]
         );
         assert_eq!(
             computed_pending_migrations(79, false, true, false, false),
             vec![
                 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-                100, 101, 102, 103, 104, 105
+                100, 101, 102, 103, 104, 105, 106, 107
             ]
         );
         // A v81 whose columns went missing is re-run even though it is no longer
@@ -10183,7 +10281,10 @@ mod tests {
         // native repair state.
         assert!(native_repair_atomic_only_allowed(104, &[105]));
         assert!(native_repair_atomic_only_allowed(102, &[103, 104, 105]));
-        assert!(!native_repair_atomic_only_allowed(105, &[106]));
+        // v106 (remote-support marker) and v107 (indexes only) read and write
+        // no native repair state either.
+        assert!(native_repair_atomic_only_allowed(105, &[106, 107]));
+        assert!(!native_repair_atomic_only_allowed(107, &[108]));
         assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
@@ -10468,7 +10569,7 @@ mod tests {
             computed_pending_migrations(85, false, false, false, false),
             vec![
                 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104,
-                105
+                105, 106, 107
             ]
         );
         assert!(native_repair_atomic_only_allowed(85, &[86]));
@@ -10480,7 +10581,10 @@ mod tests {
         // guard triggers; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(86, false, false, false, false),
-            vec![87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105]
+            vec![
+                87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105,
+                106, 107
+            ]
         );
         assert!(native_repair_atomic_only_allowed(86, &[87]));
         assert!(native_repair_atomic_only_allowed(85, &[86, 87]));
@@ -10586,7 +10690,10 @@ mod tests {
         // state.
         assert_eq!(
             computed_pending_migrations(87, false, false, false, false),
-            vec![88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105]
+            vec![
+                88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
+                107
+            ]
         );
         assert!(native_repair_atomic_only_allowed(87, &[88]));
         assert!(native_repair_atomic_only_allowed(86, &[87, 88]));
@@ -10628,7 +10735,7 @@ mod tests {
             computed_pending_migrations(83, false, false, false, true),
             vec![
                 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102,
-                103, 104, 105
+                103, 104, 105, 106, 107
             ]
         );
         let error = run_migrations_with_preflight(
@@ -13344,5 +13451,57 @@ mod tests {
             observed_after, 1,
             "after the helper returns, synchronous must be NORMAL (1); got {observed_after}"
         );
+    }
+}
+
+#[cfg(test)]
+mod support_marker_migration_tests {
+    #[test]
+    fn v106_is_additive_idempotent_and_preserves_v105_sales() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let root = std::env::temp_dir().join(format!("support-v106-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let c = rusqlite::Connection::open(root.join("pos.db")).unwrap();
+        super::run_migrations(&c).unwrap();
+        // A till at v105: v107 (Health's indexes) follows v106 and must come off
+        // too, or `current` stays at 107 and v106 is never reached.
+        c.execute_batch(
+            "DROP TABLE support_txn_marker; DELETE FROM schema_version WHERE version IN (106, 107);",
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO orders(id,order_number) VALUES('your_existing_sale','your_order')",
+            [],
+        )
+        .unwrap();
+        let before: i64 = c
+            .query_row("SELECT COUNT(*) FROM orders", [], |r| r.get(0))
+            .unwrap();
+        super::run_migrations(&c).unwrap();
+        super::run_migrations(&c).unwrap();
+        assert_eq!(
+            c.query_row("SELECT MAX(version) FROM schema_version", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            i64::from(super::CURRENT_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            c.query_row("SELECT COUNT(*) FROM orders", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        c.execute(
+            "INSERT INTO support_txn_marker VALUES('your_command','2030-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        assert!(c
+            .execute(
+                "INSERT INTO support_txn_marker VALUES('your_command','2030-01-01T00:00:00Z')",
+                []
+            )
+            .is_err());
+        drop(c);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

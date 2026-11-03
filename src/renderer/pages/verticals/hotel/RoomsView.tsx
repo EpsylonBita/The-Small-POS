@@ -755,7 +755,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               </button>
               <button
                 onClick={handleCheckoutPayment}
-                className="flex-1 py-3 rounded-xl font-medium bg-(--pos-s-yellow) text-black active:bg-yellow-500"
+                className="pos-raised pos-raised--yellow flex-1 py-3 rounded-xl font-medium bg-(--pos-s-yellow) text-black active:bg-yellow-500"
               >
                 {t('roomsView.postPaymentCheckout', { defaultValue: 'Post Payment & Checkout' })}
               </button>
@@ -849,7 +849,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               </button>
               <button
                 onClick={handleAddFolioCharge}
-                className="flex-1 py-3 rounded-xl font-medium bg-(--pos-s-yellow) text-black active:bg-yellow-500"
+                className="pos-raised pos-raised--yellow flex-1 py-3 rounded-xl font-medium bg-(--pos-s-yellow) text-black active:bg-yellow-500"
               >
                 {t('roomsView.actions.addCharge', { defaultValue: 'Add Charge' })}
               </button>
@@ -956,28 +956,27 @@ const Modal: React.FC<{
 
   return renderModalPortal(
     <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      {/* Founder 01/11 («φτιάξε και αυτό που δεν είναι γυαλί»): the shared glass backdrop and shell, like every
+          window; the header has no fill or blur of its own (a nested blur read as a white band), and only the
+          body scrolls. */}
+      <div className="liquid-glass-modal-backdrop absolute inset-0" onClick={onClose} />
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={`relative w-full ${sizeClasses[size]} max-h-[90vh] overflow-y-auto rounded-2xl backdrop-blur-2xl border ring-1 shadow-2xl ${
-          isDark ? 'bg-black/60 border-white/10 ring-white/15 shadow-black/50' : 'bg-white/60 border-white/70 ring-white/60 shadow-black/30'
-        }`}
+        className={`liquid-glass-modal-shell relative flex w-full ${sizeClasses[size]} max-h-[90vh] flex-col overflow-hidden text-(--pos-s-fg)`}
       >
-        <div className={`sticky top-0 z-10 flex items-center justify-between p-4 border-b backdrop-blur-xl ${
-          isDark ? 'border-white/10 bg-black/60' : 'border-white/40 bg-white/60'
-        }`}>
-          <h2 id={titleId} className={`text-lg font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{title}</h2>
+        <div className="flex shrink-0 items-center justify-between border-b border-(--modal-glass-line) p-4">
+          <h2 id={titleId} className="text-lg font-bold text-(--pos-s-fg)">{title}</h2>
           <button
             onClick={onClose}
-            className={`h-9 w-9 rounded-full inline-flex items-center justify-center transition-transform active:scale-95 ${isDark ? 'text-white active:bg-white/15' : 'text-gray-700 active:bg-gray-200'}`}
+            className="liquid-glass-modal-close"
           >
-            <X className="w-5 h-5" />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
-        <div className="p-4">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-hide">{children}</div>
       </div>
     </div>
   );

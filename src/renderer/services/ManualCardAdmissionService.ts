@@ -1,6 +1,7 @@
 import type { TFunction } from 'i18next';
 
 import { getBridge } from '../../lib';
+import { parseEcrDeviceAdmission } from '../utils/ecr-device-type';
 import { getCachedTerminalCredentials } from './terminal-credentials';
 
 /**
@@ -16,6 +17,15 @@ import { getCachedTerminalCredentials } from './terminal-credentials';
  * read, a malformed reply or any lookup error never admits: the caller refuses
  * and records nothing. Callers ask again right before they record.
  *
+ * Founder 01/11/2026 («Ναι, και offline»): when the live answer cannot be had
+ * (offline, a request that fails, a cached or unavailable server reply), the
+ * last known answer decides: native keeps it with its fetch time for this exact
+ * terminal scope (`ecr_get_device_admission`, refreshed online every few
+ * minutes). "No provider connected" there admits the card as `basis: cached`;
+ * a provider connected, or no answer ever read, refuses. The basis and the time
+ * of the answer travel with the admission, so a manual card recorded offline
+ * can be reviewed if a provider was connected meanwhile.
+ *
  * Founder rule 08/10/2026: a device whose plugin is not active, configured and
  * finished has no effect. Native `ecr_get_default_terminal` returns only an
  * enabled card terminal that is admitted (a payment plugin is licensed and
@@ -27,8 +37,14 @@ export const MANUAL_CARD_ADMISSION_PATH = '/api/pos/payments/manual-admission';
 
 export type ManualCardRefusal = 'terminal_configured' | 'provider_connected' | 'unavailable';
 
+export type ManualCardAdmissionBasis = 'live' | 'cached';
+
+/** A recorded manual card's admission, on its payment metadata (native keeps and syncs it). */
+export type ManualCardAdmissionMetadata = { admission_basis: ManualCardAdmissionBasis; admission_checked_at: string };
+
 export type ManualCardAdmission =
-  | { admitted: true }
+  /** `checkedAt`: when the answer that admitted it was read (now for live, the last known answer's time for cached). */
+  | { admitted: true; basis: ManualCardAdmissionBasis; checkedAt: string }
   | { admitted: false; reason: ManualCardRefusal };
 
 export type CardTerminalLookup =
@@ -89,6 +105,24 @@ export async function lookupCardTerminal(): Promise<CardTerminalLookup> {
 const refused = (reason: ManualCardRefusal): ManualCardAdmission => ({ admitted: false, reason });
 
 /**
+ * The last known answer native keeps for this terminal scope: "no provider connected" admits (cached), a provider
+ * connected refuses, no answer or an unreadable one refuses as unavailable. No network.
+ */
+async function lastKnownAdmission(): Promise<ManualCardAdmission> {
+  let snapshot: ReturnType<typeof parseEcrDeviceAdmission> = null;
+  try {
+    snapshot = parseEcrDeviceAdmission(await getBridge().ecr.getDeviceAdmission());
+  } catch {
+    return refused('unavailable');
+  }
+  const card = snapshot?.cardTerminal;
+  if (!card || !card.fetchedAt || !Number.isFinite(Date.parse(card.fetchedAt))) return refused('unavailable');
+  // Native's card admission is "a payment provider is connected for this branch".
+  if (card.admitted) return refused('provider_connected');
+  return { admitted: true, basis: 'cached', checkedAt: card.fetchedAt };
+}
+
+/**
  * The manual card rule, asked fresh every time (on the tap that offers it and
  * again on the confirm that records it). Never throws; never caches.
  */
@@ -100,25 +134,26 @@ export async function admitManualCard(): Promise<ManualCardAdmission> {
   // A copy: the identity this request was asked under, compared again after the read.
   const scope = { ...getCachedTerminalCredentials() };
   if (!scope.organizationId || !scope.branchId || !scope.terminalId) return refused('unavailable');
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) return refused('unavailable');
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return lastKnownAdmission();
 
   let response: unknown;
   try {
     response = await getBridge().adminApi.fetchFromAdmin(MANUAL_CARD_ADMISSION_PATH, { method: 'GET' });
   } catch {
-    return refused('unavailable');
+    return lastKnownAdmission();
   }
   // The answer belongs to the identity that asked; a re-pair during the read voids it.
   const after = getCachedTerminalCredentials();
   if (after.organizationId !== scope.organizationId || after.branchId !== scope.branchId
     || after.terminalId !== scope.terminalId) return refused('unavailable');
 
-  // Only a live server answer counts: the native generic GET may serve its
-  // cache after an error (`meta.source: 'cache'`, `offlineFallback`), and a
-  // cached "no provider" must never admit money after a provider is connected.
-  if (!isRow(response) || response.success !== true) return refused('unavailable');
+  // A live answer decides when there is one. The native generic GET may serve
+  // its own cache after an error (`meta.source: 'cache'`, `offlineFallback`):
+  // that is not a live answer, so the last known admission decides instead
+  // (founder 01/11/2026), as for a refused or failed request.
+  if (!isRow(response) || response.success !== true) return lastKnownAdmission();
   const meta = isRow(response.meta) ? response.meta : null;
-  if (!meta || meta.source !== 'remote' || meta.offlineFallback === true) return refused('unavailable');
+  if (!meta || meta.source !== 'remote' || meta.offlineFallback === true) return lastKnownAdmission();
   const body = isRow(response.data) ? response.data : null;
   if (!body || body.success !== true || body.admission_version !== 1
     || body.organization_id !== scope.organizationId || body.branch_id !== scope.branchId
@@ -126,7 +161,20 @@ export async function admitManualCard(): Promise<ManualCardAdmission> {
     return refused('unavailable');
   }
   if (body.provider_connected) return refused('provider_connected');
-  return { admitted: true };
+  return { admitted: true, basis: 'live', checkedAt: new Date().toISOString() };
+}
+
+/**
+ * What a recorded manual card carries for the admin's read-time review: how it
+ * was admitted and when that answer was read (Android `manualCardAdmissionMetadata`).
+ * Nothing without an admission. Native keeps these on the payment and syncs them.
+ */
+export function manualCardAdmissionMetadata(
+  admission: ManualCardAdmission | null | undefined,
+): ManualCardAdmissionMetadata | undefined {
+  return admission?.admitted
+    ? { admission_basis: admission.basis, admission_checked_at: admission.checkedAt }
+    : undefined;
 }
 
 export type ManualCardNotice = ManualCardRefusal | 'terminal_not_ready' | 'terminal_check_failed';

@@ -7,6 +7,22 @@ use tracing::warn;
 
 use crate::{db, diagnostics};
 
+mod recipe_telemetry;
+pub use recipe_telemetry::flush_recipe_telemetry;
+
+/// Bind a recipe's own audit to local identity without a credential fallback.
+/// Only its hash is used as an outbox key; these fields never enter the event.
+pub(crate) fn recipe_audit_scope(conn: &rusqlite::Connection, mut payload: Value) -> Value {
+    if payload.is_object() {
+        if let Ok(scope) = crate::support::identity::local(conn) {
+            payload["organizationId"] = json!(scope.organization_id);
+            payload["branchId"] = json!(scope.branch_id);
+            payload["terminalId"] = json!(scope.terminal_id);
+        }
+    }
+    payload
+}
+
 const SETTINGS_CATEGORY: &str = "diagnostics";
 const CRITICAL_SUPPRESS_MINUTES: i64 = 15;
 const HIGH_SUPPRESS_MINUTES: i64 = 30;

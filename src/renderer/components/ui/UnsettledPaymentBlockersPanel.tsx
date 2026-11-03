@@ -1,4 +1,4 @@
-import { AlertTriangle, Banknote, CreditCard, RotateCcw, Undo2 } from "lucide-react";
+import { AlertTriangle, CreditCard, RotateCcw, Undo2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { UnsettledPaymentBlocker } from "../../../lib/ipc-contracts";
@@ -14,6 +14,7 @@ import {
 import { formatCurrency, formatDateTime } from "../../utils/format";
 import { setAsideResolvingKey } from "../../utils/paymentSetAside";
 import { isManualTwintRecord, unsavedResolvingKey, unsavedSavingKey } from "../../utils/unsavedPayments";
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 
 interface UnsettledPaymentBlockersPanelProps {
   blockers: UnsettledPaymentBlocker[];
@@ -48,23 +49,20 @@ interface UnsettledPaymentBlockersPanelProps {
   onResolveTwintReturned?: (blocker: UnsettledPaymentBlocker) => void;
   /**
    * "Close without recording money (manager)" for the held corrections of a
-   * cancelled order (`edit_settlement_not_saved`, variant `order_cancelled`):
-   * their editor can never be reopened (Tomikro #00055, 28/10/2026). The
+   * live or cancelled order (`edit_settlement_not_saved`). The
    * caller asks the manager approval; nothing is charged or returned.
    */
   onCloseHeldEdit?: (blocker: UnsettledPaymentBlocker) => void;
+  onDiscardHeldEdit?: (blocker: UnsettledPaymentBlocker) => void;
   resolvingKey?: string | null;
 }
 
 /** Busy key of a held-correction close, shared with the caller. */
 export const heldEditClosingKey = (orderId: string) => `held-edit:${orderId}`;
 
-/** A held correction whose order is cancelled: only a manager closes it here. */
-export function isCancelledOrderHeldEdit(blocker: UnsettledPaymentBlocker): boolean {
-  return (
-    blocker.reasonCode === "edit_settlement_not_saved" &&
-    blocker.reasonVariant === "order_cancelled"
-  );
+/** Native re-proves non-application before a manager can close held corrections. */
+export function isHeldEdit(blocker: UnsettledPaymentBlocker): boolean {
+  return blocker.reasonCode === "edit_settlement_not_saved";
 }
 
 function getMethodBadgeClasses(method: string): string {
@@ -82,7 +80,7 @@ function getMethodBadgeClasses(method: string): string {
 
 function getMethodIcon(method: string) {
   if (method === "cash") {
-    return <Banknote className="h-3.5 w-3.5" />;
+    return <CashHandIcon className="h-3.5 w-3.5" />;
   }
   if (method === "card") {
     return <CreditCard className="h-3.5 w-3.5" />;
@@ -113,6 +111,7 @@ export function UnsettledPaymentBlockersPanel({
   onResolveUnsavedPayment,
   onResolveTwintReturned,
   onCloseHeldEdit,
+  onDiscardHeldEdit,
   resolvingKey = null,
 }: UnsettledPaymentBlockersPanelProps) {
   const { t } = useTranslation();
@@ -475,8 +474,11 @@ export function UnsettledPaymentBlockersPanel({
                 </div>
               )}
 
-              {typeof onCloseHeldEdit === "function" && isCancelledOrderHeldEdit(blocker) && (
+              {typeof onCloseHeldEdit === "function" && isHeldEdit(blocker) && (
                 <div className="mt-4 flex flex-wrap gap-2">
+                  <p className="w-full text-sm text-amber-800 dark:text-amber-200">
+                    {t("modals.zReport.heldEditApprovalSubtitle")}
+                  </p>
                   <button
                     type="button"
                     disabled={Boolean(resolvingKey)}
@@ -496,6 +498,11 @@ export function UnsettledPaymentBlockersPanel({
                           defaultValue: "Close without recording money (manager)",
                         })}
                   </button>
+                  {onDiscardHeldEdit && <button type="button" disabled={Boolean(resolvingKey)}
+                    onClick={() => onDiscardHeldEdit(blocker)} data-testid={`discard-held-edit-${blocker.orderId}`}
+                    className="min-h-11 rounded-2xl border px-3 py-2 text-sm font-semibold">
+                    {t('modals.menu.editDiscard')}
+                  </button>}
                 </div>
               )}
 
@@ -512,7 +519,7 @@ export function UnsettledPaymentBlockersPanel({
                       : "border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-border)";
                     const icon =
                       method === "cash" ? (
-                        <Banknote className="h-4 w-4" />
+                        <CashHandIcon className="h-4 w-4" />
                       ) : (
                         <CreditCard className="h-4 w-4" />
                       );

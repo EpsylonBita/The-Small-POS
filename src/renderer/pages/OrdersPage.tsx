@@ -29,6 +29,7 @@ import { KitchenStageBadge, selectActiveKitchenStage } from '../components/order
 import { useLocalPreparationSnapshot } from '../hooks/useLocalPreparation';
 import type { LocalPreparationPhase, LocalPreparationSnapshot } from '../services/KdsLocalPhaseStore';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../lib';
+import { KitDateField } from '../components/ui/KitDateField';
 
 interface OrderItem {
   id: string;
@@ -116,26 +117,22 @@ const normalizeOrderType = (value: string | undefined): string => {
 const getDisplayOrderNumber = (order: Order): string =>
   formatCompactOrderNumberForDisplay(order.order_number, order.created_at) || order.order_number;
 
-// Per-status PILL skins (background + border + text), light and dark. Data-driven via the `dark:`
-// Tailwind variant (darkMode: 'class' + the theme context's root `.dark` toggle) so each status is one
-// source of truth -- no per-call isDark branching. Base palette stays white/black/grey/yellow with small
-// semantic accents (amber/green/red); unknown statuses fall back to the yellow pending
-// skin. No hover utilities: the pill is informational, not an action.
-const ORDER_STATUS_PILL_CLASSES: Record<string, string> = {
-  pending: 'bg-amber-200 text-amber-900 border-amber-300 dark:bg-zinc-800 dark:text-amber-200 dark:border-zinc-700',
-  confirmed: 'bg-yellow-200 text-yellow-950 border-yellow-300 dark:bg-zinc-800 dark:text-yellow-100 dark:border-zinc-700',
-  processing: 'bg-zinc-200 text-zinc-900 border-zinc-300 dark:bg-zinc-500/20 dark:text-zinc-100 dark:border-zinc-400/35',
-  preparing: 'bg-zinc-200 text-zinc-900 border-zinc-300 dark:bg-zinc-500/20 dark:text-zinc-100 dark:border-zinc-400/35',
-  ready: 'bg-green-200 text-green-900 border-green-300 dark:bg-zinc-800 dark:text-green-200 dark:border-zinc-700',
-  out_for_delivery: 'bg-amber-300 text-amber-950 border-amber-400 dark:bg-zinc-800 dark:text-amber-100 dark:border-zinc-700',
-  completed: 'bg-gray-300 text-gray-900 border-gray-400 dark:bg-zinc-600/60 dark:text-zinc-100 dark:border-zinc-500/60',
-  delivered: 'bg-gray-300 text-gray-900 border-gray-400 dark:bg-zinc-600/60 dark:text-zinc-100 dark:border-zinc-500/60',
-  cancelled: 'bg-red-200 text-red-900 border-red-300 dark:bg-zinc-800 dark:text-red-200 dark:border-zinc-700',
+// Founder 01/11: a row's status is a plain word whose colour says it (no pill). A completed or delivered
+// order says nothing (the normal end of an order); a cancelled one says so in larger red words and its card
+// glows red from the edges inward (glassmorphism.css .pos-neon-bad). Unknown statuses read as pending.
+const ORDER_STATUS_WORD_CLASSES: Record<string, string> = {
+  pending: 'text-(--pos-s-warn)',
+  confirmed: 'text-(--pos-s-fg)',
+  processing: 'text-(--pos-s-fg)',
+  preparing: 'text-(--pos-s-fg)',
+  ready: 'text-(--pos-s-ok)',
+  out_for_delivery: 'text-(--pos-s-warn)',
 };
+const ORDER_STATUS_SILENT = new Set(['completed', 'delivered']);
 
-const getOrderStatusPillClasses = (status?: string) => {
+const getOrderStatusWordClasses = (status?: string) => {
   const normalized = (status || '').toLowerCase();
-  return ORDER_STATUS_PILL_CLASSES[normalized] || ORDER_STATUS_PILL_CLASSES.pending;
+  return ORDER_STATUS_WORD_CLASSES[normalized] || ORDER_STATUS_WORD_CLASSES.pending;
 };
 
 const ORDER_STATUS_FILTER_OPTIONS = [
@@ -810,7 +807,7 @@ const OrdersPage: React.FC = () => {
                       <label className="text-xs mb-1 block opacity-70">
                         {t('orders.filters.dateFrom', { defaultValue: 'Date From' })}
                       </label>
-                      <input
+                      <KitDateField
                         type="date"
                         value={dateFrom}
                         onChange={(e) => setDateFrom(e.target.value)}
@@ -879,7 +876,8 @@ const OrdersPage: React.FC = () => {
                     key={order.id}
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className={`p-5 rounded-xl border cursor-pointer transition-all ${
+                    data-order-status={orderStatus}
+                    className={`p-5 rounded-xl border cursor-pointer transition-all ${orderStatus === 'cancelled' ? 'pos-neon-bad ' : ''}${
                       order.is_test
                         ? isDark
                           ? 'border-cyan-600 bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2)'
@@ -899,9 +897,15 @@ const OrdersPage: React.FC = () => {
                               TEST / SANDBOX
                             </span>
                           )}
-                          <span className={`inline-flex items-center justify-center rounded-full border px-3 py-1.5 text-[13px] leading-none font-bold whitespace-nowrap ${getOrderStatusPillClasses(order.status)}`}>
-                            {getOrderStatusLabel(order.status)}
-                          </span>
+                          {orderStatus === 'cancelled' ? (
+                            <span className="text-xl font-black whitespace-nowrap text-(--pos-s-bad) first-letter:uppercase">
+                              {getOrderStatusLabel(order.status)}
+                            </span>
+                          ) : !ORDER_STATUS_SILENT.has(orderStatus) ? (
+                            <span className={`text-sm font-bold whitespace-nowrap first-letter:uppercase ${getOrderStatusWordClasses(order.status)}`}>
+                              {getOrderStatusLabel(order.status)}
+                            </span>
+                          ) : null}
                           {kitchenStage && <KitchenStageBadge phase={kitchenStage} size="md" />}
                           <div className={`flex items-center gap-1 text-xs font-medium ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
                             {getOrderTypeIcon(order.order_type)}

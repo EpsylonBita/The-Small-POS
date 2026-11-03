@@ -17,7 +17,7 @@ test('TablesPage keeps table controls rounded, touch-first, and on-palette', () 
   assert.match(source, /flex items-center gap-1\.5 px-2\.5 py-1 rounded-2xl text-xs font-medium/);
   assert.match(source, /px-3 py-1\.5 rounded-2xl text-xs font-medium/);
   assert.match(source, /px-4 py-2 rounded-2xl text-sm font-medium/);
-  assert.match(source, /p-2 rounded-2xl/);
+  assert.match(source, /className="liquid-glass-modal-close[^"]*"/);
   assert.match(source, /w-8 h-8 rounded-2xl flex items-center justify-center/);
 });
 

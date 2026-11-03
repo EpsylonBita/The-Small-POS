@@ -375,7 +375,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
             <button
               type="button"
               onClick={openCreateService}
-              className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl border border-yellow-500 bg-yellow-400 text-black font-medium transition-transform active:bg-yellow-500 active:scale-95"
+              className="pos-raised pos-raised--yellow inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl border border-yellow-500 bg-yellow-400 text-black font-medium transition-transform active:bg-yellow-500 active:scale-95"
             >
               <Plus className="w-4 h-4" />
               {t('serviceCatalog.addService', { defaultValue: 'Add Service' })}
@@ -557,9 +557,9 @@ export const ServiceCatalogView: React.FC = memo(() => {
                 onClick={closeServiceModal}
                 disabled={isSaving}
                 aria-label={t('common.close', { defaultValue: 'Close' })}
-                className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition-transform active:scale-95 ${isDark ? 'text-zinc-300 active:bg-white/10' : 'text-gray-600 active:bg-black/5'}`}
+                className="liquid-glass-modal-close"
               >
-                <X className="h-5 w-5" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 

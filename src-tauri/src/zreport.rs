@@ -1414,6 +1414,15 @@ fn load_active_staff_closeout_blockers(
     branch_id: &str,
     issued_cutoff: Option<&str>,
 ) -> Result<Vec<Value>, String> {
+    load_active_staff_closeout_blockers_with_policy(conn, branch_id, issued_cutoff, false)
+}
+
+fn load_active_staff_closeout_blockers_with_policy(
+    conn: &Connection,
+    branch_id: &str,
+    issued_cutoff: Option<&str>,
+    strict: bool,
+) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT
@@ -1443,7 +1452,12 @@ fn load_active_staff_closeout_blockers(
             }))
         })
         .map_err(|e| format!("query active closeout staff blockers: {e}"))?;
-    Ok(rows.filter_map(Result::ok).collect())
+    if strict {
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| "unavailable".into())
+    } else {
+        Ok(rows.filter_map(Result::ok).collect())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1621,20 +1635,68 @@ pub(crate) fn get_closeout_readiness_snapshot(
     payload: &Value,
 ) -> Result<Value, String> {
     let branch_id = resolve_closeout_branch_id(payload);
+    closeout_readiness_snapshot(db, payload, branch_id, false)
+}
 
+/// Query-only support variant. Identity was read from local non-secret mirrors;
+/// never resolve it via a credential or use a credential-reading sync helper.
+pub(crate) fn get_support_closeout_readiness_snapshot(
+    db: &DbState,
+    scope: &crate::support::guards::Scope,
+) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|_| "unavailable")?;
+    conn.execute_batch("PRAGMA query_only=ON; BEGIN DEFERRED")
+        .map_err(|_| "unavailable")?;
+    drop(conn);
+    let result = (|| {
+        let conn = db.conn.lock().map_err(|_| "unavailable")?;
+        if crate::support::identity::local(&conn)? != *scope {
+            return Err("unavailable".into());
+        }
+        drop(conn);
+        closeout_readiness_snapshot(
+            db,
+            &serde_json::json!({"branchId":scope.branch_id}),
+            scope.branch_id.clone(),
+            true,
+        )
+    })();
+    db.conn
+        .lock()
+        .map_err(|_| "unavailable")?
+        .execute_batch("ROLLBACK")
+        .map_err(|_| "unavailable")?;
+    result
+}
+
+fn closeout_readiness_snapshot(
+    db: &DbState,
+    payload: &Value,
+    branch_id: String,
+    support: bool,
+) -> Result<Value, String> {
     let (window, active_staff_blockers, payment_blockers, gift_close, last_z_report) = {
         let conn = db
             .lock_traced("z_report_readiness")
             .map_err(|e| e.to_string())?;
         let window = resolve_effective_z_report_window(&conn, &branch_id, payload);
-        let active_staff_blockers = load_active_staff_closeout_blockers(
-            &conn,
-            &branch_id,
-            window.cutoff_at.as_deref().filter(|_| window.frozen),
-        )?;
+        let cutoff = window.cutoff_at.as_deref().filter(|_| window.frozen);
+        let active_staff_blockers = if support {
+            load_active_staff_closeout_blockers_with_policy(&conn, &branch_id, cutoff, true)?
+        } else {
+            load_active_staff_closeout_blockers(&conn, &branch_id, cutoff)?
+        };
         let payment_blockers =
             load_unsettled_payment_blockers_for_window(&conn, &branch_id, &window)?;
         let gift_close = load_gift_close_report_for_effective_window(&conn, &branch_id, &window)?;
+        if support
+            && gift_close
+                .blockers
+                .iter()
+                .any(|b| b.code == GIFT_CLOSE_PROOF_UNAVAILABLE)
+        {
+            return Err("unavailable".into());
+        }
         let last_z_report = conn
             .query_row(
                 // W4b-iii: cents-with-real-fallback shim (removed in 4e).
@@ -1668,7 +1730,15 @@ pub(crate) fn get_closeout_readiness_snapshot(
         )
     };
 
-    let sync_snapshot = crate::sync::capture_unsynced_sync_queue_snapshot(db)?;
+    let (sync_snapshot, queued_closeouts) = if support {
+        let conn = db.conn.lock().map_err(|_| "unavailable")?;
+        let snapshot = crate::sync::capture_support_sync_queue_snapshot(&conn, &branch_id)?;
+        // Count closeouts, not the unrelated queues included in UNSYNCED_QUEUE.
+        let queued = crate::sync::support_queued_closeout_count(&conn)?;
+        (snapshot, Some(queued))
+    } else {
+        (crate::sync::capture_unsynced_sync_queue_snapshot(db)?, None)
+    };
     let lower_bound_mode = match window.lower_bound_mode {
         LowerBoundMode::Inclusive => "inclusive",
         LowerBoundMode::Exclusive => "exclusive",
@@ -1687,16 +1757,28 @@ pub(crate) fn get_closeout_readiness_snapshot(
             serde_json::json!({ "status": "not_collected", "reason": "branch unknown" })
         } else {
             let scope = current_fiscal_close_scope(&conn, &branch_id);
-            crate::fiscal::close_day_guard::fiscal_queue_evidence(&conn, &scope).unwrap_or_else(
-                |error| {
-                    serde_json::json!({
-                        "status": "unavailable",
-                        "error": crate::print::safe_operational_error(Some(error), 512),
-                    })
-                },
-            )
+            let evidence = crate::fiscal::close_day_guard::fiscal_queue_evidence(&conn, &scope);
+            if support && evidence.is_err() {
+                return Err("unavailable".into());
+            }
+            evidence.unwrap_or_else(|error| {
+                serde_json::json!({
+                    "status": "unavailable",
+                    "error": crate::print::safe_operational_error(Some(error), 512),
+                })
+            })
         };
-        let last_attempt = load_last_closeout_attempt(&conn)
+        let attempt = if support {
+            let raw: Option<String> = conn.query_row(
+                "SELECT setting_value FROM local_settings WHERE setting_category=?1 AND setting_key=?2",
+                params![LAST_CLOSEOUT_ATTEMPT_CATEGORY,LAST_CLOSEOUT_ATTEMPT_KEY], |r| r.get(0),
+            ).optional().map_err(|_| "unavailable")?;
+            raw.map(|raw| serde_json::from_str::<CloseoutAttempt>(&raw).map_err(|_| "unavailable"))
+                .transpose()?
+        } else {
+            load_last_closeout_attempt(&conn)
+        };
+        let last_attempt = attempt
             .and_then(|attempt| serde_json::to_value(attempt).ok())
             .unwrap_or_else(|| {
                 serde_json::json!({
@@ -1707,7 +1789,7 @@ pub(crate) fn get_closeout_readiness_snapshot(
         (fiscal, last_attempt)
     };
 
-    Ok(serde_json::json!({
+    let mut value = serde_json::json!({
         "branchId": if branch_id.trim().is_empty() { Value::Null } else { Value::String(branch_id) },
         "window": {
             "reportDate": window.report_date,
@@ -1737,7 +1819,11 @@ pub(crate) fn get_closeout_readiness_snapshot(
         "giftCloseProof": gift_close.readiness_value(),
         "lastZReport": last_z_report,
         "lastCloseoutAttempt": last_closeout_attempt,
-    }))
+    });
+    if let Some(count) = queued_closeouts {
+        value["queuedCloseouts"] = serde_json::json!({"count":count});
+    }
+    Ok(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -5827,7 +5913,14 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     }
     let currency = common_report_currency(report_currency_from_staff(&staff_reports, &gift_close));
     let presentation = load_z_report_presentation(db, &conn, &branch_id);
+    let discarded_corrections = crate::edit_settlement_recovery::discarded_corrections(
+        &conn,
+        &branch_id,
+        &period_start,
+        &period_end,
+    )?;
     let mut report_json = serde_json::json!({
+        "discardedCorrections": discarded_corrections,
         "vatBreakdown": vat_breakdown,
         "currency": currency,
         "presentation": presentation,
@@ -7782,7 +7875,14 @@ fn build_z_report_for_window(
         )?
     };
     let presentation = load_z_report_presentation(db, &conn, &branch_id);
+    let discarded_corrections = crate::edit_settlement_recovery::discarded_corrections(
+        &conn,
+        &branch_id,
+        &period_start,
+        &period_end,
+    )?;
     let mut report_json = serde_json::json!({
+        "discardedCorrections": discarded_corrections,
         "vatBreakdown": vat_breakdown,
         "currency": currency,
         "presentation": presentation,

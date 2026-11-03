@@ -4,7 +4,6 @@ import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import {
   TrendingUp,
-  Banknote,
   ShoppingCart,
   CheckCircle,
   Download,
@@ -36,6 +35,7 @@ import {
   OrderTypeChart
 } from '../components/reports/ReportCharts';
 import { getBridge } from '../../lib';
+import { CashHandIcon } from '../components/icons/PaymentMethodIcons';
 
 
 const ReportsPage: React.FC = () => {
@@ -251,7 +251,7 @@ const ReportsPage: React.FC = () => {
             delay={0.1}
           />
           <MetricCard
-            icon={Banknote}
+            icon={CashHandIcon}
             title={t('reports.sales.totalSales')}
             value={formatMoney(todayStats?.totalSales ?? 0)}
             subtitle={t('reports.trends.revenueChange')}

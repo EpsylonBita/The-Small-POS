@@ -28,7 +28,7 @@ test('SyncRecoveryModal shell is amber/neutral, touch-first, and hides native sc
   // Wave ΣΤ6: the warn notice keeps its tint in dark (no zinc dark halves over it).
   assert.match(source, /role="status"[\s\S]*?animate-spin/);
   assert.match(source, /<summary className="min-h-touch(?![\w.-])/);
-  assert.match(source, /min-h-touch min-w-touch rounded-2xl/);
+  assert.match(source, /className="liquid-glass-modal-close[^"]*"/);
 });
 
 test('SyncRecoveryModal keeps recovery loading, navigation, and panel wiring unchanged', () => {

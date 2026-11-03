@@ -480,7 +480,7 @@ export function RepairMoneyPanel({
               payload: { reason: deliveryReason.trim() || null },
             }),
           )}
-          className="min-h-11 rounded-xl bg-(--pos-s-yellow) px-4 font-semibold text-black disabled:opacity-45"
+          className="pos-raised pos-raised--yellow min-h-11 rounded-xl bg-(--pos-s-yellow) px-4 font-semibold text-black disabled:opacity-45"
         >
           {t('repairs.money.deliver', { defaultValue: 'Deliver repair' })}
         </button>

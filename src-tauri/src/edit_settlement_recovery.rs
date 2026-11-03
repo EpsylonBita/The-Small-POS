@@ -3,6 +3,7 @@
 use crate::{db, table_session_cache};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 fn amount(value: &Value, key: &str) -> Result<i64, String> {
     let value = match value.get(key).filter(|v| !v.is_null()) {
@@ -207,8 +208,8 @@ pub(crate) fn capture_order_headers(conn: &Connection, order: &str) -> Result<Va
             [order],
             |row| row.get(0),
         )
-        .map_err(|e| e.to_string())?;
-    serde_json::from_str(&raw).map_err(|e| e.to_string())
+        .map_err(storage_error)?;
+    serde_json::from_str(&raw).map_err(|_| "EDIT_CANONICAL_SNAPSHOT_INVALID".to_string())
 }
 /// The till's header equals the server's canonical one. Null and blank text
 /// are the same, text compares trimmed, and numbers compare to 1e-9: a
@@ -266,6 +267,7 @@ pub(crate) fn same_canonical_header(left: &Value, right: &Value) -> bool {
 pub(crate) struct EditRefusal {
     pub code: String,
     pub field: Option<&'static str>,
+    pub detail_hash: Option<String>,
 }
 
 impl EditRefusal {
@@ -273,6 +275,7 @@ impl EditRefusal {
         Self {
             code: refusal_code(code).to_string(),
             field,
+            detail_hash: edit_detail_hash(code),
         }
     }
 }
@@ -354,6 +357,109 @@ fn refusal_field(name: &str) -> Option<&'static str> {
         .find(|known| *known == name)
 }
 
+/// SQLite's primary class wins over any private diagnostic detail.
+pub(crate) fn storage_error(error: rusqlite::Error) -> String {
+    use rusqlite::ErrorCode;
+    let code = match error.sqlite_error_code() {
+        Some(ErrorCode::DatabaseBusy) => "EDIT_LOCAL_STORAGE_BUSY",
+        Some(ErrorCode::DatabaseLocked) => "EDIT_LOCAL_STORAGE_LOCKED",
+        Some(ErrorCode::ConstraintViolation) => "EDIT_LOCAL_STORAGE_CONSTRAINT",
+        Some(
+            ErrorCode::SystemIoFailure
+            | ErrorCode::DiskFull
+            | ErrorCode::ReadOnly
+            | ErrorCode::CannotOpen,
+        ) => "EDIT_LOCAL_STORAGE_IO",
+        _ => storage_error_code(&error.to_string()).unwrap_or("EDIT_LOCAL_STORAGE_OTHER"),
+    };
+    code.to_string()
+}
+
+/// Also covers SQLite errors wrapped by a dependency or an older journal.
+fn storage_error_code(error: &str) -> Option<&'static str> {
+    let message = error.to_ascii_lowercase();
+    if message.contains("sqlite_locked")
+        || message.contains("database table is locked")
+        || message.contains("database schema is locked")
+        || message.contains("a table in the database is locked")
+    {
+        Some("EDIT_LOCAL_STORAGE_LOCKED")
+    } else if message.contains("sqlite_busy")
+        || message.contains("database is locked")
+        || message.contains("database is busy")
+        || message.contains("database file is locked")
+    {
+        Some("EDIT_LOCAL_STORAGE_BUSY")
+    } else if [
+        "sqlite_constraint",
+        "unique constraint",
+        "foreign key constraint",
+        "not null constraint",
+        "check constraint",
+        "constraint failed",
+        "constraint violation",
+    ]
+    .iter()
+    .any(|token| message.contains(token))
+    {
+        Some("EDIT_LOCAL_STORAGE_CONSTRAINT")
+    } else if [
+        "sqlite_ioerr",
+        "sqlite_full",
+        "sqlite_readonly",
+        "sqlite_cantopen",
+        "disk i/o",
+        "disk is full",
+        "disk full",
+        "read-only",
+        "readonly database",
+        "cannot open",
+        "unable to open database",
+        "unable to open the database",
+    ]
+    .iter()
+    .any(|token| message.contains(token))
+    {
+        Some("EDIT_LOCAL_STORAGE_IO")
+    } else if [
+        "sqlite_error",
+        "no such table",
+        "no such column",
+        "syntax error",
+        "database disk image is malformed",
+    ]
+    .iter()
+    .any(|token| message.contains(token))
+    {
+        Some("EDIT_LOCAL_STORAGE_OTHER")
+    } else {
+        None
+    }
+}
+
+/// String-returning queue helpers may already have a fixed business code.
+pub(crate) fn storage_message(error: impl std::fmt::Display) -> String {
+    let message = error.to_string();
+    let code = refusal_code(&message);
+    if code == "EDIT_LOCAL_OPERATION_FAILED" {
+        "EDIT_LOCAL_STORAGE_OTHER".to_string()
+    } else {
+        code.to_string()
+    }
+}
+
+fn edit_detail_hash(error: &str) -> Option<String> {
+    (refusal_code(error) == "EDIT_LOCAL_OPERATION_FAILED" && error != "EDIT_LOCAL_OPERATION_FAILED")
+        .then(|| crate::core_helpers::lower_hex(&Sha256::digest(error.as_bytes()))[..8].to_string())
+}
+
+pub(crate) fn valid_edit_detail_hash(value: &str) -> bool {
+    value.len() == 8
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// The fixed code at the head of a refusal (`EDIT_X: detail` → `EDIT_X`).
 pub(crate) fn refusal_code(error: &str) -> &str {
     // Money-action approval errors carry required scope/approval metadata.
@@ -378,10 +484,20 @@ pub(crate) fn refusal_code(error: &str) -> &str {
     if crate::diagnostics::is_runtime_error_code(code) {
         code
     } else {
-        // SQL, lock, I/O and unexpected dependency failures share a fixed
-        // local-operation class. Never export their private detail or lose
-        // the fact that local persistence/admission failed.
-        "EDIT_LOCAL_OPERATION_FAILED"
+        // Recognize the historic Tomikro refusals as well as new source codes.
+        if error.starts_with("Requested cashier shift ") && error.contains("does not exist") {
+            "EDIT_PAYMENT_COLLECTOR_UNAVAILABLE"
+        } else if error.starts_with("Requested shift ")
+            && error.contains("is not a cashier or manager drawer")
+        {
+            "PAYMENT_COLLECTOR_NOT_DRAWER_OWNER"
+        } else if error.starts_with("Cashier-collected ")
+            && error.contains("require a cashier shift context")
+        {
+            "PAYMENT_COLLECTOR_SHIFT_REQUIRED"
+        } else {
+            storage_error_code(error).unwrap_or("EDIT_LOCAL_OPERATION_FAILED")
+        }
     }
 }
 
@@ -411,6 +527,7 @@ pub(crate) fn log_edit_refusal(stage: &'static str, refusal: &EditRefusal) {
         edit_stage = stage,
         edit_field = field,
         refusal = refusal_code(&refusal.code),
+        edit_detail_hash = refusal.detail_hash.as_deref(),
         "Order edit refused"
     );
 }
@@ -462,18 +579,272 @@ mod refusal_contract_tests {
 
     #[test]
     fn edit_settlement_local_failures_are_classified_without_private_details() {
-        for error in [
-            "read fresh payment operating scope: no such column: PRIVATE_CANARY",
-            "database is locked",
-            "disk I/O error",
-            "poisoned lock: PRIVATE_CANARY",
+        for (error, expected) in [
+            (
+                "read fresh payment operating scope: no such column: PRIVATE_CANARY",
+                "EDIT_LOCAL_STORAGE_OTHER",
+            ),
+            ("database is locked", "EDIT_LOCAL_STORAGE_BUSY"),
+            ("disk I/O error", "EDIT_LOCAL_STORAGE_IO"),
+            (
+                "poisoned lock: PRIVATE_CANARY",
+                "EDIT_LOCAL_OPERATION_FAILED",
+            ),
         ] {
-            assert_eq!(EditRefusal::from(error).code, "EDIT_LOCAL_OPERATION_FAILED");
+            assert_eq!(EditRefusal::from(error).code, expected);
         }
         assert_eq!(
             refusal_code("PAYMENT_CURRENCY_UNAVAILABLE: PRIVATE_CANARY"),
             "PAYMENT_CURRENCY_UNAVAILABLE"
         );
+    }
+
+    #[test]
+    fn normalize_edit_error_recognizes_the_tomikro_collector_refusals() {
+        for (raw, expected) in [
+            (
+                "Requested shift PRIVATE_CANARY is not a cashier or manager drawer",
+                "PAYMENT_COLLECTOR_NOT_DRAWER_OWNER",
+            ),
+            (
+                "Requested cashier shift PRIVATE_CANARY does not exist for this payment",
+                "EDIT_PAYMENT_COLLECTOR_UNAVAILABLE",
+            ),
+            (
+                "Cashier-collected payments require a cashier shift context",
+                "PAYMENT_COLLECTOR_SHIFT_REQUIRED",
+            ),
+            (
+                "Cashier-collected delivery payments require a cashier shift context",
+                "PAYMENT_COLLECTOR_SHIFT_REQUIRED",
+            ),
+        ] {
+            assert_eq!(normalize_edit_error(raw.into()), expected);
+            assert!(EditRefusal::from(raw).detail_hash.is_none());
+        }
+    }
+
+    #[test]
+    fn edit_storage_errors_keep_their_sqlite_class_without_private_detail() {
+        for (primary, expected) in [
+            (rusqlite::ffi::SQLITE_BUSY, "EDIT_LOCAL_STORAGE_BUSY"),
+            (rusqlite::ffi::SQLITE_LOCKED, "EDIT_LOCAL_STORAGE_LOCKED"),
+            (
+                rusqlite::ffi::SQLITE_CONSTRAINT,
+                "EDIT_LOCAL_STORAGE_CONSTRAINT",
+            ),
+            (rusqlite::ffi::SQLITE_IOERR, "EDIT_LOCAL_STORAGE_IO"),
+            (rusqlite::ffi::SQLITE_FULL, "EDIT_LOCAL_STORAGE_IO"),
+            (rusqlite::ffi::SQLITE_READONLY, "EDIT_LOCAL_STORAGE_IO"),
+            (rusqlite::ffi::SQLITE_CANTOPEN, "EDIT_LOCAL_STORAGE_IO"),
+            (rusqlite::ffi::SQLITE_ERROR, "EDIT_LOCAL_STORAGE_OTHER"),
+        ] {
+            assert_eq!(
+                storage_error(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(primary),
+                    Some("PRIVATE_CANARY".into()),
+                )),
+                expected
+            );
+        }
+        for (raw, expected) in [
+            (
+                "begin transaction: database is locked",
+                "EDIT_LOCAL_STORAGE_BUSY",
+            ),
+            (
+                "commit: database table is locked",
+                "EDIT_LOCAL_STORAGE_LOCKED",
+            ),
+            ("SQLITE_BUSY: PRIVATE_CANARY", "EDIT_LOCAL_STORAGE_BUSY"),
+            ("SQLITE_LOCKED: PRIVATE_CANARY", "EDIT_LOCAL_STORAGE_LOCKED"),
+            (
+                "UNIQUE constraint failed: PRIVATE_CANARY",
+                "EDIT_LOCAL_STORAGE_CONSTRAINT",
+            ),
+            (
+                "FOREIGN KEY constraint failed",
+                "EDIT_LOCAL_STORAGE_CONSTRAINT",
+            ),
+            (
+                "NOT NULL constraint failed",
+                "EDIT_LOCAL_STORAGE_CONSTRAINT",
+            ),
+            ("CHECK constraint failed", "EDIT_LOCAL_STORAGE_CONSTRAINT"),
+            ("commit: disk I/O error", "EDIT_LOCAL_STORAGE_IO"),
+            ("database or disk is full", "EDIT_LOCAL_STORAGE_IO"),
+            (
+                "attempt to write a readonly database",
+                "EDIT_LOCAL_STORAGE_IO",
+            ),
+            (
+                "unable to open database file PRIVATE_CANARY",
+                "EDIT_LOCAL_STORAGE_IO",
+            ),
+        ] {
+            assert_eq!(normalize_edit_error(raw.into()), expected);
+            assert!(EditRefusal::from(raw).detail_hash.is_none());
+        }
+        assert_eq!(
+            storage_message("no such column: PRIVATE_CANARY"),
+            "EDIT_LOCAL_STORAGE_OTHER"
+        );
+    }
+
+    #[test]
+    fn unclassified_edit_refusal_keeps_only_a_stable_detail_hash() {
+        let refusal = EditRefusal::from("unexpected PRIVATE_CANARY");
+        assert_eq!(refusal.code, "EDIT_LOCAL_OPERATION_FAILED");
+        assert_eq!(refusal.detail_hash.as_deref(), Some("8a6637f2"));
+        assert_eq!(
+            normalize_edit_error("unexpected PRIVATE_CANARY".into()),
+            refusal.code
+        );
+        assert!(EditRefusal::from("EDIT_LOCAL_OPERATION_FAILED")
+            .detail_hash
+            .is_none());
+        assert!(EditRefusal::from("EDIT_INVALID_REQUEST: PRIVATE_CANARY")
+            .detail_hash
+            .is_none());
+    }
+
+    #[test]
+    fn edit_commit_and_preview_error_literals_must_start_with_registered_codes() {
+        use syn::visit::Visit;
+        // No free-text exceptions currently needed. Any exception must name
+        // its exact source line and explain why it cannot use a fixed code.
+        const FREE_TEXT_ALLOWLIST: &[(&str, &str, usize, &str)] = &[];
+        struct Check<'a> {
+            file: &'a str,
+            function: &'a str,
+        }
+        impl Check<'_> {
+            fn literal(&self, expression: &syn::Expr) {
+                let literal = match expression {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(literal),
+                        ..
+                    }) => Some(literal.clone()),
+                    syn::Expr::MethodCall(call) => {
+                        self.literal(&call.receiver);
+                        return;
+                    }
+                    syn::Expr::Macro(call) if call.mac.path.is_ident("format") => call
+                        .mac
+                        .tokens
+                        .clone()
+                        .into_iter()
+                        .next()
+                        .and_then(|token| syn::parse_str::<syn::LitStr>(&token.to_string()).ok()),
+                    _ => None, // Constants, propagated errors and structured refusals.
+                };
+                let Some(literal) = literal else {
+                    return;
+                };
+                let line = literal.span().start().line;
+                if FREE_TEXT_ALLOWLIST
+                    .iter()
+                    .any(|(file, function, allowed_line, reason)| {
+                        *file == self.file
+                            && *function == self.function
+                            && *allowed_line == line
+                            && !reason.is_empty()
+                    })
+                {
+                    return;
+                }
+                let value = literal.value();
+                let head = value.split(':').next().unwrap();
+                assert!(
+                    !head.is_empty()
+                        && head.bytes().all(|byte| byte.is_ascii_uppercase()
+                            || byte.is_ascii_digit()
+                            || byte == b'_')
+                        && crate::diagnostics::is_runtime_error_code(head),
+                    "{}:{} {}: error literal must start with a registered code: {}",
+                    self.file,
+                    line,
+                    self.function,
+                    value
+                );
+            }
+        }
+        impl<'ast> Visit<'ast> for Check<'_> {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("Err")) {
+                    if let Some(argument) = call.args.first() {
+                        self.literal(argument);
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if call.method == "ok_or" {
+                    if let Some(argument) = call.args.first() {
+                        self.literal(argument);
+                    }
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+        for (file, source, functions) in [
+            (
+                "orders.rs",
+                include_str!("commands/orders.rs"),
+                &[
+                    "validate_journaled_edit_target_superseding",
+                    "prepare_edit_settlement",
+                    "apply_edit_settlement_changes",
+                    "preview_edit_settlement_superseding",
+                    "update_order_items_in_connection",
+                    "apply_edit_settlement_order_updates",
+                    "enqueue_order_edit_sync",
+                    "orders_apply_edit_settlement",
+                    "orders_preview_edit_settlement",
+                ][..],
+            ),
+            (
+                "payments.rs",
+                include_str!("payments.rs"),
+                &[
+                    "record_payment_in_connection",
+                    "build_payment_record_input",
+                    "prepare_local_payment_currency",
+                    "resolve_local_payment_currency_and_collector",
+                    "load_shift_role_status_and_staff",
+                ][..],
+            ),
+            (
+                "refunds.rs",
+                include_str!("refunds.rs"),
+                &[
+                    "refund_payment_in_connection",
+                    "refund_payment_with_cash_handler",
+                    "courier_still_holds_order_cash",
+                ][..],
+            ),
+        ] {
+            let parsed = syn::parse_file(source).unwrap();
+            let mut checked = 0;
+            for item in parsed.items {
+                if let syn::Item::Fn(function) = item {
+                    let name = function.sig.ident.to_string();
+                    if functions.contains(&name.as_str()) {
+                        Check {
+                            file,
+                            function: &name,
+                        }
+                        .visit_block(&function.block);
+                        checked += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                checked,
+                functions.len(),
+                "{file}: every listed entry must be checked"
+            );
+        }
     }
 
     #[test]
@@ -727,7 +1098,7 @@ pub(crate) fn capture_preflight(conn: &Connection, order: &str) -> Result<Value,
             "total_amount":row.get::<_,f64>(7)?,"subtotal":row.get::<_,Option<f64>>(8)?,"discount_amount":row.get::<_,Option<f64>>(9)?,
             "tax_amount":row.get::<_,Option<f64>>(10)?,"delivery_fee":row.get::<_,Option<f64>>(11)?,"tip_amount":row.get::<_,Option<f64>>(12)?,
             "itemsRaw":row.get::<_,String>(13)?,"special_instructions":row.get::<_,Option<String>>(14)?,"sync_status":row.get::<_,String>(15)?,"notes":row.get::<_,Option<String>>(16)?,"table_id":row.get::<_,Option<String>>(17)?,"table_session_id":row.get::<_,Option<String>>(18)?,"folio_charged":row.get::<_,Option<bool>>(19)?,"order_context":row.get::<_,Option<String>>(20)?,"payment_status":row.get::<_,Option<String>>(21)?,"remoteVersion":row.get::<_,Option<i64>>(22)?})))
-        .map_err(|error|error.to_string())?;
+        .map_err(storage_error)?;
     // A 1.4.122 edit the server refused is not "still syncing": waiting will
     // not heal it, a manager must review it (fix 1).
     if legacy_edit_review_pending(conn, order)? {
@@ -740,7 +1111,7 @@ pub(crate) fn capture_preflight(conn: &Connection, order: &str) -> Result<Value,
     {
         return Err("EDIT_ORIGINAL_PAYMENT_SYNC_REQUIRED".into());
     }
-    let pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND status NOT IN ('completed','synced'))",[order],|row|row.get(0)).map_err(|error|error.to_string())?;
+    let pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND status NOT IN ('completed','synced'))",[order],|row|row.get(0)).map_err(storage_error)?;
     if pending {
         return Err("EDIT_PREVIOUS_SETTLEMENT_SYNC_REQUIRED".into());
     }
@@ -757,12 +1128,9 @@ pub(crate) fn capture_preflight(conn: &Connection, order: &str) -> Result<Value,
 /// The till's recorded money of an order: its receipts as the preflight
 /// compares them, and the principal it holds as paid.
 fn local_payment_snapshot(conn: &Connection, order: &str) -> Result<(Value, i64), String> {
-    let mut statement=conn.prepare("SELECT remote_payment_id,method,COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER)),COALESCE(tip_amount_cents,CAST(ROUND(tip_amount*100) AS INTEGER),0),currency,status,COALESCE((SELECT SUM(COALESCE(a.amount_cents,CAST(ROUND(a.amount*100) AS INTEGER))) FROM payment_adjustments a WHERE a.payment_id=p.id AND a.adjustment_type IN ('refund','void')),0) FROM order_payments p WHERE order_id=?1 AND status IN ('completed','refunded') ORDER BY remote_payment_id").map_err(|error|error.to_string())?;
-    let rows=statement.query_map([order],|row|Ok(json!({"id":row.get::<_,Option<String>>(0)?,"method":row.get::<_,String>(1)?,"amountCents":row.get::<_,i64>(2)?,"tipCents":row.get::<_,i64>(3)?,"currency":row.get::<_,String>(4)?,"status":row.get::<_,String>(5)?,"returnedCents":row.get::<_,i64>(6)?}))).map_err(|error|error.to_string())?;
-    let payments = Value::Array(
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?,
-    );
+    let mut statement=conn.prepare("SELECT remote_payment_id,method,COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER)),COALESCE(tip_amount_cents,CAST(ROUND(tip_amount*100) AS INTEGER),0),currency,status,COALESCE((SELECT SUM(COALESCE(a.amount_cents,CAST(ROUND(a.amount*100) AS INTEGER))) FROM payment_adjustments a WHERE a.payment_id=p.id AND a.adjustment_type IN ('refund','void')),0) FROM order_payments p WHERE order_id=?1 AND status IN ('completed','refunded') ORDER BY remote_payment_id").map_err(storage_error)?;
+    let rows=statement.query_map([order],|row|Ok(json!({"id":row.get::<_,Option<String>>(0)?,"method":row.get::<_,String>(1)?,"amountCents":row.get::<_,i64>(2)?,"tipCents":row.get::<_,i64>(3)?,"currency":row.get::<_,String>(4)?,"status":row.get::<_,String>(5)?,"returnedCents":row.get::<_,i64>(6)?}))).map_err(storage_error)?;
+    let payments = Value::Array(rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?);
     let paid = crate::money::Cents::round_half_even(
         crate::payments::load_principal_paid_for_order(conn, order)?,
     )
@@ -781,7 +1149,8 @@ pub(crate) fn refresh_order_from_canonical(
     order: &str,
     remote: &Value,
 ) -> Result<Vec<&'static str>, EditRefusal> {
-    let scope = table_session_cache::current_scope(conn)?;
+    let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
+    let scope = table_session_cache::scope_from_snapshot(&captured)?;
     let canonical = &remote["order"];
     let (supabase, organization, branch): (Option<String>, Option<String>, Option<String>) = conn
         .query_row(
@@ -789,7 +1158,7 @@ pub(crate) fn refresh_order_from_canonical(
             [order],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(storage_error)?;
     if organization.as_deref() != Some(scope.organization.as_str())
         || branch.as_deref() != Some(scope.branch.as_str())
         || supabase.is_none()
@@ -824,12 +1193,13 @@ pub(crate) fn refresh_order_from_canonical(
             Some("paid_cents"),
         ));
     }
-    let changed = adopt_canonical_order(conn, order, canonical, AdoptMode::Full)?;
+    let changed =
+        adopt_canonical_order_scoped(conn, order, canonical, AdoptMode::Full, Some(&captured))?;
     conn.execute(
         "UPDATE orders SET sync_status='synced',last_synced_at=?1 WHERE id=?2 AND organization_id=?3",
         params![chrono::Utc::now().to_rfc3339(), order, scope.organization],
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(storage_error)?;
     Ok(changed)
 }
 
@@ -1068,7 +1438,7 @@ pub(crate) fn order_has_local_queue(conn: &Connection, order: &str) -> Result<bo
             [order],
             |row| row.get(0),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(storage_error)?;
     Ok(queued
         || crate::sync::has_outstanding_local_order_queue(conn, order)
         || pending_financial_edits(conn, "")?
@@ -1084,7 +1454,8 @@ pub(crate) fn reconcile_canonical_drift(
     before: &Value,
     remote: &Value,
 ) -> Result<DriftResolution, EditRefusal> {
-    let scope = table_session_cache::current_scope(conn)?;
+    let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
+    let scope = table_session_cache::scope_from_snapshot(&captured)?;
     let mut drifts = canonical_drift(before, remote)?;
     drifts.extend(payment_drift(before, remote, &scope)?);
     if drifts.is_empty() {
@@ -1101,18 +1472,20 @@ pub(crate) fn reconcile_canonical_drift(
     }
     let canonical = &remote["order"];
     if drifts.iter().all(|known| known.adoptable) {
-        return Ok(DriftResolution::Adopted(adopt_canonical_order(
+        return Ok(DriftResolution::Adopted(adopt_canonical_order_scoped(
             conn,
             order,
             canonical,
             AdoptMode::NonMoney,
+            Some(&captured),
         )?));
     }
-    Ok(DriftResolution::Refreshed(adopt_canonical_order(
+    Ok(DriftResolution::Refreshed(adopt_canonical_order_scoped(
         conn,
         order,
         canonical,
         AdoptMode::Full,
+        Some(&captured),
     )?))
 }
 
@@ -1186,94 +1559,213 @@ pub(crate) fn lines_with_client_ids(
 
 /// Write the server's canonical order onto the till's mirror. Only columns
 /// the snapshot carries are written; a missing key is never a NULL.
+#[cfg(test)]
 pub(crate) fn adopt_canonical_order(
     conn: &Connection,
     order: &str,
     canonical: &Value,
     mode: AdoptMode,
 ) -> Result<Vec<&'static str>, String> {
+    adopt_canonical_order_scoped(conn, order, canonical, mode, None)
+}
+
+/// Caller-owned transactions pass the scope captured before their admission.
+/// The mirror-only fallback deliberately never consults the credential store.
+pub(crate) fn adopt_canonical_order_scoped(
+    conn: &Connection,
+    order: &str,
+    canonical: &Value,
+    mode: AdoptMode,
+    captured: Option<&crate::terminal_helpers::TerminalScopeSnapshot>,
+) -> Result<Vec<&'static str>, String> {
+    let fallback;
+    let captured = match captured {
+        Some(captured) => captured,
+        None => {
+            fallback = if conn.is_autocommit() {
+                crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?
+            } else {
+                crate::terminal_helpers::TerminalScopeSnapshot::from_mirrors(conn)
+            };
+            &fallback
+        }
+    };
+    let scope = table_session_cache::scope_from_snapshot(captured)?;
+    if conn.is_autocommit()
+        && !canonical_adoption_needs_write(conn, &scope, order, canonical, mode)?
+    {
+        return Ok(Vec::new());
+    }
     // Keep a durable preimage and one automatic adoption per canonical
     // revision/mode. The savepoint makes both the guard and the complete
     // projection atomic, including when a later column cannot be written.
-    conn.execute_batch("SAVEPOINT edit_canonical_adoption")
-        .map_err(|error| error.to_string())?;
-    let result = (|| {
-        let scope = table_session_cache::current_scope(conn)?;
-        let local = capture_order_headers(conn, order)?;
-        let original: String = conn.query_row(
+    crate::db::with_immediate_admission(conn, || {
+        captured.revalidate(conn)?;
+        conn.execute_batch("SAVEPOINT edit_canonical_adoption")
+            .map_err(storage_error)?;
+        let result = (|| {
+            let local = capture_order_headers(conn, order)?;
+            let original: String = conn.query_row(
             "SELECT json_object('id',supabase_id,'organization_id',organization_id,'branch_id',branch_id,
                 'items',items,'notes',notes,'special_instructions',special_instructions,'total_amount',total_amount,
                 'subtotal',subtotal,'discount_amount',discount_amount,'delivery_fee',delivery_fee,'tip_amount',tip_amount,
                 'tax_amount',tax_amount,'tax_breakdown',tax_breakdown,'status',status,'payment_status',payment_status,
                 'version',version,'remote_version',remote_version,'updated_at',updated_at,'sync_status',sync_status)
-             FROM orders WHERE id=?1", [order], |row| row.get(0)).map_err(|error| error.to_string())?;
-        let original: Value = serde_json::from_str(&original).map_err(|error| error.to_string())?;
-        if original["id"] != canonical["id"]
-            || original["organization_id"] != scope.organization
-            || original["branch_id"] != scope.branch
-        {
-            return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
-        }
-        let version = canonical["version"]
-            .as_i64()
-            .filter(|version| *version > 0)
-            .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
-        if original["remote_version"]
-            .as_i64()
-            .is_some_and(|known| version < known)
-        {
-            return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
-        }
-        let key = format!(
-            "{}:{}:{}:{order}:{version}:{mode:?}",
-            scope.organization, scope.branch, scope.terminal
-        );
-        // A repeated canonical snapshot is idempotent. A later, different
-        // local state at this same revision needs explicit server refresh.
-        let repeated = db::get_setting(conn, "edit_canonical_adoption_v1", &key);
-        let changed = adopt_canonical_order_inner(conn, order, canonical, mode)?;
-        if repeated.is_some() && !changed.is_empty() {
-            return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
-        }
-        if !changed.is_empty() {
-            db::set_setting(
-                conn,
-                "edit_canonical_adoption_v1",
-                &key,
-                &json!({"original":original,"headers":local,
-                "canonical":canonical,"at":chrono::Utc::now().to_rfc3339()})
-                .to_string(),
-            )?;
-        }
-        Ok(changed)
-    })();
-    match result {
-        Ok(changed) => {
-            conn.execute_batch("RELEASE edit_canonical_adoption")
-                .map_err(|error| error.to_string())?;
+             FROM orders WHERE id=?1", [order], |row| row.get(0)).map_err(storage_error)?;
+            let original: Value = serde_json::from_str(&original)
+                .map_err(|_| "EDIT_CANONICAL_SNAPSHOT_INVALID".to_string())?;
+            if original["id"] != canonical["id"]
+                || original["organization_id"] != scope.organization
+                || original["branch_id"] != scope.branch
+            {
+                return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+            }
+            let version = canonical["version"]
+                .as_i64()
+                .filter(|version| *version > 0)
+                .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
+            if original["remote_version"]
+                .as_i64()
+                .is_some_and(|known| version < known)
+            {
+                return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
+            }
+            let key = format!(
+                "{}:{}:{}:{order}:{version}:{mode:?}",
+                scope.organization, scope.branch, scope.terminal
+            );
+            // A repeated canonical snapshot is idempotent. A later, different
+            // local state at this same revision needs explicit server refresh.
+            let repeated = db::get_setting(conn, "edit_canonical_adoption_v1", &key);
+            let changed = adopt_canonical_order_inner(conn, &scope, order, canonical, mode)?;
+            if repeated.is_some() && !changed.is_empty() {
+                return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
+            }
             if !changed.is_empty() {
-                tracing::info!(target: "checkout::order_edit", event_code = "checkout_edit_adopted",
-                    adopted_fields = changed.len(), adopt_mode = ?mode,
-                    "Order adopted from the server's canonical snapshot");
+                db::set_setting(
+                    conn,
+                    "edit_canonical_adoption_v1",
+                    &key,
+                    &json!({"original":original,"headers":local,
+                "canonical":canonical,"at":chrono::Utc::now().to_rfc3339()})
+                    .to_string(),
+                )?;
             }
             Ok(changed)
+        })();
+        match result {
+            Ok(changed) => {
+                conn.execute_batch("RELEASE edit_canonical_adoption")
+                    .map_err(storage_error)?;
+                if !changed.is_empty() {
+                    tracing::info!(target: "checkout::order_edit", event_code = "checkout_edit_adopted",
+                    adopted_fields = changed.len(), adopt_mode = ?mode,
+                    "Order adopted from the server's canonical snapshot");
+                }
+                Ok(changed)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch(
+                    "ROLLBACK TO edit_canonical_adoption; RELEASE edit_canonical_adoption",
+                );
+                Err(error)
+            }
         }
-        Err(error) => {
-            let _ = conn.execute_batch(
-                "ROLLBACK TO edit_canonical_adoption; RELEASE edit_canonical_adoption",
-            );
-            Err(error)
+    })
+}
+
+/// A read-only eligibility probe. All scope/version/column decisions run again
+/// in the admitted body; no probe snapshot is upgraded.
+fn canonical_adoption_needs_write(
+    conn: &Connection,
+    scope: &table_session_cache::Scope,
+    order: &str,
+    canonical: &Value,
+    mode: AdoptMode,
+) -> Result<bool, String> {
+    let (remote, org, branch, known): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    ) = conn
+        .query_row(
+            "SELECT supabase_id,organization_id,branch_id,remote_version FROM orders WHERE id=?1",
+            [order],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    if remote.as_deref() != canonical["id"].as_str()
+        || org.as_deref() != Some(&scope.organization)
+        || branch.as_deref() != Some(&scope.branch)
+    {
+        return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+    }
+    let version = canonical["version"]
+        .as_i64()
+        .filter(|version| *version > 0)
+        .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
+    if known.is_some_and(|known| version < known) {
+        return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
+    }
+    if mode == AdoptMode::Full {
+        return Ok(true);
+    }
+    let headers = capture_order_headers(conn, order)?;
+    for (_, column) in EDIT_HEADER_FIELDS {
+        if *column == "order_type" {
+            continue;
+        }
+        if canonical
+            .get(*column)
+            .is_some_and(|value| !same_canonical_header(&headers[*column], value))
+        {
+            return Ok(true);
         }
     }
+    let (notes, kitchen, raw): (Option<String>, Option<String>, String) = conn
+        .query_row(
+            "SELECT notes,special_instructions,COALESCE(items,'[]') FROM orders WHERE id=?1",
+            [order],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    for (column, local) in [("notes", notes), ("special_instructions", kitchen)] {
+        if let Some(value) = canonical.get(column) {
+            let normalized = |value: Option<&str>| {
+                value
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            };
+            if normalized(local.as_deref()) != normalized(value.as_str()) {
+                return Ok(true);
+            }
+        }
+    }
+    if mode != AdoptMode::Headers {
+        if let Some(rows) = canonical["items"]
+            .as_array()
+            .filter(|rows| !rows.is_empty() && items(&canonical["items"]).is_ok())
+        {
+            let local: Vec<Value> = serde_json::from_str(&raw).unwrap_or_default();
+            if let Some(next) = lines_with_client_ids(&local, rows) {
+                if serde_json::from_str::<Value>(&raw).ok().as_ref() != Some(&Value::Array(next)) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn adopt_canonical_order_inner(
     conn: &Connection,
+    scope: &table_session_cache::Scope,
     order: &str,
     canonical: &Value,
     mode: AdoptMode,
 ) -> Result<Vec<&'static str>, String> {
-    let scope = table_session_cache::current_scope(conn)?;
     if canonical["organization_id"] != scope.organization || canonical["branch_id"] != scope.branch
     {
         return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
@@ -1294,7 +1786,7 @@ fn adopt_canonical_order_inner(
             &format!("UPDATE orders SET {column}=?1 WHERE id=?2 AND organization_id=?3"),
             params![bind_canonical_value(value), order, scope.organization],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(storage_error)?;
         if let Some(field) = refusal_field(column) {
             changed.push(field);
         }
@@ -1305,7 +1797,7 @@ fn adopt_canonical_order_inner(
             [order],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(storage_error)?;
     for (column, local) in [("notes", notes), ("special_instructions", kitchen)] {
         let Some(value) = canonical.get(column) else {
             continue;
@@ -1326,7 +1818,7 @@ fn adopt_canonical_order_inner(
             &format!("UPDATE orders SET {column}=?1 WHERE id=?2 AND organization_id=?3"),
             params![value.as_str(), order, scope.organization],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(storage_error)?;
         changed.push(refusal_field(column).unwrap_or("notes"));
     }
     if let Some(canonical_rows) = canonical["items"].as_array().filter(|rows| {
@@ -1347,7 +1839,7 @@ fn adopt_canonical_order_inner(
                 "UPDATE orders SET items=?1 WHERE id=?2 AND organization_id=?3",
                 params![next.to_string(), order, scope.organization],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(storage_error)?;
             changed.push(field);
         }
     }
@@ -1368,7 +1860,7 @@ fn adopt_canonical_order_inner(
                     [order],
                     |row| row.get(0),
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(storage_error)?;
             if local.is_some_and(|local| {
                 crate::money::Cents::round_half_even(local)
                     == crate::money::Cents::round_half_even(value)
@@ -1386,7 +1878,7 @@ fn adopt_canonical_order_inner(
                     scope.organization
                 ],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(storage_error)?;
             changed.push(refusal_field(column).unwrap_or("total_amount"));
         }
         if let Some(status) = canonical["status"]
@@ -1398,7 +1890,7 @@ fn adopt_canonical_order_inner(
                     "UPDATE orders SET status=?1 WHERE id=?2 AND organization_id=?3 AND status<>?1",
                     params![status, order, scope.organization],
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(storage_error)?;
             if updated > 0 {
                 changed.push("status");
             }
@@ -1409,7 +1901,7 @@ fn adopt_canonical_order_inner(
                  AND (remote_version IS NULL OR remote_version<?1)",
                 params![version, order, scope.organization],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(storage_error)?;
         }
     }
     if !changed.is_empty() {
@@ -1417,7 +1909,7 @@ fn adopt_canonical_order_inner(
             "UPDATE orders SET sync_status='synced',last_synced_at=?1 WHERE id=?2 AND organization_id=?3",
             params![chrono::Utc::now().to_rfc3339(), order, scope.organization],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(storage_error)?;
         crate::fiscal::greece_vat::adopt_server_order_vat(conn, order, canonical);
         if mode == AdoptMode::Full {
             crate::sync::recompute_local_order_payment_snapshot(
@@ -1649,7 +2141,7 @@ fn schema(conn: &Connection) -> Result<(), String> {
         state TEXT NOT NULL, response_json TEXT, created_at TEXT NOT NULL,
         PRIMARY KEY(organization_id,branch_id,terminal_id,client_event_id));",
     )
-    .map_err(|error| error.to_string())
+    .map_err(storage_error)
 }
 
 pub(crate) fn require_original_financial_attempt(
@@ -1676,19 +2168,19 @@ pub(crate) fn require_original_financial_attempt_superseding(
     {
         return Err("TABLE_CANCELLATION_PENDING".into());
     }
-    let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='edit_settlement_attempts_v1')",[],|row|row.get(0)).map_err(|error|error.to_string())?;
+    let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='edit_settlement_attempts_v1')",[],|row|row.get(0)).map_err(storage_error)?;
     if !exists {
         return Ok(());
     }
     // A refused attempt that confirmed no money (`none`) cannot hide a tender;
     // it never holds the order. A prepared one may still be in its commit.
     let mut statement=conn.prepare("SELECT client_event_id FROM edit_settlement_attempts_v1 WHERE order_id=?1
-        AND (state='prepared' OR (state='refused' AND (NOT json_valid(request_json) OR COALESCE(json_extract(request_json,'$.action.type'),'')<>'none')))").map_err(|error|error.to_string())?;
+        AND (state='prepared' OR (state='refused' AND (NOT json_valid(request_json) OR COALESCE(json_extract(request_json,'$.action.type'),'')<>'none')))").map_err(storage_error)?;
     let rows = statement
         .query_map([order], |row| row.get::<_, String>(0))
-        .map_err(|error| error.to_string())?
+        .map_err(storage_error)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
+        .map_err(storage_error)?;
     drop(statement);
     for event in rows {
         if key.is_some_and(|key| key.starts_with(&format!("edit:{event}:"))) {
@@ -1723,7 +2215,7 @@ pub(crate) fn proven_not_applied(
     let carried:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM order_payments WHERE idempotency_key LIKE ?1)
         OR EXISTS(SELECT 1 FROM payment_adjustments WHERE idempotency_key LIKE ?1)
         OR EXISTS(SELECT 1 FROM parity_sync_queue WHERE json_valid(data) AND (COALESCE(json_extract(data,'$.client_event_id'),'')=?2
-            OR COALESCE(json_extract(data,'$.parentEditEventId'),'')=?2))",params![key,event],|row|row.get(0)).map_err(|error|error.to_string())?;
+            OR COALESCE(json_extract(data,'$.parentEditEventId'),'')=?2))",params![key,event],|row|row.get(0)).map_err(storage_error)?;
     Ok(!carried)
 }
 
@@ -1744,9 +2236,86 @@ fn supersede_unapplied(
         conn.execute("UPDATE edit_settlement_attempts_v1 SET state='superseded',
             response_json=json_set(CASE WHEN json_valid(response_json) THEN response_json ELSE '{}' END,'$.supersededBy',?1,'$.supersededAt',?2)
             WHERE organization_id=?3 AND branch_id=?4 AND terminal_id=?5 AND client_event_id=?6 AND order_id=?7 AND state IN ('prepared','refused')",
-            params![event,chrono::Utc::now().to_rfc3339(),scope.organization,scope.branch,scope.terminal,replaced,order]).map_err(|error|error.to_string())?;
+            params![event,chrono::Utc::now().to_rfc3339(),scope.organization,scope.branch,scope.terminal,replaced,order]).map_err(storage_error)?;
     }
     Ok(())
+}
+
+/// A renewal replaces the whole held chain, including attempts left open by
+/// older versions. A retry may already have committed its own replacements.
+pub(crate) fn replacement_events(
+    conn: &Connection,
+    order: &str,
+    named: &[String],
+    event: &str,
+) -> Result<Vec<String>, String> {
+    if named.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut events = named.to_vec();
+    events.extend(pending_financial_events(conn, order)?);
+    events.sort();
+    events.dedup();
+    events.retain(|replaced| replaced != event);
+    let mut replacements = Vec::new();
+    for replaced in events {
+        if inspect(conn, &replaced, order)?.is_some_and(|journal| {
+            journal["state"] == "superseded" && journal["response"]["supersededBy"] == event
+        }) {
+            continue;
+        }
+        if !proven_not_applied(conn, order, &replaced)? {
+            return Err("ORDER_EDIT_SETTLEMENT_PENDING".into());
+        }
+        replacements.push(replaced);
+    }
+    Ok(replacements)
+}
+
+/// Close only wholly proven legacy chains. The newest attempt retains the
+/// hold, and every original request remains untouched. Safe to repeat.
+pub(crate) fn collapse_proven_chains_on_startup(conn: &Connection) -> Result<usize, String> {
+    let orders = pending_financial_edits(conn, "")?;
+    if orders.is_empty() {
+        return Ok(0);
+    }
+    let scope = table_session_cache::current_scope(conn)?;
+    db::with_full_sync(conn, |conn| {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
+        let mut changed = 0;
+        for order in orders {
+            let events = pending_financial_events(&tx, &order)?;
+            if events.len() < 2 {
+                continue;
+            }
+            let mut proven = true;
+            for event in &events {
+                if !matches!(proven_not_applied(&tx, &order, event), Ok(true)) {
+                    proven = false;
+                    break;
+                }
+            }
+            if !proven {
+                continue;
+            }
+            let newest = events.last().unwrap();
+            let older = &events[..events.len() - 1];
+            supersede_unapplied(&tx, &scope, &order, older, newest)?;
+            for event in older {
+                tx.execute("UPDATE edit_settlement_attempts_v1 SET response_json=json_set(response_json,'$.reason','chain_collapsed_on_startup')
+                    WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND client_event_id=?4 AND order_id=?5 AND state='superseded'",
+                    params![scope.organization,scope.branch,scope.terminal,event,order]).map_err(storage_error)?;
+            }
+            changed += older.len();
+        }
+        tx.commit().map_err(storage_error)?;
+        if changed > 0 {
+            tracing::info!(target: "checkout::order_edit", event_code = "checkout_edit_chain_collapsed", "Held edit chain collapsed");
+        }
+        Ok(changed)
+    })
 }
 
 /// Requested replacements of earlier attempts, from the confirmed request.
@@ -1803,7 +2372,7 @@ pub(crate) fn reconcile_unapplied(
         "previousState":journal["state"],"charged":false});
     db::with_full_sync(conn, |conn| {
         conn.execute_batch("BEGIN IMMEDIATE")
-            .map_err(|error| error.to_string())?;
+            .map_err(storage_error)?;
         let result = (|| -> Result<(), String> {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS edit_settlement_reconciliations_v1 (
@@ -1812,11 +2381,11 @@ pub(crate) fn reconcile_unapplied(
                 previous_response_json TEXT, audit_json TEXT NOT NULL, created_at TEXT NOT NULL,
                 PRIMARY KEY(organization_id,branch_id,terminal_id,client_event_id));",
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(storage_error)?;
             let changed=conn.execute("UPDATE edit_settlement_attempts_v1 SET state='reconciled',
                 response_json=json_set(CASE WHEN json_valid(response_json) THEN response_json ELSE '{}' END,'$.reconciliation',json(?1))
                 WHERE organization_id=?2 AND branch_id=?3 AND terminal_id=?4 AND client_event_id=?5 AND order_id=?6 AND state IN ('prepared','refused')",
-                params![audit.to_string(),scope.organization,scope.branch,scope.terminal,event,order]).map_err(|error|error.to_string())?;
+                params![audit.to_string(),scope.organization,scope.branch,scope.terminal,event,order]).map_err(storage_error)?;
             if changed != 1 {
                 return Err("EDIT_RECONCILIATION_NOT_PROVEN".into());
             }
@@ -1834,13 +2403,11 @@ pub(crate) fn reconcile_unapplied(
                     now
                 ],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(storage_error)?;
             Ok(())
         })();
         match result {
-            Ok(()) => conn
-                .execute_batch("COMMIT")
-                .map_err(|error| error.to_string()),
+            Ok(()) => conn.execute_batch("COMMIT").map_err(storage_error),
             Err(error) => {
                 let _ = conn.execute_batch("ROLLBACK");
                 Err(error)
@@ -1852,20 +2419,242 @@ pub(crate) fn reconcile_unapplied(
     )
 }
 
+/// Require a live native session and a checked-in actor on this till.
+/// Terminal-PIN sessions use placeholder identities; for those, as in money
+/// approval, the till's active cashier/manager shift identifies the actor.
+fn discard_actor(conn: &Connection, session: &Value) -> Result<Value, String> {
+    let staff = session["staffId"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or("STAFF_SESSION_EXPIRED")?;
+    let scope = table_session_cache::current_scope(conn)?;
+    let terminal_session = matches!(staff, "staff-user" | "admin-user");
+    let mut actor = conn.query_row("SELECT id,staff_id,NULLIF(TRIM(staff_name),'') FROM staff_shifts
+        WHERE (?1 OR staff_id=?2) AND branch_id=?3 AND terminal_id=?4 AND status='active'
+        AND role_type IN ('cashier','manager')
+        ORDER BY check_in_time DESC,id LIMIT 1", params![terminal_session,staff,scope.branch,scope.terminal], |row|
+        Ok(json!({"staffId":row.get::<_,String>(1)?,"staffShiftId":row.get::<_,String>(0)?,"name":row.get::<_,Option<String>>(2)?})))
+        .optional().map_err(storage_error)?.ok_or_else(|| "CASHIER_REQUIRED".to_string())?;
+    if actor["name"].is_null() {
+        let directory = db::get_setting(
+            conn,
+            "staff_auth_cache",
+            &format!("branch_{}", scope.branch),
+        )
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let name = directory
+            .as_ref()
+            .and_then(|value| value["staff"].as_array())
+            .and_then(|rows| rows.iter().find(|row| row["id"] == actor["staffId"]))
+            .and_then(|row| {
+                ["name", "full_name", "fullName", "staff_name"]
+                    .iter()
+                    .find_map(|key| row[*key].as_str().filter(|name| !name.trim().is_empty()))
+            });
+        actor["name"] = json!(name.unwrap_or("—"));
+    }
+    Ok(actor)
+}
+
+fn discarded_action(request: &Value) -> Result<Value, String> {
+    let action = request["action"]["type"]
+        .as_str()
+        .ok_or("EDIT_RECONCILIATION_NOT_PROVEN")?;
+    let (rows, method_key) = match action {
+        "collect" => (request["action"]["payments"].as_array(), "method"),
+        "refund" => (request["action"]["refunds"].as_array(), "refundMethod"),
+        "none" => return Ok(json!({"action":action,"methods":[],"amountCents":0})),
+        _ => return Err("EDIT_RECONCILIATION_NOT_PROVEN".into()),
+    };
+    let mut methods = std::collections::BTreeMap::<String, i64>::new();
+    for row in rows.ok_or("EDIT_RECONCILIATION_NOT_PROVEN")? {
+        let method = row
+            .get(method_key)
+            .or_else(|| row.get("refund_method"))
+            .and_then(Value::as_str)
+            .ok_or("EDIT_RECONCILIATION_NOT_PROVEN")?
+            .trim()
+            .to_ascii_lowercase();
+        let amount = row["amount"]
+            .as_f64()
+            .filter(|amount| amount.is_finite() && *amount >= 0.0)
+            .ok_or("EDIT_RECONCILIATION_NOT_PROVEN")?;
+        *methods.entry(method).or_default() +=
+            crate::money::Cents::round_half_even(amount).as_i64();
+    }
+    let total: i64 = methods.values().sum();
+    Ok(
+        json!({"action":action,"amountCents":total,"methods":methods.into_iter()
+        .map(|(method,cents)|json!({"method":method,"amountCents":cents})).collect::<Vec<_>>()}),
+    )
+}
+
+/// A cashier declaration closes only an unchanged, proven un-applied set.
+/// Use the existing closed state so every blocker and replay reader agrees.
+pub(crate) fn discard_by_cashier(
+    conn: &Connection,
+    order: &str,
+    events: &[String],
+    order_scope: bool,
+    session: &Value,
+    money_changed_hands: Option<&Value>,
+) -> Result<Value, String> {
+    if money_changed_hands.and_then(Value::as_bool) != Some(false) {
+        return Err("EDIT_DISCARD_MONEY_DECLARED".into());
+    }
+    discard_actor(conn, session)?;
+    if events.is_empty() {
+        return Err("EDIT_RECONCILIATION_NOT_PROVEN".into());
+    }
+    for event in events {
+        if !proven_not_applied(conn, order, event)? {
+            return Err("EDIT_RECONCILIATION_NOT_PROVEN".into());
+        }
+    }
+    db::with_full_sync(conn, |conn| {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(storage_error)?;
+        let result = (|| {
+            let scope = table_session_cache::current_scope(conn)?;
+            let actor = discard_actor(conn, session)?;
+            if order_scope && pending_financial_events(conn, order)?.as_slice() != events {
+                return Err("EDIT_RECONCILIATION_NOT_PROVEN".to_string());
+            }
+            let now = chrono::Utc::now().to_rfc3339();
+            let number: Option<String> = conn
+                .query_row(
+                    "SELECT order_number FROM orders WHERE id=?1 AND organization_id=?2",
+                    params![order, scope.organization],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage_error)?
+                .flatten();
+            let mut audits = Vec::new();
+            // Prove the complete set before changing any attempt, including
+            // the admitted-provider gate. Never inspect transaction-id shapes.
+            for event in events {
+                if !proven_not_applied(conn, order, event)? {
+                    return Err("EDIT_RECONCILIATION_NOT_PROVEN".into());
+                }
+                let journal =
+                    inspect(conn, event, order)?.ok_or("RECOVERY_ORIGINAL_REQUEST_REQUIRED")?;
+                let mut audit = discarded_action(&journal["request"])?;
+                if crate::device_admission::is_admitted(conn, "payment_terminal")
+                    && audit["methods"]
+                        .as_array()
+                        .is_some_and(|rows| rows.iter().any(|row| row["method"] == "card"))
+                {
+                    return Err("EDIT_DISCARD_PROVIDER_CHECK_REQUIRED".into());
+                }
+                for (key, value) in [
+                    ("decision", json!("discarded_by_cashier")),
+                    ("actor", actor.clone()),
+                    ("at", json!(now)),
+                    ("charged", json!(false)),
+                    ("moneyChangedHands", json!(false)),
+                    ("previousState", journal["state"].clone()),
+                    ("orderNumber", json!(number)),
+                ] {
+                    audit[key] = value;
+                }
+                audits.push((event, journal, audit));
+            }
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS edit_settlement_reconciliations_v1 (
+                organization_id TEXT NOT NULL, branch_id TEXT NOT NULL, terminal_id TEXT NOT NULL,
+                client_event_id TEXT NOT NULL, order_id TEXT NOT NULL, request_json TEXT NOT NULL,
+                previous_response_json TEXT, audit_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(organization_id,branch_id,terminal_id,client_event_id));",
+            )
+            .map_err(storage_error)?;
+            for (event, journal, audit) in audits {
+                let changed = conn.execute("UPDATE edit_settlement_attempts_v1 SET state='reconciled',
+                    response_json=json_set(CASE WHEN json_valid(response_json) THEN response_json ELSE '{}' END,'$.reconciliation',json(?1))
+                    WHERE organization_id=?2 AND branch_id=?3 AND terminal_id=?4 AND client_event_id=?5 AND order_id=?6 AND state IN ('prepared','refused')",
+                    params![audit.to_string(),scope.organization,scope.branch,scope.terminal,event,order]).map_err(storage_error)?;
+                if changed != 1 {
+                    return Err("EDIT_RECONCILIATION_NOT_PROVEN".into());
+                }
+                conn.execute("INSERT INTO edit_settlement_reconciliations_v1 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    params![scope.organization,scope.branch,scope.terminal,event,order,journal["request"].to_string(),journal["response"].to_string(),audit.to_string(),now]).map_err(storage_error)?;
+            }
+            Ok(
+                json!({"success":true,"state":"reconciled","orderId":order,"closedEvents":events,"decision":"discarded_by_cashier"}),
+            )
+        })();
+        match result {
+            Ok(reply) => match conn.execute_batch("COMMIT").map_err(storage_error) {
+                Ok(()) => Ok(reply),
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    })
+}
+
+/// Information only: never counted as sales, refunds or a Z blocker.
+pub(crate) fn discarded_corrections(
+    conn: &Connection,
+    branch: &str,
+    start: &str,
+    end: &str,
+) -> Result<Vec<Value>, String> {
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='edit_settlement_reconciliations_v1')",[],|row|row.get(0)).map_err(storage_error)?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let scope = table_session_cache::current_scope(conn)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT audit_json FROM edit_settlement_reconciliations_v1
+        WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3
+        AND julianday(created_at)>julianday(?4) AND julianday(created_at)<=julianday(?5)
+        AND json_valid(audit_json) AND json_extract(audit_json,'$.decision')='discarded_by_cashier'
+        ORDER BY created_at,client_event_id",
+        )
+        .map_err(storage_error)?;
+    let audits = statement
+        .query_map(
+            params![scope.organization, branch, scope.terminal, start, end],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(storage_error)?;
+    let mut rows = Vec::new();
+    for audit in audits {
+        let audit: Value = serde_json::from_str(&audit.map_err(storage_error)?)
+            .map_err(|_| "EDIT_CANONICAL_SNAPSHOT_INVALID")?;
+        let mut methods = audit["methods"].as_array().cloned().unwrap_or_default();
+        if methods.is_empty() {
+            methods.push(json!({"method":null,"amountCents":0}));
+        }
+        for method in &methods {
+            rows.push(json!({"orderNumber":audit["orderNumber"],"action":audit["action"],"method":method["method"],
+                "amountCents":method["amountCents"],"actorName":audit["actor"]["name"],"at":audit["at"]}));
+        }
+    }
+    Ok(rows)
+}
+
 pub(crate) fn pending_financial_edits(
     conn: &Connection,
     branch: &str,
 ) -> Result<Vec<String>, String> {
-    let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='edit_settlement_attempts_v1')",[],|row|row.get(0)).map_err(|error|error.to_string())?;
+    let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='edit_settlement_attempts_v1')",[],|row|row.get(0)).map_err(storage_error)?;
     if !exists {
         return Ok(Vec::new());
     }
-    let mut statement=conn.prepare("SELECT DISTINCT order_id FROM edit_settlement_attempts_v1 WHERE state IN ('prepared','refused') AND (?1='' OR branch_id=?1) AND (NOT json_valid(request_json) OR json_extract(request_json,'$.action.type') IN ('collect','refund'))").map_err(|error|error.to_string())?;
+    let mut statement=conn.prepare("SELECT DISTINCT order_id FROM edit_settlement_attempts_v1 WHERE state IN ('prepared','refused') AND (?1='' OR branch_id=?1) AND (NOT json_valid(request_json) OR json_extract(request_json,'$.action.type') IN ('collect','refund'))").map_err(storage_error)?;
     let rows = statement
         .query_map([branch], |row| row.get::<_, String>(0))
-        .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+        .map_err(storage_error)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)
 }
 
 /// The held money corrections of one order: the attempts that make
@@ -1874,24 +2663,24 @@ pub(crate) fn pending_financial_events(
     conn: &Connection,
     order: &str,
 ) -> Result<Vec<String>, String> {
-    let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='edit_settlement_attempts_v1')",[],|row|row.get(0)).map_err(|error|error.to_string())?;
+    let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='edit_settlement_attempts_v1')",[],|row|row.get(0)).map_err(storage_error)?;
     if !exists {
         return Ok(Vec::new());
     }
-    let mut statement=conn.prepare("SELECT client_event_id FROM edit_settlement_attempts_v1 WHERE order_id=?1 AND state IN ('prepared','refused')
-        AND (NOT json_valid(request_json) OR json_extract(request_json,'$.action.type') IN ('collect','refund')) ORDER BY created_at,client_event_id").map_err(|error|error.to_string())?;
+    let scope = table_session_cache::current_scope(conn)?;
+    let mut statement=conn.prepare("SELECT client_event_id FROM edit_settlement_attempts_v1 WHERE order_id=?1 AND organization_id=?2 AND branch_id=?3 AND terminal_id=?4 AND state IN ('prepared','refused')
+        AND (NOT json_valid(request_json) OR json_extract(request_json,'$.action.type') IN ('collect','refund')) ORDER BY created_at,client_event_id").map_err(storage_error)?;
     let rows = statement
-        .query_map([order], |row| row.get::<_, String>(0))
-        .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+        .query_map(
+            params![order, scope.organization, scope.branch, scope.terminal],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(storage_error)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)
 }
 
-/// A held correction of a cancelled order (or of one no longer on this till)
-/// can never be reopened and saved (Tomikro #00055, 28/10/2026: four refused
-/// card collections held every Z after the order was cancelled). Only these
-/// are offered the manager's close-without-money from the Z checks; a live
-/// order keeps its editor path.
+/// Closed/missing orders need different Z guidance; live and closed orders
+/// may both have proven held corrections closed by a manager.
 pub(crate) fn order_closed_for_edits(conn: &Connection, order: &str) -> Result<bool, String> {
     let status: Option<String> = conn
         .query_row(
@@ -1900,7 +2689,7 @@ pub(crate) fn order_closed_for_edits(conn: &Connection, order: &str) -> Result<b
             |row| row.get(0),
         )
         .optional()
-        .map_err(|error| error.to_string())?;
+        .map_err(storage_error)?;
     Ok(status.is_none_or(|status| matches!(status.as_str(), "cancelled" | "canceled")))
 }
 
@@ -1916,9 +2705,9 @@ pub(crate) fn inspect(
          WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND client_event_id=?4 AND order_id=?5",
         params![scope.organization,scope.branch,scope.terminal,event,order],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-    ).optional().map_err(|error| error.to_string())?;
-    row.map(|(request,state,response)| Ok(json!({"request":serde_json::from_str::<Value>(&request).map_err(|error|error.to_string())?,
-        "state":state,"response":response.map(|raw|serde_json::from_str::<Value>(&raw)).transpose().map_err(|error|error.to_string())?}))).transpose()
+    ).optional().map_err(storage_error)?;
+    row.map(|(request,state,response)| Ok(json!({"request":serde_json::from_str::<Value>(&request).map_err(|_| "EDIT_CANONICAL_SNAPSHOT_INVALID".to_string())?,
+        "state":state,"response":response.map(|raw|serde_json::from_str::<Value>(&raw)).transpose().map_err(|_| "EDIT_CANONICAL_SNAPSHOT_INVALID".to_string())?}))).transpose()
 }
 
 pub(crate) fn validate_target(conn: &Connection, order: &str, expected: i64) -> Result<(), String> {
@@ -1943,7 +2732,7 @@ fn validate_versioned_target(
     let (organization,branch,version,table,status):(Option<String>,String,i64,bool,String)=conn.query_row(
         "SELECT organization_id,COALESCE(branch_id,''),CASE WHEN ?2 THEN COALESCE(version,1) ELSE COALESCE(remote_version,version,1) END,
          (NULLIF(TRIM(table_id),'') IS NOT NULL OR NULLIF(TRIM(table_session_id),'') IS NOT NULL),status FROM orders WHERE id=?1",
-        params![order,local],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).map_err(|error|error.to_string())?;
+        params![order,local],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).map_err(storage_error)?;
     if organization.as_deref() != Some(&scope.organization) || branch != scope.branch {
         return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
     }
@@ -2000,13 +2789,14 @@ pub(crate) fn run(
         }
     }
     let supersedes = superseded_events(request);
+    let replacements = replacement_events(conn, order, &supersedes, event)?;
     // Another unresolved attempt holds the order (the preview refuses this
     // before any picker); a new attempt never becomes a second hold.
     require_original_financial_attempt_superseding(
         conn,
         order,
         Some(&format!("edit:{event}:")),
-        &supersedes,
+        &replacements,
     )?;
     let not_applied = |error: String| {
         // Rollback (or a refusal before the transaction) proves no new
@@ -2014,9 +2804,13 @@ pub(crate) fn run(
         // happened. Retain the confirmed action: an exact save retry, a
         // re-quote under a new event, or a manager reconciliation; never
         // authorize recollection.
-        json!({"success":false,"code":"EDIT_SETTLEMENT_NOT_APPLIED","error":refusal_code(&error),
+        let mut response = json!({"success":false,"code":"EDIT_SETTLEMENT_NOT_APPLIED","error":refusal_code(&error),
             "clientEventId":event,"orderId":order,"transactionRolledBack":true,
-            "paymentPersisted":false,"requiresReconciliation":true,"requoteAllowed":true})
+            "paymentPersisted":false,"requiresReconciliation":true,"requoteAllowed":true});
+        if let Some(hash) = edit_detail_hash(&error) {
+            response["edit_detail_hash"] = json!(hash);
+        }
+        response
     };
     // Fix 4 (06/10/2026): the confirmed action is journaled BEFORE anything is
     // re-validated. A check that fails after the operator confirmed money
@@ -2026,12 +2820,23 @@ pub(crate) fn run(
         conn.execute("INSERT OR IGNORE INTO edit_settlement_attempts_v1
             (organization_id,branch_id,terminal_id,client_event_id,order_id,request_json,state,created_at)
             VALUES(?1,?2,?3,?4,?5,?6,'prepared',?7)",
-            params![scope.organization,scope.branch,scope.terminal,event,order,request.to_string(),chrono::Utc::now().to_rfc3339()]).map_err(|error|error.to_string())?;
+            params![scope.organization,scope.branch,scope.terminal,event,order,request.to_string(),chrono::Utc::now().to_rfc3339()]).map_err(storage_error)?;
         // Reusing an event for another order is never a new operation.
         let owner:String=conn.query_row("SELECT order_id FROM edit_settlement_attempts_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND client_event_id=?4",
-            params![scope.organization,scope.branch,scope.terminal,event],|row|row.get(0)).map_err(|error|error.to_string())?;
+            params![scope.organization,scope.branch,scope.terminal,event],|row|row.get(0)).map_err(storage_error)?;
         if owner != order {
             return Err("RECOVERY_ORIGINAL_REQUEST_REQUIRED".into());
+        }
+        // Replacement survives admission and financial rollback: a refused
+        // renewal must never reopen its predecessors.
+        if !replacements.is_empty() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )
+            .map_err(storage_error)?;
+            supersede_unapplied(&tx, &scope, order, &replacements, event)?;
+            tx.commit().map_err(storage_error)?;
         }
         if let Err(error) = admission(conn) {
             let response = not_applied(error);
@@ -2039,7 +2844,7 @@ pub(crate) fn run(
             return Ok(response);
         }
         conn.execute_batch("BEGIN IMMEDIATE")
-            .map_err(|error| error.to_string())?;
+            .map_err(storage_error)?;
         let target = match request
             .get("expected_local_version")
             .or_else(|| request.get("expectedLocalVersion"))
@@ -2048,25 +2853,17 @@ pub(crate) fn run(
             Some(local) => validate_local_target(conn, order, local),
             None => validate_target(conn, order, expected),
         };
-        // The replaced attempt is closed inside the same transaction before the
-        // financial writes (their own guards then see no other open attempt);
-        // a failed apply rolls the replacement back with them.
-        let applied = target
-            .and_then(|_| supersede_unapplied(conn, &scope, order, &supersedes, event))
-            .and_then(|_| apply(conn))
-            .and_then(|response| {
-                finish(conn, &scope, event, "applied", &response)?;
-                Ok(response)
-            });
+        let applied = target.and_then(|_| apply(conn)).and_then(|response| {
+            finish(conn, &scope, event, "applied", &response)?;
+            Ok(response)
+        });
         match applied {
             Ok(response) => {
-                conn.execute_batch("COMMIT")
-                    .map_err(|error| format!("EDIT_SETTLEMENT_OUTCOME_UNKNOWN: {error}"))?;
+                conn.execute_batch("COMMIT").map_err(storage_error)?;
                 Ok(response)
             }
             Err(error) => {
-                conn.execute_batch("ROLLBACK")
-                    .map_err(|rollback| format!("EDIT_SETTLEMENT_OUTCOME_UNKNOWN: {rollback}"))?;
+                conn.execute_batch("ROLLBACK").map_err(storage_error)?;
                 let response = not_applied(error);
                 finish(conn, &scope, event, "refused", &response)?;
                 Ok(response)
@@ -2094,7 +2891,7 @@ fn finish(
             event
         ],
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(storage_error)?;
     Ok(())
 }
 
@@ -2159,7 +2956,7 @@ fn legacy_edit_schema(conn: &Connection) -> Result<(), String> {
         attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, audit_json TEXT NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
     )
-    .map_err(|error| error.to_string())
+    .map_err(storage_error)
 }
 
 /// Put identity-refused legacy edit rows back in line, unchanged (bounded).
@@ -2177,7 +2974,7 @@ pub(crate) fn requeue_legacy_edits(conn: &Connection) -> Result<usize, String> {
             [format!("%{LEGACY_IDENTITY_REFUSAL}%")],
             |row| row.get(0),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(storage_error)?;
     if !exists {
         return Ok(0);
     }
@@ -2204,7 +3001,7 @@ pub(crate) fn requeue_legacy_edits(conn: &Connection) -> Result<usize, String> {
         Option<String>,
         Option<String>,
     )> = {
-        let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
+        let mut statement = conn.prepare(&sql).map_err(storage_error)?;
         let rows = statement
             .query_map(
                 params![
@@ -2226,9 +3023,9 @@ pub(crate) fn requeue_legacy_edits(conn: &Connection) -> Result<usize, String> {
                     ))
                 },
             )
-            .map_err(|error| error.to_string())?
+            .map_err(storage_error)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
+            .map_err(storage_error)?;
         rows
     };
     let mut requeued = 0;
@@ -2238,13 +3035,13 @@ pub(crate) fn requeue_legacy_edits(conn: &Connection) -> Result<usize, String> {
         let audit = json!({"action":"requeue_unchanged","at":now.to_rfc3339(),"previous":{
             "status":status,"attempts":attempts,"error_message":error,"next_retry_at":next_retry}});
         conn.execute_batch("SAVEPOINT legacy_edit_requeue")
-            .map_err(|error| error.to_string())?;
+            .map_err(storage_error)?;
         let result = (|| -> Result<usize, String> {
             conn.execute("INSERT INTO legacy_edit_replays_v1(queue_id,organization_id,branch_id,terminal_id,order_id,state,attempts,next_attempt_at,audit_json,created_at,updated_at)
                 VALUES(?1,?2,?3,?4,?5,'requeued',1,?6,json_array(json(?7)),?8,?8) ON CONFLICT(queue_id) DO UPDATE SET state='requeued',
                 attempts=legacy_edit_replays_v1.attempts+1,next_attempt_at=excluded.next_attempt_at,
                 audit_json=json_insert(legacy_edit_replays_v1.audit_json,'$[#]',json(?7)),updated_at=excluded.updated_at",
-                params![id,scope.organization,scope.branch,scope.terminal,order,next,audit.to_string(),now.to_rfc3339()]).map_err(|error|error.to_string())?;
+                params![id,scope.organization,scope.branch,scope.terminal,order,next,audit.to_string(),now.to_rfc3339()]).map_err(storage_error)?;
             conn.execute(
                 &format!(
                     "UPDATE parity_sync_queue SET status='pending',attempts=0,error_message=NULL,next_retry_at=NULL,last_attempt=NULL
@@ -2253,12 +3050,12 @@ pub(crate) fn requeue_legacy_edits(conn: &Connection) -> Result<usize, String> {
                 ),
                 params![id, data],
             )
-            .map_err(|error| error.to_string())
+            .map_err(storage_error)
         })();
         match result {
             Ok(changed) => {
                 conn.execute_batch("RELEASE legacy_edit_requeue")
-                    .map_err(|error| error.to_string())?;
+                    .map_err(storage_error)?;
                 requeued += changed;
             }
             Err(error) => {
@@ -2287,7 +3084,7 @@ pub(crate) fn mark_legacy_edits_for_review(conn: &Connection) -> Result<usize, S
              OR lower(COALESCE(q.error_message,'')) LIKE '%terminal that owns the order%')"
     );
     let rows: Vec<(String, String)> = {
-        let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
+        let mut statement = conn.prepare(&sql).map_err(storage_error)?;
         let rows = statement
             .query_map(
                 params![
@@ -2296,9 +3093,9 @@ pub(crate) fn mark_legacy_edits_for_review(conn: &Connection) -> Result<usize, S
                 ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .map_err(|error| error.to_string())?
+            .map_err(storage_error)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
+            .map_err(storage_error)?;
         rows
     };
     let mut marked = 0;
@@ -2313,7 +3110,7 @@ pub(crate) fn mark_legacy_edits_for_review(conn: &Connection) -> Result<usize, S
                 "UPDATE parity_sync_queue SET error_message=?1 WHERE id=?2 AND status='conflict'",
                 params![message, id],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(storage_error)?;
     }
     Ok(marked)
 }
@@ -2329,7 +3126,7 @@ pub(crate) fn legacy_edit_review_pending(conn: &Connection, order: &str) -> Resu
         params![order, format!("{LEGACY_EDIT_REVIEW_CODE}%")],
         |row| row.get(0),
     )
-    .map_err(|error| error.to_string())
+    .map_err(storage_error)
 }
 
 /// Once the server acknowledges an order's legacy edit, its difference rows
@@ -2358,7 +3155,7 @@ pub(crate) fn release_legacy_edit_dependents(
             ),
             [order],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(storage_error)?;
     released += conn
         .execute(
             &format!(
@@ -2369,6 +3166,10 @@ pub(crate) fn release_legacy_edit_dependents(
             ),
             [order],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(storage_error)?;
     Ok(released)
 }
+
+#[cfg(test)]
+#[path = "admission_tests/adoption.rs"]
+mod admission_regression_tests;

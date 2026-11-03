@@ -4,6 +4,7 @@ import {
   ArrowRight,
   Ban,
   BedDouble,
+  BellRing,
   CalendarClock,
   Check,
   Edit,
@@ -12,19 +13,18 @@ import {
   Minus,
   Phone,
   Search,
-  ShoppingBag,
+  StickyNote,
   Trash2,
-  Truck,
   User,
-  UtensilsCrossed,
   X,
 } from 'lucide-react';
+import { DeliveryScooterIcon, PickupHandBagIcon } from '../icons/OrderTypeGlyphs';
+import TableOrderIcon from '../icons/TableOrderIcon';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import { posApiDelete, posApiGet } from '../../utils/api-helpers';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
-import { useTheme } from '../../contexts/theme-context';
 import { formatDate } from '../../utils/format';
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
 import {
@@ -239,7 +239,6 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
-  const { resolvedTheme } = useTheme();
   const [searchQuery, setSearchQuery] = useState('');
   const [lookupQuery, setLookupQuery] = useState('');
   const [customer, setCustomer] = useState<Customer | null>(null);
@@ -777,7 +776,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           {t('modals.customerSearch.searchLabel', 'Phone Number or Name')}
         </label>
         <div className="relative">
-          <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 z-10 ${resolvedTheme === 'dark' ? 'text-white' : 'text-black'}`} />
+          <Search className="absolute left-3 top-1/2 z-10 h-5 w-5 -translate-y-1/2 text-(--pos-s-muted)" aria-hidden="true" />
           <input
             id={searchInputId}
             ref={searchInputRef}
@@ -805,7 +804,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
       {showingSavedCustomers && !isSearching && (
         <p
-          className="mb-3 text-xs font-medium text-amber-700 dark:text-amber-300"
+          className="mb-3 text-xs font-medium text-(--pos-s-warn)"
           data-testid="customer-search-saved-results"
         >
           {t('modals.customerSearch.offlineSavedResults')}
@@ -829,13 +828,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           <button
             type="button"
             onClick={handleAddNewCustomer}
-            className="min-h-12 rounded-xl border-2 border-emerald-600 bg-white px-6 py-3 font-semibold text-emerald-700 transition-transform active:translate-y-1 active:shadow-xs dark:border-emerald-500 dark:bg-white dark:text-emerald-700"
-            style={{
-              backgroundColor: '#ffffff',
-              borderColor: '#16a34a',
-              color: '#15803d',
-            }}
+            className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary pos-raised--tint [--pos-tint:var(--pos-s-yellow)]"
           >
+            <User className="h-5 w-5" aria-hidden="true" />
             {t('modals.customerSearch.addNewCustomer')}
           </button>
         </div>
@@ -852,32 +847,28 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               <button
                 type="button"
                 key={c.id}
-                className={`relative mb-3 w-full cursor-pointer rounded-2xl border p-4 text-left transition-all ${
-                  c.is_banned
-                    ? 'border-red-600 bg-(--pos-s-surface-2)'
-                    : 'border-zinc-300/70 bg-zinc-100/85 active:bg-zinc-200/80 dark:border-zinc-700/70 dark:bg-zinc-800/80 dark:active:bg-zinc-700/70'
-                }`}
+                className={`pos-choice-card relative mb-3 cursor-pointer text-left ${c.is_banned ? 'pos-neon-bad' : ''}`}
                 onClick={() => handleSelectFromList(c)}
               >
                 <div className="flex items-center gap-3">
-                  <User className={`h-6 w-6 shrink-0 ${c.is_banned ? 'text-red-500' : 'text-gray-600 dark:text-gray-300'}`} />
+                  <User className={`h-6 w-6 shrink-0 ${c.is_banned ? 'text-(--pos-s-bad)' : 'text-(--pos-s-muted)'}`} aria-hidden="true" />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <p className={`font-medium truncate ${c.is_banned ? 'text-red-500' : 'liquid-glass-modal-text'}`}>{c.name}</p>
+                      <p className={`font-medium truncate ${c.is_banned ? 'text-(--pos-s-bad)' : 'text-(--pos-s-fg)'}`}>{c.name}</p>
                       {c.is_banned && (
-                        <span className="px-2 py-0.5 text-xs font-semibold bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 rounded-full flex items-center gap-1">
+                        <span className="flex items-center gap-1 text-xs font-semibold text-(--pos-s-bad)">
                           <Ban className="w-3 h-3" />
                           {t('modals.customerSearch.banned', 'BANNED')}
                         </span>
                       )}
                     </div>
-                    <p className="mt-1 flex items-center gap-1.5 text-sm liquid-glass-modal-text-muted">
-                      <Phone className="h-4 w-4 shrink-0 text-yellow-500 dark:text-yellow-300" />
+                    <p className="mt-1 flex items-center gap-1.5 text-sm text-(--pos-s-muted)">
+                      <Phone className="h-4 w-4 shrink-0" aria-hidden="true" />
                       <span>{c.phone}</span>
                     </p>
                     {c.is_banned && c.ban_reason && (
-                      <p className="text-xs text-red-400 mt-1 flex items-center gap-1">
-                        <AlertTriangle className="w-3 h-3" />
+                      <p className="mt-1 flex items-center gap-1 text-xs text-(--pos-s-bad)">
+                        <AlertTriangle className="h-3 w-3" aria-hidden="true" />
                         {c.ban_reason}
                       </p>
                     )}
@@ -890,11 +881,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       )}
 
       {customer && (
-        <div className={`mb-6 rounded-2xl border p-4 ${
-          customer.is_banned
-            ? 'border-red-600 bg-(--pos-s-surface-2)'
-            : 'border-zinc-300/70 bg-zinc-100/85 dark:border-zinc-700/70 dark:bg-zinc-800/80'
-        }`}>
+        <div className={`pos-card mb-6 p-4 ${customer.is_banned ? 'pos-neon-bad' : ''}`} data-testid="customer-search-customer">
           {/* Banned Customer Warning Banner */}
           {customer.is_banned && (
             <div className="mb-4 p-3 bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl">
@@ -919,21 +906,21 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           )}
 
           <div className="flex items-center gap-3">
-            <User className={`h-7 w-7 shrink-0 ${customer.is_banned ? 'text-red-500' : 'text-green-600 dark:text-green-400'}`} />
+            <User className={`h-7 w-7 shrink-0 ${customer.is_banned ? 'text-(--pos-s-bad)' : 'text-(--pos-s-muted)'}`} aria-hidden="true" />
             <div className="flex min-w-0 flex-1 flex-col items-start gap-1">
               <div className="flex min-w-0 items-center gap-2">
-                <h3 className={`max-w-full truncate font-medium ${customer.is_banned ? 'text-red-500' : 'liquid-glass-modal-text'}`}>
+                <h3 className={`max-w-full truncate text-lg font-semibold ${customer.is_banned ? 'text-(--pos-s-bad)' : 'text-(--pos-s-fg)'}`}>
                   {customer.name}
                 </h3>
                 {customer.is_banned && (
-                  <span className="px-2 py-0.5 text-xs font-semibold bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 rounded-full flex items-center gap-1">
+                  <span className="flex items-center gap-1 text-xs font-semibold text-(--pos-s-bad)">
                     <Ban className="w-3 h-3" />
                     {t('modals.customerSearch.banned', 'BANNED')}
                   </span>
                 )}
               </div>
-              <p className="flex items-center gap-1.5 text-sm liquid-glass-modal-text-muted">
-                <Phone className="h-4 w-4 shrink-0 text-yellow-500 dark:text-yellow-300" />
+              <p className="flex items-center gap-1.5 text-sm text-(--pos-s-muted)">
+                <Phone className="h-4 w-4 shrink-0" aria-hidden="true" />
                 <span>{customer.phone}</span>
               </p>
             </div>
@@ -963,29 +950,30 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                       event.preventDefault();
                       setSelectedAddressId(addr.id);
                     }}
-                    className={`w-full cursor-pointer rounded-lg p-2 transition-all ${callerIdWorkspace ? 'min-h-[116px] rounded-xl! p-4!' : ''} ${isSelected
-                      ? 'border-2 border-green-600 bg-transparent'
-                      : 'border border-gray-200 bg-transparent active:border-gray-300 dark:border-white/10 dark:active:border-white/20'
+                    data-address-selected={isSelected ? 'true' : undefined}
+                    className={`pos-raised w-full cursor-pointer rounded-2xl border p-3 text-left ${isSelected
+                      ? 'pos-raised--tint [--pos-tint:var(--pos-s-sel-bg)]'
+                      : ''
                       }`}
                   >
                     <div className="flex items-start gap-2">
                       {/* Checkmark or MapPin icon */}
                       {isSelected ? (
-                        <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center shrink-0 mt-0.5">
-                          <Check className="w-3 h-3 text-white" />
-                        </div>
+                        <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)">
+                          <Check className="h-3.5 w-3.5" strokeWidth={3} aria-hidden="true" />
+                        </span>
                       ) : (
-                        <MapPin className="w-4 h-4 text-gray-500 dark:text-gray-300 mt-0.5 shrink-0" />
+                        <MapPin className="mt-0.5 h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
                       )}
                       <div className="flex-1 min-w-0">
-                        <p className={`text-sm font-medium ${isSelected ? 'text-green-400' : 'liquid-glass-modal-text'}`}>
+                        <p className="text-sm font-semibold text-(--pos-s-fg)">
                           {resolveAddressStreet(addr)}
                         </p>
-                        <p className="text-xs liquid-glass-modal-text-muted">
+                        <p className="text-xs text-(--pos-s-muted)">
                           {[addr.city, addr.postal_code].filter(Boolean).join(', ')}
                         </p>
                         {addr.floor_number && (
-                          <p className="text-xs liquid-glass-modal-text-muted">
+                          <p className="text-xs text-(--pos-s-muted)">
                             {t('modals.customerSearch.floor')}: {addr.floor_number}
                           </p>
                         )}
@@ -1000,10 +988,10 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                               onEditCustomer({ ...customer, editAddressId: addr.id } as any);
                             }
                           }}
-                          className="p-1.5 text-amber-500 active:bg-(--pos-s-surface-2) rounded-md transition-colors"
+                          className="pos-icon-btn h-10! w-10!"
                           aria-label={t('common.edit', 'Edit')}
                         >
-                          <Edit className="w-3.5 h-3.5" />
+                          <Edit className="h-4 w-4" aria-hidden="true" />
                         </button>
                         <button
                           onClick={async (e) => {
@@ -1045,13 +1033,13 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                                         toast.error(customerAddressWriteErrorText(t, err, 'modals.customerSearch.deleteAddressFailed'));
                                       }
                                     }}
-                                    className="px-3 py-1.5 text-xs font-medium bg-red-500 text-white rounded-md active:bg-red-600 transition-colors"
+                                    className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--danger"
                                   >
                                     {t('common.delete', 'Delete')}
                                   </button>
                                   <button
                                     onClick={() => toast.dismiss(toastInstance.id)}
-                                    className="px-3 py-1.5 text-xs font-medium bg-gray-500 text-white rounded-md active:bg-gray-600 transition-colors"
+                                    className="pos-solid-btn pos-solid-btn--sm"
                                   >
                                     {t('common.cancel', 'Cancel')}
                                   </button>
@@ -1059,10 +1047,10 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                               </div>
                             ), { duration: 10000 });
                           }}
-                          className="p-1.5 text-red-500 active:bg-(--pos-s-surface-2) rounded-md transition-colors"
+                          className="pos-icon-btn pos-icon-btn--danger h-10! w-10!"
                           aria-label={t('common.delete', 'Delete')}
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Trash2 className="h-4 w-4" aria-hidden="true" />
                         </button>
                       </div>
                       )}
@@ -1091,13 +1079,15 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                 </p>
               )}
               {customer.name_on_ringer && (
-                <p className="text-sm liquid-glass-modal-text-muted">
-                  🔔 {t('modals.customerSearch.nameOnRinger')}: {customer.name_on_ringer}
+                <p className="flex items-center gap-2 text-sm text-(--pos-s-muted)">
+                  <BellRing className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>{t('modals.customerSearch.nameOnRinger')}: {customer.name_on_ringer}</span>
                 </p>
               )}
               {customer.notes && (
-                <p className="text-sm liquid-glass-modal-text-muted">
-                  📝 {customer.notes}
+                <p className="flex items-start gap-2 text-sm text-(--pos-s-muted)">
+                  <StickyNote className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>{customer.notes}</span>
                 </p>
               )}
             </div>
@@ -1108,12 +1098,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               {/* Continue Button - prominent, shows selected address */}
               <button
                 onClick={handleSelectCustomer}
-                style={{
-                  backgroundColor: '#16a34a',
-                  color: '#ffffff',
-                  borderColor: '#16a34a'
-                }}
-                className="w-full mt-4 py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border active:bg-(--pos-s-surface-2) active:scale-[0.98]"
+                className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary pos-raised--tint [--pos-tint:var(--pos-s-yellow)] pos-solid-btn--wrap mt-4 w-full gap-2"
               >
                 <span>
                   {selectedAddressId && customer.addresses?.find(a => a.id === selectedAddressId)
@@ -1123,20 +1108,20 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                     : t('modals.customerSearch.continue', 'Continue')
                   }
                 </span>
-                <ArrowRight className="w-5 h-5" />
+                <ArrowRight className="h-5 w-5 shrink-0" aria-hidden="true" />
               </button>
 
               {!lookupOnly && (
                 <>
                   {/* Action Buttons - Add Address, Edit Customer, Delete */}
-                  <div className="flex gap-2 mt-3">
+                  <div className="mt-3 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2">
             {/* Add Address Button */}
             {onAddNewAddress && (
               <button
                 onClick={handleAddNewAddress}
-                className="pos-solid-btn pos-solid-btn--sm flex-1 transition-transform duration-150 active:scale-[0.98]"
+                className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--wrap min-w-0 gap-1.5"
               >
-                <MapPin className="w-4 h-4" />
+                <MapPin className="w-4 h-4 shrink-0" />
                 {t('modals.customerSearch.addNewAddress')}
               </button>
             )}
@@ -1144,16 +1129,16 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             {onEditCustomer && (
               <button
                 onClick={handleEditCustomer}
-                className="pos-solid-btn pos-solid-btn--sm flex-1 transition-transform duration-150 active:scale-[0.98]"
+                className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--wrap min-w-0 gap-1.5"
               >
-                <Edit className="w-4 h-4" />
+                <Edit className="w-4 h-4 shrink-0" />
                 {t('modals.customerSearch.editCustomer')}
               </button>
             )}
             {/* Delete Customer Button */}
             <button
               onClick={handleDeleteCustomer}
-              className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--danger transition-transform duration-150 active:scale-[0.98]"
+              className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--danger"
               aria-label={t('modals.customerSearch.deleteCustomer')}
             >
               <Trash2 className="w-4 h-4" />
@@ -1169,9 +1154,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               <button
                 type="button"
                 onClick={handleAddNewAddress}
-                className="mt-4 flex min-h-touch w-full items-center justify-center gap-2 rounded-xl border border-amber-600 bg-white px-4 py-3 font-semibold text-slate-900 transition-transform active:scale-[0.98] dark:bg-slate-900 dark:text-white"
+                className="pos-solid-btn pos-solid-btn--md mt-4 min-h-touch w-full gap-2"
               >
-                <MapPin className="h-5 w-5 text-amber-600 dark:text-amber-300" />
+                <MapPin className="h-5 w-5" aria-hidden="true" />
                 {t('modals.customerSearch.addNewAddress', 'Add address')}
               </button>
             </>
@@ -1183,7 +1168,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
         <button
           type="button"
           onClick={() => onContinueWithoutCustomer(searchQuery.trim())}
-          className="mb-3 w-full rounded-xl border border-(--pos-s-yellow) bg-yellow-400 px-6 py-3 font-semibold text-black transition-transform active:scale-[0.98]"
+          className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary pos-raised--tint [--pos-tint:var(--pos-s-yellow)] mb-3 w-full"
         >
           {t('modals.customerSearch.chooseOrderType', 'Continue to order type')}
         </button>
@@ -1216,36 +1201,35 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               const config = {
                 delivery: {
                   label: t('orderFlow.deliveryOrder', 'Delivery'),
-                  icon: Truck,
-                  classes: 'border-yellow-500',
-                  iconClasses: 'text-yellow-600',
+                  icon: <DeliveryScooterIcon className="h-full w-full" />,
+                  tint: '[--pos-tint:#facc15]',
+                  colour: 'text-yellow-800 dark:text-yellow-400',
                 },
                 pickup: {
                   label: t('orderFlow.pickupOrder', 'Pickup'),
-                  icon: ShoppingBag,
-                  classes: 'border-emerald-500',
-                  iconClasses: 'text-emerald-600',
+                  icon: <PickupHandBagIcon className="h-full w-full" />,
+                  tint: '[--pos-tint:#10b981]',
+                  colour: 'text-emerald-800 dark:text-emerald-400',
                 },
                 'dine-in': {
                   label: t('orderFlow.tableOrder', 'Table'),
-                  icon: UtensilsCrossed,
-                  classes: 'border-amber-500',
-                  iconClasses: 'text-amber-600',
+                  icon: <TableOrderIcon className="h-full w-full" strokeWidth={1.6} opticalScale={1.62} />,
+                  tint: '[--pos-tint:#3b82f6]',
+                  colour: 'text-[#1d4ed8] dark:text-[#60a5fa]',
                 },
                 room: {
                   label: t('orderFlow.roomOrder', 'Room'),
-                  icon: BedDouble,
-                  classes: 'border-amber-500',
-                  iconClasses: 'text-amber-600',
+                  icon: <BedDouble className="h-full w-full" strokeWidth={1.5} />,
+                  tint: '[--pos-tint:#a855f7]',
+                  colour: 'text-[#7e22ce] dark:text-[#c084fc]',
                 },
                 service: {
                   label: t('orderFlow.serviceOrder', 'Service'),
-                  icon: CalendarClock,
-                  classes: 'border-amber-500',
-                  iconClasses: 'text-amber-600',
+                  icon: <CalendarClock className="h-full w-full" strokeWidth={1.5} />,
+                  tint: '[--pos-tint:#06b6d4]',
+                  colour: 'text-[#155e75] dark:text-[#22d3ee]',
                 },
               }[type];
-              const Icon = config.icon;
               return (
                 <button
                   key={type}
@@ -1256,9 +1240,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                     buildSelectedCustomer(),
                     searchQuery.trim(),
                   )}
-                  className={`flex min-h-[96px] flex-col items-center justify-center gap-2 rounded-2xl border-2 bg-white px-4 py-4 font-semibold text-slate-900 transition-transform active:translate-y-1 active:shadow-xs dark:bg-white dark:text-slate-900 ${config.classes}`}
+                  className={`pos-raised pos-raised--tint flex min-h-[104px] flex-col items-center justify-center gap-2 rounded-2xl border px-4 py-4 font-bold ${config.tint} ${config.colour}`}
                 >
-                  <Icon className={`h-8 w-8 ${config.iconClasses}`} strokeWidth={1.8} />
+                  <span className="flex h-10 w-10 items-center justify-center" aria-hidden="true">{config.icon}</span>
                   <span className="text-center text-sm leading-tight">{config.label}</span>
                 </button>
               );
@@ -1269,8 +1253,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
       {/* Add New Customer Option - only after an authoritative not-found result in Caller ID mode. */}
       {!callerIdWorkspace && Boolean(onAddNewCustomer) && lookupQuery.length >= 3 && !isSearching && ((!lookupOnly && customer) || error === t('modals.customerSearch.customerNotFound')) && (
-        <div className="p-4 bg-yellow-50 dark:bg-zinc-800 border border-yellow-200 dark:border-zinc-700 rounded-2xl">
-          <p className="text-sm liquid-glass-modal-text-muted mb-3">
+        <div className="pos-card p-4">
+          <p className="mb-3 text-sm text-(--pos-s-muted)">
             {customer
               ? t('modals.customerSearch.differentPersonPrompt')
               : t('modals.customerSearch.notFoundPrompt')
@@ -1278,13 +1262,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           </p>
           <button
             onClick={handleAddNewCustomer}
-            style={{
-              backgroundColor: '#16a34a',
-              color: '#ffffff',
-              borderColor: '#16a34a'
-            }}
-            className="w-full py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border active:bg-(--pos-s-surface-2) active:scale-[0.98]"
+            className={`pos-solid-btn pos-solid-btn--md w-full gap-2 ${customer ? '' : `pos-solid-btn--primary pos-raised--tint [--pos-tint:var(--pos-s-yellow)]`}`}
           >
+            <User className="h-5 w-5" aria-hidden="true" />
             {t('modals.customerSearch.addNewCustomer')}
           </button>
         </div>

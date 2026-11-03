@@ -57,9 +57,9 @@ export function CallerIdToastContent({
           type="button"
           onClick={() => toast.dismiss(toastId)}
           aria-label={t('common.actions.close', 'Close')}
-          className="shrink-0 rounded-lg p-1 transition-transform active:scale-95 active:bg-white/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)"
+          className="liquid-glass-modal-close shrink-0"
         >
-          <X className="w-4 h-4 text-zinc-500" />
+          <X className="h-5 w-5" aria-hidden="true" />
         </button>
       </div>
 

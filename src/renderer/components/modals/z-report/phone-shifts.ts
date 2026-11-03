@@ -16,6 +16,7 @@ import {
   unitShiftPhoneState,
   unitShiftStaffLabel,
   unitShiftsZRefusal,
+  workCardOpenShiftsHintKey,
   type UnitClosedShift,
   type UnitShift,
 } from '../../../utils/unit-shift-readiness';
@@ -185,4 +186,9 @@ export function extractUnitShiftsZRefusal(value: unknown): UnitShiftsZRefusal | 
       ?? visit(candidate.data, depth + 1);
   };
   return visit(value, 0);
+}
+
+/** The server refused this Z over an open shift: remind each person to use their own PIN. */
+export function refusalWorkCardHintKey(refusal: UnitShiftsZRefusal, enabled: boolean) {
+  return workCardOpenShiftsHintKey(enabled, refusal.kind === 'open')
 }

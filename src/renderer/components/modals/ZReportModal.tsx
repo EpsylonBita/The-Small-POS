@@ -15,6 +15,7 @@ import type {
 } from '../../types/reports';
 import { getSyncQueueBridge } from '../../services/SyncQueueBridge';
 import ZReportExportDialog, { type ZReportExportKind } from './ZReportExportDialog';
+import { CardsIcon, CashHandIcon } from '../icons/PaymentMethodIcons';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { parseLocalDateString, toLocalDateString } from '../../utils/date';
 import { clearBusinessDayStorage } from '../../utils/session-utils';
@@ -35,6 +36,7 @@ import {
 } from '../../utils/zReport';
 import {
   readUnitShiftReadinessRemembered,
+  workCardOpenShiftsHintKey,
   readinessSinceFromPeriodStart,
   unitHasPhones,
   unitIsQuiet,
@@ -49,6 +51,7 @@ import {
 import {
   closedShiftInZWindow,
   extractUnitShiftsZRefusal,
+  refusalWorkCardHintKey,
   frozenZCutoffMs,
   phoneShiftCurrency,
   phoneShiftRowFromReadiness,
@@ -57,6 +60,7 @@ import {
   type PhoneShiftStaffRow,
   type UnitShiftsZRefusal,
 } from './z-report/phone-shifts';
+import { useWorkCardStatus } from '../../hooks/useWorkCardStatus';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { heldEditClosingKey, UnsettledPaymentBlockersPanel } from '../ui/UnsettledPaymentBlockersPanel';
@@ -67,6 +71,8 @@ import {
   resolveReturnedTwintReceipt,
   type TwintReturnedReceipt,
 } from '../../services/TwintReceiptRecoveryService';
+import { DiscardEditConfirmation } from './DiscardEditConfirmation';
+import { editRefusalMessageKey } from '../../utils/editRefusalMessage';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import {
   useRecordPaymentBlocker,
@@ -75,7 +81,6 @@ import {
 import { isNewOrderCheckoutBlocker } from '../ui/UnsettledPaymentBlockersPanel';
 import {
   AlertTriangle,
-  Banknote,
   CalendarDays,
   CheckCircle,
   ChevronDown,
@@ -107,6 +112,7 @@ import {
 } from '../../../lib/payment-integrity';
 import { extractPrivilegedActionError } from '../../utils/privileged-actions';
 import { formatFiscalCloseBlockedError } from '../../../lib/fiscal-closeout';
+import { KitDateField } from '../ui/KitDateField';
 
 interface ZReportModalProps {
   isOpen: boolean;
@@ -241,6 +247,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   lockDate = false,
 }) => {
   const bridge = getBridge();
+  const workCard = useWorkCardStatus(isOpen);
   const { clearShift, staff, activeShift } = useShift();
   const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
   const { t } = useTranslation();
@@ -274,6 +281,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const [selectedDate, setSelectedDate] = useState<string>(() => date || toLocalDateString(new Date()));
   const [isUsingLiveDefaultDate, setIsUsingLiveDefaultDate] = useState(() => !lockDate);
   const [zReport, setZReport] = useState<ZReportData | null>(null);
+  const [discardHeldEdit, setDiscardHeldEdit] = useState<UnsettledPaymentBlocker | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -829,15 +837,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     }
   }, [activeShift?.staff_id, bridge, runWithPrivilegedConfirmation, staff, t, unsavedConfirmation]);
 
-  // A cancelled order's held corrections can never be reopened and saved
-  // (Tomikro #00055, 28/10/2026): a manager closes them here without
-  // recording money. Native re-proves non-application before the approval
-  // and again under its lock; nothing is charged, returned or voided.
-  const handleCloseHeldEdit = useCallback(async (blocker: UnsettledPaymentBlocker) => {
+  // A manager can close any held correction native proves never applied.
+  // The same proof runs before approval and again under the native lock.
+  const handleCloseHeldEdit = useCallback(async (blocker: UnsettledPaymentBlocker, discard = false) => {
     setResolvingBlockerKey(heldEditClosingKey(blocker.orderId));
     setSubmitResult(null);
     try {
-      const result: any = await runWithPrivilegedConfirmation({
+      const result: any = discard ? await bridge.orders.applyEditSettlement({
+        orderId: blocker.orderId, items: [], action: { type: 'none' },
+        reconcile: { decision: 'discard_by_cashier', scope: 'order', moneyChangedHands: false },
+      } as any) : await runWithPrivilegedConfirmation({
         scope: 'cash_drawer_control',
         action: () =>
           bridge.orders.applyEditSettlement({
@@ -848,7 +857,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
               decision: 'close_without_money',
               scope: 'order',
               reason: String(t('modals.zReport.heldEditCloseReason', {
-                defaultValue: 'Order cancelled; correction closed from the Z checks by a manager without recording money',
+                defaultValue: 'Correction closed from the Z checks by a manager without recording money',
               })),
             },
           } as any),
@@ -884,12 +893,13 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         // The operator closed the PIN prompt: nothing was recorded.
       } else {
         setSubmitResult(
-          t('modals.zReport.heldEditCloseFailed', {
+          discard ? t(`modals.menu.${editRefusalMessageKey(String(e))}`) : t('modals.zReport.heldEditCloseFailed', {
             defaultValue: 'The correction could not be closed. It stays held; nothing was recorded.',
           }),
         );
       }
     } finally {
+      setDiscardHeldEdit(null);
       setResolvingBlockerKey(null);
       setReportReloadVersion((current) => current + 1);
     }
@@ -1322,7 +1332,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   // shifts again (a fresh preview also moves a live window's end to now).
   const applyUnitShiftsRefusal = useCallback((refusal: UnitShiftsZRefusal) => {
     if (refusal.kind === 'open') {
-      setSubmitResult(refusal.openShifts.length > 0
+      const hint = refusalWorkCardHintKey(refusal, workCard.data?.enabled === true);
+      setSubmitResult((refusal.openShifts.length > 0
         ? t('modals.zReport.phoneShifts.refusedOpen', {
           shifts: refusal.openShifts.map(describeOpenPhoneShift).join('; '),
           defaultValue:
@@ -1331,7 +1342,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         : t('modals.zReport.phoneShifts.refusedOpenUnnamed', {
           defaultValue:
             'The day was not closed: a phone shift is still open. Close it on the phone, or from Staff on this register.',
-        }));
+        })) + (hint ? `\n${t(hint)}` : ''));
     } else {
       setSubmitResult(t('modals.zReport.phoneShifts.refusedUnavailable', {
         defaultValue:
@@ -1366,7 +1377,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       });
     }
     setReportReloadVersion((current) => current + 1);
-  }, [describeOpenPhoneShift, phoneShiftsKey, t]);
+  }, [describeOpenPhoneShift, phoneShiftsKey, t, workCard.data?.enabled]);
 
   const handleSubmitReport = useCallback(async () => {
     // Unconfirmed gift card proof keeps the day open; native refuses it too, so never bypass that.
@@ -1780,7 +1791,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             defaultValue: 'Close it on the phone, or from Staff on this register',
           })
           : undefined,
-        details: openPhoneShifts.map(describeOpenPhoneShift),
+        details: [...openPhoneShifts.map(describeOpenPhoneShift), ...(workCardOpenShiftsHintKey(workCard.data?.enabled === true, openPhoneShifts.length > 0) ? [t('workCard.zHint')] : [])],
       }]
       : []),
     // Closed phone tills whose cash this register has not taken yet: a
@@ -1927,10 +1938,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       driverCashGiven +
       driverCashReturned);
   const otherCollected = otherTenderCollected;
+  // Founder 01/11 («βάλε τα χρώματα στους αριθμούς που εκφράζουν την κατάσταση, όπως κάναμε με το checkout και
+  // τα έξοδα»): money in green, money out red, staff payouts yellow; the opening and the expectation stay neutral.
+  const moneyInTone = 'text-emerald-600 dark:text-emerald-300';
+  const moneyOutTone = 'text-rose-600 dark:text-rose-300';
+  const payoutTone = 'text-yellow-700 dark:text-yellow-300';
   // Cash + Card + Platforms (+ Other tender) = the headline, by construction.
   const revenueSplitTiles = [
-    { key: 'cash', label: t('modals.zReport.cashInTill'), value: formatMoney(cashCollected) },
-    { key: 'card', label: t('modals.zReport.cardTotalLabel'), value: formatMoney(cardCollected) },
+    { key: 'cash', label: t('modals.zReport.cashInTill'), value: formatMoney(cashCollected), Glyph: CashHandIcon },
+    { key: 'card', label: t('modals.zReport.cardTotalLabel'), value: formatMoney(cardCollected), Glyph: CardsIcon },
     ...(reportSections.twint ? [{ key: 'twint', label: 'TWINT', value: formatMoney(twintCollected) }] : []),
     ...(platformCollected !== 0 ? [{ key: 'platforms', label: t('modals.zReport.platformsTotal'), value: formatMoney(platformCollected) }] : []),
     ...(otherCollected >= 0.005
@@ -1946,10 +1962,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     || (Array.isArray(zReport?.drawers) ? zReport.drawers : []).some((drawer) => Boolean(drawer?.closedAt || drawer?.reconciled));
   const moneyFlowRows = [
     { key: 'start', label: t('modals.zReport.opening'), value: formatMoney(drawerOpening), tone: strongTextClass },
-    { key: 'cash', label: t('modals.zReport.cashSales'), value: `+${formatMoney(drawerCashNet)}`, tone: strongTextClass },
-    ...(reportSections.expenses || totalCashOut !== 0 ? [{ key: 'out', label: t('modals.zReport.totalExpenses'), value: totalCashOut > 0 ? `-${formatMoney(totalCashOut)}` : formatMoney(0), tone: strongTextClass },] : []),
+    { key: 'cash', label: t('modals.zReport.cashSales'), value: `+${formatMoney(drawerCashNet)}`, tone: moneyInTone },
+    ...(reportSections.expenses || totalCashOut !== 0 ? [{ key: 'out', label: t('modals.zReport.totalExpenses'), value: totalCashOut > 0 ? `-${formatMoney(totalCashOut)}` : formatMoney(0), tone: moneyOutTone },] : []),
     ...(totalCashInAdjustments > 0
-      ? [{ key: 'returned', label: t('modals.zReport.driverCashReturned'), value: `+${formatMoney(totalCashInAdjustments)}`, tone: strongTextClass }]
+      ? [{ key: 'returned', label: t('modals.zReport.driverCashReturned'), value: `+${formatMoney(totalCashInAdjustments)}`, tone: moneyInTone }]
       : []),
     // Gift card cash is a drawer liability: in the canonical expectation once, never a sale.
     ...(giftCloseDrawer
@@ -1977,7 +1993,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     badge?: number;
   }> = [
     { key: 'review', label: t('modals.zReport.clarity.tabReview', { defaultValue: 'Check' }), icon: ListChecks, badge: closeoutIssueCount },
-    { key: 'money', label: t('modals.zReport.clarity.tabMoney', { defaultValue: 'Money' }), icon: Banknote },
+    { key: 'money', label: t('modals.zReport.clarity.tabMoney', { defaultValue: 'Money' }), icon: CashHandIcon },
     { key: 'staff', label: t('modals.zReport.staff'), icon: Users },
     { key: 'orders', label: t('modals.zReport.orders'), icon: Receipt, badge: dayOrderDetailCount },
   ];
@@ -2057,10 +2073,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className={`flex h-11 w-11 min-h-touch min-w-touch shrink-0 items-center justify-center rounded-xl border transition ${glassControlClass}`}
+            className="liquid-glass-modal-close shrink-0"
             aria-label={t('common.actions.close')}
           >
-            <X className="h-5 w-5" />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </header>
       )}
@@ -2154,8 +2170,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                     <CalendarDays className="h-4 w-4" />
                     {t('modals.zReport.clarity.dayStepTitle', { defaultValue: 'Business day' })}
                   </span>
-                  <input
-                    type="date"
+                  <KitDateField
+                    type="date" required
                     value={selectedDate}
                     onChange={(e) => {
                       setIsUsingLiveDefaultDate(false);
@@ -2189,7 +2205,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                 quiet secondary tools cluster (Refresh / Print / CSV) that used to crowd the header. Tabs lead
                 on the left; the tools sit right, deliberately muted -- reachable, never competing with the
                 three close-day steps above. */}
-            <div className="flex shrink-0 flex-col gap-2 border-b border-slate-900/10 p-3 dark:border-white/10 lg:flex-row lg:items-center">
+            <div className="shrink-0 border-b border-slate-900/10 p-3 dark:border-white/10">
+            {/* Founder 01/11: the tools sit on the same line as the tabs; why Print waits goes under the row. */}
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
               <div className="grid flex-1 rounded-xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-1 sm:grid-cols-4">
                 {reportTabs.map((tab) => {
                   const TabIcon = tab.icon;
@@ -2206,16 +2224,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           : 'text-slate-600'
                     }`}
                   >
-                    <TabIcon className="h-4 w-4" />
+                    <TabIcon className={tab.key === 'money' ? 'h-5 w-5' : 'h-4 w-4'} />
                     <span>{tab.label}</span>
+                    {/* Founder 01/11: a count is a plain number, no pill; what still needs a look reads amber. */}
                     {typeof tab.badge === 'number' && tab.badge > 0 && (
-                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${activeTab === tab.key ? 'bg-black/15 text-(--pos-s-sel-fg)' : 'bg-(--pos-s-surface-2) text-amber-700 dark:text-amber-200'}`}>{tab.badge}</span>
+                      <span data-z-tab-count className={`text-sm font-black tabular-nums ${activeTab === tab.key ? 'text-(--pos-s-sel-fg)' : tab.key === 'review' ? 'text-(--pos-s-warn)' : 'text-(--pos-s-muted)'}`}>{tab.badge}</span>
                     )}
                   </button>
                   );
                 })}
               </div>
-              <div className="flex flex-col items-end gap-1">
               <div
                 data-z-report-utility-tools
                 className="flex items-center justify-end gap-1 rounded-xl border border-(--modal-glass-card-border) bg-(--modal-glass-card) p-1"
@@ -2243,13 +2261,13 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                   );
                 })}
               </div>
+            </div>
               {/* Why Print is unavailable, visible: a title tooltip never shows on a touch till. */}
               {printUnavailableHint && (
-                <p data-z-print-hint className={`max-w-md text-right text-[11px] font-semibold ${softTextClass}`}>
+                <p data-z-print-hint className={`mt-2 text-right text-[11px] font-semibold ${softTextClass}`}>
                   {printUnavailableHint}
                 </p>
               )}
-              </div>
             </div>
 
             <div data-z-report-center-scroll className="min-h-0 flex-1 overflow-y-auto p-4 pb-6 scroll-pb-6 scrollbar-hide">
@@ -2260,8 +2278,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                       close-day steps. */}
                   <div data-z-report-money-glance className="grid grid-cols-2 gap-3">
                     <div className={`rounded-2xl border p-3 ${dashboardTileClass}`}>
-                      <div className={`flex items-center gap-1.5 text-[11px] font-bold ${softTextClass}`}><Banknote className="h-3.5 w-3.5" />{t('modals.zReport.clarity.totalSales', { defaultValue: 'Total sales' })}</div>
-                      <div className={`mt-0.5 wrap-break-word text-lg font-bold ${strongTextClass}`}>{formatMoney(totalSales)}</div>
+                      <div className={`flex items-center gap-1.5 text-[11px] font-bold ${softTextClass}`}><CashHandIcon className="h-3.5 w-3.5" />{t('modals.zReport.clarity.totalSales', { defaultValue: 'Total sales' })}</div>
+                      <div className={`mt-0.5 wrap-break-word text-lg font-bold ${moneyInTone}`}>{formatMoney(totalSales)}</div>
                     </div>
                     <div className={`rounded-2xl border p-3 ${dashboardTileClass}`}>
                       <div className={`flex items-center gap-1.5 text-[11px] font-bold ${softTextClass}`}><ShieldCheck className="h-3.5 w-3.5" />{t('modals.zReport.clarity.expectedCash', { defaultValue: 'Expected cash' })}</div>
@@ -2277,10 +2295,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                       <div className="grid gap-3 text-center text-sm font-bold md:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr_auto_1fr]">
                         <div><div className={softTextClass}>{t('modals.zReport.opening')}</div><div>{formatMoney(drawerOpening)}</div></div>
                         <div className={`hidden md:block ${softTextClass}`}>+</div>
-                        <div><div className={softTextClass}>{t('modals.zReport.cashSales')}</div><div>{formatMoney(cashCollected)}</div></div>
+                        <div><div className={softTextClass}>{t('modals.zReport.cashSales')}</div><div className={moneyInTone}>{formatMoney(cashCollected)}</div></div>
                         {reportSections.expenses && <>
                           <div className={`hidden md:block ${softTextClass}`}>-</div>
-                          <div><div className={softTextClass}>{t('modals.zReport.totalExpenses')}</div><div>{formatMoney(expensesTotal + staffPaymentsTotal)}</div></div>
+                          <div><div className={softTextClass}>{t('modals.zReport.totalExpenses')}</div><div className={moneyOutTone}>{formatMoney(expensesTotal + staffPaymentsTotal)}</div></div>
                         </>}
                         {giftCloseDrawer && (
                           <>
@@ -2371,12 +2389,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                             const status = getDrawerStatusBadge(drawer);
                             const stats = [
                               { key: 'opening', label: t('modals.zReport.opening'), value: drawer.opening, tone: strongTextClass },
-                              { key: 'cash', label: t('modals.zReport.cashSales'), value: drawer.cashSales, tone: strongTextClass },
-                              { key: 'card', label: t('modals.zReport.cardSales'), value: drawer.cardSales, tone: strongTextClass },
-                              { key: 'drops', label: t('modals.zReport.drops'), value: drawer.drops, tone: strongTextClass },
-                              { key: 'given', label: t('modals.zReport.driverCashGiven'), value: drawer.driverCashGiven, tone: strongTextClass },
-                              { key: 'returned', label: t('modals.zReport.driverCashReturned'), value: drawer.driverCashReturned, tone: strongTextClass },
-                              { key: 'staff', label: t('modals.zReport.staffPayments'), value: drawer.staffPayments, tone: strongTextClass },
+                              { key: 'cash', label: t('modals.zReport.cashSales'), value: drawer.cashSales, tone: moneyInTone },
+                              { key: 'card', label: t('modals.zReport.cardSales'), value: drawer.cardSales, tone: moneyInTone },
+                              { key: 'drops', label: t('modals.zReport.drops'), value: drawer.drops, tone: moneyOutTone },
+                              { key: 'given', label: t('modals.zReport.driverCashGiven'), value: drawer.driverCashGiven, tone: moneyOutTone },
+                              { key: 'returned', label: t('modals.zReport.driverCashReturned'), value: drawer.driverCashReturned, tone: moneyInTone },
+                              { key: 'staff', label: t('modals.zReport.staffPayments'), value: drawer.staffPayments, tone: payoutTone },
                               { key: 'variance', label: t('modals.zReport.variance'), value: variance, tone: Math.abs(variance) < 0.01 ? strongTextClass : 'text-amber-600 dark:text-amber-300' },
                             ];
 
@@ -2673,7 +2691,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 <div className={`wrap-break-word text-sm font-bold ${mutedTextClass}`}>
                                   {t('modals.zReport.actualEarned')}
                                 </div>
-                                <div className={`mt-1 wrap-break-word text-4xl font-bold leading-none tabular-nums sm:text-5xl ${strongTextClass}`}>
+                                <div className={`mt-1 wrap-break-word text-4xl font-bold leading-none tabular-nums sm:text-5xl ${moneyInTone}`}>
                                   {formatMoney(collectedTotal)}
                                 </div>
                                 {/* Plain counts in sentence case; the open/past day is the header chip's job, not «live window» jargon. */}
@@ -2683,8 +2701,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 <div data-z-report-revenue-split className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
                                   {revenueSplitTiles.map((tile) => (
                                     <div key={tile.key} className={`min-w-0 rounded-xl border p-2 ${dashboardTileClass}`}>
-                                      <div className={`truncate text-[11px] font-bold ${softTextClass}`}>{tile.key === 'twint' ? <img src={twintLogo} alt="TWINT" className="h-5 mx-auto rounded-sm" /> : tile.label}</div>
-                                      <div className={`mt-0.5 truncate text-base font-bold ${strongTextClass}`}>{tile.value}</div>
+                                      <div className={`flex min-w-0 items-center gap-1.5 text-[11px] font-bold ${softTextClass}`}>
+                                        {'Glyph' in tile && tile.Glyph ? <tile.Glyph className="h-4 w-4 shrink-0" /> : null}
+                                        <span className="truncate">{tile.key === 'twint' ? <img src={twintLogo} alt="TWINT" className="h-5 mx-auto rounded-sm" /> : tile.label}</span>
+                                      </div>
+                                      <div className={`mt-0.5 truncate text-base font-bold ${moneyInTone}`}>{tile.value}</div>
                                     </div>
                                   ))}
                                 </div>
@@ -2838,7 +2859,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
                                 {t('modals.zReport.orderTurnover', { defaultValue: 'Order turnover' })}
                               </div>
-                              <div className={`mt-1 truncate text-sm font-bold ${strongTextClass}`}>
+                              <div className={`mt-1 truncate text-sm font-bold ${moneyInTone}`}>
                                 {formatMoney(integrity.orderTurnover ?? 0)}
                               </div>
                             </div>
@@ -2846,7 +2867,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
                                 {t('modals.zReport.paymentCoverage', { defaultValue: 'Payment coverage' })}
                               </div>
-                              <div className={`mt-1 truncate text-sm font-bold ${strongTextClass}`}>
+                              <div className={`mt-1 truncate text-sm font-bold ${moneyInTone}`}>
                                 {formatMoney(integrity.paymentCoverage ?? 0)}
                               </div>
                             </div>
@@ -2859,7 +2880,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                   difference and must not read as a gap. */}
                               <div className={`mt-1 truncate text-sm font-bold ${Math.abs(integrity.unexplainedDifference ?? integrity.difference ?? 0) >= 0.01
                                 ? 'text-rose-600 dark:text-rose-300'
-                                : strongTextClass}`}>
+                                : moneyInTone}`}>
                                 {formatMoney(integrity.difference ?? 0)}
                               </div>
                               {(integrity.refundedOrders?.orders ?? 0) > 0 && (
@@ -2875,7 +2896,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
                                 {t('modals.zReport.reconciliationOrdersAffected', { defaultValue: 'Orders affected' })}
                               </div>
-                              <div className={`mt-1 truncate text-sm font-bold ${strongTextClass}`}>
+                              <div className={`mt-1 truncate text-sm font-bold ${(integrity.blockingFindings ?? 0) > 0 ? moneyOutTone : moneyInTone}`}>
                                 {integrity.blockingFindings ?? 0}
                               </div>
                             </div>
@@ -2933,6 +2954,22 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                         </section>
                       )}
 
+                      {Boolean(zReport?.discardedCorrections?.length) && (
+                        <section data-testid="z-discarded-corrections" className={`rounded-2xl border p-4 ${modalInsetClassName}`}>
+                          <h3 className="font-semibold">{t('modals.zReport.discardedCorrections')}</h3>
+                          {zReport?.discardedCorrections?.map((entry, index) => (
+                            <div key={index} className="mt-2 flex flex-wrap gap-2 text-sm">
+                              <span>{entry.orderNumber || '—'}</span>
+                              <span>{entry.action === 'none' ? '—' : t(`modals.menu.${entry.action === 'refund' ? 'editDiscardRefund' : 'editDiscardCollect'}`)}</span>
+                              <span>{entry.method ? localizeZReportPaymentLabel(entry.method, t) : '—'}</span>
+                              <span>{formatMoney(entry.amountCents / 100)}</span>
+                              <span>{entry.actorName || '—'}</span>
+                              <span>{formatTime(entry.at)}</span>
+                            </div>
+                          ))}
+                        </section>
+                      )}
+
                       {effectivePaymentBlockers.length > 0 && (
                         <UnsettledPaymentBlockersPanel
                           blockers={effectivePaymentBlockers}
@@ -2948,6 +2985,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           onSaveUnsavedPayment={(blocker) => { void handleSaveUnsavedAgain(blocker); }}
                           onResolveUnsavedPayment={setUnsavedConfirmation}
                           onCloseHeldEdit={(blocker) => { void handleCloseHeldEdit(blocker); }}
+                          onDiscardHeldEdit={setDiscardHeldEdit}
                           onResolveTwintReturned={(blocker) => { setTwintReturnReference(''); setTwintReturnPin(''); setTwintReturnError(null); setTwintReturn(blocker); }}
                           resolvingKey={resolvingBlockerKey}
                         />
@@ -3084,6 +3122,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     />
     )}
     {recordBlocker.confirmDialog}
+    <DiscardEditConfirmation isOpen={discardHeldEdit !== null} onClose={() => setDiscardHeldEdit(null)}
+      onDiscard={async () => { if (discardHeldEdit) await handleCloseHeldEdit(discardHeldEdit, true); }} />
     {confirmationModal}
     </CashierRecovery>
   );

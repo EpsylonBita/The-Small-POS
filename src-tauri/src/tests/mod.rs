@@ -94,6 +94,7 @@ mod cancel_money_taken;
 
 // Fix review 30/09/2026: a slow card terminal is never paid twice.
 mod checkout_double_charge;
+mod split_first_portion;
 
 // Fix review 30/09/2026: with nobody on shift, a manager approves the Z's
 // money actions with their own PIN.
@@ -127,3 +128,8 @@ mod round3_set_aside_restore;
 // one classifier in both apps (R1); the platform-held set-aside and the
 // shared store-collectable contract (R4); an `other` refund names it (R5).
 mod round3_review_fixes;
+
+// 02/11/2026: Health reads on its own read-only connection, so a checkout
+// never waits for a Health scan; the scans stay cheap as orders and the
+// parity queue grow.
+mod health_checkout_scaling;

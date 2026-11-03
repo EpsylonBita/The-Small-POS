@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 import { localeBundles } from '../../../locales/bundles'
 import {
@@ -15,6 +17,22 @@ import {
  * which keeps both apps saying the same thing.
  */
 describe('shared Health i18n keys in the desktop locale bundles', () => {
+  it('has remote-support copy in all six locales, identical across apps', () => {
+    for (const locale of HEALTH_LOCALES) {
+      const mobile: unknown = JSON.parse(readFileSync(resolve(process.cwd(), `../POSSystemMobile/src/locales/${locale}.json`), 'utf8'))
+      for (const field of ['title', 'impact', 'action', 'details']) {
+        const key = `sync.healthModal.remoteSupport.${field}`
+        const value = localeValue(localeBundles[locale], key)
+        expect(value, `${locale} ${key}`).toEqual(expect.any(String))
+        expect(value, `${locale} ${key}`).toBeTruthy()
+        expect(value).toBe(localeValue(mobile, key))
+        if (locale === 'el') {
+          expect(value).toMatch(/[Α-ω]/u)
+          expect(value).not.toContain('?')
+        }
+      }
+    }
+  })
   it('covers the six POS locales', () => {
     expect(Object.keys(localeBundles).sort()).toEqual([...HEALTH_LOCALES].sort())
   })

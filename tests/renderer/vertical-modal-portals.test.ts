@@ -34,7 +34,8 @@ test('RoomsView modal portals to body with a high-z full-screen blur overlay', (
   assert.ok(importsHelper(rooms), 'RoomsView must use renderModalPortal');
   assert.match(rooms, /return renderModalPortal\(/);
   assert.match(rooms, /fixed inset-0 z-1200(?![\w.-])/);
-  assert.match(rooms, /absolute inset-0 bg-black\/50 backdrop-blur-sm/);
+  assert.match(rooms, /className="liquid-glass-modal-backdrop absolute inset-0"/);
+  assert.match(rooms, /liquid-glass-modal-shell relative flex w-full/);
 });
 
 test('RoomsView shared Modal exposes dialog semantics so it joins the topmost-modal behavior', () => {
@@ -81,12 +82,12 @@ test('ReservationsView create + details overlays portal to body with high z and 
   const highZ = reservations.match(/fixed inset-0 z-1200(?![\w.-])/g);
   assert.ok(highZ && highZ.length >= 2, 'both overlays should use the high app-modal z-index');
 
-  // The create/service overlays share a full-screen blurred glass backdrop.
-  assert.match(reservations, /const modalScrimClass = `absolute inset-0 backdrop-blur-xl/);
+  // Founder 01/11: the create/service/details windows share the full-screen blurred glass backdrop of every window.
+  assert.match(reservations, /const modalScrimClass = 'liquid-glass-modal-backdrop';/);
   assert.match(reservations, /<div className=\{modalScrimClass\} onClick=\{\(\) => setShowCreateModal\(false\)\}/);
   assert.match(reservations, /<div className=\{modalScrimClass\} onClick=\{closeServiceModal\}/);
-  // The details drawer still has its own lighter click-away blur.
-  assert.match(reservations, /absolute inset-0 bg-black\/30 backdrop-blur-sm/);
+  // The details window closes on its click-away backdrop too.
+  assert.match(reservations, /<div className=\{modalScrimClass\} onClick=\{\(\) => setSelectedReservation\(null\)\}/);
 
   // Click-outside close behavior is preserved.
   assert.match(reservations, /onClick=\{\(\) => setShowCreateModal\(false\)\}/);

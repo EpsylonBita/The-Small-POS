@@ -182,6 +182,7 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
 
   afterEach(async () => {
     cleanup()
+    document.documentElement.classList.remove('dark')
     vi.useRealTimers()
     vi.restoreAllMocks()
     await i18n.changeLanguage('en')
@@ -198,6 +199,37 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     expect(
       screen.getByRole('button', { name: i18n.t('sync.healthModal.close') }),
     ).toBeInTheDocument()
+  })
+
+  it.each(['light', 'dark'])('shows remote support as a calm independent row in %s theme', async theme => {
+    document.documentElement.classList.toggle('dark', theme === 'dark')
+    bridge.diagnostics.getSystemHealth.mockResolvedValue({
+      ...HEALTHY_SYSTEM_HEALTH,
+      remoteSupport: { status: 'unavailable', code: 'SUPPORT_DATABASE_UNAVAILABLE', guidance: 'RAW_GUIDANCE' },
+    })
+    renderHealthModal()
+    const row = await screen.findByRole('region', { name: i18n.t('sync.healthModal.remoteSupport.title') })
+    expect(row).toHaveTextContent(i18n.t('sync.healthModal.remoteSupport.impact'))
+    expect(row).toHaveTextContent(i18n.t('sync.healthModal.remoteSupport.action'))
+    expect(row.className).toContain('bg-(--pos-s-surface-2)')
+    expect(row.className).not.toMatch(/red|rose|danger/)
+    expect(row.querySelector('button')).toBeNull()
+    expect(screen.getByText(i18n.t('sync.healthModal.states.healthy.title'))).toBeInTheDocument()
+    expect(screen.getByTestId('health-service-support')).toHaveTextContent(i18n.t('sync.healthModal.status.notNeeded'))
+    expect(screen.queryByText(/SUPPORT_DATABASE_UNAVAILABLE|RAW_GUIDANCE/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText(i18n.t('sync.healthModal.sections.supportActions')))
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('sync.healthModal.actions.openAdvanced') }))
+    const details = screen.getByTestId('health-remote-support-details')
+    expect(details).toHaveTextContent('SUPPORT_DATABASE_UNAVAILABLE')
+    expect(details).toHaveTextContent('unavailable')
+    document.documentElement.classList.remove('dark')
+  })
+
+  it.each([undefined, { status: 'available' }, { status: 'not_observed' }])('hides the remote support row for %j', async remoteSupport => {
+    bridge.diagnostics.getSystemHealth.mockResolvedValue({ ...HEALTHY_SYSTEM_HEALTH, remoteSupport })
+    renderHealthModal()
+    await screen.findByText(i18n.t('sync.healthModal.states.healthy.title'))
+    expect(screen.queryByTestId('health-remote-support')).not.toBeInTheDocument()
   })
 
   it('prioritizes a failed payment over printer setup even when the financial mirror still reports zero', async () => {

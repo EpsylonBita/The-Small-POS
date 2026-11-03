@@ -8,7 +8,8 @@ import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
 import { PHONE_SHIFT_STAFF_OPEN_EVENT } from '../hooks/usePhoneShiftNotices';
 import { ShiftManager, type ShiftManagerRef } from './ShiftManager';
 import { DeferredModal } from './ui/DeferredModal';
-const ZReportModal = lazy(() => import('./modals/ZReportModal'));
+const loadZReportModal = () => import('./modals/ZReportModal');
+const ZReportModal = lazy(loadZReportModal);
 
 /**
  * The locked cashier day's recovery actions, or null outside the gate. While the
@@ -41,22 +42,22 @@ export function CashierOperationalBoundary({ children }: { children: React.React
   return <div className="relative h-full min-h-0">
     <div ref={content} className={`h-full min-h-0 ${locked ? 'invisible' : ''}`} inert={locked} aria-hidden={locked || undefined} data-cashier-operational="true">{children}</div>
     {locked && actions && <div ref={prompt} data-cashier-recovery="true" className="absolute inset-0 z-40 flex items-center justify-center p-4">
-      <div role={actions.resolving ? "status" : "alert"} aria-live="polite" className="w-full max-w-md rounded-[28px] border border-(--pos-s-border) bg-white/95 text-gray-900 shadow-xl dark:bg-[#11100d]/95 dark:text-white">
+      <div role={actions.resolving ? "status" : "alert"} aria-live="polite" className="pos-card w-full max-w-md shadow-xl">
         {actions.resolving ? <div className="flex items-center justify-center gap-3 p-6 sm:p-8">
           <span aria-hidden="true" className="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
           <p>{t('cashierGate.checking')}</p>
         </div> : <div className="p-6 sm:p-8">
           <div className="text-center">
-            <Store className="mx-auto mb-5 text-amber-700 dark:text-amber-300" size={28} strokeWidth={1.8} aria-hidden="true" />
+            <Store className="mx-auto mb-5 text-(--pos-s-muted)" size={28} strokeWidth={1.8} aria-hidden="true" />
             <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{t(actions.resolving ? 'cashierGate.checking' : 'cashierGate.title')}</h1>
-            <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-gray-600 dark:text-gray-400">{t(actions.waiter ? 'cashierGate.waiterBody' : 'cashierGate.body')}</p>
+            <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-(--pos-s-muted)">{t(actions.waiter ? 'cashierGate.waiterBody' : 'cashierGate.body')}</p>
           </div>
           <div className="mt-7 space-y-3">
-            <button onClick={actions.checkIn} className="flex min-h-[48px] w-full items-center justify-center gap-3 rounded-xl bg-amber-400 px-4 py-3 font-semibold text-gray-950 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950">{t('navigation.checkIn')}<ArrowRight size={18} aria-hidden="true" /></button>
-            {actions.pendingZ && !actions.waiter && <button onClick={actions.completeZ} className="min-h-[48px] w-full rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-sm font-medium text-amber-800 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-400 dark:text-amber-300">{t('shift.actions.completeZReport')}</button>}
-            <div className="grid grid-cols-2 gap-3 border-t border-gray-200 pt-4 dark:border-white/10">
-              <button onClick={actions.settings} className="flex min-h-touch items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-medium text-gray-600 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-400 dark:text-gray-300 "><Settings size={17} aria-hidden="true" />{t('navigation.settings')}</button>
-              <button onClick={actions.logout} className="flex min-h-touch items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-medium text-gray-600 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-400 dark:text-gray-300 "><LogOut size={17} aria-hidden="true" />{t('navigation.logout')}</button>
+            <button onClick={actions.checkIn} className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary w-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg) focus-visible:ring-offset-2">{t('navigation.checkIn')}<ArrowRight size={18} aria-hidden="true" /></button>
+            {actions.pendingZ && !actions.waiter && <button onClick={actions.completeZ} className="pos-solid-btn pos-solid-btn--md w-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)">{t('shift.actions.completeZReport')}</button>}
+            <div className="grid grid-cols-2 gap-3 border-t border-(--pos-s-border) pt-4">
+              <button onClick={actions.settings} className="flex min-h-touch items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-(--pos-s-fg) transition-colors active:bg-(--pos-s-surface-2) focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)"><Settings size={17} aria-hidden="true" />{t('navigation.settings')}</button>
+              <button onClick={actions.logout} className="flex min-h-touch items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-(--pos-s-fg) transition-colors active:bg-(--pos-s-surface-2) focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)"><LogOut size={17} aria-hidden="true" />{t('navigation.logout')}</button>
             </div>
           </div>
         </div>}
@@ -124,7 +125,7 @@ export function GlobalCashierGate({ children, onLogout, onOpenSettings }: {
     </RecoveryActionsContext.Provider>
     <CashierRecovery>
       <ShiftManager ref={shiftManager} suppressAutoCheckin />
-      <DeferredModal isOpen={showZ} onClose={() => setShowZ(false)}>
+      <DeferredModal isOpen={showZ} onClose={() => setShowZ(false)} preload={loadZReportModal}>
         <ZReportModal isOpen={showZ} onClose={() => setShowZ(false)} branchId={day.branchId || ''}
           date={endOfDayStatus.pendingReportDate || endOfDayStatus.activeReportDate || undefined} lockDate={isPendingLocalSubmit} />
       </DeferredModal>

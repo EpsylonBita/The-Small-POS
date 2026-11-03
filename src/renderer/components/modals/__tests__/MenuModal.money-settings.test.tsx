@@ -138,11 +138,12 @@ vi.mock('../../../utils/catalog-offers', async (importOriginal) => ({
 }));
 
 const draftStorage = vi.hoisted(() => ({ draft: null as any, generation: 0, invalidated: false, deletes: 0, deleteError: false,
-  loadGate: null as Promise<void> | null, parked: null as any, parkError: null as string | null }));
+  setAside: null as any, setAsideError: false, loadGate: null as Promise<void> | null, parked: null as any, parkError: null as string | null }));
 beforeEach(() => {
   draftStorage.draft = null; draftStorage.generation = 0; draftStorage.invalidated = false;
   draftStorage.deletes = 0; draftStorage.deleteError = false; draftStorage.loadGate = null;
   draftStorage.parked = null; draftStorage.parkError = null;
+  draftStorage.setAside = null; draftStorage.setAsideError = false;
 });
 vi.mock('../../../../lib', async (importOriginal) => {
   const bridge = {
@@ -170,6 +171,14 @@ vi.mock('../../../../lib', async (importOriginal) => {
       if (command === 'checkout_draft_delete') {
         if (draftStorage.deleteError) throw new Error('DISK_UNAVAILABLE');
         draftStorage.deletes++; draftStorage.draft = null; draftStorage.generation++;
+      }
+      if (command === 'checkout_draft_set_aside_edit') {
+        if (draftStorage.deleteError || draftStorage.setAsideError) throw new Error('DISK_UNAVAILABLE');
+        if (input.expectedGeneration !== draftStorage.generation || input.draftId !== draftStorage.draft?.draftId ||
+          input.clientRequestId !== draftStorage.draft?.checkoutRequestId) throw new Error('CHECKOUT_DRAFT_CHANGED');
+        if (draftStorage.draft?.context.editMode !== true) throw new Error('CHECKOUT_DRAFT_NOT_EDIT');
+        draftStorage.setAside = structuredClone(draftStorage.draft);
+        draftStorage.draft = null; draftStorage.generation++;
       }
       if (command === 'checkout_draft_park') {
         if (draftStorage.parkError) throw new Error(draftStorage.parkError);
@@ -228,7 +237,9 @@ vi.mock('../../menu/MenuCart', () => ({
 vi.mock('../../menu/MenuItemModal', () => ({ MenuItemModal: () => null }));
 vi.mock('../../menu/ComboChoiceModal', () => ({ ComboChoiceModal: () => null }));
 vi.mock('../PaymentModal', () => ({
-  PaymentModal: ({ isOpen, onPaymentComplete, onBeforePayment, onSplitPayment, orderTotal }: any) => (isOpen ? <div data-testid="payment-modal">payment
+  PaymentModal: ({ isOpen, onPaymentComplete, onBeforePayment, onSplitPayment, orderTotal, onClose, initialTipSelection }: any) => (isOpen ? <div data-testid="payment-modal" data-initial-tip={initialTipSelection?.amount ?? ''}>payment
+    <button onClick={() => onClose()}>Close payment</button>
+    <button onClick={() => onSplitPayment({ amount: 2, recipientRole: 'cashier' })}>Confirm split with tip</button>
     <button onClick={() => onBeforePayment({ method: 'twint', amount: 7, currency: 'CHF', idempotencyKey: 'loyalty-twint' })}>Admit loyalty QR</button>
     <button onClick={() => onPaymentComplete({ method: 'twint', amount: 7, currency: 'CHF', idempotencyKey: 'loyalty-twint', metadata: { provider: 'twint', confirmation: 'cashier', confirmation_action: 'confirm' } })}>Confirm loyalty receipt</button>
     <button onClick={() => onBeforePayment({ method: 'twint', amount: 7.2, currency: 'CHF', idempotencyKey: 'admitted-twint' })}>Admit QR</button>
@@ -439,7 +450,7 @@ describe('MenuModal recovery after a failed durable freeze', () => {
 });
 
 describe('MenuModal paid edit lifecycle', () => {
-  it('waits for controlled restore props without reporting a failed save or changing the retained cart', async () => {
+  it('waits for controlled restore props of the same order without changing the retained cart', async () => {
     mocks.settings.unavailable = false;
     const retainedItems = [
       { id: 'original-line', menuItemId: 'espresso', name: 'Espresso', quantity: 1, unitPrice: 6, totalPrice: 6 },
@@ -451,7 +462,7 @@ describe('MenuModal paid edit lifecycle', () => {
       context: { editMode: true, editOrderId: 'paid-order', editExpectedVersion: 1, orderType: 'pickup' } };
     const restore = vi.fn();
     const props = { isOpen: true, onClose: vi.fn(), orderType: 'pickup' as const, onDraftRestore: restore };
-    const view = render(<MenuModal {...props} editMode={false} />);
+    const view = render(<MenuModal {...props} orderType="delivery" editMode editOrderId="paid-order" />);
     await waitFor(() => expect(restore).toHaveBeenCalledOnce());
     expect(screen.queryByText('modals.menu.draftSaveFailed')).toBeNull();
     expect(draftStorage.generation).toBe(14);
@@ -692,7 +703,8 @@ describe('MenuModal closing an order correction (1.4.125)', () => {
     expect(draftStorage.draft.submission).toBeUndefined();
     fireEvent.click(closeButton());
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-    expect(draftStorage.deletes).toBe(1);
+    expect(draftStorage.setAside).toMatchObject({ context: { editMode: true } });
+    expect(draftStorage.deletes).toBe(0);
     expect(draftAtClose).toBeNull();
     expect(draftStorage.draft).toBeNull();
 
@@ -726,7 +738,7 @@ describe('MenuModal closing an order correction (1.4.125)', () => {
     expect(draftStorage.draft).toEqual(frozen);
   });
 
-  it('keeps a renewed refused correction, which replaces an attempt the journal still holds', async () => {
+  it('sets aside a renewed refused correction before closing', async () => {
     loadEditOrder();
     draftStorage.generation = 5;
     draftStorage.draft = { schemaVersion: 1, draftId: 'renewed-edit', checkoutRequestId: 'renewed-attempt', phase: 'editing',
@@ -735,10 +747,10 @@ describe('MenuModal closing an order correction (1.4.125)', () => {
     render(<MenuModal isOpen onClose={onClose} orderType="pickup" editMode editOrderId="paid-order" />);
     await waitFor(() => expect(screen.queryByText('Loading the saved cart…')).toBeNull());
     fireEvent.click(closeButton());
-    expect(onClose).toHaveBeenCalledOnce();
-    await act(async () => { await Promise.resolve(); });
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
     expect(draftStorage.deletes).toBe(0);
-    expect(draftStorage.draft).toMatchObject({ draftId: 'renewed-edit', phase: 'editing',
+    expect(draftStorage.draft).toBeNull();
+    expect(draftStorage.setAside).toMatchObject({ draftId: 'renewed-edit', phase: 'editing',
       context: { editMode: true, supersedesEditEvent: 'refused-attempt' } });
   });
 
@@ -761,7 +773,8 @@ describe('MenuModal closing an order correction (1.4.125)', () => {
 
     await act(async () => { finishLoad(); });
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-    expect(draftStorage.deletes).toBe(1);
+    expect(draftStorage.setAside).toMatchObject({ context: { editMode: true } });
+    expect(draftStorage.deletes).toBe(0);
     expect(draftAtClose).toBeNull();
     expect(draftStorage.draft).toBeNull();
   });
@@ -948,6 +961,31 @@ describe('MenuModal paid edit corrections (06/10/2026)', () => {
     expect(preflight.mock.calls[0][0]).toMatchObject({ supersedes_client_event_id: 'refused-event' });
     expect(preflight.mock.calls[0][0].client_event_id).not.toBe('refused-event');
     expect(mocks.applyEditSettlement).not.toHaveBeenCalled();
+  });
+
+  it.each(['no', 'yes'] as const)('cashier discard of a refused edit requires a no-money declaration: %s', async answer => {
+    editOrder([{ id: 'original-line', menu_item_id: 'espresso', name: 'Espresso', quantity: 1, unit_price: 6, total_price: 6 }]);
+    refusedDraft();
+    mocks.applyEditSettlement.mockResolvedValue({ success: true, state: 'reconciled' });
+    const close = vi.fn();
+    render(<MenuModal isOpen onClose={close} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={vi.fn(async () => ({ kind: 'ordinary' as const }))}
+      onEditComplete={vi.fn(async () => { throw new Error('EDIT_SETTLEMENT_METHOD_UNAVAILABLE'); })} />);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    fireEvent.click(await screen.findByTestId('menu-edit-discard'));
+    expect(mocks.applyEditSettlement).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByTestId(`discard-edit-${answer}`));
+    if (answer === 'no') {
+      await waitFor(() => expect(close).toHaveBeenCalledOnce());
+      expect(mocks.applyEditSettlement).toHaveBeenCalledExactlyOnceWith({ orderId: 'paid-order', client_event_id: 'refused-event',
+        items: [], action: { type: 'none' }, reconcile: { decision: 'discard_by_cashier', moneyChangedHands: false } });
+      expect(draftStorage.draft).toBeNull();
+    } else {
+      expect(await screen.findByText('modals.menu.editDiscardMoneyGuidance')).toBeTruthy();
+      expect(mocks.applyEditSettlement).not.toHaveBeenCalled();
+      expect(draftStorage.draft?.submission).toBeTruthy();
+      expect(close).not.toHaveBeenCalled();
+    }
   });
 
   it('a manager closes a correction proven never applied without recording money', async () => {
@@ -1499,5 +1537,292 @@ describe('appointment checkout claim before payment', () => {
     fireEvent.click(await screen.findByText('Confirm cash'));
     await waitFor(() => expect(complete).toHaveBeenCalled());
     expect(mocks.appointmentClaims).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Founder 01/11/2026 («Τίποτα»): Split for an order paid now saves nothing until the first portion is paid. The
+// admitted cart goes to the split window; its first portion confirms this checkout and saves the order with that
+// payment; backing out of it shows the payment window again and leaves the cart as it was.
+describe('split saves the order only with its first payment', () => {
+  const openSplit = async (complete: any, onSplitCheckout: any) => {
+    mocks.settings.unavailable = false;
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={complete} onSplitCheckout={onSplitCheckout} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm split'));
+    await waitFor(() => expect(onSplitCheckout).toHaveBeenCalledTimes(1));
+    return onSplitCheckout.mock.calls[0][0];
+  };
+
+  it('hands the admitted cart to the split window and saves nothing', async () => {
+    const complete = vi.fn(async () => true);
+    const onSplitCheckout = vi.fn();
+    const session = await openSplit(complete, onSplitCheckout);
+    expect(complete).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('payment-modal')).toBeNull();
+    expect(session.submission.paymentData).toEqual(expect.objectContaining({ method: 'pending' }));
+    expect(session.submission.clientRequestId).toBe(draftStorage.draft?.checkoutRequestId);
+    expect(draftStorage.draft?.phase).toBe('checkout_pending');
+  });
+
+  it('backing out of the split shows the payment window again and the cart stays editable', async () => {
+    const complete = vi.fn(async () => true);
+    const session = await openSplit(complete, vi.fn());
+    await act(async () => { await session.backOut(); });
+    expect(await screen.findByTestId('payment-modal')).toBeTruthy();
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    expect(complete).not.toHaveBeenCalled();
+    // A different tender can be chosen now: the earlier admission is gone.
+    fireEvent.click(screen.getByText('Confirm cash'));
+    await waitFor(() => expect(complete).toHaveBeenCalledWith(expect.objectContaining({
+      paymentData: expect.objectContaining({ method: 'cash' }),
+    })));
+  });
+
+  it('the first portion confirms the checkout and saves the order with that payment', async () => {
+    const complete = vi.fn(async () => true);
+    const session = await openSplit(complete, vi.fn());
+    const firstPayment = { method: 'cash', amount: 1.5, discountAmount: 0, paymentOrigin: 'manual', terminalApproved: false };
+    let committed = false;
+    await act(async () => { committed = await session.commit(firstPayment); });
+    expect(committed).toBe(true);
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({
+      clientRequestId: session.submission.clientRequestId,
+      paymentData: expect.objectContaining({ method: 'pending', splitFirstPortion: firstPayment }),
+    }));
+    await waitFor(() => expect(draftStorage.draft).toBeNull());
+  });
+
+  it('without the hand-off (a table order) the pending order is saved first, as before', async () => {
+    mocks.settings.unavailable = false;
+    const complete = vi.fn(async () => true);
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm split'));
+    await waitFor(() => expect(complete).toHaveBeenCalledWith(expect.objectContaining({
+      paymentData: expect.objectContaining({ method: 'pending' }),
+    })));
+    expect(complete.mock.calls[0][0].paymentData.splitFirstPortion).toBeUndefined();
+  });
+
+  it('backing out restores the cart exactly, the tip comes back, and closing the payment window releases the points', async () => {
+    mocks.settings.unavailable = false;
+    mocks.loyaltyEnabled = true;
+    const complete = vi.fn(async () => true);
+    const onSplitCheckout = vi.fn();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" selectedCustomer={{ id: '11111111-1111-4111-8111-111111111111', name: 'Customer' }} onOrderComplete={complete} onSplitCheckout={onSplitCheckout} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Redeem points'));
+    fireEvent.click(await screen.findByText('Use 100 points'));
+    await waitFor(() => expect(screen.getByTestId('loyalty-applied').textContent).toBe('100'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm split with tip'));
+    await waitFor(() => expect(onSplitCheckout).toHaveBeenCalledTimes(1));
+    const session = onSplitCheckout.mock.calls[0][0];
+    expect(session.submission.paymentData).toEqual(expect.objectContaining({ method: 'pending', tipAmount: 2 }));
+
+    // Codex review P2: a released checkout never redeems again, so the back-out keeps this checkout's points.
+    const releases = () => (getBridge() as any).invoke.mock.calls
+      .filter(([command]: [string]) => command === 'loyalty_release_redemption').length;
+    const releasedBefore = releases();
+    await act(async () => { await session.backOut(); });
+    expect(releases()).toBe(releasedBefore);
+    expect(await screen.findByTestId('payment-modal')).toHaveAttribute('data-initial-tip', '2');
+    expect(screen.getByTestId('loyalty-applied').textContent).toBe('100');
+
+    // The cart as it was: the next tender builds the very same order from it (lines, totals, discounts, points,
+    // customer, type and notes), and its points stay the one reservation of this checkout.
+    fireEvent.click(screen.getByText('Confirm cash'));
+    await waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    const pick = (submission: any) => {
+      const { paymentData: _payment, ...cart } = submission;
+      return cart;
+    };
+    expect(pick(complete.mock.calls[0][0])).toEqual(pick(session.submission));
+    expect(mocks.redeem).toHaveBeenCalled();
+    for (const [request] of mocks.redeem.mock.calls) {
+      expect(request).toEqual(expect.objectContaining({ orderId: session.submission.clientRequestId, checkoutReservation: true, points: 100 }));
+    }
+  });
+
+  it('closing the payment window after a back-out releases the reserved points and returns to the cart', async () => {
+    mocks.settings.unavailable = false;
+    mocks.loyaltyEnabled = true;
+    const complete = vi.fn(async () => true);
+    const onSplitCheckout = vi.fn();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" selectedCustomer={{ id: '11111111-1111-4111-8111-111111111111', name: 'Customer' }} onOrderComplete={complete} onSplitCheckout={onSplitCheckout} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Redeem points'));
+    fireEvent.click(await screen.findByText('Use 100 points'));
+    await waitFor(() => expect(screen.getByTestId('loyalty-applied').textContent).toBe('100'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm split'));
+    await waitFor(() => expect(onSplitCheckout).toHaveBeenCalledTimes(1));
+    await act(async () => { await onSplitCheckout.mock.calls[0][0].backOut(); });
+    fireEvent.click(await screen.findByText('Close payment'));
+    const release = (getBridge() as any).loyalty.releaseRedemption;
+    await waitFor(() => expect(release).toHaveBeenCalledWith({ orderId: draftStorage.draft?.checkoutRequestId }));
+    await waitFor(() => expect(screen.queryByTestId('payment-modal')).toBeNull());
+    expect(draftStorage.draft?.phase).toBe('editing');
+    expect(screen.getByTestId('menu-cart')).toBeInTheDocument();
+    expect(complete).not.toHaveBeenCalled();
+  });
+});
+
+describe('edit draft isolation and order-level held correction exit', () => {
+  const line = { id: 'original-line', menuItemId: 'espresso', name: 'Espresso', quantity: 1, unitPrice: 6, totalPrice: 6, price: 6 };
+  const prepare = (phase: 'editing' | 'checkout_pending' = 'editing') => {
+    mocks.settings.unavailable = false;
+    draftStorage.generation = 5;
+    draftStorage.draft = { schemaVersion: 1, draftId: 'renewed', checkoutRequestId: 'renewed-event', phase,
+      cartItems: [line], state: {}, context: { editMode: true, editOrderId: 'paid-order', editExpectedVersion: 1,
+        orderType: 'pickup', supersedesEditEvent: 'refused-event' } };
+    mocks.editOrder = { id: 'paid-order', version: 1, order_type: 'pickup',
+      items: [{ id: 'original-line', menu_item_id: 'espresso', name: 'Espresso', quantity: 1, unit_price: 6, total_price: 6 }] };
+  };
+
+  it.each(['editing', 'checkout_pending'] as const)('sets aside a %s edit before starting a clean new order', async phase => {
+    prepare(phase);
+    const restore = vi.fn();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onDraftRestore={restore} />);
+    await waitFor(() => expect(draftStorage.draft).toMatchObject({ cartItems: [], context: { editMode: false } }));
+    expect(draftStorage.setAside).toMatchObject({ draftId: 'renewed', phase });
+    expect(restore).not.toHaveBeenCalled();
+    expect(vi.mocked(getBridge().invoke)).toHaveBeenCalledWith('checkout_draft_set_aside_edit',
+      expect.objectContaining({ expectedGeneration: 5, draftId: 'renewed', clientRequestId: 'renewed-event' }));
+  });
+
+  it('never restores another order edit when setting it aside fails', async () => {
+    prepare();
+    draftStorage.setAsideError = true;
+    const restore = vi.fn();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onDraftRestore={restore} />);
+    await screen.findByText('modals.menu.draftSaveFailed');
+    expect(mocks.toastError).toHaveBeenCalledWith('modals.menu.draftDiscardFailed');
+    expect(restore).not.toHaveBeenCalled();
+    expect(draftStorage.draft.draftId).toBe('renewed');
+  });
+
+  it('sets aside the old edit when opening a different order edit', async () => {
+    prepare();
+    mocks.editOrder = { ...mocks.editOrder, id: 'other-order' };
+    const restore = vi.fn();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" editMode editOrderId="other-order" onDraftRestore={restore} />);
+    await waitFor(() => expect(draftStorage.setAside?.draftId).toBe('renewed'));
+    expect(restore).not.toHaveBeenCalled();
+    await waitFor(() => expect(draftStorage.draft?.context.editOrderId).toBe('other-order'));
+  });
+
+  it('sets aside an editing correction even when a submission remains recorded', async () => {
+    prepare();
+    draftStorage.draft.submission = { action: 'edit_settlement', client_event_id: 'renewed-event' };
+    const close = vi.fn();
+    render(<MenuModal isOpen onClose={close} orderType="pickup" editMode editOrderId="paid-order" />);
+    await waitFor(() => expect(screen.queryByText('Loading the saved cart…')).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'common.actions.close' }));
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(draftStorage.setAside?.submission.action).toBe('edit_settlement');
+  });
+
+  it.each(['no', 'yes'] as const)('cashier discard of a held order preserves its editable cart: %s', async answer => {
+    prepare();
+    draftStorage.draft = null;
+    mocks.applyEditSettlement.mockResolvedValue({ success: true, state: 'reconciled' });
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={vi.fn().mockRejectedValue(new Error('ORDER_EDIT_SETTLEMENT_PENDING'))} onEditComplete={vi.fn()} />);
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByTestId('menu-order-discard-held-edit'));
+    const cart = structuredClone(draftStorage.draft.cartItems);
+    fireEvent.click(await screen.findByTestId(`discard-edit-${answer}`));
+    if (answer === 'no') {
+      await waitFor(() => expect(mocks.applyEditSettlement).toHaveBeenCalledExactlyOnceWith({ orderId: 'paid-order',
+        items: [], action: { type: 'none' }, reconcile: { decision: 'discard_by_cashier', scope: 'order', moneyChangedHands: false } }));
+      await waitFor(() => expect(screen.queryByTestId('menu-order-held-edit')).toBeNull());
+    } else {
+      expect(await screen.findByText('modals.menu.editDiscardMoneyGuidance')).toBeTruthy();
+      expect(mocks.applyEditSettlement).not.toHaveBeenCalled();
+    }
+    expect(draftStorage.draft.cartItems).toEqual(cart);
+  });
+
+  it('closes held corrections from a preview refusal, retains the cart and allows saving again', async () => {
+    prepare();
+    draftStorage.draft = null;
+    const preflight = vi.fn().mockRejectedValueOnce(new Error('ORDER_EDIT_SETTLEMENT_PENDING')).mockResolvedValue({ kind: 'ordinary' });
+    const complete = vi.fn(async () => undefined);
+    const close = vi.fn();
+    mocks.applyEditSettlement.mockResolvedValue({ success: true, state: 'reconciled' });
+    render(<MenuModal isOpen onClose={close} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={preflight} onEditComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    fireEvent.click(screen.getByText('Checkout'));
+    await screen.findByTestId('menu-order-held-edit');
+    const cart = structuredClone(draftStorage.draft.cartItems);
+    fireEvent.click(screen.getByTestId('menu-order-close-held-edit'));
+    await waitFor(() => expect(mocks.applyEditSettlement).toHaveBeenCalledWith({
+      orderId: 'paid-order', items: [], action: { type: 'none' },
+      reconcile: { decision: 'close_without_money', scope: 'order', reason: 'modals.menu.editCloseWithoutMoneyReason' },
+    }));
+    await waitFor(() => expect(screen.queryByTestId('menu-order-held-edit')).toBeNull());
+    expect(draftStorage.draft.cartItems).toEqual(cart);
+    expect(close).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Checkout'));
+    await waitFor(() => expect(complete).toHaveBeenCalledOnce());
+  });
+
+  it('releases the frozen edit after an apply refusal is closed by a manager', async () => {
+    prepare(); draftStorage.draft = null;
+    const complete = vi.fn(async (data: any, lifecycle?: any) => {
+      await lifecycle.beforeCommit({ ...data, action: 'edit_settlement' });
+      throw new Error('ORDER_EDIT_SETTLEMENT_PENDING');
+    });
+    mocks.applyEditSettlement.mockResolvedValue({ success: true, state: 'reconciled' });
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={vi.fn(async () => ({ kind: 'settlement' as const, requiredAction: 'collect' as const }))}
+      onEditComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    fireEvent.click(screen.getByText('Checkout'));
+    await screen.findByTestId('menu-order-held-edit');
+    expect(draftStorage.draft.phase).toBe('checkout_pending');
+    const previous = draftStorage.draft.checkoutRequestId;
+    const cart = structuredClone(draftStorage.draft.cartItems);
+    fireEvent.click(screen.getByTestId('menu-order-close-held-edit'));
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    expect(draftStorage.draft.checkoutRequestId).not.toBe(previous);
+    expect(draftStorage.draft.cartItems).toEqual(cart);
+    expect(draftStorage.setAside.checkoutRequestId).toBe(previous);
+    expect(screen.queryByTestId('menu-order-held-edit')).toBeNull();
+  });
+
+  it('keeps the cart and held banner when the manager close fails', async () => {
+    prepare(); draftStorage.draft = null;
+    mocks.applyEditSettlement.mockRejectedValue(new Error('EDIT_RECONCILIATION_NOT_PROVEN'));
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={vi.fn(async () => { throw new Error('ORDER_EDIT_SETTLEMENT_PENDING'); })} onEditComplete={vi.fn()} />);
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByTestId('menu-order-close-held-edit'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('modals.menu.editCloseWithoutMoneyFailed'));
+    expect(screen.getByTestId('menu-order-held-edit')).toBeTruthy();
+    expect(draftStorage.draft.cartItems).toHaveLength(1);
+  });
+
+  it('shows the cashier check-in guidance before opening a payment picker', async () => {
+    prepare(); draftStorage.draft = null;
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={vi.fn(async () => { throw new Error('EDIT_NO_DRAWER_OWNER_ON_SHIFT'); })} onEditComplete={vi.fn()} />);
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    fireEvent.click(screen.getByText('Checkout'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('modals.menu.editNoDrawerOwnerOnShift'));
+    expect(draftStorage.draft.phase).toBe('editing');
+    expect(screen.queryByText('Confirm cash')).toBeNull();
   });
 });

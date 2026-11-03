@@ -211,20 +211,22 @@ pub(crate) fn with_savepoint<T>(
     name: &str,
     body: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    conn.execute_batch(&format!("SAVEPOINT {name}"))
-        .map_err(|e| format!("savepoint {name}: {e}"))?;
-    match body() {
-        Ok(value) => {
-            conn.execute_batch(&format!("RELEASE {name}"))
-                .map_err(|e| format!("release {name}: {e}"))?;
-            Ok(value)
+    crate::db::with_immediate_admission(conn, || {
+        conn.execute_batch(&format!("SAVEPOINT {name}"))
+            .map_err(|e| format!("savepoint {name}: {e}"))?;
+        match body() {
+            Ok(value) => {
+                conn.execute_batch(&format!("RELEASE {name}"))
+                    .map_err(|e| format!("release {name}: {e}"))?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch(&format!("ROLLBACK TO {name}"));
+                let _ = conn.execute_batch(&format!("RELEASE {name}"));
+                Err(error)
+            }
         }
-        Err(error) => {
-            let _ = conn.execute_batch(&format!("ROLLBACK TO {name}"));
-            let _ = conn.execute_batch(&format!("RELEASE {name}"));
-            Err(error)
-        }
-    }
+    })
 }
 
 pub(crate) fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
@@ -351,6 +353,31 @@ pub(crate) fn set_aside_payment_in_connection(
     server_payment_id: Option<&str>,
     detected_at: &str,
 ) -> Result<SetAsideOutcome, String> {
+    if conn.is_autocommit() {
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT order_id,LOWER(TRIM(COALESCE(status,''))) FROM order_payments WHERE id=?1",
+                [payment_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("load payment to set aside: {e}"))?;
+        match row {
+            None => return Ok(SetAsideOutcome::NotEligible),
+            Some((_, status))
+                if status != "completed" && status != DUPLICATE_REVIEW_PAYMENT_STATUS =>
+            {
+                return Ok(SetAsideOutcome::NotEligible)
+            }
+            Some((order_id, status))
+                if status == "completed"
+                    && !crate::db::order_payments_accept_duplicate_review(conn) =>
+            {
+                return Ok(SetAsideOutcome::StatusUnavailable { order_id })
+            }
+            _ => {}
+        }
+    }
     with_savepoint(conn, "payment_set_aside", || {
         let row: Option<(String, String, String, String, Option<String>, String, i64)> = conn
             .query_row(
@@ -849,6 +876,25 @@ pub(crate) fn resolve_set_aside_payment_in_connection(
     resolved_by: Option<&str>,
     resolved_at: &str,
 ) -> Result<ResolveOutcome, String> {
+    if conn.is_autocommit() {
+        let row: Option<(String,String,Option<String>)> = conn.query_row("SELECT order_id,LOWER(TRIM(COALESCE(status,''))),metadata FROM order_payments WHERE id=?1", [payment_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|e| format!("load set-aside payment to resolve: {e}"))?;
+        let Some((order_id, status, metadata)) = row else {
+            return Err(format!("{PAYMENT_NOT_FOUND_ERROR}: payment {payment_id}"));
+        };
+        if status == "voided"
+            && parse_metadata_object(metadata.as_deref())
+                .get("duplicate_review")
+                .and_then(Value::as_object)
+                .is_some_and(|review| review.get("resolution").is_some())
+        {
+            return Ok(ResolveOutcome::AlreadyResolved { order_id });
+        }
+        if status != DUPLICATE_REVIEW_PAYMENT_STATUS {
+            return Err(format!(
+                "{PAYMENT_NOT_SET_ASIDE_ERROR}: payment {payment_id} is not set aside for review"
+            ));
+        }
+    }
     with_savepoint(conn, "payment_set_aside_resolve", || {
         let row: Option<(String, String, Option<String>, String, i64)> = conn
             .query_row(
@@ -1441,3 +1487,7 @@ mod tests {
         assert!(!response_reports_already_paid(None));
     }
 }
+
+#[cfg(test)]
+#[path = "admission_tests/payment_review.rs"]
+mod admission_regression_tests;

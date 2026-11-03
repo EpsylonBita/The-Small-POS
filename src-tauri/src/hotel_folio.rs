@@ -41,6 +41,22 @@ pub(crate) fn import(conn: &Connection, order: &Value) -> Result<String, String>
     import_scoped(conn, order)
 }
 
+pub(crate) fn import_with_scope(
+    conn: &Connection,
+    order: &Value,
+    captured: &crate::terminal_helpers::TerminalScopeSnapshot,
+) -> Result<String, String> {
+    for key in ["organization_id", "branch_id"] {
+        let expected = captured
+            .folio_credential(key)
+            .ok_or("FOLIO_SETTLEMENT_SCOPE_REQUIRED")?;
+        if order.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err("FOLIO_SETTLEMENT_SCOPE_MISMATCH".into());
+        }
+    }
+    import_scoped(conn, order)
+}
+
 fn import_scoped(conn: &Connection, order: &Value) -> Result<String, String> {
     if !is_settlement(order) {
         return Err("FOLIO_SETTLEMENT_REQUIRED".into());
@@ -350,5 +366,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn admission_folio_scope_is_captured_before_the_writer() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = crate::tests::harness::TestDb::open();
+        let conn = std::rc::Rc::new(Connection::open(db.db_path()).unwrap());
+        conn.busy_timeout(std::time::Duration::from_millis(5000))
+            .unwrap();
+        crate::storage::seed_terminal_credential_for_test("organization_id", "org").unwrap();
+        crate::storage::seed_terminal_credential_for_test("branch_id", "branch").unwrap();
+        let checkout = crate::admission_tests::pause_credentials_for_checkout(
+            conn.clone(),
+            db.db_path().to_owned(),
+        );
+        let order = order();
+        let captured =
+            crate::terminal_helpers::TerminalScopeSnapshot::capture_for_canonical(&conn, &order)
+                .unwrap();
+        let tx = crate::db::immediate_transaction(&conn).unwrap();
+        import_with_scope(&tx, &order, &captured).unwrap();
+        tx.commit().unwrap();
+        checkout.join().unwrap();
     }
 }

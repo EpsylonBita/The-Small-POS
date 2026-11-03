@@ -22,6 +22,7 @@ const makeCloseHarness = (overrides: Record<string, any> = {}) => {
     draftPersistence: {
       status: 'ready', error: null, isPending: () => false, hasSubmission: () => false, supersedesEdit: () => false,
       clear: async (completed: boolean) => { assert.equal(completed, false); calls.push('clear'); },
+      setAsideEdit: async () => { calls.push('set-aside-edit'); },
     },
     onClose: () => calls.push('close'),
     setCloseRequested: (requested: boolean) => { assert.equal(requested, true); calls.push('close-pending'); },
@@ -138,7 +139,7 @@ test('MenuModal header cannot horizontally clip the full/edit modal off the view
   assert.match(source, /col-span-2 row-start-2/);
 
   // The close control is always reachable (never the clipped element).
-  assert.match(source, /liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0/);
+  assert.match(source, /className="liquid-glass-modal-close shrink-0"/);
 
   // Both populated states share a bounded, truncating neutral chip in either theme.
   const chipSource = readFileSync(
@@ -232,9 +233,15 @@ test('MenuModal X / Escape tombstones editable carts and preserves protected che
   for (const editableState of [{}, { editMode: true }]) {
     const editable = makeCloseHarness(editableState);
     await editable.requestClose();
-    assert.deepEqual(editable.calls, ['clear', 'empty-cart', 'close'], JSON.stringify(editableState));
+    assert.deepEqual(editable.calls, ['editMode' in editableState ? 'set-aside-edit' : 'clear', 'empty-cart', 'close'], JSON.stringify(editableState));
   }
   const idle = { status: 'ready', error: null, hasSubmission: () => false, supersedesEdit: () => false };
+  for (const retained of [{ hasSubmission: () => true }, { supersedesEdit: () => true }]) {
+    const editing = makeCloseHarness({ editMode: true, draftPersistence: { ...idle, ...retained, isPending: () => false,
+      setAsideEdit: async () => { editing.calls.push('set-aside-edit'); } } });
+    await editing.requestClose();
+    assert.deepEqual(editing.calls, ['set-aside-edit', 'empty-cart', 'close']);
+  }
 
   for (const protectedState of [
     { isOpen: false },
@@ -250,8 +257,6 @@ test('MenuModal X / Escape tombstones editable carts and preserves protected che
   }
   for (const resumable of [
     { draftPersistence: { ...idle, isPending: () => true } },
-    { editMode: true, draftPersistence: { ...idle, isPending: () => false, hasSubmission: () => true } },
-    { editMode: true, draftPersistence: { ...idle, isPending: () => false, supersedesEdit: () => true } },
     { editMode: true, draftPersistence: { ...idle, status: 'loaded', isPending: () => true } },
     { editMode: true, draftPersistence: { ...idle, status: 'error', isPending: () => false } },
     // A draft that cannot be hydrated is kept, never waited on forever.

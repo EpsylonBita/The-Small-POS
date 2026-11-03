@@ -347,14 +347,10 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
               <button
                 type="button"
                 onClick={() => setPreview(null)}
-                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border transition-colors ${
-                  resolvedTheme === 'dark'
-                    ? 'border-white/10 bg-white/5 text-zinc-300 active:bg-white/10 active:text-white'
-                    : 'border-black/10 bg-black/5 text-gray-600 active:bg-black/10 active:text-gray-950'
-                }`}
+                className="liquid-glass-modal-close shrink-0"
                 aria-label={t('common.actions.close')}
               >
-                <X className="h-4 w-4" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
@@ -424,7 +420,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
                 {t('menu.featuredShortcuts.hint')}
               </span>
             </div>
-            <div className="flex gap-2 overflow-x-auto py-1 scrollbar-hide touch-pan-x">
+            <div className="pos-scroll-row gap-2">
               {featuredNavigationShortcuts.map((shortcut) => {
                 const flavorName = shortcut.flavorType
                   ? t(`menu.categories.${shortcut.flavorType}`)

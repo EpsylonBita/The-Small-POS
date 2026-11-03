@@ -67,7 +67,7 @@ test('closeout inline expense receipt field is fiscal-entitlement gated', () => 
     'normal orgs must not send inline checkout receipt/reference values',
   );
   const gatedInputs = source.match(
-    /\{canUseExpenseReceiptReference && \(\s*<input[\s\S]*?value=\{expenseReceipt\}[\s\S]*?placeholder=\{expenseReceiptPlaceholder\}/g,
+    /\{canUseExpenseReceiptReference && \(\s*(?:<div>[\s\S]*?)?<input[\s\S]*?value=\{expenseReceipt\}[\s\S]*?placeholder=\{expenseReceiptPlaceholder\}/g,
   );
   assert.ok(
     gatedInputs && gatedInputs.length >= 2,
@@ -181,14 +181,15 @@ test('StaffShiftModal hides every scroll region (no custom-scrollbar, scrollbar-
   // is matched tolerantly (Round 313 2nd follow-up tightened it space-y-6 -> space-y-4 to fit the PIN step);
   // the guard's intent is the bounded flex-1 scroll region with the hidden native scrollbar. Round 338 added
   // min-h-0 so this flex child actually shrinks and scrolls inside the shell (keeping the footer pinned).
-  assert.match(source, /flex-1 min-h-0 space-y-\d+ overflow-y-auto pr-2 scrollbar-hide/);
+  // Founder 01/11: pos-scroll-room gives the raised controls room at its sides (it replaced pr-2).
+  assert.match(source, /pos-scroll-room flex-1 min-h-0 space-y-\d+ overflow-y-auto scrollbar-hide/);
 });
 
 test('StaffShiftModal keeps the touch palette: semantic add=yellow, no blue/hover-era classes', () => {
   // Add actions stay yellow (the semantic "add" color); save/record stay green and
   // destructive stay red elsewhere. No leftover blue palette and no hover-era Tailwind
   // classes from the old design -- this POS uses active:, not hover:.
-  assert.match(source, /checkoutActionButtonClass = '[^']*\bbg-yellow-400\b[^']*\btext-black\b/);
+  assert.match(source, /checkoutActionButtonClass = '[^']*\bpos-solid-btn--primary\b/);
   assert.doesNotMatch(source, /-blue-\d/, 'no blue palette classes');
   assert.doesNotMatch(
     source,

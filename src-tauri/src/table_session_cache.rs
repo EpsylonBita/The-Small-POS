@@ -30,6 +30,25 @@ pub(crate) fn current_scope(conn: &Connection) -> Result<Scope, String> {
     })
 }
 
+pub(crate) fn scope_from_snapshot(
+    snapshot: &crate::terminal_helpers::TerminalScopeSnapshot,
+) -> Result<Scope, String> {
+    let terminal = snapshot
+        .canonical_terminal()
+        .ok_or("Table cache terminal identity is unavailable")?;
+    let setting = |key| snapshot.value(key).filter(|value| !value.trim().is_empty());
+    Ok(Scope {
+        organization: setting("organization_id")
+            .ok_or("Table cache organization is unavailable")?,
+        branch: setting("branch_id").ok_or("Table cache branch is unavailable")?,
+        owner: setting("owner_terminal_db_id")
+            .or_else(|| setting("owner_terminal_id"))
+            .or_else(|| setting("parent_terminal_id"))
+            .unwrap_or_else(|| terminal.clone()),
+        terminal,
+    })
+}
+
 fn schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS table_session_snapshots_v1 (
@@ -67,7 +86,43 @@ fn schema(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn has_table_history(order: &Value) -> bool {
+    order
+        .get("has_table_service_history")
+        .and_then(Value::as_bool)
+        == Some(true)
+        || ["table_id", "table_session_id"].iter().any(|key| {
+            order
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        })
+}
+
 pub(crate) fn remember_order_history(conn: &Connection, order: &Value) -> Result<(), String> {
+    if !has_table_history(order) {
+        return Ok(());
+    }
+    let scope = current_scope(conn)?;
+    remember_order_history_with_scope(conn, &scope, order)
+}
+
+pub(crate) fn remember_order_history_with_snapshot(
+    conn: &Connection,
+    captured: &crate::terminal_helpers::TerminalScopeSnapshot,
+    order: &Value,
+) -> Result<(), String> {
+    if !has_table_history(order) {
+        return Ok(());
+    }
+    remember_order_history_with_scope(conn, &scope_from_snapshot(captured)?, order)
+}
+
+pub(crate) fn remember_order_history_with_scope(
+    conn: &Connection,
+    scope: &Scope,
+    order: &Value,
+) -> Result<(), String> {
     if order
         .get("has_table_service_history")
         .and_then(Value::as_bool)
@@ -81,7 +136,6 @@ pub(crate) fn remember_order_history(conn: &Connection, order: &Value) -> Result
     {
         return Ok(());
     }
-    let scope = current_scope(conn)?;
     if text(order, "organization_id")? != scope.organization
         || text(order, "branch_id")? != scope.branch
         || text(order, "owner_terminal_id")? != scope.owner
@@ -142,20 +196,21 @@ pub(crate) fn item_edit_attempt(
     order_id: &str,
     request: &mut Value,
 ) -> Result<(), String> {
-    let transaction = conn
-        .unchecked_transaction()
-        .map_err(|error| error.to_string())?;
-    item_edit_attempt_inner(&transaction, order_id, request)?;
-    crate::table_attempt_recovery::remember_item(&transaction, order_id, request)?;
+    let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
+    let scope = scope_from_snapshot(&captured)?;
+    let transaction = crate::db::immediate_transaction(&conn).map_err(|error| error.to_string())?;
+    captured.revalidate(&transaction)?;
+    item_edit_attempt_inner(&transaction, &scope, order_id, request)?;
+    crate::table_attempt_recovery::remember_item_scoped(&transaction, &scope, order_id, request)?;
     transaction.commit().map_err(|error| error.to_string())
 }
 
 fn item_edit_attempt_inner(
     conn: &Connection,
+    scope: &Scope,
     order_id: &str,
     request: &mut Value,
 ) -> Result<(), String> {
-    let scope = current_scope(conn)?;
     schema(conn)?;
     let requested = request
         .as_object_mut()
@@ -189,11 +244,11 @@ pub(crate) fn cancellation_attempt(
     approved_staff_id: &str,
     requested: Option<&str>,
 ) -> Result<String, String> {
-    let scope = current_scope(conn)?;
-    schema(conn)?;
-    let transaction = conn
-        .unchecked_transaction()
-        .map_err(|error| error.to_string())?;
+    let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
+    let scope = scope_from_snapshot(&captured)?;
+    let transaction = crate::db::immediate_transaction(&conn).map_err(|error| error.to_string())?;
+    captured.revalidate(&transaction)?;
+    schema(&transaction)?;
     let event = cancellation_attempt_scoped(
         &transaction,
         &scope,
@@ -202,8 +257,10 @@ pub(crate) fn cancellation_attempt(
         approved_staff_id,
         requested,
     )?;
-    crate::table_attempt_recovery::remember_cancel(
+    crate::table_attempt_recovery::remember_cancel_scoped(
         &transaction,
+        &scope,
+        captured.value("terminal_id").as_deref(),
         local_order_id,
         session_id,
         &event,
@@ -295,8 +352,11 @@ fn cancellation_attempt_scoped(
     Ok(replacement)
 }
 
-pub(crate) fn invalidate(conn: &Connection, session_ids: &[Value]) -> Result<(), String> {
-    let scope = current_scope(conn)?;
+pub(crate) fn invalidate_scoped(
+    conn: &Connection,
+    scope: &Scope,
+    session_ids: &[Value],
+) -> Result<(), String> {
     schema(conn)?;
     for id in session_ids.iter().filter_map(Value::as_str) {
         conn.execute("DELETE FROM table_session_snapshots_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3
@@ -392,7 +452,11 @@ pub(crate) fn save(conn: &Connection, session: &Value) -> Result<bool, String> {
     save_scoped(conn, &scope, session)
 }
 
-fn save_scoped(conn: &Connection, scope: &Scope, session: &Value) -> Result<bool, String> {
+pub(crate) fn save_scoped(
+    conn: &Connection,
+    scope: &Scope,
+    session: &Value,
+) -> Result<bool, String> {
     let revision = validate(scope, session)?;
     remember_order_history_scoped(conn, scope, text(session, "active_order_id")?)?;
     for allocation in session["items"].as_array().unwrap() {
@@ -503,6 +567,7 @@ mod tests {
     }
     #[test]
     fn cancellation_retry_keeps_event_and_original_actor_without_approval_secrets() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = Connection::open_in_memory().unwrap();
         schema(&conn).unwrap();
         let first = cancellation_attempt_scoped(
@@ -580,6 +645,7 @@ mod tests {
 
     #[test]
     fn a_saved_return_that_may_have_applied_money_keeps_its_original_identity() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = Connection::open_in_memory().unwrap();
         schema(&conn).unwrap();
         frozen_return(&conn, "money-event", None);
@@ -646,6 +712,7 @@ mod tests {
 
     #[test]
     fn a_frozen_return_travels_under_its_own_event_not_an_older_attempt() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         // Symptom: a refund frozen under a new event was sent as the older
         // attempt's plain request, refused, and left orphaned (applied=0),
         // holding every manual table cancellation in the branch.
@@ -710,6 +777,7 @@ mod tests {
     }
     #[test]
     fn durable_cache_keeps_scoped_lines_and_ledger_and_rejects_old_revision() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = Connection::open_in_memory().unwrap();
         save_scoped(&conn, &scope(), &snapshot(2)).unwrap();
         let mut older = snapshot(1);
@@ -725,6 +793,7 @@ mod tests {
     }
     #[test]
     fn history_survives_check_cache_invalidation_and_is_owner_scoped() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = Connection::open_in_memory().unwrap();
         save_scoped(&conn, &scope(), &snapshot(2)).unwrap();
         conn.execute("DELETE FROM table_session_snapshots_v1", [])
@@ -751,6 +820,7 @@ mod tests {
     }
     #[test]
     fn cache_refuses_foreign_branch_owner_changed_order_or_released_table() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = Connection::open_in_memory().unwrap();
         save_scoped(&conn, &scope(), &snapshot(2)).unwrap();
         let mut foreign = scope();
@@ -768,6 +838,7 @@ mod tests {
     }
     #[test]
     fn cache_refuses_missing_revision_and_paid_scope_corruption() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = Connection::open_in_memory().unwrap();
         let mut invalid = snapshot(2);
         invalid.as_object_mut().unwrap().remove("snapshot_revision");
@@ -777,3 +848,7 @@ mod tests {
         assert!(save_scoped(&conn, &scope(), &invalid).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "admission_tests/table_session.rs"]
+mod admission_regression_tests;

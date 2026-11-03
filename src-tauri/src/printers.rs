@@ -5,6 +5,8 @@
 //! jobs either to the Windows print spooler or directly over raw TCP for LAN
 //! thermal printers.
 
+pub(crate) mod restore_brand;
+
 use chrono::Utc;
 use rusqlite::params;
 use serde_json::{Map, Value};
@@ -232,12 +234,30 @@ fn parse_network_http_probe_target(host: &str) -> Option<(String, u16, String)> 
     Some((authority.to_string(), 80, authority.to_string()))
 }
 
+struct SupportProbeObservation<'a> {
+    host: &'a str,
+    answered: bool,
+    brand: PrinterBrand,
+}
+impl Drop for SupportProbeObservation<'_> {
+    fn drop(&mut self) {
+        support_probe_observations().publish(self.host.into(),serde_json::json!({
+            "result":if self.answered {"answered"}else{"no_answer"},"brand":self.brand.label().to_ascii_lowercase(),
+        }));
+    }
+}
+
 fn probe_network_printer_brand_http_target(
     connect_host: &str,
     port: u16,
     host_header: &str,
 ) -> PrinterBrand {
     use std::io::{Read, Write};
+    let mut observation = SupportProbeObservation {
+        host: host_header,
+        answered: false,
+        brand: PrinterBrand::Unknown,
+    };
 
     // Reject any host_header containing control characters (\r, \n, \t,
     // other C0, or DEL). Without this guard the format! below would fold
@@ -270,6 +290,7 @@ fn probe_network_printer_brand_http_target(
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => {
+                observation.answered = true;
                 response.extend_from_slice(&chunk[..read]);
                 if response.len() >= 16 * 1024 {
                     break;
@@ -313,7 +334,9 @@ fn probe_network_printer_brand_http_target(
     probe.push_str(&server_header);
     probe.push(' ');
     probe.push_str(&body_excerpt);
-    detect_printer_brand(&probe)
+    let detected = detect_printer_brand(&probe);
+    observation.brand = detected;
+    detected
 }
 
 fn probe_network_printer_brand_http(host: &str) -> PrinterBrand {
@@ -326,7 +349,35 @@ fn probe_network_printer_brand_http(host: &str) -> PrinterBrand {
         return detected;
     }
 
-    probe_network_printer_brand_http_target(&connect_host, 80, &connect_host)
+    let fallback = probe_network_printer_brand_http_target(&connect_host, 80, &connect_host);
+    let observation = support_probe_observations().read(&connect_host);
+    if !observation["content"].is_null() {
+        support_probe_observations().publish(host_header, observation["content"].clone());
+    }
+    fallback
+}
+
+fn support_probe_observations() -> &'static crate::diagnostics::RetainedObservations {
+    static CACHE: std::sync::OnceLock<crate::diagnostics::RetainedObservations> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(crate::diagnostics::RetainedObservations::default)
+}
+
+/// Reads the raw last observation, before last-known-brand fallback. Never
+/// enumerates printers or takes the printer/brand-cache locks or probes a host.
+pub(crate) fn support_last_probe(host: &str) -> Value {
+    support_probe_observations().read(host)
+}
+
+#[cfg(test)]
+fn retain_support_probe(host: &str, brand: PrinterBrand) {
+    support_probe_observations().publish(
+        host.into(),
+        serde_json::json!({
+            "result":if brand == PrinterBrand::Unknown {"no_answer"} else {"answered"},
+            "brand":brand.label().to_ascii_lowercase(),
+        }),
+    );
 }
 
 pub fn detect_network_printer_brand(host: &str) -> PrinterBrand {
@@ -344,6 +395,12 @@ pub fn detect_network_printer_brand(host: &str) -> PrinterBrand {
     }
 
     let detected = probe_network_printer_brand_http(trimmed);
+    if let Some((_, _, host_header)) = parse_network_http_probe_target(trimmed) {
+        let observed = support_probe_observations().read(&host_header);
+        if !observed["content"].is_null() && host_header != trimmed {
+            support_probe_observations().publish(trimmed.into(), observed["content"].clone());
+        }
+    }
 
     if let Ok(mut cache) = network_brand_cache().lock() {
         cache.insert(trimmed.to_string(), (Instant::now(), detected));
@@ -1799,6 +1856,20 @@ pub(crate) fn drain_after_goodbye(stream: &mut std::net::TcpStream) {
     }
 }
 
+/// Same connect-only printer probe, bounded by the caller. A numeric IP
+/// avoids DNS and no business/device lock or printer command is involved.
+pub(crate) fn support_tcp_probe(ip: std::net::Ipv4Addr, port: u16, timeout: Duration) -> bool {
+    let stream = connect_tcp_socket(
+        &ip.to_string(),
+        port,
+        timeout.as_millis().clamp(1, 500) as u64,
+    );
+    stream.is_ok_and(|stream| {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        true
+    })
+}
+
 pub fn probe_printer_tcp(host: &str, port: u16) -> Result<(), String> {
     let stream = connect_tcp_socket(host, port, RAW_TCP_PROBE_TIMEOUT_MS)?;
     let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -2098,6 +2169,17 @@ fn create_printer_profile_with_capability_trust(
     profile: &Value,
     evidence_trust: CapabilityEvidenceTrust,
 ) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    create_printer_profile_on_connection(&conn, profile, evidence_trust, None, false)
+}
+
+fn create_printer_profile_on_connection(
+    conn: &rusqlite::Connection,
+    profile: &Value,
+    evidence_trust: CapabilityEvidenceTrust,
+    supplied_id: Option<&str>,
+    validate_only: bool,
+) -> Result<Value, String> {
     let name = non_empty_str(profile.get("name").and_then(|v| v.as_str()))
         .ok_or("Missing profile name")?;
     let printer_name = non_empty_str(
@@ -2274,9 +2356,13 @@ fn create_printer_profile_with_capability_trust(
         ));
     }
 
-    let id = Uuid::new_v4().to_string();
+    if validate_only {
+        return Ok(Value::Null);
+    }
+    let id = supplied_id
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let now = Utc::now().to_rfc3339();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     conn.execute(
         "INSERT INTO printer_profiles (id, name, driver_type, printer_name, paper_width_mm,
@@ -2350,13 +2436,22 @@ fn update_printer_profile_with_capability_trust(
     profile: &Value,
     evidence_trust: CapabilityEvidenceTrust,
 ) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    update_printer_profile_on_connection(&conn, profile, evidence_trust, false)
+}
+
+fn update_printer_profile_on_connection(
+    conn: &rusqlite::Connection,
+    profile: &Value,
+    evidence_trust: CapabilityEvidenceTrust,
+    validate_only: bool,
+) -> Result<Value, String> {
     let id = profile
         .get("id")
         .or_else(|| profile.get("profileId"))
         .and_then(|v| v.as_str())
         .ok_or("Missing profile id")?;
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
     let (current_role, current_connection_json): (String, Option<String>) = conn
         .query_row(
@@ -2601,6 +2696,9 @@ fn update_printer_profile_with_capability_trust(
         return Err("No fields to update".into());
     }
 
+    if validate_only {
+        return Ok(Value::Null);
+    }
     if !sets.is_empty() {
         sets.push("updated_at = ?");
         vals.push(Box::new(now.clone()));
@@ -2731,7 +2829,14 @@ pub fn list_printer_profiles(db: &DbState) -> Result<Value, String> {
 /// Get a single printer profile by ID.
 pub fn get_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    support_get_printer_profile(&conn, profile_id)
+}
 
+/// Device owner entry point; the caller owns the connection and transaction.
+pub(crate) fn support_get_printer_profile(
+    conn: &rusqlite::Connection,
+    profile_id: &str,
+) -> Result<Value, String> {
     conn.query_row(
         "SELECT id, name, driver_type, printer_name, paper_width_mm,
                 copies_default, cut_paper, open_cash_drawer,
@@ -2782,7 +2887,14 @@ pub fn get_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, Stri
 /// Delete a printer profile. Also clears the default if it was the default.
 pub fn delete_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    support_delete_printer_profile(&conn, profile_id)
+}
 
+/// Device owner entry point; the caller owns the connection and transaction.
+pub(crate) fn support_delete_printer_profile(
+    conn: &rusqlite::Connection,
+    profile_id: &str,
+) -> Result<Value, String> {
     let was_default_setting = get_default_profile_id_from_setting(&conn)
         .as_deref()
         .map(|id| id == profile_id)
@@ -4612,4 +4724,155 @@ mod tests {
             "the printer must receive the full payload"
         );
     }
+}
+
+#[cfg(test)]
+mod support_observation_tests {
+    use super::*;
+    #[test]
+    fn retained_probe_facade_does_not_wait_for_printer_brand_lock() {
+        let _owner = network_brand_cache().lock().unwrap();
+        let at = Instant::now();
+        assert_eq!(
+            support_last_probe("your-test-never-probed-host")["status"],
+            "unavailable"
+        );
+        assert!(at.elapsed() < Duration::from_millis(50));
+    }
+    #[test]
+    fn star_31_october_retained_incident_survives_the_support_projection() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _test_gate = crate::support::critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        let host = "192.168.1.19";
+        {
+            let writer = db.state.conn.lock().unwrap();
+            crate::db::set_setting(
+                &writer,
+                "local",
+                &format!("printer_last_known_brand:{host}"),
+                "Star",
+            )
+            .unwrap();
+            writer.execute("INSERT INTO printer_profiles(id,name,printer_name,driver_type,printer_type,connection_json,character_set,created_at,updated_at) VALUES('your-incident-printer','Front printer',?1,'escpos','network',?2,'PC737_GREEK','2026-10-31','2026-10-31')",params![host,serde_json::json!({"ip":host,"emulation":"auto"}).to_string()]).unwrap();
+        }
+        retain_support_probe(host, PrinterBrand::Unknown);
+        // Historical observation from the incident, before dispatch preserved
+        // a saved Star brand. Do not rerun a probe or change today's fallback.
+        let layout = crate::receipt_renderer::LayoutConfig {
+            detected_brand: PrinterBrand::Unknown,
+            character_set: "PC737_GREEK".into(),
+            ..Default::default()
+        };
+        crate::print::retain_support_layout_fixture(
+            &db.state,
+            &serde_json::json!({"id":"your-incident-printer"}),
+            &layout,
+        );
+        let gate = crate::support::critical_op::CriticalOpGate::new();
+        let permit = gate.try_begin_support(false, None).unwrap();
+        let read = crate::support::replica::read_connection(
+            db.db_path(),
+            &permit,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        let _writer = db.state.conn.lock().unwrap();
+        let result = crate::support::collectors::printers::collect(&read).unwrap();
+        let printer = &result["printers"][0];
+        assert_eq!(printer["resolved_brand"], "unknown");
+        assert_eq!(printer["brand_source"], "unknown_fallback");
+        assert_eq!(printer["last_known_brand"], "star");
+        assert_eq!(printer["last_probe"]["result"], "no_answer");
+        assert!(printer["last_probe"]["at"].is_string());
+        assert_eq!(printer["effective_emulation"], "escpos");
+        assert_eq!(printer["code_page"], 14);
+    }
+    #[test]
+    fn retained_no_answer_is_independent_of_saved_star_fallback() {
+        let host = format!("your-test-host-{}", uuid::Uuid::new_v4());
+        remember_network_printer_brand(&host, PrinterBrand::Star);
+        retain_support_probe(&host, PrinterBrand::Unknown);
+        let probe = support_last_probe(&host);
+        assert_eq!(probe["content"]["result"], "no_answer");
+        assert_eq!(probe["content"]["brand"], "unknown");
+        assert!(probe["at"].is_string());
+        assert_eq!(
+            keep_last_known_network_brand(&host, PrinterBrand::Unknown),
+            PrinterBrand::Star
+        );
+    }
+}
+
+/// Pure validation using the same normalization as manual create/update.
+pub(crate) fn support_validate_printer_profile(
+    conn: &rusqlite::Connection,
+    profile: &Value,
+    existing: bool,
+) -> Result<(), String> {
+    if existing {
+        update_printer_profile_on_connection(
+            conn,
+            profile,
+            CapabilityEvidenceTrust::Untrusted,
+            true,
+        )?;
+    } else {
+        create_printer_profile_on_connection(
+            conn,
+            profile,
+            CapabilityEvidenceTrust::Untrusted,
+            None,
+            true,
+        )?;
+    }
+    Ok(())
+}
+
+/// Save only on the caller's support transaction; never acquires DbState.
+pub(crate) fn support_save_printer_profile(
+    conn: &rusqlite::Connection,
+    profile: &Value,
+    id: &str,
+    existing: bool,
+) -> Result<(), String> {
+    if existing {
+        let mut profile = profile.clone();
+        let previous = support_get_printer_profile(conn, id)?;
+        // Support edits only its typed fields; keep transport options and the
+        // owner's printer identity, driver and printer type unchanged.
+        let mut connection: Value = previous["connectionJson"]
+            .as_str()
+            .and_then(|v| serde_json::from_str(v).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let (Some(current), Some(patch)) = (
+            connection.as_object_mut(),
+            profile["connectionJson"].as_object(),
+        ) {
+            current.remove("ip");
+            current.remove("hostname");
+            current.extend(patch.clone());
+        }
+        profile["connectionJson"] = connection;
+        if let Some(object) = profile.as_object_mut() {
+            object.remove("printerName");
+            object.remove("printerType");
+            object.remove("driverType");
+        }
+        update_printer_profile_on_connection(
+            conn,
+            &profile,
+            CapabilityEvidenceTrust::Untrusted,
+            false,
+        )?;
+    } else {
+        create_printer_profile_on_connection(
+            conn,
+            profile,
+            CapabilityEvidenceTrust::Untrusted,
+            Some(id),
+            false,
+        )?;
+    }
+    Ok(())
 }

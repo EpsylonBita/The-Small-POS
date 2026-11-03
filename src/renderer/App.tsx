@@ -31,6 +31,10 @@ import { AppRoutes } from "./AppRoutes";
 import { GlobalCashierGate } from './components/GlobalCashierGate';
 import { CashierRecovery } from './contexts/cashier-gate-context';
 import { UtilityRail } from "./components/UtilityRail";
+import { SupportSessionProvider } from './hooks/useSupportSession';
+import { SupportBanner } from './components/support/SupportBanner';
+import { SupportInteractionHost } from './components/support/SupportOnsiteSheet';
+import { SupportRestoreNotice } from './components/support/SupportRestoreNotice';
 import { CallerIdCustomerSearchModalHost } from "./components/callerid/CallerIdCustomerSearchModalHost";
 import { DeferredModal } from "./components/ui/DeferredModal";
 import SyncRecoveryModal, {
@@ -49,8 +53,7 @@ import {
 import AnimatedBackground from "./components/AnimatedBackground";
 import ThemeToggle from "./components/ThemeToggle";
 import FullscreenAwareLayout from "./components/FullscreenAwareLayout";
-import { UpdateDialog } from "./components/UpdateDialog";
-import type { UpdateStatus } from "./components/UpdateDialog";
+import { UpdateDialog, type UpdateStatus } from "./components/UpdateDialog";
 import type {
   AppFrameUpdate,
   AppFrameUpdateStatus,
@@ -68,6 +71,11 @@ import {
 import { useAutoUpdater } from "./hooks/useAutoUpdater";
 import { useWindowState } from "./hooks/useWindowState";
 import { environment, updateAdminUrlFromSettings } from "../config/environment";
+import {
+  SUPABASE_RUNTIME_KEY_EVENT,
+  applyRuntimeSupabaseKey,
+  currentSupabasePublicCredentials,
+} from "./services/supabase-runtime-key";
 import { setSupabaseContext } from "../shared/supabase-config";
 import { emitCompatEvent, getBridge, isBrowser, offEvent, onEvent } from "../lib";
 import {
@@ -79,6 +87,7 @@ import {
 import { clearStoredAppointmentClaims } from "./services/appointment-checkout-claims";
 import { DesktopRealtimeManager } from "./services/RealtimeManager";
 import { RealtimeAuthService } from "./services/RealtimeAuthService";
+import { SupportDoorbell } from './services/support/SupportDoorbell';
 import { DesktopRealtimeLifecycleCoordinator } from "./services/DesktopRealtimeLifecycleCoordinator";
 import {
   createTerminalRealtimeSession,
@@ -107,7 +116,8 @@ import { loginPinSlotForRole, rememberLoginPinLength } from "./utils/loginPinLen
 const CustomerDisplayPage = lazy(() => import('./pages/CustomerDisplayPage'));
 const KitchenDisplayPage = lazy(() => import('./pages/KitchenDisplayPage'));
 const OnboardingPage = lazy(() => import('./pages/OnboardingPage'));
-const ConnectionSettingsModal = lazy(() => import('./components/modals/ConnectionSettingsModal'));
+const loadConnectionSettingsModal = () => import('./components/modals/ConnectionSettingsModal');
+const ConnectionSettingsModal = lazy(loadConnectionSettingsModal);
 
 function PageLoading() {
   const { t } = useI18n();
@@ -1157,6 +1167,22 @@ function AppContent() {
     };
   }, [user]);
 
+  // The Supabase public key can change at runtime: a till adopts the publishable key the
+  // server hands it (Stage 3 of the key rotation). Realtime restarts on the new key.
+  const [supabaseKeyRevision, setSupabaseKeyRevision] = useState(0);
+  useEffect(() => {
+    const handleKeyUpdated = () => setSupabaseKeyRevision((revision) => revision + 1);
+    const handleRuntimeConfig = (payload: unknown) => {
+      applyRuntimeSupabaseKey(payload);
+    };
+    window.addEventListener(SUPABASE_RUNTIME_KEY_EVENT, handleKeyUpdated);
+    onEvent('terminal-config-updated', handleRuntimeConfig);
+    return () => {
+      window.removeEventListener(SUPABASE_RUNTIME_KEY_EVENT, handleKeyUpdated);
+      offEvent('terminal-config-updated', handleRuntimeConfig);
+    };
+  }, []);
+
   useEffect(() => {
     if (!user || isBrowser()) {
       setRealtimeReady(false);
@@ -1165,7 +1191,8 @@ function AppContent() {
       return;
     }
 
-    if (!environment.SUPABASE_URL || !environment.SUPABASE_ANON_KEY) {
+    const { url: supabaseUrl, key: supabasePublicKey } = currentSupabasePublicCredentials();
+    if (!supabaseUrl || !supabasePublicKey) {
       setRealtimeReady(false);
       setTerminalRealtimeSession(null);
       stopRealtimeAuthRef.current = () => {};
@@ -1176,8 +1203,8 @@ function AppContent() {
     let realtimeSession: TerminalRealtimeSession;
     try {
       realtimeSession = createTerminalRealtimeSession(
-        environment.SUPABASE_URL,
-        environment.SUPABASE_ANON_KEY,
+        supabaseUrl,
+        supabasePublicKey,
       );
     } catch (error) {
       setRealtimeReady(false);
@@ -1208,8 +1235,8 @@ function AppContent() {
       },
       createManager: ({ organizationId }) => {
         const manager = new DesktopRealtimeManager({
-          supabaseUrl: environment.SUPABASE_URL,
-          supabaseKey: environment.SUPABASE_ANON_KEY,
+          supabaseUrl,
+          supabaseKey: supabasePublicKey,
           organizationId,
           onOrderChange: () => {
             void silentRefreshOrders().catch(() => {});
@@ -1250,7 +1277,11 @@ function AppContent() {
       // Destructive order deletes recover through the strict POS sync API.
       // The legacy org-topic broadcast remains disabled until a terminal- and
       // branch-private server policy is deployed end to end.
-      subscribeAuthenticatedFeatures: () => () => {},
+      subscribeAuthenticatedFeatures: () => {
+        const doorbell = new SupportDoorbell(realtimeSession.client, authService);
+        doorbell.start();
+        return () => doorbell.stop();
+      },
       onReadyChange: (ready) => {
         if (!disposed) {
           setRealtimeReady(ready);
@@ -1300,7 +1331,7 @@ function AppContent() {
         stopRealtimeAuthRef.current = () => {};
       }
     };
-  }, [bridge.terminalConfig, silentRefreshOrders, t, user]);
+  }, [bridge.terminalConfig, silentRefreshOrders, supabaseKeyRevision, t, user]);
 
   // Track hash route for unauthenticated screens so UI updates without reload
   const [hash, setHash] = useState<string>(typeof window !== 'undefined' ? window.location.hash : '');
@@ -1639,6 +1670,7 @@ function AppContent() {
       <ErrorBoundary>
         <ThemeProvider>
           <FullscreenAwareLayout update={frameUpdate} windowState={windowState}>
+            {!user && <SupportBanner />}
             <PageLoadMotion animationKey="login" className="h-full min-h-0">
               <LoginPage
                 onLogin={handleLogin}
@@ -1683,6 +1715,7 @@ function AppContent() {
         <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
           <FullscreenAwareLayout update={frameUpdate} windowState={windowState}>
             {/* Shutdown/Restart Overlay */}
+            <SupportBanner />
             {isShuttingDown && (
               <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center">
                 <div className="bg-white/10 backdrop-blur-md rounded-3xl p-8 shadow-2xl border border-white/30 text-center">
@@ -1724,7 +1757,7 @@ function AppContent() {
             />
 
             <CashierRecovery>
-            <DeferredModal isOpen={showConnectionSettings} onClose={closeConnectionSettings}>
+            <DeferredModal isOpen={showConnectionSettings} onClose={closeConnectionSettings} preload={loadConnectionSettingsModal}>
               <ConnectionSettingsModal
                 isOpen={showConnectionSettings}
                 initialSection={connectionSettingsInitialSection}
@@ -1831,7 +1864,7 @@ function App() {
         <ShiftProvider>
           <ModuleProvider>
             <BarcodeScannerProvider>
-              <AppContent />
+              <SupportSessionProvider><SupportRestoreNotice><AppContent /><SupportInteractionHost /></SupportRestoreNotice></SupportSessionProvider>
             </BarcodeScannerProvider>
           </ModuleProvider>
         </ShiftProvider>

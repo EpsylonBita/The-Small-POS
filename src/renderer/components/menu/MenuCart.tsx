@@ -2,7 +2,8 @@ import type { CouponEligibility } from '../../utils/couponErrors';
 import { getStoreCurrency } from '../../utils/store-currency';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine, Gift, CheckSquare, Square, Percent, RotateCcw, Award, MapPin } from 'lucide-react';
+import { Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine, Gift, CheckSquare, Square, Percent, RotateCcw, Award, MapPin } from 'lucide-react';
+import { EmptyCartIllustration } from '../icons/EmptyCartIllustration';
 import { useI18n } from '../../contexts/i18n-context';
 import { useOnBarcodeScan } from '../../contexts/barcode-scanner-context';
 import { useLoyaltyReader } from '../../hooks/useLoyaltyReader';
@@ -1168,8 +1169,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       {/* Scrollable Cart Items - flex-1 + min-h-0 allows proper scrolling */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3 touch-scroll scrollbar-hide">
         {uniqueCartItems.length === 0 ? (
-          <div className="text-center py-6 sm:py-8">
-            <ShoppingCart className="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 text-black/20 dark:text-white/20" />
+          // Founder 01/11/2026: a better picture than the plain cart glyph (EmptyCartIllustration), in the middle of the
+          // cart's empty space.
+          <div data-cart-empty className="flex min-h-full flex-col items-center justify-center py-6 text-center sm:py-8">
+            <EmptyCartIllustration className="mx-auto mb-3 w-28 text-(--pos-s-muted) opacity-80 sm:mb-4 sm:w-36" />
             <p className="text-sm sm:text-base antialiased liquid-glass-modal-text-muted">
               {t('menu.cart.empty')}
             </p>
@@ -1564,7 +1567,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   aria-label={appliedCoupon
                     ? t('menu.cart.couponApplied', 'Coupon applied')
                     : t('menu.cart.couponButton', 'Coupon')}
-                  className={`${cartActionIconButtonBaseClass} text-amber-800 focus:ring-yellow-400 dark:text-yellow-300`}
+                  // Founder 01/11/2026: the three cart actions each in their own colour (coupon emerald, as its applied
+                  // line; points amber, as theirs; discount rose).
+                  className={`${cartActionIconButtonBaseClass} text-emerald-700 focus:ring-emerald-400 dark:text-emerald-400`}
                 >
                   {isValidatingCoupon ? (
                     <Loader2 className="h-8 w-8 animate-spin shrink-0" />
@@ -1583,8 +1588,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   aria-label={loyaltyActionTitle}
                   className={`${cartActionIconButtonBaseClass} ${
                     loyaltyRedeemAvailable
-                      ? 'text-amber-800 focus:ring-yellow-400 dark:text-yellow-300'
-                      : 'cursor-not-allowed text-zinc-500 dark:text-zinc-400'
+                      ? 'text-amber-800 focus:ring-amber-400 dark:text-amber-400'
+                      : 'cursor-not-allowed text-amber-800 opacity-40 dark:text-amber-400'
                   }`}
                 >
                   {loyaltyRedeemLoading ? (
@@ -1601,7 +1606,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   type="button"
                   onClick={openDiscountModal}
                   aria-label={discountActionTitle}
-                  className={`${cartActionIconButtonBaseClass} text-amber-800 focus:ring-yellow-400 dark:text-yellow-300`}
+                  className={`${cartActionIconButtonBaseClass} text-rose-600 focus:ring-rose-400 dark:text-rose-400`}
                 >
                   <Percent className="h-8 w-8 shrink-0" aria-hidden="true" />
                   <span className="sr-only">{t('menu.cart.discountAmount', 'Discount')}</span>
@@ -1878,6 +1883,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               <button
                 type="button"
                 onClick={() => setIsLineDiscountModalOpen(false)}
+                aria-label={t('common.actions.close', 'Close')}
                 className="liquid-glass-modal-close"
               >
                 <X className="w-4 h-4" />
@@ -2141,9 +2147,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               <button
                 type="button"
                 onClick={() => setIsCouponModalOpen(false)}
-                className="p-1 rounded-full transition-colors liquid-glass-modal-text-muted active:bg-black/10 dark:active:bg-white/15"
+                aria-label={t('common.actions.close', 'Close')}
+                className="liquid-glass-modal-close"
               >
-                <X className="w-4 h-4" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
@@ -2233,6 +2240,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               <button
                 type="button"
                 onClick={() => setIsDiscountModalOpen(false)}
+                aria-label={t('common.actions.close', 'Close')}
                 className="liquid-glass-modal-close"
               >
                 <X className="w-4 h-4" />

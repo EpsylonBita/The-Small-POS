@@ -91,10 +91,11 @@ test('ingredient styling is scoped to the menu customizer instead of leaking int
 });
 
 test('menu item customizer uses theme-aware shared search, footer, controls and notes surfaces', () => {
-  assert.match(menuItemModal, /className="liquid-glass-modal-input w-full pl-9 pr-8/);
+  assert.match(menuItemModal, /className="liquid-glass-modal-input w-full h-11 pl-9 pr-8/);
   assert.match(menuItemModal, /className="liquid-glass-modal-footer shrink-0/);
   assert.match(menuItemModal, /className="liquid-glass-modal-inset rounded-xl/);
-  assert.match(menuItemModal, /className="liquid-glass-modal-icon-button flex h-9 w-9/);
+  // Founder 01/11/2026 («οχι ολα τα κουμπια εχουν βαθος»): the quantity steppers are the kit's raised round buttons.
+  assert.match(menuItemModal, /className="pos-raised flex h-11 w-11 items-center justify-center rounded-full/);
   assert.match(menuItemModal, /className="liquid-glass-modal-inset rounded-3xl p-5/);
   assert.doesNotMatch(menuItemModal, /className="bg-black\/40 backdrop-blur-2xl border border-white\/20 rounded-3xl/);
 });
@@ -105,9 +106,11 @@ test('plugin setup modal explicitly protects its heading, close control and form
     glassStyles,
     /html:not\(\.dark\) \.plugin-setup-modal \.liquid-glass-modal-title\s*\{[\s\S]*?color:\s*#18181b !important/,
   );
+  // Founder 01/11: one close button everywhere — the kit surface and words in both themes, no per-window override.
+  assert.doesNotMatch(glassStyles, /\.plugin-setup-modal \.liquid-glass-modal-close\s*\{/);
   assert.match(
     glassStyles,
-    /html:not\(\.dark\) \.plugin-setup-modal \.liquid-glass-modal-close\s*\{[\s\S]*?color:\s*#3f3f46/,
+    /\.liquid-glass-modal-close \{[^}]*width: 44px;[^}]*border-radius: 9999px;[^}]*background: var\(--pos-s-raised\);[^}]*box-shadow: var\(--pos-s-depth\);[^}]*color: var\(--pos-s-fg\);/,
   );
   assert.match(
     glassStyles,

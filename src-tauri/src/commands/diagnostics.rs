@@ -145,6 +145,14 @@ pub fn start_remote_incident_reporter(
         loop {
             match build_system_health_payload(db.as_ref(), sync_state.as_ref()).await {
                 Ok(mut health) => {
+                    if let Err(error) = incident_reporting::flush_recipe_telemetry(
+                        db.clone(),
+                        health["isOnline"] == true,
+                    )
+                    .await
+                    {
+                        warn!(error = %error, "Recipe telemetry remains buffered");
+                    }
                     let observed_at = Utc::now();
                     incident_reporting::track_network_outage(
                         db.as_ref(),

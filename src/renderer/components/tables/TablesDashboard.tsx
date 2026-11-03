@@ -16,7 +16,6 @@ import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../..
 import {
   AlertTriangle,
   ArrowRightLeft,
-  Banknote,
   CheckCircle,
   ClipboardList,
   Clock3,
@@ -29,10 +28,12 @@ import {
   Users,
   WalletCards,
   XCircle,
+  X,
 } from 'lucide-react';
 import { formatCurrency, formatTime as formatTimeValue } from '../../utils/format';
 import { toLocalDateString } from '../../utils/date';
 import { resolveTableDisplayStatus, tableHasOpenCheckReference } from '../../utils/tableOrderFlow';
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 
 interface TablesDashboardProps {
   branchId: string;
@@ -1360,7 +1361,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                         ? 'border-white/10 bg-white/6 text-slate-200'
                         : 'border-slate-200 bg-white/75 text-slate-700'
                     }`}>
-                      {hasOpenCheck ? <Banknote className="h-4 w-4" /> : <ArrowRightLeft className="h-4 w-4" />}
+                      {hasOpenCheck ? <CashHandIcon className="h-4 w-4" /> : <ArrowRightLeft className="h-4 w-4" />}
                       {hasOpenCheck
                         ? t('tablesDashboard.pay', { defaultValue: 'Pay' })
                         : t('tablesDashboard.assign', { defaultValue: 'Assign' })}
@@ -1400,12 +1401,10 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
               <button
                 type="button"
                 onClick={handleClosePanel}
-                className={`rounded-xl p-2 transition-colors ${
-                  isDark ? 'text-slate-300 active:bg-white/8' : 'text-slate-500 active:bg-slate-100'
-                }`}
+                className="liquid-glass-modal-close"
                 aria-label={t('common.close', { defaultValue: 'Close' })}
               >
-                <XCircle className="w-5 h-5" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 

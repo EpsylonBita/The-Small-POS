@@ -49,7 +49,8 @@ test('Z modal headline is the money collected in the whole day (store + platform
   );
   // Founder 31/10: the headline in the one money ink (it was brown), said once -- the overview card that
   // repeated it beside the headline is gone.
-  assert.match(source, /sm:text-5xl \$\{strongTextClass\}`\}>\s*\{formatMoney\(collectedTotal\)\}/);
+  // Founder 01/11: the takings read green, like the check-out and expenses windows.
+  assert.match(source, /sm:text-5xl \$\{moneyInTone\}`\}>\s*\{formatMoney\(collectedTotal\)\}/);
   assert.match(source, /data-z-report-earned-source[\s\S]*?\{t\('modals\.zReport\.orders', \{ defaultValue: 'Orders' \}\)\}: \{totalOrders\}/);
   assert.doesNotMatch(source, /key: 'earned',/);
   // The old staff-subset override is gone for good, and the headline never
@@ -106,3 +107,18 @@ test('Z modal cash-flow row keys exist in all six locales (no raw keys on the ti
     assert.match(get(el, `modals.zReport.${key}`) as string, /[Ͱ-Ͽ]/, `el ${key} should be Greek`);
   }
 });
+
+// Founder 01/11 («βγάλε τα wrappers από τους αριθμούς … βάλε τα χρώματα στους αριθμούς που εκφράζουν την κατάσταση»):
+// money in green, money out red, staff payouts yellow, plain tab counts, the app's cash and card glyphs.
+test('Z money colours follow the check-out: in green, out red, payouts yellow; counts are plain numbers', () => {
+  const source = modalSource();
+  assert.match(source, /const moneyInTone = 'text-emerald-600 dark:text-emerald-300';/);
+  assert.match(source, /const moneyOutTone = 'text-rose-600 dark:text-rose-300';/);
+  assert.match(source, /key: 'cash', label: t\('modals\.zReport\.cashSales'\), value: `\+\$\{formatMoney\(drawerCashNet\)\}`, tone: moneyInTone/);
+  assert.match(source, /key: 'staff', label: t\('modals\.zReport\.staffPayments'\), value: drawer\.staffPayments, tone: payoutTone/);
+  assert.match(source, /key: 'cash', label: t\('modals\.zReport\.cashInTill'\), value: formatMoney\(cashCollected\), Glyph: CashHandIcon/);
+  assert.match(source, /key: 'card', label: t\('modals\.zReport\.cardTotalLabel'\), value: formatMoney\(cardCollected\), Glyph: CardsIcon/);
+  assert.match(source, /<span data-z-tab-count className=/);
+  assert.doesNotMatch(source, /rounded-full px-2 py-0\.5 text-\[11px\] font-bold \$\{activeTab === tab\.key/);
+});
+

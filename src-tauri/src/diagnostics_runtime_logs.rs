@@ -770,6 +770,14 @@ const CHECKOUT_FAILURE_CLASSES: &[&str] = &[
 ];
 
 fn is_checkout_event_code(value: &str) -> bool {
+    if matches!(
+        value,
+        "checkout_edit_set_aside"
+            | "checkout_edit_chain_collapsed"
+            | "checkout_edit_chain_collapse_failed"
+    ) {
+        return true;
+    }
     value
         .strip_prefix("checkout_")
         .and_then(|rest| {
@@ -812,10 +820,20 @@ pub(crate) const RUNTIME_ERROR_CODES: &[&str] = &[
     "EDIT_CANONICAL_QUOTE_REQUIRED",
     "EDIT_CANONICAL_SNAPSHOT_INVALID",
     "EDIT_COLLECTION_AMOUNT_MISMATCH",
+    "EDIT_DISCARD_MONEY_DECLARED",
+    "EDIT_DISCARD_PROVIDER_CHECK_REQUIRED",
     "EDIT_DUPLICATE_CANONICAL_ITEM",
+    "EDIT_INVALID_DELIVERY_COORDINATES",
+    "EDIT_INVALID_ORDER_TYPE",
     "EDIT_INVALID_REFUSAL_REPORT",
     "EDIT_INVALID_REQUEST",
     "EDIT_LOCAL_OPERATION_FAILED",
+    "EDIT_LOCAL_STORAGE_BUSY",
+    "EDIT_LOCAL_STORAGE_CONSTRAINT",
+    "EDIT_LOCAL_STORAGE_IO",
+    "EDIT_LOCAL_STORAGE_LOCKED",
+    "EDIT_LOCAL_STORAGE_OTHER",
+    "EDIT_NO_DRAWER_OWNER_ON_SHIFT",
     "EDIT_ORDER_REFRESHED",
     "EDIT_ORIGINAL_ITEMS_UNAVAILABLE",
     "EDIT_ORIGINAL_PAYMENT_SYNC_REQUIRED",
@@ -829,6 +847,7 @@ pub(crate) const RUNTIME_ERROR_CODES: &[&str] = &[
     "EDIT_REFUSAL_UNCLASSIFIED",
     "EDIT_SETTLEMENT_ACK_CANONICAL_SNAPSHOT_REQUIRED",
     "EDIT_SETTLEMENT_ADJUSTMENT_ID_REQUIRED",
+    "EDIT_SETTLEMENT_BUSY",
     "EDIT_SETTLEMENT_CHILD_OUTBOX_REQUIRED",
     "EDIT_SETTLEMENT_CLOSED",
     "EDIT_SETTLEMENT_EXACT_ACTION_REQUIRED",
@@ -837,6 +856,7 @@ pub(crate) const RUNTIME_ERROR_CODES: &[&str] = &[
     "EDIT_SETTLEMENT_NOT_APPLIED",
     "EDIT_SETTLEMENT_ORDER_NOT_EDITABLE",
     "EDIT_SETTLEMENT_OUTCOME_UNKNOWN",
+    "EDIT_SETTLEMENT_RECONCILIATION_REQUIRED",
     "EDIT_SETTLEMENT_SCOPE_MISMATCH",
     "EDIT_SETTLEMENT_VERSION_CHANGED",
     "EDIT_SETTLEMENT_VERSION_REQUIRED",
@@ -856,6 +876,9 @@ pub(crate) const RUNTIME_ERROR_CODES: &[&str] = &[
     "HTTP_ERROR",
     "LEGACY_EDIT_REVIEW_REQUIRED",
     "MANAGER_PIN_REFUSED",
+    "MANUAL_CANCEL_ORIGINAL_PROVIDER_REQUIRED",
+    "MANUAL_CANCEL_PROVIDER_CONNECTED",
+    "MANUAL_CANCEL_UNAVAILABLE",
     "MISSING_FISCAL_DATA",
     "NO_APPROVER_IN_STORE",
     "OPERATING_CURRENCY_BRANCH_MISMATCH",
@@ -905,17 +928,23 @@ pub(crate) const RUNTIME_ERROR_CODES: &[&str] = &[
     "PARITY_SYNC_FAILED",
     "PARITY_SYNC_PARTIAL",
     "PAYMENT_CANONICAL_RETURN_FINAL",
+    "PAYMENT_COLLECTOR_NOT_DRAWER_OWNER",
+    "PAYMENT_COLLECTOR_SHIFT_REQUIRED",
     "PAYMENT_COLLECTOR_STAFF_MISMATCH",
     "PAYMENT_COLLECTOR_TERMINAL_MISMATCH",
     "PAYMENT_CURRENCY_MISMATCH",
     "PAYMENT_CURRENCY_MIXED",
     "PAYMENT_CURRENCY_UNAVAILABLE",
+    "PAYMENT_DRIVER_EARNING_REQUIRED",
+    "PAYMENT_GHOST_ORDER",
+    "PAYMENT_INVALID_REQUEST",
     "PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE",
     "PAYMENT_METHOD_EDIT_PROVIDER_PAYMENT_IMMUTABLE",
     "PAYMENT_METHOD_EDIT_REQUIRES_SINGLE_COMPLETED_PAYMENT",
     "PAYMENT_METHOD_EDIT_TARGET_NOT_FOUND",
     "PAYMENT_MIRROR_PENDING",
     "PAYMENT_NOT_SAVED",
+    "PAYMENT_ORDER_NOT_FOUND",
     "PAYMENT_RECOVERY_IDENTITY_MISMATCH",
     "PAYMENT_SYNC_REQUIRED",
     "PERMISSION_DENIED",
@@ -925,6 +954,13 @@ pub(crate) const RUNTIME_ERROR_CODES: &[&str] = &[
     "POS_TERMINAL_AUTH_REQUIRED",
     "REAUTH_REQUIRED",
     "RECOVERY_ORIGINAL_REQUEST_REQUIRED",
+    "REFUND_AMOUNT_EXCEEDS_BALANCE",
+    "REFUND_DRIVER_EARNING_REQUIRED",
+    "REFUND_IDEMPOTENCY_CONFLICT",
+    "REFUND_INVALID_REQUEST",
+    "REFUND_PAYMENT_NOT_FOUND",
+    "REFUND_PAYMENT_SET_ASIDE",
+    "REFUND_PAYMENT_VOIDED",
     "REMOTE_AUTH_PAUSED",
     "REMOTE_HANDOVER_RETRY",
     "REPAIR_ACCESS_DECISION_STALE",
@@ -1138,7 +1174,7 @@ fn numeric_field(text: &str, aliases: &[&str], maximum: u64, minimum: u64) -> Op
     None
 }
 
-pub(super) fn project_line(line: &str) -> Result<Value, &'static str> {
+pub(crate) fn project_line(line: &str) -> Result<Value, &'static str> {
     if line.len() > MAX_LINE_BYTES {
         return Err("oversized");
     }
@@ -1226,6 +1262,15 @@ pub(super) fn project_line(line: &str) -> Result<Value, &'static str> {
             .and_then(|stage| listed(stage, crate::edit_settlement_recovery::EDIT_REFUSAL_STAGES))
         {
             event["edit_stage"] = json!(stage);
+        }
+        if event["eventCode"] == "checkout_edit_refused"
+            && error_code == Some("EDIT_LOCAL_OPERATION_FAILED")
+        {
+            if let Some(hash) = structured_field(message, "edit_detail_hash")
+                .filter(|hash| crate::edit_settlement_recovery::valid_edit_detail_hash(hash))
+            {
+                event["edit_detail_hash"] = json!(hash);
+            }
         }
         return Ok(event);
     }

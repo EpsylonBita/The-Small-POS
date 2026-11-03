@@ -11,6 +11,7 @@ import type {
 } from '../../../lib/ipc-adapter';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { CentsMoneyInput } from '../ui/CentsMoneyInput';
+import { resolveEditSettlementRefundAmount } from '../../utils/editSettlementFinancials';
 import {
   RefundAttributionFields,
   refundRouteForTender,
@@ -52,7 +53,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
   const originalCurrency = paymentUnits.size === 1 ? [...paymentUnits][0] : null;
   const originalMoney = (amount: number) => formatCurrency(amount, originalCurrency);
 
-  const totalRequired = useMemo(() => round2(Math.max(0, (preview?.paidTotal || 0) - (preview?.nextTotal || 0))), [preview]);
+  const totalRequired = useMemo(() => preview ? resolveEditSettlementRefundAmount(preview) : 0, [preview]);
   const totalReduced = (preview?.nextTotal || 0) < (preview?.originalTotal || 0) - 0.01;
   // Shared rule R2: who hands a cash refund back is the till's rule (the
   // courier while their earning on the order is unsettled, else the drawer),

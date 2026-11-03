@@ -85,29 +85,29 @@ export function usePaymentPrintPrompt() {
     >
       <div className="space-y-5">
         <div className="flex items-start gap-4">
-          <Printer className="h-9 w-9 shrink-0 text-yellow-500 dark:text-yellow-300" />
+          <Printer className="h-9 w-9 shrink-0 text-(--pos-s-fg)" aria-hidden="true" />
           <div className="min-w-0 space-y-2">
-            <p className="text-sm leading-6 liquid-glass-modal-text-muted">
+            <p className="text-sm leading-6 text-(--pos-s-muted)">
               {t(
                 'paymentPrintPrompt.message',
                 'Do you want to print the receipt for this payment?',
               )}
             </p>
             {(pendingPrompt.context.orderNumber || typeof pendingPrompt.context.amount === 'number') && (
-              <div className="rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2 text-sm">
+              <div className="pos-card px-3 py-2 text-sm">
                 {pendingPrompt.context.orderNumber && (
                   <div className="flex items-center justify-between gap-3">
-                    <span className="liquid-glass-modal-text-muted">
+                    <span className="text-(--pos-s-muted)">
                       {t('paymentPrintPrompt.order', 'Order')}
                     </span>
-                    <span className="truncate font-semibold liquid-glass-modal-text">
+                    <span className="truncate font-semibold text-(--pos-s-fg)">
                       {pendingPrompt.context.orderNumber}
                     </span>
                   </div>
                 )}
                 {typeof pendingPrompt.context.amount === 'number' && (
                   <div className="flex items-center justify-between gap-3">
-                    <span className="liquid-glass-modal-text-muted">
+                    <span className="text-(--pos-s-muted)">
                       {t('paymentPrintPrompt.amount', 'Amount')}
                     </span>
                     <span className="font-semibold text-emerald-400">
@@ -124,16 +124,16 @@ export function usePaymentPrintPrompt() {
           <button
             type="button"
             onClick={() => resolvePrompt(false)}
-            className="rounded-xl border liquid-glass-modal-border bg-white/5 px-4 py-3 text-sm font-semibold liquid-glass-modal-text transition-colors active:bg-white/10"
+            className="pos-solid-btn pos-solid-btn--md"
           >
             {t('paymentPrintPrompt.skip', 'Do not print')}
           </button>
           <button
             type="button"
             onClick={() => resolvePrompt(true)}
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-yellow-400 px-4 py-3 text-sm font-bold text-black transition-colors active:bg-yellow-300"
+            className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary pos-raised--tint [--pos-tint:var(--pos-s-yellow)] gap-2"
           >
-            <ReceiptText className="h-4 w-4" />
+            <ReceiptText className="h-4 w-4" aria-hidden="true" />
             {t('paymentPrintPrompt.print', 'Print receipt')}
           </button>
         </div>

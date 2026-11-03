@@ -1,11 +1,13 @@
 import { formatCurrency } from '../../utils/format';
 import React, { useEffect, useRef, useState } from 'react';
 import { roundMoney } from '@shared/utils/money';
-import { Banknote, CreditCard, AlertTriangle, X } from 'lucide-react';
+import { CreditCard, AlertTriangle, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
+import { editRefusalMessageKey } from '../../utils/editRefusalMessage';
 
 /**
  * EditSettlementDeltaModal — minimal cash/card picker used when editing a
@@ -42,6 +44,7 @@ export interface EditSettlementDeltaModalProps {
    * only after the cashier had taken or returned the money.
    */
   allowedMethods?: readonly EditSettlementDeltaMethod[] | null;
+  methodRefusals?: Partial<Record<EditSettlementDeltaMethod, string>>;
   onConfirm: (method: EditSettlementDeltaMethod) => void | Promise<void>;
   onCancel: () => void;
 }
@@ -56,6 +59,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
   amount,
   orderNumber,
   allowedMethods,
+  methodRefusals,
   onConfirm,
   onCancel,
 }) => {
@@ -65,6 +69,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
   const permits = (method: EditSettlementDeltaMethod) =>
     !Array.isArray(allowedMethods) || allowedMethods.includes(method);
   const restricted = !permits('cash') || !permits('card');
+  const hideCash = !permits('cash') && Boolean(methodRefusals?.cash);
+  const hideCard = !permits('card') && Boolean(methodRefusals?.card);
 
   // Reset submit state whenever the modal re-opens so a previous in-flight
   // error doesn't leave the buttons disabled forever.
@@ -96,13 +102,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
     try {
       await onConfirm(method);
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : t('modals.editSettlementDelta.failed', {
-              defaultValue: 'Could not complete the settlement',
-            });
-      toast.error(message);
+      const code = error instanceof Error ? error.message : String(error);
+      toast.error(t(`modals.menu.${editRefusalMessageKey(code)}`));
       submittingRef.current = false;
       setSubmitting(false);
     }
@@ -155,8 +156,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
         </div>
 
         {/* Method buttons */}
-        <div className="grid grid-cols-2 gap-3">
-          <button
+        <div className={`grid gap-3 ${hideCash || hideCard ? 'grid-cols-1' : 'grid-cols-2'}`}>
+          {!hideCash && <button
             type="button"
             onClick={() => void handlePick('cash')}
             disabled={submitting || !permits('cash')}
@@ -168,11 +169,11 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
             }`}
             data-testid="edit-settlement-delta-cash"
           >
-            <Banknote className="h-7 w-7" strokeWidth={1.8} />
+            <CashHandIcon className="h-7 w-7" />
             <span>{cashLabel}</span>
-          </button>
+          </button>}
 
-          <button
+          {!hideCard && <button
             type="button"
             onClick={() => void handlePick('card')}
             disabled={submitting || !permits('card')}
@@ -186,7 +187,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
           >
             <CreditCard className="h-7 w-7" strokeWidth={1.8} />
             <span>{cardLabel}</span>
-          </button>
+          </button>}
         </div>
 
         {/* A tender this terminal may not record is never offered. */}
@@ -197,15 +198,21 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
             className="flex items-start gap-2 rounded-2xl border border-(--pos-s-warn) bg-(--pos-s-warn-bg) px-3 py-2 text-xs text-(--pos-s-fg)"
           >
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>
-              {!permits('cash')
-                ? t('modals.editSettlementDelta.cashDisabled', {
+            <div>
+              {(['cash', 'card'] as const).filter(method => !permits(method)).map(method => (
+                <p key={method}>
+                  {methodRefusals?.[method] && <span>{method === 'cash' ? cashLabel : cardLabel}: </span>}
+                  {methodRefusals?.[method]
+                    ? t(`modals.menu.${editRefusalMessageKey(methodRefusals[method]!)}`)
+                    : method === 'cash' ? t('modals.editSettlementDelta.cashDisabled', {
                     defaultValue: 'Cash is turned off for this terminal, so it cannot be recorded here.',
                   })
                 : t('modals.editSettlementDelta.cardDisabled', {
                     defaultValue: 'Card is turned off for this terminal, so it cannot be recorded here.',
                   })}
-            </span>
+                </p>
+              ))}
+            </div>
           </div>
         )}
 

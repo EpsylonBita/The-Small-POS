@@ -11,6 +11,7 @@
  * through.
  */
 import React from 'react';
+import { WorkCardNoticeManager } from './WorkCardNoticeManager';
 import { toast } from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { Smartphone } from 'lucide-react';
@@ -148,7 +149,7 @@ export function showPhoneShiftNotice(shift: UnitClosedShift, t: Translate): void
 export function PhoneShiftNoticeManager({ enabled }: { enabled: boolean }) {
   const { t } = useTranslation();
   usePhoneShiftNotices(enabled, (shift) => showPhoneShiftNotice(shift, t as unknown as Translate));
-  return null;
+  return <WorkCardNoticeManager enabled={enabled} />;
 }
 
 export default PhoneShiftNoticeManager;

@@ -15,10 +15,8 @@
 }
 .table-action-dialog .liquid-glass-modal-header { padding: 16px 20px !important; border-color: var(--modal-glass-line) !important; background: transparent !important; }
 .table-action-dialog .liquid-glass-modal-title { font-size: 22px !important; font-weight: 600 !important; color: var(--ta-text) !important; }
-.table-action-dialog .liquid-glass-modal-close {
-  width: 44px !important; height: 44px !important; min-height: 44px !important; border: 1px solid var(--ta-action-border) !important;
-  border-radius: 8px !important; background: var(--ta-surface) !important; color: var(--ta-muted) !important; box-shadow: none !important;
-}
+/* Founder 01/11 («εδώ πάλι δεν έχουν βάθος»): the window's close is the shared round raised X (no square override),
+   and its buttons are the kit's raised buttons. */
 .table-action-dialog .table-action-body { padding: 20px !important; color: var(--ta-text); }
 /* Status and seats on one line under the table title. */
 .table-action-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; }
@@ -36,24 +34,27 @@
 .table-action-stepper { display: flex; align-items: center; gap: 8px; }
 .table-action-stepper button, .table-action-stepper input {
   display: inline-flex; justify-content: center; align-items: center; width: 44px; height: 44px; min-height: 44px;
-  border: 1px solid var(--ta-action-border); border-radius: 8px; background: var(--ta-surface); color: var(--ta-text);
+  border: 1px solid var(--ta-action-border); border-radius: 12px; background: var(--ta-surface); color: var(--ta-text);
   box-shadow: none; padding: 0; text-align: center; font-size: 16px; font-weight: 600;
 }
+/* The − / + are raised kit buttons; the count between them stays a field. */
+.table-action-stepper button { border-color: transparent; background: var(--pos-s-raised); box-shadow: var(--pos-s-depth); }
 .table-action-balance { margin: 0 0 16px; font-size: 14px; color: var(--ta-muted); }
 .table-action-list { display: grid; gap: 16px; }
 .table-action-button {
   display: flex; width: 100%; min-height: 48px; gap: 10px; align-items: center; justify-content: center;
-  padding: 10px 16px; border: 1px solid var(--ta-action-border); border-radius: 8px;
-  background: var(--ta-surface); color: var(--ta-text); font-size: 15px; font-weight: 600; box-shadow: none;
+  padding: 10px 16px; border: 1px solid transparent; border-radius: 12px;
+  background: var(--pos-s-raised); color: var(--ta-text); font-size: 15px; font-weight: 600; box-shadow: var(--pos-s-depth);
 }
-.table-action-button--primary { background: #facc15; border-color: #facc15; color: #18181b; }
-.table-action-button--danger { color: var(--ta-danger); border-color: var(--ta-danger); }
+.table-action-button--primary { background: #facc15; border-color: transparent; color: #18181b; box-shadow: var(--pos-s-depth-yellow); }
+.table-action-button--danger { color: var(--ta-danger); border-color: transparent; }
 .table-action-description { margin: 7px 0 0; font-size: 12px; line-height: 1.5; color: var(--ta-muted); }
 .table-action-hint { margin: 20px 0 0; padding-top: 16px; border-top: 1px solid var(--ta-border); font-size: 12px; color: var(--ta-muted); }
 .table-action-dialog button:disabled { opacity: .5; cursor: not-allowed; }
 .table-action-dialog button:focus-visible, .table-action-dialog input:focus-visible { outline: 2px solid #ca8a04; outline-offset: 3px; }
-.table-action-button:active:not(:disabled), .table-action-stepper button:active:not(:disabled) { background: var(--ta-soft); }
-.table-action-button--primary:active:not(:disabled) { background: #eab308; }
+.table-action-button:is(:active, [data-pressed]):not(:disabled), .table-action-stepper button:is(:active, [data-pressed]):not(:disabled) { background: var(--pos-s-raised-press); box-shadow: var(--pos-s-depth-press); translate: 0 1px; }
+.table-action-button--primary:is(:active, [data-pressed]):not(:disabled) { background: #eab308; box-shadow: var(--pos-s-depth-yellow-press); }
+.table-action-dialog button:disabled { box-shadow: var(--pos-s-depth-press); }
 @media (max-width: 420px) { .table-action-covers { flex-wrap: wrap; } .table-action-covers-copy { flex-basis: 100%; } .table-action-dialog .liquid-glass-modal-title { font-size: 20px !important; } }
 
 .table-action-status[data-status="reserved"] { color: var(--ta-blue); }

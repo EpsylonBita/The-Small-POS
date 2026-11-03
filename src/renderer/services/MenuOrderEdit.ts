@@ -73,19 +73,28 @@ export type MenuEditSettlementMethod = 'cash' | 'card';
 export type MenuEditPreflight = { financials?: Partial<OrderFinancialsUpdateParams>; kind: 'ordinary' | 'metadata' | 'settlement'; requiredAction?: 'none' | 'collect' | 'refund'; canonicalExpectedVersion?: number; localExpectedVersion?: number;
   /** Tenders this terminal may record for the difference (server method_policy). */
   allowedMethods?: MenuEditSettlementMethod[];
+  methodRefusals?: OrderEditSettlementPreview['methodRefusals'];
   /** The order PATCH line limit (server max_lines). */
   maxLines?: number };
 
 /** The order PATCH accepts at most this many lines (the quote accepts 500). */
 export const MENU_EDIT_MAX_LINES = 50;
 
-function settlementPolicy(preview: unknown): Pick<MenuEditPreflight, 'allowedMethods' | 'maxLines'> {
-  const source = (preview ?? {}) as { allowedMethods?: unknown; maxLines?: unknown };
+function settlementPolicy(preview: unknown): Pick<MenuEditPreflight, 'allowedMethods' | 'methodRefusals' | 'maxLines'> {
+  const source = (preview ?? {}) as { allowedMethods?: unknown; methodRefusals?: unknown; maxLines?: unknown };
   const allowedMethods = Array.isArray(source.allowedMethods)
     ? source.allowedMethods.filter((method): method is MenuEditSettlementMethod => method === 'cash' || method === 'card')
     : undefined;
   const maxLines = Number.isSafeInteger(source.maxLines) && Number(source.maxLines) > 0 ? Number(source.maxLines) : undefined;
-  return { ...(allowedMethods ? { allowedMethods } : {}), ...(maxLines ? { maxLines } : {}) };
+  const methodRefusals: NonNullable<MenuEditPreflight['methodRefusals']> = {};
+  if (source.methodRefusals && typeof source.methodRefusals === 'object') {
+    for (const method of ['cash', 'card'] as const) {
+      const code = (source.methodRefusals as Record<string, unknown>)[method];
+      if (typeof code === 'string' && /^[A-Z][A-Z0-9_]+$/.test(code)) methodRefusals[method] = code;
+    }
+  }
+  return { ...(allowedMethods ? { allowedMethods } : {}),
+    ...(Object.keys(methodRefusals).length ? { methodRefusals } : {}), ...(maxLines ? { maxLines } : {}) };
 }
 
 export function menuEditRefundAction(preview: OrderEditSettlementPreview, amount: number, method: 'cash' | 'card', reason: string,

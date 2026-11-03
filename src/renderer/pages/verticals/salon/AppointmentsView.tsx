@@ -42,6 +42,7 @@ import {
 } from '../../../services/appointment-checkout-claims';
 import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 import { WorkspaceChips, WorkspaceHeader, WorkspaceIconButton, WorkspaceSearch, WorkspaceSelect } from '../../../components/tables/TableWorkspace';
+import { KitDateField } from '../../../components/ui/KitDateField';
 
 type ViewMode = 'timeline' | 'list';
 type QuickFilter = 'today' | 'tomorrow' | 'week';
@@ -664,8 +665,8 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
             <WorkspaceIconButton label={t('appointments.previousDay', 'Previous day')} onClick={() => navigateDate('prev')}>
               <ChevronLeft />
             </WorkspaceIconButton>
-            <input
-              type="date"
+            <KitDateField
+              type="date" required
               value={toLocalDateStr(selectedDate)}
               aria-label={t('appointments.filters.today', 'Today')}
               onChange={(e) => {
@@ -1232,9 +1233,9 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
             type="button"
             onClick={onClose}
             aria-label={t('common.actions.close', 'Close')}
-            className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border transition active:scale-95 ${isDark ? 'bg-zinc-900/70 border-white/10 text-zinc-300 active:bg-zinc-800' : 'bg-white/25 border-white/65 text-gray-800 active:bg-white/45'}`}
+            className="liquid-glass-modal-close"
           >
-            <X className="w-5 h-5" />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
 
@@ -1559,7 +1560,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
           <button
             onClick={handleCreateAppointment}
             disabled={isSubmitting || !formData.staffId || !formData.serviceId || !formData.startTime}
-            className="px-5 py-2.5 rounded-xl font-semibold bg-(--pos-s-yellow) text-black border border-(--pos-s-yellow) shadow-xs transition-transform duration-150 active:scale-95 active:bg-yellow-500 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
+            className="pos-raised pos-raised--yellow px-5 py-2.5 rounded-xl font-semibold bg-(--pos-s-yellow) text-black border border-(--pos-s-yellow) shadow-xs transition-transform duration-150 active:scale-95 active:bg-yellow-500 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
           >
             {isSubmitting ? t('appointments.modal.creating', 'Creating...') : t('appointments.modal.create', 'Create')}
           </button>

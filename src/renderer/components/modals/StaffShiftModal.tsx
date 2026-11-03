@@ -32,11 +32,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import { fromCents, roundMoney, toCents } from '@shared/utils/money';
 import { toast } from 'react-hot-toast';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
-import { X, Clock, FileText, Plus, AlertCircle, User, ChevronLeft, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2, Pencil, QrCode, Delete } from 'lucide-react';
+import { X, Clock, FileText, Plus, AlertCircle, User, ChevronLeft, ChevronRight, AlertTriangle, CheckCircle, XCircle, CreditCard, Star, Check, Trash2, Pencil, QrCode, Delete } from 'lucide-react';
+import { CardsIcon, CashHandIcon, SplitReceiptIcon } from '../icons/PaymentMethodIcons';
+import { formatGridOrderNumber } from '../../utils/gridOrderNumber';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { ShiftExpense, StaffPayment } from '../../types';
 import useTerminalSettings from '../../hooks/useTerminalSettings';
+import { useWorkCardStatus, WorkCardLine } from '../../hooks/useWorkCardStatus';
 import { liquidGlassModalCard } from '../../styles/designSystem';
 import { LiquidGlassModal, POSGlassBadge, POSGlassCard } from '../ui/pos-glass-components';
 import { VarianceBadge } from '../ui/VarianceBadge';
@@ -764,26 +767,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   // manager can release it there (fix review 06/10/2026).
   const [satelliteReleaseShiftId, setSatelliteReleaseShiftId] = useState<string | null>(null);
 
-  // Variance result state
-  const [lastShiftResult, setLastShiftResult] = useState<{
-    currency: string | null;
-    variance: number;
-    breakdown?: {
-      calculationVersion: number;
-      opening: number;
-      sales: number;
-      cashRefunds: number;
-      expenses: number;
-      cashDrops: number;
-      driverGiven: number;
-      driverReturned: number;
-      inheritedDriverExpectedReturns: number;
-      recordedStaffPayments: number;
-      deductedStaffPayments: number;
-      expected: number;
-      actual: number;
-    };
-  } | null>(null);
   const [checkoutPaymentBlockers, setCheckoutPaymentBlockers] = useState<
     UnsettledPaymentBlocker[]
   >([]);
@@ -1021,6 +1004,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [checkoutShift, setCheckoutShift] = useState<any | null>(null);
   const effectiveMode = (localMode ?? mode);
   const effectiveShift = (checkoutShift ?? activeShift);
+  const workCard = useWorkCardStatus(isOpen, [
+    ...availableStaff.map(member => member.id),
+    ...(unitReadiness?.kind === 'ready'
+      ? unitReadiness.readiness.openShifts.flatMap(shift => shift.staff_id ? [shift.staff_id] : [])
+      : []),
+    ...(effectiveShift?.staff_id ? [effectiveShift.staff_id] : []),
+  ]);
   const isNonFinancialCheckoutRole = isNonFinancialShiftRole(effectiveShift?.role_type);
   const isCashierCheckoutRole = effectiveShift?.role_type === 'cashier' || effectiveShift?.role_type === 'manager';
   const canRecordInlineExpenses =
@@ -1188,8 +1178,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   }, [checkInStep, selectedStaff]);
   const [shiftSummary, setShiftSummary] = useState<any | null>(null);
-  const checkoutDisplayCurrency = lastShiftResult
-    ? lastShiftResult.currency : shiftSummaryCurrency(shiftSummary, effectiveShift);
+  const checkoutDisplayCurrency = shiftSummaryCurrency(shiftSummary, effectiveShift);
   const formatCurrency = (amount: number, currency?: string | null) => formatMoney(
     amount, currency !== undefined ? currency : effectiveMode === 'checkout' ? checkoutDisplayCurrency : undefined,
   );
@@ -1764,7 +1753,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     if (isOpen) {
       return;
     }
-    setLastShiftResult(null);
     setCheckoutPaymentBlockers([]);
     // Mirrors resetStaffPaymentForm() so the payment form cannot re-open
     // half-cleared with a stale staff selection over an emptied history.
@@ -3264,50 +3252,69 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             { duration: 15000, icon: '⚠️' },
           );
         }
-        setSuccess(t('modals.staffShift.shiftStarted'));
-        // Update the global shift context to the checked-in staff so guards lift
-        setStaff({
-          staffId: selectedStaff.id,
-          name: selectedStaff.name,
-          role: selectedRoleType,
-          branchId: resolvedBranchId,
-          terminalId: resolvedTerminalId,
-          organizationId: resolvedOrganizationId,
-        });
-        // Optimistically mark shift active immediately with a minimal stub, so UI unlocks at once
-        try {
-          if (shiftId) {
-            // opening_cash_amount: for cashiers this is the drawer count, for drivers this is their starting amount
-            const effectiveOpeningAmount = selectedRoleType === 'driver' || selectedRoleType === 'server'
-              ? (usedStartingAmount ?? 0)
-              : usedOpeningCash;
-            setActiveShiftImmediate({
-              id: String(shiftId),
-              staff_id: selectedStaff.id,
-              branch_id: resolvedBranchId,
-              terminal_id: resolvedTerminalId,
-              role_type: selectedRoleType,
-              check_in_time: new Date().toISOString(),
-              opening_cash_amount: effectiveOpeningAmount,
-              status: 'active',
-              total_orders_count: 0,
-              total_sales_amount: 0,
-              total_cash_sales: 0,
-              total_card_sales: 0,
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            });
+        // Other staff may check in without taking ownership of this drawer.
+        let keepDrawerOwner = false;
+        if (selectedRoleType !== 'cashier' && selectedRoleType !== 'manager') {
+          const isDrawerOwner = (reply: any) => {
+            const shift = reply?.data ?? reply;
+            return reply?.success !== false && shift?.status === 'active' &&
+              ['cashier', 'manager'].includes(shift.role_type);
+          };
+          try {
+            keepDrawerOwner = isDrawerOwner(await bridge.shifts.getActiveCashierByTerminal(resolvedBranchId, resolvedTerminalId));
+          } catch { }
+          if (!keepDrawerOwner) {
+            try {
+              keepDrawerOwner = isDrawerOwner(await bridge.shifts.getActiveCashierByTerminalLoose(resolvedTerminalId));
+            } catch { }
           }
-        } catch { }
-        // Also fetch from DB to sync full shift details
-        try {
-          await refreshActiveShift(selectedStaff.id);
-        } catch (e) {
-          console.warn('[StaffShiftModal] refreshActiveShift failed:', e);
         }
-        setTimeout(() => {
-          onClose();
-        }, 300);
+        if (!keepDrawerOwner) {
+          setStaff({
+            staffId: selectedStaff.id,
+            name: selectedStaff.name,
+            role: selectedRoleType,
+            branchId: resolvedBranchId,
+            terminalId: resolvedTerminalId,
+            organizationId: resolvedOrganizationId,
+          });
+          // Optimistically mark shift active immediately with a minimal stub, so UI unlocks at once
+          try {
+            if (shiftId) {
+              // opening_cash_amount: for cashiers this is the drawer count, for drivers this is their starting amount
+              const effectiveOpeningAmount = selectedRoleType === 'driver' || selectedRoleType === 'server'
+                ? (usedStartingAmount ?? 0)
+                : usedOpeningCash;
+              setActiveShiftImmediate({
+                id: String(shiftId),
+                staff_id: selectedStaff.id,
+                branch_id: resolvedBranchId,
+                terminal_id: resolvedTerminalId,
+                role_type: selectedRoleType,
+                check_in_time: new Date().toISOString(),
+                opening_cash_amount: effectiveOpeningAmount,
+                status: 'active',
+                total_orders_count: 0,
+                total_sales_amount: 0,
+                total_cash_sales: 0,
+                total_card_sales: 0,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              });
+            }
+          } catch { }
+        }
+        // Founder 02/11/2026: the window closes at once, with no success banner
+        // flashing while the shift is read back. The shift set above has already
+        // unlocked the till; without one, the read decides first. A check-in
+        // that keeps the drawer owner leaves the shift context alone.
+        const synced = keepDrawerOwner
+          ? Promise.resolve()
+          : refreshActiveShift(selectedStaff.id).catch((e) => {
+            console.warn('[StaffShiftModal] refreshActiveShift failed:', e);
+          });
+        if (!shiftId) await synced;
+        onClose();
       } else {
         const refusal = result.error || t('modals.staffShift.openShiftFailed');
         setError(describeOfflineOpeningRefusal(refusal, t) ?? refusal);
@@ -3633,53 +3640,15 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         emitCompatEvent('shift-updated', { shiftId: effectiveShift.id, status: 'closed', branchId: effectiveShift.branch_id,
           terminalId: effectiveShift.terminal_id, roleType: effectiveShift.role_type });
         setCheckoutPaymentBlockers([]);
-        const variance = result?.variance ?? result?.data?.variance ?? 0;
-        const closedCurrency = shiftSummaryCurrency(result?.data ?? result, null);
-        const varianceText = t(variance >= 0 ? 'shiftManager.overage' : 'shiftManager.shortage', {
-          amount: formatCurrency(Math.abs(variance), closedCurrency),
-        });
-        // Check for cashier logic to populate items
-        const isCashier = effectiveShift.role_type === 'cashier';
-        if (isCashier) {
-          const opening = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
-          const breakdown = getCashierExpectedBreakdown(
-            shiftSummary,
-            effectiveShift,
-            opening,
-            cashierCheckoutExpenseTotal,
-          );
-          const backendExpected =
-            typeof result.expected === 'number'
-              ? result.expected
-              : typeof result.data?.expected === 'number'
-                ? result.data.expected
-                : breakdown.expected;
-          const actual = closingAmount;
-
-          setLastShiftResult({
-            currency: closedCurrency,
-            variance, // Use backend variance directly
-            breakdown: {
-              calculationVersion: breakdown.calculationVersion,
-              opening: breakdown.opening,
-              sales: breakdown.sales,
-              cashRefunds: breakdown.cashRefunds,
-              expenses: breakdown.expenses,
-              cashDrops: breakdown.cashDrops,
-              driverGiven: breakdown.driverGiven,
-              driverReturned: breakdown.driverReturned,
-              inheritedDriverExpectedReturns: breakdown.inheritedDriverExpectedReturns,
-              recordedStaffPayments: breakdown.recordedStaffPayments,
-              deductedStaffPayments: breakdown.deductedStaffPayments,
-              expected: backendExpected,
-              actual
-            }
-          });
-        } else {
-          setLastShiftResult({ variance, currency: closedCurrency, breakdown: undefined });
+        // Founder 02/11/2026: the window closes at once. No success banner and no
+        // variance summary flashing for seconds: the closed shift is the answer.
+        // The shift is read back and the checkout slip prints behind it.
+        onClose();
+        try {
+          await refreshActiveShift();
+        } catch (refreshErr) {
+          console.warn('[StaffShiftModal] refreshActiveShift after checkout failed:', refreshErr);
         }
-
-        setSuccess(t('modals.staffShift.shiftClosedSuccess', 'Shift closed successfully!'));
 
         // Print staff check-out receipt (role-specific)
         try {
@@ -3696,11 +3665,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         } catch (printErr) {
           console.error('[StaffShiftModal] Staff checkout print error:', printErr);
         }
-
-        await refreshActiveShift();
-        setTimeout(() => {
-          onClose();
-        }, 2000);
       } else {
         const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
         setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
@@ -4193,19 +4157,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       : <CheckCircle className="w-4 h-4 text-green-700 dark:text-green-400" />;
   };
 
+  // The founder's payment glyphs (31/10: a hand with notes, two cards, a torn receipt), coloured as in the
+  // payment window (payment-option-*-icon); their inner fill matches the card they sit on.
   const getPaymentSymbol = (paymentMethod: string): React.ReactNode => {
     const method = (paymentMethod || '').toLowerCase();
-    if (method === 'cash') return <Banknote className="w-4 h-4 text-green-700 dark:text-green-400" />;
-    if (method === 'card') return <CreditCard className="w-4 h-4 text-slate-400" />;
+    const glyphStyle = { '--pay-icon-fill': 'var(--pos-s-surface)' } as React.CSSProperties;
+    if (method === 'cash') return <span className="inline-flex" style={glyphStyle}><CashHandIcon className="h-5 w-5 payment-option-cash-icon" /></span>;
     if (method === 'mixed' || method === 'split') {
-      return (
-        <span className="inline-flex items-center gap-1">
-          <Banknote className="w-4 h-4 text-green-700 dark:text-green-400" />
-          <CreditCard className="w-4 h-4 text-slate-400" />
-        </span>
-      );
+      return <span className="inline-flex" style={glyphStyle}><SplitReceiptIcon className="h-5 w-5 payment-option-split-icon" /></span>;
     }
-    return <CreditCard className="w-4 h-4 text-gray-400" />; // fallback
+    return <span className="inline-flex" style={glyphStyle}><CardsIcon className="h-5 w-5 payment-option-card-icon" /></span>;
   };
 
   const formatShiftWindow = (shift: any) => {
@@ -4298,21 +4259,22 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   };
 
+  // Order status as coloured words, no wrapper (founder 01/11): done green, cancelled red, open warn.
   const getAuditStatusBadgeClass = (status?: string | null) => {
     switch ((status || '').trim().toLowerCase()) {
       case 'completed':
       case 'delivered':
       case 'closed':
-        return 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-emerald-200';
+        return 'text-(--pos-s-ok)';
       case 'cancelled':
       case 'canceled':
       case 'refunded':
-        return 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-rose-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-rose-200';
+        return 'text-(--pos-s-bad)';
       case 'active':
       case 'pending':
-        return 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-yellow-800 dark:border-zinc-700 dark:bg-zinc-800 dark:text-yellow-200';
+        return 'text-(--pos-s-warn)';
       default:
-        return 'border-slate-200/90 bg-slate-50/90 text-slate-700 dark:border-white/10 dark:bg-white/6 dark:text-slate-200';
+        return 'text-(--pos-s-fg)';
     }
   };
 
@@ -4460,7 +4422,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           : t('modals.staffShift.countedCashPrompt', {
             defaultValue: 'Enter counted cash to confirm the final drawer amount.'
           }),
-        accentClass: 'text-yellow-500 dark:text-yellow-300',
+        // The expected cash in the kit green, as in the card above (founder 01/11/2026).
+        accentClass: 'text-(--pos-s-ok)',
         minimal: false,
       };
     }
@@ -4736,20 +4699,20 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     if (!unitReadiness || unitReadiness.kind === 'unsupported') {
       if (pendingWaiterReturns.length === 0 && !waiterReturnsError) return null;
       return (
-        <section className={checkInSurfaceClass}>
-          <h4 className="text-xl font-black liquid-glass-modal-text">{t('modals.staffShift.satelliteCheckout.awaitingReceipt')}</h4>
-          {waiterReturnsError && <p role="alert">{t('modals.staffShift.satelliteCheckout.pendingReadFailed')}</p>}
-          <div className="mt-3 flex flex-wrap gap-3">
+        <section className={`${checkInSurfaceClass} flex flex-col`}>
+          <h4 className="pos-group__title">{t('modals.staffShift.satelliteCheckout.awaitingReceipt')}</h4>
+          {waiterReturnsError && <p role="alert" className="pos-notice pos-notice--bad mt-3 text-sm font-semibold">{t('modals.staffShift.satelliteCheckout.pendingReadFailed')}</p>}
+          <div className="mt-3 flex flex-wrap items-stretch gap-3">
             {pendingWaiterReturns.map(row => {
               const member = availableStaff.find(person => person.id === row.staff_id);
               return <button key={row.id} type="button" disabled={!member}
                 onClick={() => member && void handleStaffSelect(member, { ...row, self_closed: true, remote_terminal_name: row.terminal_id })}
-                className="rounded-2xl border border-yellow-400 px-5 py-3 text-left font-bold liquid-glass-modal-text">
+                className="pos-choice-card is-selected w-auto text-left font-semibold active:bg-(--pos-s-surface)">
                 {row.staff_name || member?.name} · {formatCurrency(row.closing_cash_amount, row.currency)}
                 <span className="block text-sm font-normal">{t('modals.staffShift.satelliteCheckout.receive')}</span>
               </button>;
             })}
-            <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="rounded-2xl border px-5 py-3">{t('common.refresh')}</button>
+            <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="pos-solid-btn pos-solid-btn--sm self-center">{t('common.refresh')}</button>
           </div>
         </section>
       );
@@ -4759,12 +4722,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     const shown = shownUnitReadiness();
     if (!shown) {
       return (
-        <section className={checkInSurfaceClass} data-testid="phone-shifts-unavailable">
-          <h4 className="text-xl font-black liquid-glass-modal-text">{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
-          <p role="alert" className="mt-2 text-sm font-semibold text-rose-600 dark:text-rose-300">
+        <section className={`${checkInSurfaceClass} flex flex-col`} data-testid="phone-shifts-unavailable">
+          <h4 className="pos-group__title">{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
+          <p role="alert" className="pos-notice pos-notice--bad mt-3 text-sm font-semibold">
             {t('phoneShifts.unavailable', { defaultValue: 'Phone shifts could not be checked. Check the connection and try again.' })}
           </p>
-          <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="mt-3 rounded-2xl border px-5 py-3 font-semibold liquid-glass-modal-text">
+          <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="pos-solid-btn pos-solid-btn--sm mt-3">
             {t('phoneShifts.retry', { defaultValue: 'Retry' })}
           </button>
         </section>
@@ -4784,23 +4747,23 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     return (
       <>
         {shown.staleSince && (
-          <section className={checkInSurfaceClass} data-testid="phone-shifts-last-checked">
-            <h4 className="text-xl font-black liquid-glass-modal-text">{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
-            <p role="status" className="mt-2 text-sm font-semibold text-amber-700 dark:text-amber-300">
+          <section className={`${checkInSurfaceClass} flex flex-col`} data-testid="phone-shifts-last-checked">
+            <h4 className="pos-group__title">{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
+            <p role="status" className="pos-notice pos-notice--warn mt-3 text-sm font-semibold">
               {t('modals.staffShift.phoneShifts.lastChecked', {
                 defaultValue: 'No connection. Phone shifts as last checked at {{time}}.',
                 time: readinessTime(shown.staleSince),
               })}
             </p>
-            <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="mt-3 rounded-2xl border px-5 py-3 font-semibold liquid-glass-modal-text">
+            <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="pos-solid-btn pos-solid-btn--sm mt-3">
               {t('phoneShifts.retry', { defaultValue: 'Retry' })}
             </button>
           </section>
         )}
         {pendingReturns.length > 0 && (
-          <section className={checkInSurfaceClass} data-testid="phone-tills-awaiting">
-            <h4 className="text-xl font-black liquid-glass-modal-text">{t('modals.staffShift.satelliteCheckout.awaitingReceipt')}</h4>
-            <div className="mt-3 flex flex-wrap gap-3">
+          <section className={`${checkInSurfaceClass} flex flex-col`} data-testid="phone-tills-awaiting">
+            <h4 className="pos-group__title">{t('modals.staffShift.satelliteCheckout.awaitingReceipt')}</h4>
+            <div className="mt-3 flex flex-wrap items-stretch gap-3">
               {pendingReturns.map(till => {
                 const heading = `${unitShiftStaffLabel(till)} · ${phoneTillAmount(till)}`;
                 // Only a till this Main can receive now, and whose local claim
@@ -4808,8 +4771,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 if (!receiveHere.has(till.id)) {
                   return (
                     <div key={till.id} data-testid={`phone-till-info-${till.id}`}
-                      className="rounded-2xl border border-slate-300/80 px-5 py-3 text-left dark:border-white/15">
-                      <span className="block font-bold liquid-glass-modal-text">{heading}</span>
+                      className="pos-choice-card w-auto text-left">
+                      <span className="block font-semibold text-(--pos-s-fg)">{heading}</span>
                       <span className={`block ${checkInMutedTextClass}`}>{phoneShiftPhoneText(till)}</span>
                       <span className={`block ${checkInMutedTextClass}`}>
                         {/* Founder decision 15/10/2026: a till waiting for a
@@ -4825,38 +4788,35 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 return (
                   <button key={till.id} type="button" data-testid={`phone-till-receive-${till.id}`}
                     onClick={() => receivePhoneTill(till)}
-                    className="rounded-2xl border border-yellow-400 px-5 py-3 text-left font-bold liquid-glass-modal-text">
+                    className="pos-choice-card is-selected w-auto text-left font-semibold active:bg-(--pos-s-surface)">
                     {heading}
                     <span className="block text-sm font-normal">{phoneShiftPhoneText(till)}</span>
                     <span className="block text-sm font-normal">{t('modals.staffShift.satelliteCheckout.receive')}</span>
                   </button>
                 );
               })}
-              <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="rounded-2xl border px-5 py-3">{t('common.refresh')}</button>
+              <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="pos-solid-btn pos-solid-btn--sm self-center">{t('common.refresh')}</button>
             </div>
           </section>
         )}
         {uncardedShifts.length > 0 && (
-          <section className={checkInSurfaceClass} data-testid="phone-shifts-open">
-            <h4 className="text-xl font-black liquid-glass-modal-text">{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
+          <section className={`${checkInSurfaceClass} flex flex-col`} data-testid="phone-shifts-open">
+            <h4 className="pos-group__title">{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
             <p className={`mt-2 ${checkInMutedTextClass}`}>
               {t('modals.staffShift.phoneShifts.openHelper', { defaultValue: 'Still open on a phone. Each one holds the Z until it is closed.' })}
             </p>
-            <div className="mt-3 grid gap-3 xl:grid-cols-2">
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
               {uncardedShifts.map(shift => (
                 <button key={shift.id} type="button" data-testid={`phone-shift-close-${shift.id}`}
                   onClick={() => closePhoneShiftFromMain(shift)}
-                  className="w-full rounded-[24px] border border-(--pos-s-border) p-4 text-left">
-                  <span className="block truncate text-lg font-black liquid-glass-modal-text">{unitShiftStaffLabel(shift)}</span>
+                  className="pos-choice-card text-left active:bg-(--pos-s-surface-2)">
+                  <span className="block truncate text-base font-semibold text-(--pos-s-fg)">{unitShiftStaffLabel(shift)}</span>
+                  <WorkCardLine status={workCard} staffId={shift.staff_id} />
                   <span className="mt-2 flex flex-wrap items-center gap-2">
-                    <span className="inline-flex shrink-0 items-center rounded-full border border-white/20 bg-black/45 px-3 py-1 text-xs font-semibold text-white">
+                    <span className="text-sm font-semibold text-(--pos-s-fg)">
                       {translateRoleName(shift.role_type || 'staff')}
                     </span>
-                    <span className={`inline-flex shrink-0 items-center rounded-full border px-3 py-1 text-xs font-semibold ${
-                      unitShiftPhoneState(shift) === 'active'
-                        ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-sky-700 dark:text-sky-200'
-                        : 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-700 dark:text-amber-200'
-                    }`}>
+                    <span className={`text-sm font-semibold ${unitShiftPhoneState(shift) === 'active' ? 'text-(--pos-s-muted)' : 'text-(--pos-s-warn)'}`}>
                       {t('modals.staffShift.satelliteTerminalChip', { defaultValue: 'on {{terminal}}', terminal: phoneShiftPhoneText(shift) })}
                     </span>
                     {shift.check_in_time ? (
@@ -4866,7 +4826,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       </span>
                     ) : null}
                   </span>
-                  <span className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-300/80 px-4 py-2.5 text-sm font-semibold liquid-glass-modal-text dark:border-white/15">
+                  <span className="mt-3 inline-flex items-center gap-1 text-sm font-semibold text-(--pos-s-fg)">
                     {t('modals.staffShift.phoneShifts.closeHere', { defaultValue: 'Close the shift here' })}
                     <ChevronRight className="h-4 w-4 shrink-0" />
                   </span>
@@ -4909,6 +4869,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       && (satelliteRefusedForGood || isNonCashPhoneRole(satelliteCheckout.shift.role_type as string | null | undefined));
     return (
       <div className="space-y-4" data-testid="satellite-checkout-section">
+        <WorkCardLine status={workCard} staffId={satelliteCheckout.staff.id} />
         <div className={checkoutSurfaceClass}>
           <h3 className="text-lg font-black liquid-glass-modal-text">
             {t('modals.staffShift.satelliteCheckout.title', {
@@ -4958,7 +4919,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               <button
                 type="button"
                 onClick={closeSatelliteCheckout}
-                className="mt-4 rounded-2xl bg-yellow-400 px-5 py-3 font-bold text-black"
+                className="pos-raised pos-raised--yellow mt-4 rounded-2xl bg-yellow-400 px-5 py-3 font-bold text-black"
               >
                 {t('common.done', { defaultValue: 'Done' })}
               </button>
@@ -4985,7 +4946,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   ['expected', t('modals.staffShift.satelliteCheckout.expectedCash', { defaultValue: 'Expected cash' }), formatSatelliteMoney(figures.expected_cash_amount)],
                 ].map(([key, label, value]) => (
                   <div key={key as string}>
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    <p className="text-[11px] font-semibold text-(--pos-s-muted)">
                       {label}
                     </p>
                     <p className="text-base font-bold liquid-glass-modal-text">{value}</p>
@@ -5031,7 +4992,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 type="button"
                 onClick={() => void handleSatelliteRemoteCheckout()}
                 disabled={satelliteSubmitting || !currency || !satelliteCountedCash.trim() || !Number.isFinite(countedValue) || countedValue < 0}
-                className="mt-5 w-full rounded-2xl bg-yellow-400 px-5 py-4 text-base font-black text-black disabled:opacity-50"
+                className="pos-raised pos-raised--yellow mt-5 w-full rounded-2xl bg-yellow-400 px-5 py-4 text-base font-black text-black disabled:opacity-50"
                 data-testid="satellite-checkout-confirm"
               >
                 {satelliteSubmitting
@@ -5057,15 +5018,26 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     );
   };
 
-  const checkoutSurfaceClass = 'rounded-[28px] border border-slate-200/80 bg-white/90 p-5 dark:border-white/10 dark:bg-white/4';
-  const checkoutInsetSurfaceClass = 'rounded-[24px] border border-slate-200/80 bg-slate-50/90 p-4 dark:border-white/10 dark:bg-black/25 dark:shadow-none';
-  const checkoutActionButtonClass = 'flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-yellow-400 text-black transition-all';
-  const checkoutMutedTextClass = 'text-sm text-slate-600 dark:text-slate-300/80';
-  const checkInSurfaceClass = 'rounded-[28px] border border-slate-300/80 bg-white p-4 dark:border-white/10 dark:bg-white/4';
-  const checkInInsetSurfaceClass = 'rounded-[24px] border border-slate-300/70 bg-slate-100/80 p-3 dark:border-white/10 dark:bg-black/25 dark:shadow-none';
-  const checkInFooterClass = 'sticky bottom-0 z-10 mt-3 border-t border-slate-300/80 bg-white px-1 pt-3 dark:border-white/10 dark:bg-[#071018]';
+  // Founder 01/11 («και έλεγξε και τα checkout modal»): the checkout in the kit, like the check-in.
+  const checkoutSurfaceClass = 'pos-card p-5';
+  const checkoutInsetSurfaceClass = 'rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4';
+  const checkoutActionButtonClass = 'pos-solid-btn pos-solid-btn--primary h-12 w-12 shrink-0 p-0';
+  const checkoutMutedTextClass = 'text-sm text-(--pos-s-muted)';
+  const checkoutFieldClass =
+    'block min-h-[48px] w-full rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) px-3 text-base font-semibold text-(--pos-s-fg) outline-hidden transition-colors focus:border-(--pos-s-yellow)';
+  const checkoutLabelClass = 'mb-1 block text-sm font-semibold text-(--pos-s-fg)';
+  // Founder 01/11 («δεν έχουμε διορθώσει αυτά τα modals»): the check-in steps in the kit, one column, each
+  // fact said once (the step's title and help appear once; the chosen person is one compact line).
+  const checkInSurfaceClass = 'pos-card p-4';
+  const checkInInsetSurfaceClass = 'rounded-2xl border border-(--pos-s-control) bg-(--pos-s-surface-2) p-3';
+  // Founder 02/11/2026: on glass a solid strip cut the raised buttons at its bottom edge. The footer is the
+  // checkout bar's floating surface, with room for the buttons and their shadow.
+  const checkInFooterClass = 'sticky bottom-0 z-10 mt-3 rounded-2xl p-3 staff-checkout-footer-panel';
   const checkInEyebrowClass = 'text-xs font-semibold text-slate-500 dark:text-slate-400';
-  const checkInMutedTextClass = 'text-sm text-slate-600 dark:text-slate-300/80';
+  const checkInMutedTextClass = 'text-sm text-(--pos-s-muted)';
+  const checkInStepColumnClass = 'mx-auto w-full max-w-xl space-y-4';
+  const checkInKeyClass =
+    'flex min-h-touch items-center justify-center rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface) text-xl font-semibold text-(--pos-s-fg) transition active:scale-[0.97] active:bg-(--pos-s-surface-2)';
 
   const renderTipsSummaryCard = () => {
     const tipsReceived = Number(shiftSummary?.tipsReceived || 0);
@@ -5075,13 +5047,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
     return (
       <div className={checkoutSurfaceClass} data-testid="staff-checkout-tips">
-        <div className="text-xs uppercase tracking-[0.2em] text-yellow-700 dark:text-yellow-300">
+        <div className="text-sm text-yellow-700 dark:text-yellow-300 font-semibold">
           {t('modals.staffShift.tipsReceived', { defaultValue: 'Tips Received' })}
         </div>
         <div className="mt-2 text-3xl font-black tracking-tight text-yellow-700 dark:text-yellow-300">
           {formatCurrency(tipsReceived)}
         </div>
-        <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/75">
+        <p className="mt-2 text-sm text-(--pos-s-muted)">
           {t('modals.staffShift.tipsSeparateFromCashReturn', {
             defaultValue: 'Tips are recorded separately and are not included in the cash to return.',
           })}
@@ -5093,7 +5065,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               <span className="text-sm font-semibold liquid-glass-modal-text">
                 {t('modals.staffShift.tipAllocations', { defaultValue: 'Tip Allocations' })}
               </span>
-              <span className="rounded-full bg-(--pos-s-surface-2) px-2.5 py-1 text-xs font-bold text-yellow-800 dark:text-yellow-200">
+              <span className="text-sm font-semibold text-(--pos-s-muted)">
                 {allocations.length}
               </span>
             </summary>
@@ -5105,7 +5077,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 >
                   <span className="truncate text-slate-600 dark:text-slate-300">
                     {t('modals.staffShift.tipOrder', { defaultValue: 'Order' })}{' '}
-                    #{allocation.orderNumber || allocation.orderId}
+                    {formatGridOrderNumber({ order_number: allocation.orderNumber, order_id: allocation.orderId })}
                   </span>
                   <span className="font-black text-yellow-800 dark:text-yellow-200">
                     {formatCurrency(Number(allocation.amount || 0))}
@@ -5123,13 +5095,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     <details className={`${checkoutSurfaceClass} group`}>
       <summary className="flex cursor-pointer list-none items-start justify-between gap-4 [&::-webkit-details-marker]:hidden">
         <div>
-          <div className="text-xs uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
-            {t('modals.staffShift.auditDetails', 'Audit Details')}
-          </div>
-          <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+          <h3 className="text-xl font-semibold text-(--pos-s-fg)">
             {t('modals.staffShift.auditDetails', 'Audit Details')}
           </h3>
-          <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/75">
+          <p className="mt-2 text-sm text-(--pos-s-muted)">
             {t('modals.staffShift.auditDetailsHelper', 'Expand for order, transfer, and payment history.')}
           </p>
         </div>
@@ -5144,7 +5113,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   );
 
   const renderAuditEmptyState = (message: string) => (
-    <div className="rounded-2xl border border-dashed border-slate-200/90 bg-slate-50/70 px-4 py-5 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-white/3 dark:text-slate-400">
+    <div className="rounded-2xl border border-dashed border-(--pos-s-border) px-4 py-5 text-center text-sm text-(--pos-s-muted)">
       {message}
     </div>
   );
@@ -5153,13 +5122,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     <div className={checkoutSurfaceClass}>
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 flex-1">
-          <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-            {t('modals.staffShift.expenses')}
-          </div>
-          <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+          <h3 className="text-xl font-semibold text-(--pos-s-fg)">
             {t('modals.staffShift.expenses')}
           </h3>
-          <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/75">
+          <p className="mt-2 text-sm text-(--pos-s-muted)">
             {canRecordInlineExpenses
               ? t('modals.staffShift.reviewAndConfirm')
               : t('modals.staffShift.expensesReadOnly', {
@@ -5170,7 +5136,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         </div>
 
         <div className="w-full sm:w-auto sm:text-right">
-          <div className="text-xs uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+          <div className="text-sm text-(--pos-s-muted) font-semibold">
             {t('modals.staffShift.totalExpenses')}
           </div>
           <div className="mt-1 text-2xl font-black text-rose-500 dark:text-rose-300">
@@ -5191,10 +5157,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
       {canRecordInlineExpenses && showExpenseForm && (
         <div ref={expenseFormRef} className={`mt-5 space-y-3 ${checkoutInsetSurfaceClass}`}>
+          <label className={checkoutLabelClass} htmlFor="checkout-expense-type">
+            {t('modals.expense.expenseType', 'Expense type')}
+          </label>
           <select
+            id="checkout-expense-type"
             value={expenseType}
             onChange={(e) => setExpenseType(e.target.value as 'supplies' | 'maintenance' | 'petty_cash' | 'refund' | 'other')}
-            className="liquid-glass-modal-input text-sm"
+            className={checkoutFieldClass}
           >
             <option value="supplies">{getExpenseTypeLabel('supplies')}</option>
             <option value="maintenance">{getExpenseTypeLabel('maintenance')}</option>
@@ -5203,36 +5173,51 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <option value="other">{getExpenseTypeLabel('other')}</option>
           </select>
 
-          <CentsMoneyInput
-            aria-label={t('modals.staffShift.amountLabel', 'Amount')}
-            value={expenseAmount}
-            onValueChange={setExpenseAmount}
-            placeholder="0,00"
-            className="liquid-glass-modal-input text-lg font-bold"
-          />
+          <div>
+            <span className={checkoutLabelClass}>{t('modals.staffShift.amountLabel', 'Amount')}</span>
+            <CentsMoneyInput
+              aria-label={t('modals.staffShift.amountLabel', 'Amount')}
+              value={expenseAmount}
+              onValueChange={setExpenseAmount}
+              placeholder="0,00"
+              className={`${checkoutFieldClass} text-lg font-bold`}
+            />
+          </div>
 
-          <input
-            type="text"
-            value={expenseDescription}
-            onChange={(e) => setExpenseDescription(e.target.value)}
-            placeholder={expenseDescriptionPlaceholder}
-            className="liquid-glass-modal-input text-sm"
-          />
+          <div>
+            <label className={checkoutLabelClass} htmlFor="checkout-expense-description">
+              {t('modals.expense.justification', 'Justification')}
+            </label>
+            <input
+              id="checkout-expense-description"
+              type="text"
+              value={expenseDescription}
+              onChange={(e) => setExpenseDescription(e.target.value)}
+              placeholder={expenseDescriptionPlaceholder}
+              className={checkoutFieldClass}
+            />
+          </div>
 
           {canUseExpenseReceiptReference && (
-            <input
-              type="text"
-              value={expenseReceipt}
-              onChange={(e) => setExpenseReceipt(e.target.value)}
-              placeholder={expenseReceiptPlaceholder}
-              className="liquid-glass-modal-input text-sm"
-            />
+            <div>
+              <label className={checkoutLabelClass} htmlFor="checkout-expense-receipt">
+                {t('modals.expense.receiptReference', 'Receipt reference')}
+              </label>
+              <input
+                id="checkout-expense-receipt"
+                type="text"
+                value={expenseReceipt}
+                onChange={(e) => setExpenseReceipt(e.target.value)}
+                placeholder={expenseReceiptPlaceholder}
+                className={checkoutFieldClass}
+              />
+            </div>
           )}
 
           <button
             onClick={handleRecordExpense}
             disabled={!canRecordInlineExpense}
-            className="w-full rounded-xl bg-(--pos-s-yellow) px-4 py-3 text-sm font-semibold text-black transition-all disabled:cursor-not-allowed disabled:opacity-50"
+            className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary w-full"
           >
             {recordExpenseLabel}
           </button>
@@ -5262,7 +5247,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 <div className="min-w-0">
                   <div className="font-semibold liquid-glass-modal-text">{expenseTitle}</div>
                   {expenseMeta && (
-                    <div className="mt-1 text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                    <div className="mt-1 text-sm text-(--pos-s-muted) font-semibold">
                       {expenseMeta}
                     </div>
                   )}
@@ -5306,7 +5291,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             );
           })
         ) : (
-          <div className="rounded-2xl border border-dashed border-slate-200/90 bg-slate-50/70 px-4 py-5 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-white/3 dark:text-slate-400">
+          <div className="rounded-2xl border border-dashed border-(--pos-s-border) px-4 py-5 text-center text-sm text-(--pos-s-muted)">
             {t('modals.staffShift.noExpensesRecorded')}
           </div>
         )}
@@ -5326,13 +5311,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       <div className={checkoutSurfaceClass}>
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0 flex-1">
-            <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-              {t('modals.staffShift.recordStaffPayments', 'Record Staff Payments')}
-            </div>
-            <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+            <h3 className="text-xl font-semibold text-(--pos-s-fg)">
               {t('modals.staffShift.recordStaffPayments', 'Record Staff Payments')}
             </h3>
-            <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/75">
+            <p className="mt-2 text-sm text-(--pos-s-muted)">
               {t(
                 'modals.staffShift.staffPaymentsReturnedViaCheckouts',
                 'Recorded staff payouts are deducted from this cashier checkout immediately.',
@@ -5359,7 +5341,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         {showStaffPaymentForm && (
           <div ref={staffPaymentFormRef} className={`mt-5 space-y-3 ${checkoutInsetSurfaceClass}`}>
             <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+              <label className={checkoutLabelClass}>
                 {t('modals.staffShift.selectStaff', 'Select Staff')}
               </label>
               <select
@@ -5388,7 +5370,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     setExpectedPayment(null);
                   }
                 }}
-                className="liquid-glass-modal-input w-full"
+                className={checkoutFieldClass}
               >
                 <option value="">{t('modals.staffShift.selectStaffPlaceholder', '-- Select Staff --')}</option>
                 {editingStaffPayment && selectedStaffForPayment?.id && !availableStaff.some((member) => member.id === (selectedStaffForPayment?.id ?? '')) && (
@@ -5404,13 +5386,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <label className={checkoutLabelClass}>
                   {t('modals.staffShift.paymentType', 'Payment Type')}
                 </label>
                 <select
                   value={paymentType}
                   onChange={(e) => setPaymentType(e.target.value)}
-                  className="liquid-glass-modal-input w-full"
+                  className={checkoutFieldClass}
                 >
                   <option value="wage">{t('modals.staffShift.paymentTypes.wage', 'Wage')}</option>
                   <option value="tip">{t('modals.staffShift.paymentTypes.tip', 'Tip')}</option>
@@ -5421,10 +5403,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               </div>
 
               <div>
-                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <label className={checkoutLabelClass}>
                   {t('modals.staffShift.amountLabel', 'Amount')}
                   {expectedPayment !== null && (
-                    <span className="ml-2 normal-case tracking-normal text-slate-500">
+                    <span className="ml-2 font-normal text-(--pos-s-muted)">
                       ({t('modals.staffShift.expected', 'Expected')}: {formatCurrency(expectedPayment)})
                     </span>
                   )}
@@ -5434,13 +5416,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   value={paymentAmount}
                   onValueChange={setPaymentAmount}
                   placeholder={expectedPayment ? formatCurrency(expectedPayment) : '0,00'}
-                  className="liquid-glass-modal-input w-full text-lg font-bold"
+                  className={`${checkoutFieldClass} text-lg font-bold`}
                 />
               </div>
             </div>
 
             <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+              <label className={checkoutLabelClass}>
                 {t('modals.staffShift.notesOptional', 'Notes (optional)')}
               </label>
               <input
@@ -5448,21 +5430,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 value={paymentNotes}
                 onChange={(e) => setPaymentNotes(e.target.value)}
                 placeholder={t('modals.staffShift.paymentNotesPlaceholder', 'Add notes (optional)')}
-                className="liquid-glass-modal-input w-full"
+                className={checkoutFieldClass}
               />
             </div>
 
-            <div className="flex flex-wrap justify-end gap-2">
+            <div className="flex flex-wrap justify-end gap-3">
               <button
                 onClick={resetStaffPaymentForm}
-                className="rounded-xl border border-slate-200/80 bg-white/80 px-4 py-2 text-sm font-medium text-slate-700 transition-all dark:border-white/10 dark:bg-white/10 dark:text-slate-200"
+                className="pos-solid-btn pos-solid-btn--md"
               >
                 {t('common.cancel', 'Cancel')}
               </button>
               <button
                 onClick={handleRecordStaffPayment}
                 disabled={loading || !selectedStaffForPayment || !paymentAmount}
-                className="rounded-xl bg-(--pos-s-yellow) px-4 py-2 text-sm font-semibold text-black transition-all disabled:opacity-50"
+                className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary"
               >
                 {loading
                   ? t('common.saving', 'Saving...')
@@ -5479,7 +5461,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           {staffPaymentsList.length > 0 ? (
             <>
               <div className="flex items-center justify-between">
-                <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <div className="text-sm text-(--pos-s-muted) font-semibold">
                   {t('modals.staffShift.recordedThisSession', 'Recorded This Session')}
                 </div>
                 <div className="text-sm font-bold text-rose-500 dark:text-rose-300">
@@ -5495,7 +5477,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     <div className="font-semibold liquid-glass-modal-text">
                       {payment.staff_name || t('common.unknown', 'Unknown')}
                     </div>
-                    <div className="text-xs text-slate-500 dark:text-slate-400">
+                    <div className="text-xs text-(--pos-s-muted)">
                       {t(`modals.staffShift.paymentTypes.${payment.payment_type}`, payment.payment_type)}
                       {payment.notes ? ` · ${payment.notes}` : ''}
                     </div>
@@ -5505,7 +5487,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       type="button"
                       disabled={loading}
                       onClick={() => { void beginEditStaffPayment(payment); }}
-                      className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-yellow-800 transition-colors disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-yellow-200"
+                      className="pos-raised inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-yellow-800 transition-colors disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-yellow-200"
                     >
                       <Pencil className="h-3.5 w-3.5" />
                       {t('modals.staffShift.editPayment', 'Edit')}
@@ -5539,7 +5521,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               ))}
             </>
           ) : (
-            <div className="rounded-2xl border border-dashed border-slate-200/90 bg-slate-50/70 px-4 py-5 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-white/3 dark:text-slate-400">
+            <div className="rounded-2xl border border-dashed border-(--pos-s-border) px-4 py-5 text-center text-sm text-(--pos-s-muted)">
               {t('modals.staffShift.staffPaymentsMade')}
             </div>
           )}
@@ -5563,10 +5545,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           setSelectedStaff(null);
           setError('');
         }}
-        className="inline-flex items-center gap-2 self-start rounded-2xl border border-slate-200/80 bg-white/80 px-4 py-2 text-sm font-semibold text-slate-700 transition-all dark:border-white/10 dark:bg-white/10 dark:text-slate-200"
+        className="pos-solid-btn pos-solid-btn--sm self-start"
         {...getInteractiveMotion('button')}
       >
-        <ChevronRight className="h-4 w-4 rotate-180" />
+        <ChevronLeft className="h-5 w-5" />
         {t('modals.staffShift.backToStaffSelection')}
       </motion.button>
     );
@@ -5587,7 +5569,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       <div className="space-y-4" data-testid="gift-close-checkout" data-state={state.kind}>
         {renderCheckoutBackButton()}
         <section className={checkoutSurfaceClass}>
-          <div className="text-xs uppercase tracking-[0.22em] text-yellow-700 dark:text-yellow-300">
+          <div className="text-sm text-yellow-700 dark:text-yellow-300 font-semibold">
             {giftText(giftCloseText('title', 'Gift card cash close'))}
           </div>
           {state.kind === 'preparing' && (
@@ -5633,7 +5615,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   strong
                 />
               </dl>
-              <label className="mt-5 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+              <label className="mt-5 block text-sm font-semibold text-(--pos-s-muted)">
                 {giftText(giftCloseText('countLabel', 'Counted cash in drawer'))}
                 <CentsMoneyInput
                   data-testid="gift-close-count"
@@ -5758,13 +5740,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <div className={checkoutSurfaceClass}>
               <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.9fr)]">
                 <div>
-                  <div className="text-xs uppercase tracking-[0.22em] text-yellow-700 dark:text-yellow-300">
+                  <div className="text-sm text-yellow-700 dark:text-yellow-300 font-semibold">
                     {t('modals.staffShift.expectedInDrawer', { defaultValue: 'Expected In Drawer' })}
                   </div>
-                  <div className="mt-3 text-4xl font-black tracking-tight text-slate-900 dark:text-white">
+                  {/* Founder 01/11/2026 («κανε το αναμενομενο πρασινο και στα 2»): the expected cash in the kit green. */}
+                  <div data-expected-in-drawer className="mt-3 text-4xl font-black tracking-tight text-(--pos-s-ok)">
                     {formatDrawerCurrency(breakdown.expected)}
                   </div>
-                  <p className="mt-3 text-sm text-slate-600 dark:text-slate-300/75">
+                  <p className="mt-3 text-sm text-(--pos-s-muted)">
                     {t('modals.staffShift.expectedInDrawerHelper', {
                       defaultValue: 'Count the drawer and confirm the actual cash before closing.',
                     })}
@@ -5772,7 +5755,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 </div>
 
                 <div className={checkoutInsetSurfaceClass}>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+                  <label className="block text-sm font-semibold text-(--pos-s-muted)">
                     {t('modals.staffShift.closingCashLabel')}
                   </label>
                   <CentsMoneyInput
@@ -5783,16 +5766,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     className="liquid-glass-modal-input mt-3 w-full text-3xl font-black text-center"
                     autoFocus
                   />
-                  <p className="mt-3 text-sm text-slate-600 dark:text-slate-300/75">
+                  <p className="mt-3 text-sm text-(--pos-s-muted)">
                     {t('modals.staffShift.closingCashHelper')}
                   </p>
-                  {variance === null ? (
-                    <p className="mt-4 text-center text-sm text-slate-500 dark:text-slate-400">
-                      {t('modals.staffShift.countedCashPrompt', {
-                        defaultValue: 'Enter counted cash to confirm the final drawer amount.',
-                      })}
-                    </p>
-                  ) : (
+                  {variance !== null && (
                     <div className="mt-4 flex justify-center">
                       <VarianceBadge currency={cashierDrawerCurrency} variance={variance} size="lg" showIcon />
                     </div>
@@ -5804,18 +5781,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <div className={checkoutSurfaceClass}>
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-                    {t('modals.staffShift.cashReconciliation', 'Cash Reconciliation')}
-                  </div>
-                  <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+                  <h3 className="text-xl font-semibold text-(--pos-s-fg)">
                     {t('modals.staffShift.varianceBreakdown', 'Cash Breakdown')}
                   </h3>
                 </div>
                 <div className="text-right">
-                  <div className="text-xs uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.actualLabel', 'Actual')}
                   </div>
-                  <div className="mt-1 text-2xl font-black text-slate-900 dark:text-white">
+                  {/* Founder 01/11/2026: «Not entered» in the kit amber until the counted cash is typed, so it is not missed;
+                      then green when it matches the expected cash, the expenses' rose red when it does not («αυτο το
+                      κοκκινο μου αρεσει»). */}
+                  <div
+                    data-actual-cash={actual === null ? 'not-entered' : Math.abs(actual - breakdown.expected) < 0.005 ? 'matches' : 'differs'}
+                    className={`mt-1 text-2xl font-black ${actual === null ? 'text-(--pos-s-warn)' : Math.abs(actual - breakdown.expected) < 0.005 ? 'text-(--pos-s-ok)' : 'text-rose-500 dark:text-rose-300'}`}
+                  >
                     {actual === null
                       ? t('common.notEntered', { defaultValue: 'Not entered' })
                       : formatDrawerCurrency(actual)}
@@ -5839,7 +5819,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   .map((row) => (
                     <div
                       key={row.label}
-                      className="flex items-center justify-between rounded-2xl border border-slate-200/80 bg-slate-50/85 px-4 py-3 dark:border-white/10 dark:bg-black/20"
+                      className="flex items-center justify-between border-t border-(--pos-s-border) px-1 py-3 first:border-t-0"
                     >
                       <span className="text-sm font-medium text-slate-600 dark:text-slate-300">{row.label}</span>
                       <span className={`text-lg font-black ${row.tone}`}>
@@ -5862,21 +5842,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           <div className="space-y-5">
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <div className={checkoutInsetSurfaceClass}>
-                <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <div className="text-sm text-(--pos-s-muted) font-semibold">
                   {t('modals.staffShift.totalOrders')}
                 </div>
                 <div className="mt-2 text-2xl font-black liquid-glass-modal-text">{headerMetrics.totalCount}</div>
               </div>
               <div className={checkoutInsetSurfaceClass}>
-                <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <div className="text-sm text-(--pos-s-muted) font-semibold">
                   {t('modals.staffShift.totalSalesLabel', 'Total Sales')}
                 </div>
-                <div className="mt-2 text-2xl font-black text-emerald-600 dark:text-emerald-300">
+                <div className={`mt-2 text-2xl font-black text-emerald-600 dark:text-emerald-300`}>
                   {formatCurrency(headerMetrics.totalAmount)}
                 </div>
               </div>
               <div className={checkoutInsetSurfaceClass}>
-                <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <div className="text-sm text-(--pos-s-muted) font-semibold">
                   {t('modals.staffShift.totalCashOrders')}
                 </div>
                 <div className="mt-2 text-2xl font-black text-slate-600 dark:text-slate-300">
@@ -5884,7 +5864,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 </div>
               </div>
               <div className={checkoutInsetSurfaceClass}>
-                <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                <div className="text-sm text-(--pos-s-muted) font-semibold">
                   {t('modals.staffShift.totalCashAmount', 'Total Cash Amount')}
                 </div>
                 <div className="mt-2 text-2xl font-black liquid-glass-modal-text">
@@ -5894,7 +5874,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             </div>
 
             {!hasAuditActivity && (
-              <div className="rounded-2xl border border-dashed border-slate-200/90 bg-slate-50/70 px-4 py-5 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-white/3 dark:text-slate-400">
+              <div className="rounded-2xl border border-dashed border-(--pos-s-border) px-4 py-5 text-center text-sm text-(--pos-s-muted)">
                 {t('modals.staffShift.auditNoActivity')}
               </div>
             )}
@@ -5902,17 +5882,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <div className={checkoutInsetSurfaceClass}>
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-                    {t('modals.staffShift.auditOrderHistoryTitle')}
-                  </div>
-                  <h4 className="mt-1 text-lg font-black liquid-glass-modal-text">
+                  <h4 className="text-lg font-semibold text-(--pos-s-fg)">
                     {t('modals.staffShift.auditOrderHistoryTitle')}
                   </h4>
-                  <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/75">
+                  <p className="mt-2 text-sm text-(--pos-s-muted)">
                     {t('modals.staffShift.auditOrderHistoryHelper')}
                   </p>
                 </div>
-                <span className="rounded-full border border-slate-200/80 bg-white/90 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-slate-500 dark:border-white/10 dark:bg-white/10 dark:text-slate-300">
+                <span className="shrink-0 text-base font-semibold text-(--pos-s-muted)">
                   {cashierOrders.length}
                 </span>
               </div>
@@ -5922,19 +5899,19 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   cashierOrders.map((order: any) => (
                     <div
                       key={order.order_id}
-                      className="rounded-2xl border border-slate-200/80 bg-white/80 p-4 dark:border-white/10 dark:bg-white/4"
+                      className="pos-card p-4"
                     >
                       <div className="flex items-start justify-between gap-4">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
                             <div className="truncate text-base font-black liquid-glass-modal-text">
-                              #{order.order_number || order.order_id}
+                              {formatGridOrderNumber(order)}
                             </div>
-                            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${getAuditStatusBadgeClass(order.status)}`}>
+                            <span className={`inline-flex items-center text-[13px] font-semibold ${getAuditStatusBadgeClass(order.status)}`}>
                               {translateAuditStatus(order.status)}
                             </span>
                           </div>
-                          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-(--pos-s-muted) font-semibold">
                             <span>{formatTime(order.created_at)}</span>
                             <span>•</span>
                             <span>{translateAuditOrderType(order.order_type)}</span>
@@ -5945,40 +5922,38 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               </>
                             )}
                             </div>
-                            <div className="mt-2 text-sm text-slate-600 dark:text-slate-300/75">
-                              {(typeof order.customer_name === 'string' && order.customer_name.trim()) || t('modals.staffShift.noCustomerName')}
-                            </div>
+                            {typeof order.customer_name === 'string' && order.customer_name.trim() ? (
+                              <div className="mt-1 text-sm text-(--pos-s-muted)">{order.customer_name.trim()}</div>
+                            ) : null}
                           </div>
 
                         <div className="text-right">
                           <div className="text-xl font-black liquid-glass-modal-text">
                             {formatCurrency(Number(order.total_amount || 0))}
                           </div>
-                          <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-slate-200/80 bg-slate-50/90 px-3 py-1.5 text-xs font-semibold text-slate-600 dark:border-white/10 dark:bg-black/20 dark:text-slate-200">
+                          <div className="mt-1 inline-flex items-center gap-1.5 text-sm font-semibold text-(--pos-s-muted)">
                             {getPaymentSymbol(String(order.payment_method || 'cash'))}
                             <span>{translateAuditPaymentMethod(order.payment_method)}</span>
                           </div>
                         </div>
                       </div>
 
-                      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                        <div className="rounded-2xl border border-slate-200/80 bg-slate-50/90 px-3 py-3 dark:border-white/10 dark:bg-black/20">
-                          <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-                            {t('modals.staffShift.cash')}
-                          </div>
-                          <div className="mt-1 text-lg font-black text-emerald-600 dark:text-emerald-300">
-                            {formatCurrency(Number(order.cash_amount || 0))}
-                          </div>
+                      {Number(order.cash_amount || 0) > 0 && Number(order.card_amount || 0) > 0 ? (
+                        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-(--pos-s-border) pt-3 text-sm">
+                          <span className="text-(--pos-s-muted)">
+                            {t('modals.staffShift.cash')}{' '}
+                            <span className="font-black text-emerald-600 dark:text-emerald-300">
+                              {formatCurrency(Number(order.cash_amount || 0))}
+                            </span>
+                          </span>
+                          <span className="text-(--pos-s-muted)">
+                            {t('modals.staffShift.card')}{' '}
+                            <span className="font-black text-slate-600 dark:text-slate-300">
+                              {formatCurrency(Number(order.card_amount || 0))}
+                            </span>
+                          </span>
                         </div>
-                        <div className="rounded-2xl border border-slate-200/80 bg-slate-50/90 px-3 py-3 dark:border-white/10 dark:bg-black/20">
-                          <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-                            {t('modals.staffShift.card')}
-                          </div>
-                          <div className="mt-1 text-lg font-black text-slate-600 dark:text-slate-300">
-                            {formatCurrency(Number(order.card_amount || 0))}
-                          </div>
-                        </div>
-                      </div>
+                      ) : null}
                     </div>
                   ))
                 ) : (
@@ -5992,17 +5967,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <div className={checkoutInsetSurfaceClass}>
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-                    {t('modals.staffShift.auditStaffReturnsTitle')}
-                  </div>
-                  <h4 className="mt-1 text-lg font-black liquid-glass-modal-text">
+                  <h4 className="text-lg font-semibold text-(--pos-s-fg)">
                     {t('modals.staffShift.auditStaffReturnsTitle')}
                   </h4>
-                  <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/75">
+                  <p className="mt-2 text-sm text-(--pos-s-muted)">
                     {t('modals.staffShift.auditStaffReturnsHelper')}
                   </p>
                 </div>
-                <span className="rounded-full border border-slate-200/80 bg-white/90 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-slate-500 dark:border-white/10 dark:bg-white/10 dark:text-slate-300">
+                <span className="shrink-0 text-base font-semibold text-(--pos-s-muted)">
                   {currentPeriodReturns.length + transferredStaff.length}
                 </span>
               </div>
@@ -6010,10 +5982,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               <div className="mt-4 grid gap-4 xl:grid-cols-2">
                 <div className="space-y-3">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                    <div className="text-sm text-(--pos-s-muted) font-semibold">
                       {t('modals.staffShift.currentPeriodReturnsLabel')}
                     </div>
-                    <span className="rounded-full border border-slate-200/80 bg-white/90 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500 dark:border-white/10 dark:bg-white/10 dark:text-slate-300">
+                    <span className="shrink-0 text-base font-semibold text-(--pos-s-muted)">
                       {currentPeriodReturns.length}
                     </span>
                   </div>
@@ -6026,17 +5998,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       return (
                         <div
                           key={item.shift_id || item.driver_id || item.order_id}
-                          className="rounded-2xl border border-slate-200/80 bg-white/80 p-4 dark:border-white/10 dark:bg-white/4"
+                          className="pos-card p-4"
                         >
                           <div className="flex items-start justify-between gap-4">
                             <div>
                               <div className="font-semibold liquid-glass-modal-text">
                                 {item.driver_name || item.staff_name || '—'}
                               </div>
-                              <div className="mt-1 text-xs uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">
+                              <div className="mt-1 text-sm text-(--pos-s-muted) font-semibold">
                                 {translateRoleName(item.role_type || 'driver')}
                               </div>
-                              <div className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                              <div className="mt-2 text-xs text-(--pos-s-muted)">
                                 {formatShiftWindow({
                                   check_in_time: item.check_in_time,
                                   check_out_time: item.check_out_time,
@@ -6048,31 +6020,31 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                             <div className={`text-right text-lg font-black ${isPositive ? 'text-emerald-600 dark:text-emerald-300' : 'text-rose-600 dark:text-rose-300'}`}>
                               {isPositive ? '+' : '-'}{formatCurrency(Math.abs(amountToReturn))}
-                              <div className="mt-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">
+                              <div className="mt-1 text-[11px] font-semibold text-(--pos-s-muted)">
                                 {isPositive ? t('modals.staffShift.driverReturns') : t('modals.staffShift.driverTakes')}
                               </div>
                             </div>
                           </div>
 
-                          <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                            <div className="rounded-2xl border border-slate-200/80 bg-slate-50/90 px-3 py-3 dark:border-white/10 dark:bg-black/20">
-                              <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                          <div className="mt-3 grid gap-3 border-t border-(--pos-s-border) pt-3 sm:grid-cols-3">
+                            <div className="min-w-0">
+                              <div className="text-[11px] text-(--pos-s-muted) font-semibold">
                                 {t('modals.staffShift.driverStarting')}
                               </div>
                               <div className="mt-1 text-sm font-black text-slate-600 dark:text-slate-300">
                                 {formatCurrency(Number(item.starting_amount || 0))}
                               </div>
                             </div>
-                            <div className="rounded-2xl border border-slate-200/80 bg-slate-50/90 px-3 py-3 dark:border-white/10 dark:bg-black/20">
-                              <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                            <div className="min-w-0">
+                              <div className="text-[11px] text-(--pos-s-muted) font-semibold">
                                 {t('modals.staffShift.cashCollected', 'Cash Collected')}
                               </div>
                               <div className="mt-1 text-sm font-black text-emerald-600 dark:text-emerald-300">
                                 {formatCurrency(Number(item.cash_collected || 0))}
                               </div>
                             </div>
-                            <div className="rounded-2xl border border-slate-200/80 bg-slate-50/90 px-3 py-3 dark:border-white/10 dark:bg-black/20">
-                              <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                            <div className="min-w-0">
+                              <div className="text-[11px] text-(--pos-s-muted) font-semibold">
                                 {t('modals.staffShift.totalSalesLabel', 'Total Sales')}
                               </div>
                               <div className="mt-1 text-sm font-black liquid-glass-modal-text">
@@ -6090,10 +6062,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                 <div className="space-y-3">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                    <div className="text-sm text-(--pos-s-muted) font-semibold">
                       {t('modals.staffShift.inheritedReturnsLabel')}
                     </div>
-                    <span className="rounded-full border border-slate-200/80 bg-white/90 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500 dark:border-white/10 dark:bg-white/10 dark:text-slate-300">
+                    <span className="shrink-0 text-base font-semibold text-(--pos-s-muted)">
                       {transferredStaff.length}
                     </span>
                   </div>
@@ -6105,48 +6077,48 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       return (
                         <div
                           key={item.shift_id || item.driver_id || item.waiter_id}
-                          className="rounded-2xl border border-slate-200/80 bg-white/80 p-4 dark:border-white/10 dark:bg-white/4"
+                          className="pos-card p-4"
                         >
                           <div className="flex items-start justify-between gap-4">
                             <div>
                               <div className="font-semibold liquid-glass-modal-text">
                                 {item.driver_name || item.waiter_name || item.staff_name || '—'}
                               </div>
-                              <div className="mt-1 text-xs uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">
+                              <div className="mt-1 text-sm text-(--pos-s-muted) font-semibold">
                                 {translateRoleName(item.role_type || 'driver')}
                               </div>
-                              <div className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                              <div className="mt-2 text-xs text-(--pos-s-muted)">
                                 {formatShiftWindow({ check_in_time: item.check_in_time })}
                               </div>
                             </div>
 
                             <div className="text-right text-lg font-black text-slate-600 dark:text-slate-300">
                               +{formatCurrency(Math.abs(inheritedReturn))}
-                              <div className="mt-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">
+                              <div className="mt-1 text-[11px] font-semibold text-(--pos-s-muted)">
                                 {t('modals.staffShift.driverReturns')}
                               </div>
                             </div>
                           </div>
 
-                          <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                            <div className="rounded-2xl border border-slate-200/80 bg-slate-50/90 px-3 py-3 dark:border-white/10 dark:bg-black/20">
-                              <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                          <div className="mt-3 grid gap-3 border-t border-(--pos-s-border) pt-3 sm:grid-cols-3">
+                            <div className="min-w-0">
+                              <div className="text-[11px] text-(--pos-s-muted) font-semibold">
                                 {t('modals.staffShift.driverStarting')}
                               </div>
                               <div className="mt-1 text-sm font-black text-slate-600 dark:text-slate-300">
                                 {formatCurrency(Number(item.starting_amount || 0))}
                               </div>
                             </div>
-                            <div className="rounded-2xl border border-slate-200/80 bg-slate-50/90 px-3 py-3 dark:border-white/10 dark:bg-black/20">
-                              <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                            <div className="min-w-0">
+                              <div className="text-[11px] text-(--pos-s-muted) font-semibold">
                                 {t('modals.staffShift.cashCollected', 'Cash Collected')}
                               </div>
                               <div className="mt-1 text-sm font-black text-emerald-600 dark:text-emerald-300">
                                 {formatCurrency(Number(item.cash_collected || 0))}
                               </div>
                             </div>
-                            <div className="rounded-2xl border border-slate-200/80 bg-slate-50/90 px-3 py-3 dark:border-white/10 dark:bg-black/20">
-                              <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                            <div className="min-w-0">
+                              <div className="text-[11px] text-(--pos-s-muted) font-semibold">
                                 {t('modals.staffShift.totalSalesLabel', 'Total Sales')}
                               </div>
                               <div className="mt-1 text-sm font-black liquid-glass-modal-text">
@@ -6167,17 +6139,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <div className={checkoutInsetSurfaceClass}>
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.staffPaymentsTitle')}
                   </div>
-                  <h4 className="mt-1 text-lg font-black liquid-glass-modal-text">
+                  <h4 className="text-lg font-semibold text-(--pos-s-fg)">
                     {t('modals.staffShift.totalStaffPayments')}
                   </h4>
-                  <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/75">
+                  <p className="mt-2 text-sm text-(--pos-s-muted)">
                     {t('modals.staffShift.auditStaffPaymentsHelper')}
                   </p>
                 </div>
-                <span className="rounded-full border border-slate-200/80 bg-white/90 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-slate-500 dark:border-white/10 dark:bg-white/10 dark:text-slate-300">
+                <span className="shrink-0 text-base font-semibold text-(--pos-s-muted)">
                   {historicalStaffPayments.length}
                 </span>
               </div>
@@ -6187,17 +6159,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   historicalStaffPayments.map((payment: any) => (
                     <div
                       key={payment.id}
-                      className="rounded-2xl border border-slate-200/80 bg-white/80 p-4 dark:border-white/10 dark:bg-white/4"
+                      className="pos-card p-4"
                     >
                       <div className="flex items-start justify-between gap-4">
                         <div className="min-w-0">
                           <div className="font-semibold liquid-glass-modal-text">
                             {payment.staff_name || '—'}
                           </div>
-                          <div className="mt-1 text-xs uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">
+                          <div className="mt-1 text-sm text-(--pos-s-muted) font-semibold">
                             {payment.role_type ? translateRoleName(payment.role_type) : '—'}
                           </div>
-                          <div className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                          <div className="mt-2 text-xs text-(--pos-s-muted)">
                             {payment.created_at ? formatTime(payment.created_at) : t('common.unknown', 'Unknown')}
                           </div>
                         </div>
@@ -6250,22 +6222,22 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.95fr)]">
           <div className="space-y-6">
             <div className={checkoutSurfaceClass}>
-              <div className="text-xs uppercase tracking-[0.22em] text-slate-600 dark:text-slate-300/90">
+              <div className="text-sm text-(--pos-s-muted) font-semibold">
                 {t('modals.staffShift.amountToReturn', {
                   defaultValue: 'Return',
                 })}
               </div>
-              <div className="mt-3 text-4xl font-black tracking-tight text-slate-900 dark:text-white">
+              <div className="mt-3 text-4xl font-black tracking-tight text-(--pos-s-fg)">
                 {formatCurrency(Math.abs(amountToReturn))}
               </div>
-              <p className="mt-3 text-sm text-slate-600 dark:text-slate-300/75">
+              <p className="mt-3 text-sm text-(--pos-s-muted)">
                 {t('modals.staffShift.cashReturnHelper', {
                   defaultValue: 'Hand this cash to the cashier. Tips are recorded separately.',
                 })}
               </p>
 
               <div className={`mt-5 ${checkoutInsetSurfaceClass}`}>
-                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+                <label className="block text-sm font-semibold text-(--pos-s-muted)">
                   {t('modals.staffShift.cashActuallyHandedOver', {
                     defaultValue: 'Cash Actually Handed Over',
                   })}
@@ -6293,10 +6265,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             </div>
 
             <div className={checkoutSurfaceClass}>
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-                {t('modals.staffShift.cashReconciliation', 'Cash Reconciliation')}
-              </div>
-              <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+              <h3 className="text-xl font-semibold text-(--pos-s-fg)">
                 {t('receipt.formula.label')}
               </h3>
               <div className="mt-5 space-y-2">
@@ -6308,7 +6277,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 ].map((row) => (
                   <div
                     key={row.label}
-                    className="flex items-center justify-between rounded-2xl border border-slate-200/80 bg-slate-50/85 px-4 py-3 dark:border-white/10 dark:bg-black/20"
+                    className="flex items-center justify-between border-t border-(--pos-s-border) px-1 py-3 first:border-t-0"
                   >
                     <span className="text-sm font-medium text-slate-600 dark:text-slate-300">{row.label}</span>
                     <span className={`text-lg font-black ${row.tone}`}>
@@ -6335,24 +6304,24 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             {renderTipsSummaryCard()}
 
             <div className={checkoutSurfaceClass}>
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+              <div className="text-sm text-(--pos-s-muted) font-semibold">
                 {t('modals.staffShift.informationOnlyTitle', 'Information Only')}
               </div>
-              <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+              <h3 className="mt-2 text-xl font-semibold text-(--pos-s-fg)">
                 {t('modals.staffShift.reviewAndConfirm')}
               </h3>
               <div className="mt-5 grid gap-4 sm:grid-cols-2">
                 <div className={checkoutInsetSurfaceClass}>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.totalOrders')}
                   </div>
                   <div className="mt-2 text-2xl font-black liquid-glass-modal-text">{completedDeliveries.length}</div>
                 </div>
                 <div className={checkoutInsetSurfaceClass}>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.cashCollected', 'Cash Collected')}
                   </div>
-                  <div className="mt-2 text-2xl font-black text-emerald-600 dark:text-emerald-300">
+                  <div className={`mt-2 text-2xl font-black text-emerald-600 dark:text-emerald-300`}>
                     {formatCurrency(cashCollected)}
                   </div>
                 </div>
@@ -6371,17 +6340,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 >
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <div className="font-semibold liquid-glass-modal-text">#{delivery.order_number || delivery.id}</div>
-                      <div className="mt-1 text-sm text-slate-600 dark:text-slate-300/75">
+                      <div className="font-semibold liquid-glass-modal-text">{formatGridOrderNumber(delivery)}</div>
+                      <div className="mt-1 text-sm text-(--pos-s-muted)">
                         {delivery.customer_name || '—'}
                       </div>
                       {delivery.delivery_address && (
-                        <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{delivery.delivery_address}</div>
+                        <div className="mt-1 text-xs text-(--pos-s-muted)">{delivery.delivery_address}</div>
                       )}
                     </div>
                     <div className="text-right">
                       <div className="font-black liquid-glass-modal-text">{formatCurrency(Number(delivery.total_amount || 0))}</div>
-                      <div className="mt-1 text-xs uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">
+                      <div className="mt-1 text-sm text-(--pos-s-muted) font-semibold">
                         {(delivery.payment_method || 'card').toUpperCase()}
                       </div>
                     </div>
@@ -6389,7 +6358,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 </div>
               ))
             ) : (
-              <div className="rounded-2xl border border-dashed border-slate-200/90 bg-slate-50/70 px-4 py-5 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-white/3 dark:text-slate-400">
+              <div className="rounded-2xl border border-dashed border-(--pos-s-border) px-4 py-5 text-center text-sm text-(--pos-s-muted)">
                 {t('modals.staffShift.noOrdersYet')}
               </div>
             )}
@@ -6425,15 +6394,15 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.95fr)]">
           <div className="space-y-6">
             <div className={checkoutSurfaceClass}>
-              <div className="text-xs uppercase tracking-[0.22em] text-slate-600 dark:text-slate-300/90">
+              <div className="text-sm text-(--pos-s-muted) font-semibold">
                 {t('modals.staffShift.cashToHandToCashier', {
                   defaultValue: 'Cash To Hand To Cashier',
                 })}
               </div>
-              <div className="mt-3 text-4xl font-black tracking-tight text-slate-900 dark:text-white">
+              <div className="mt-3 text-4xl font-black tracking-tight text-(--pos-s-fg)">
                 {formatCurrency(Math.abs(cashToReturn))}
               </div>
-              <p className="mt-3 text-sm text-slate-600 dark:text-slate-300/75">
+              <p className="mt-3 text-sm text-(--pos-s-muted)">
                 {calculationVersion >= 2
                   ? t('modals.staffShift.cashReturnHelper', {
                     defaultValue: 'Hand this cash to the cashier. Tips are recorded separately.',
@@ -6444,7 +6413,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               </p>
 
               <div className={`mt-5 ${checkoutInsetSurfaceClass}`}>
-                <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+                <label className="block text-sm font-semibold text-(--pos-s-muted)">
                   {t('modals.staffShift.cashActuallyHandedOver', {
                     defaultValue: 'Cash Actually Handed Over',
                   })}
@@ -6472,10 +6441,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             </div>
 
             <div className={checkoutSurfaceClass}>
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-                {t('modals.staffShift.cashReconciliation', 'Cash Reconciliation')}
-              </div>
-              <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+              <h3 className="text-xl font-semibold text-(--pos-s-fg)">
                 {t('receipt.formula.label')}
               </h3>
               <div className="mt-5 space-y-2">
@@ -6489,7 +6455,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 ].map((row) => (
                   <div
                     key={row.label}
-                    className="flex items-center justify-between rounded-2xl border border-slate-200/80 bg-slate-50/85 px-4 py-3 dark:border-white/10 dark:bg-black/20"
+                    className="flex items-center justify-between border-t border-(--pos-s-border) px-1 py-3 first:border-t-0"
                   >
                     <span className="text-sm font-medium text-slate-600 dark:text-slate-300">{row.label}</span>
                     <span className={`text-lg font-black ${row.tone}`}>
@@ -6516,35 +6482,35 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             {renderTipsSummaryCard()}
 
             <div className={checkoutSurfaceClass}>
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+              <div className="text-sm text-(--pos-s-muted) font-semibold">
                 {t('modals.staffShift.informationOnlyTitle', 'Information Only')}
               </div>
-              <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+              <h3 className="mt-2 text-xl font-semibold text-(--pos-s-fg)">
                 {t('modals.staffShift.orderSummary', 'Order Summary')}
               </h3>
               <div className="mt-5 grid gap-4 sm:grid-cols-2">
                 <div className={checkoutInsetSurfaceClass}>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.tablesServed', 'Tables Served')}
                   </div>
                   <div className="mt-2 text-2xl font-black liquid-glass-modal-text">{waiterTables.length}</div>
                 </div>
                 <div className={checkoutInsetSurfaceClass}>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.ordersCount', 'Orders')}
                   </div>
                   <div className="mt-2 text-2xl font-black liquid-glass-modal-text">{totalOrders}</div>
                 </div>
                 <div className={checkoutInsetSurfaceClass}>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.cashOrders', 'Cash Orders')}
                   </div>
-                  <div className="mt-2 text-2xl font-black text-emerald-600 dark:text-emerald-300">
+                  <div className={`mt-2 text-2xl font-black text-emerald-600 dark:text-emerald-300`}>
                     {formatCurrency(cashFromTables)}
                   </div>
                 </div>
                 <div className={checkoutInsetSurfaceClass}>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.cardOrders', 'Card Orders')}
                   </div>
                   <div className="mt-2 text-2xl font-black text-slate-600 dark:text-slate-300">
@@ -6569,13 +6535,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       <div className="font-semibold liquid-glass-modal-text">
                         {t('modals.staffShift.tableNumber', 'Table')} {table.table_number}
                       </div>
-                      <div className="mt-1 text-sm text-slate-600 dark:text-slate-300/75">
+                      <div className="mt-1 text-sm text-(--pos-s-muted)">
                         {t('modals.staffShift.ordersCountValue', { count: table.order_count || 0 })}
                       </div>
                     </div>
                     <div className="text-right">
                       <div className="font-black liquid-glass-modal-text">{formatCurrency(Number(table.total_amount || 0))}</div>
-                      <div className="mt-1 text-xs uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">
+                      <div className="mt-1 text-sm text-(--pos-s-muted) font-semibold">
                         {(table.payment_method || 'mixed').toUpperCase()}
                       </div>
                     </div>
@@ -6583,7 +6549,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 </div>
               ))
             ) : (
-              <div className="rounded-2xl border border-dashed border-slate-200/90 bg-slate-50/70 px-4 py-5 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-white/3 dark:text-slate-400">
+              <div className="rounded-2xl border border-dashed border-(--pos-s-border) px-4 py-5 text-center text-sm text-(--pos-s-muted)">
                 {t('modals.staffShift.noOrdersYet')}
               </div>
             )}
@@ -6605,15 +6571,15 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]">
           <div className="space-y-6">
             <div className={checkoutSurfaceClass}>
-              <div className="text-xs uppercase tracking-[0.22em] text-emerald-600 dark:text-emerald-300">
+              <div className="text-sm text-emerald-600 dark:text-emerald-300 font-semibold">
                 {t('modals.staffShift.shiftSummary', 'Shift Summary')}
               </div>
-              <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+              <h3 className="mt-2 text-xl font-semibold text-(--pos-s-fg)">
                 {t('modals.staffShift.nonFinancialRoleTitle', {
                   defaultValue: 'Operational shift only',
                 })}
               </h3>
-              <p className="mt-3 text-sm text-slate-600 dark:text-slate-300/75">
+              <p className="mt-3 text-sm text-(--pos-s-muted)">
                 {t('modals.staffShift.nonFinancialRoleNote', {
                   defaultValue: 'This role does not handle drawer cash, sales reconciliation, refunds, or expenses at checkout.',
                 })}
@@ -6621,7 +6587,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
               <div className={`mt-5 grid gap-3 sm:grid-cols-2 ${checkoutInsetSurfaceClass}`}>
                 <div>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.staffMember', 'Staff')}
                   </div>
                   <div className="mt-2 text-lg font-black liquid-glass-modal-text">
@@ -6629,7 +6595,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   </div>
                 </div>
                 <div>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.roleStepLabel', 'Role')}
                   </div>
                   <div className="mt-2 text-lg font-black liquid-glass-modal-text">
@@ -6637,7 +6603,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   </div>
                 </div>
                 <div>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.checkIn')}
                   </div>
                   <div className="mt-2 text-lg font-black liquid-glass-modal-text">
@@ -6645,7 +6611,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   </div>
                 </div>
                 <div>
-                  <div className="text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {t('modals.staffShift.checkOut')}
                   </div>
                   <div className="mt-2 text-sm font-semibold text-emerald-600 dark:text-emerald-300">
@@ -6660,13 +6626,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
           <div className="space-y-6">
             <div className={checkoutSurfaceClass}>
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+              <div className="text-sm text-(--pos-s-muted) font-semibold">
                 {t('modals.staffShift.reviewAndConfirm')}
               </div>
-              <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+              <h3 className="mt-2 text-xl font-semibold text-(--pos-s-fg)">
                 {t('modals.staffShift.readyToClose', { defaultValue: 'Ready To Close' })}
               </h3>
-              <p className="mt-3 text-sm text-slate-600 dark:text-slate-300/75">
+              <p className="mt-3 text-sm text-(--pos-s-muted)">
                 {t('modals.staffShift.nonFinancialCheckoutHelper', {
                   defaultValue: 'Closing this shift only records the staff member, role, and checkout time.',
                 })}
@@ -6702,16 +6668,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     role: StaffRole,
     options: { emphasized?: boolean; highlighted?: boolean } = {},
   ) => {
-    const presentation = getRolePresentation(role.role_name);
-    const emphasized = options.emphasized || options.highlighted;
-
+    // Plain words, no wrapper (founder 01/11); the star marks the primary (or chosen) role.
     return (
-      <span
-        key={role.role_id}
-        className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold ${
-          emphasized ? presentation.badgeFilled : presentation.badgeOutline
-        }`}
-      >
+      <span key={role.role_id} className="inline-flex items-center gap-1 text-sm font-semibold text-(--pos-s-fg)">
         {(options.highlighted || role.is_primary) && <Star className="h-3.5 w-3.5" />}
         <span>{translateRoleName(role.role_name)}</span>
       </span>
@@ -6727,101 +6686,65 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         setError('');
         navigateCheckInStep(targetStep);
       }}
-      className="inline-flex items-center gap-2 rounded-xl border border-slate-200/90 bg-white/90 px-4 py-2 text-sm font-semibold text-slate-700 transition-all dark:border-white/10 dark:bg-white/4 dark:text-slate-100"
+      className="pos-solid-btn pos-solid-btn--md"
       {...getInteractiveMotion('button')}
     >
-      <ChevronRight className="h-4 w-4 rotate-180" />
+      <ChevronLeft className="h-5 w-5" />
       {t('common.actions.back')}
     </motion.button>
   );
 
+  // The chosen person as one compact line: name, then their roles (or the role chosen for this shift).
+  // The step's own title and help appear once, in the step, never repeated here.
   const renderSelectedStaffSummary = ({
-    helper,
     statusLabel,
-    statusClass,
     highlightedRoleName,
   }: {
-    helper: string;
     statusLabel?: string;
-    statusClass?: string;
     highlightedRoleName?: string;
-  }) => {
+  } = {}) => {
     if (!selectedStaff) {
       return null;
     }
 
-    const summaryRoleName = highlightedRoleName || selectedPrimaryRole?.role_name || selectedStaff.role_name;
-    const summaryPresentation = getRolePresentation(summaryRoleName);
+    const roleNames = highlightedRoleName
+      ? [highlightedRoleName]
+      : selectedStaffRoles.length > 0
+        ? selectedStaffRoles.map((role) => role.role_name)
+        : [selectedPrimaryRole?.role_name || selectedStaff.role_name];
 
     return (
-      <motion.div className={checkInSurfaceClass}>
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <div className={checkInEyebrowClass}>{t('modals.staffShift.selectedStaffLabel')}</div>
-            <h3 className="mt-1 truncate text-xl font-black tracking-tight liquid-glass-modal-text">
-              {selectedStaff.name}
-            </h3>
-            <p className="mt-1 text-xs leading-snug text-slate-600 dark:text-slate-300/80">{helper}</p>
-          </div>
-
-          {statusLabel && statusClass && (
-            <span className={`inline-flex shrink-0 items-center rounded-full border px-3 py-1 text-xs font-semibold ${statusClass}`}>
-              {statusLabel}
-            </span>
-          )}
-        </div>
-
-        <div className="mt-3 flex items-center gap-3">
-          <User className={`h-8 w-8 shrink-0 ${summaryPresentation.iconColor}`} strokeWidth={1.8} />
-
-          <div className="min-w-0">
-            <div className={checkInEyebrowClass}>{t('modals.staffShift.currentRoleLabel')}</div>
-            <div className={`mt-1 text-base font-black ${summaryPresentation.accentText}`}>
-              {translateRoleName(summaryRoleName)}
-            </div>
+      <div className="pos-card flex items-center gap-3 px-4 py-3" data-testid="checkin-selected-staff">
+        <User className="h-7 w-7 shrink-0 text-(--pos-s-muted)" strokeWidth={1.8} />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-lg font-semibold text-(--pos-s-fg)">{selectedStaff.name}</div>
+          <div className={`truncate ${checkInMutedTextClass}`}>
+            <span className="sr-only">{t('modals.staffShift.currentRoleLabel')}: </span>
+            {roleNames.map((roleName) => translateRoleName(roleName)).join(' · ')}
           </div>
         </div>
-
-        <div className="mt-3">
-          <div className={checkInEyebrowClass}>{t('modals.staffShift.availableRolesLabel')}</div>
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {selectedStaffRoles.map((role) =>
-              renderRoleBadge(role, {
-                emphasized: !highlightedRoleName && role.is_primary,
-                highlighted: role.role_name === highlightedRoleName,
-              }),
-            )}
-          </div>
-        </div>
-      </motion.div>
+        {statusLabel && <span className="shrink-0 text-sm font-semibold text-(--pos-s-fg)">{statusLabel}</span>}
+      </div>
     );
   };
 
   const renderCheckInContent = () => {
-    const cashEntryRole = roleType === 'cashier' || roleType === 'driver' || roleType === 'server';
-    const selectedRolePresentation = getRolePresentation(roleType);
-
     if (checkInStep === 'select-staff') {
       return (
-        <div className="space-y-6" data-testid="staff-select-section">
-          <div>
-            <div className={checkInEyebrowClass}>{t('modals.staffShift.checkInTitle')}</div>
-            <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
-              {t('modals.staffShift.selectStaff')}
-            </h3>
-            <p className={`mt-2 max-w-3xl ${checkInMutedTextClass}`}>
-              {t('modals.staffShift.selectStaffStepHelper')}
-            </p>
+        <div className="space-y-4" data-testid="staff-select-section">
+          <div className="pos-pane-head">
+            <h3 className="pos-pane-title">{t('modals.staffShift.selectStaff')}</h3>
+            <p className="pos-pane-intro">{t('modals.staffShift.selectStaffStepHelper')}</p>
           </div>
 
           {hasActiveErganiPlugin && (
-            <div className="rounded-[24px] border border-slate-200/90 bg-white/90 p-4 dark:border-white/10 dark:bg-white/4 dark:shadow-none">
-              <label className={`block ${checkInEyebrowClass}`}>
+            <div className="pos-card p-4">
+              <label className="block text-sm font-semibold text-(--pos-s-fg)">
                 {t('modals.staffShift.staffQrBadge', 'Staff QR badge')}
               </label>
               <div className="mt-3 flex flex-col gap-3 sm:flex-row">
                 <div className="relative flex-1">
-                  <QrCode className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+                  <QrCode className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-(--pos-s-muted)" />
                   <input
                     value={staffQrCode}
                     onChange={(event) => setStaffQrCode(event.target.value)}
@@ -6832,14 +6755,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       }
                     }}
                     placeholder={t('modals.staffShift.staffQrPlaceholder', 'Scan or paste staff QR badge')}
-                    className="min-h-[48px] w-full rounded-2xl border border-slate-200/90 bg-white/95 py-3 pl-12 pr-4 text-sm font-semibold text-slate-900 outline-hidden transition-colors focus:border-slate-300 dark:border-white/10 dark:bg-black/20 dark:text-white dark:focus:border-slate-400/40"
+                    className="min-h-[48px] w-full rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) py-3 pl-12 pr-4 text-base font-semibold text-(--pos-s-fg) outline-hidden transition-colors focus:border-(--pos-s-yellow)"
                   />
                 </div>
                 <motion.button
                   type="button"
                   onClick={() => void handleStaffQrResolve()}
                   disabled={resolvingStaffQr || staffQrCode.trim().length === 0}
-                  className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-2xl bg-yellow-400 px-5 py-3 text-sm font-bold text-black transition-colors disabled:cursor-not-allowed disabled:border disabled:border-slate-300 disabled:bg-slate-100 disabled:text-slate-600 disabled:shadow-none dark:disabled:border-white/10 dark:disabled:bg-white/10 dark:disabled:text-slate-300"
+                  className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary"
                   {...getInteractiveMotion('primary', resolvingStaffQr || staffQrCode.trim().length === 0)}
                 >
                   {resolvingStaffQr ? (
@@ -6858,148 +6781,116 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           {!loading && renderPhoneShiftSections()}
 
           {loading ? (
-            <div className={`${checkInSurfaceClass} py-14 text-center`}>
-              <div className="inline-block h-12 w-12 animate-spin rounded-full border-4 border-slate-300 border-t-slate-600 dark:border-slate-600 dark:border-t-slate-300" />
+            <div className={`${checkInSurfaceClass} py-12 text-center`}>
+              <div className="inline-block h-10 w-10 animate-spin rounded-full border-4 border-(--pos-s-border) border-t-(--pos-s-fg)" />
               <p className={`mt-4 ${checkInMutedTextClass}`}>{t('modals.staffShift.loadingStaff')}</p>
             </div>
           ) : availableStaff.length === 0 ? (
-            <div className={`${checkInSurfaceClass} py-14 text-center`}>
-              <User className="mx-auto mb-4 h-16 w-16 text-slate-400 dark:text-slate-500" />
-              <p className="text-base font-semibold liquid-glass-modal-text">
+            <div className={`${checkInSurfaceClass} py-12 text-center`}>
+              <User className="mx-auto mb-3 h-12 w-12 text-(--pos-s-muted)" strokeWidth={1.6} />
+              <p className="text-base font-semibold text-(--pos-s-fg)">
                 {t('modals.staffShift.noStaffAvailable')}
               </p>
             </div>
           ) : (
-            <div className="grid gap-6 xl:grid-cols-2">
-              <section className={checkInSurfaceClass}>
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className={checkInEyebrowClass}>{t('modals.staffShift.checkedInNow')}</div>
-                    <h4 className="mt-2 text-xl font-black tracking-tight liquid-glass-modal-text">
-                      {t('modals.staffShift.activeShift')}
-                    </h4>
-                    <p className={`mt-2 ${checkInMutedTextClass}`}>
-                      {t('modals.staffShift.checkedInNowHelper')}
-                    </p>
-                  </div>
-                  <span className="inline-flex items-center rounded-full border border-(--pos-s-border) bg-transparent px-3 py-1 text-xs font-semibold text-emerald-600 dark:border-zinc-700 dark:bg-transparent dark:text-emerald-200">
-                    {activeCheckInStaff.length}
-                  </span>
+            <div className="space-y-4">
+              {/* On shift now: one row each; the row itself opens the shift. */}
+              {/* Founder 01/11/2026 («η σκια της θα ηθελα να ειναι πρασινη»): staff on shift lift the card on a green shadow. */}
+              <section className={`pos-group ${activeCheckInStaff.length > 0 ? 'pos-group--ok' : ''}`} data-testid="checkin-active-shifts">
+                <div className="pos-group__head flex items-center justify-between gap-3 pb-3">
+                  <h4 className="pos-group__title">{t('modals.staffShift.checkedInNow')}</h4>
+                  <span className={`text-base font-semibold ${activeCheckInStaff.length > 0 ? 'text-(--pos-s-ok)' : 'text-(--pos-s-muted)'}`}>{activeCheckInStaff.length}</span>
                 </div>
+                {activeCheckInStaff.length > 0 ? (
+                  activeCheckInStaff.map((staffMember) => {
+                    // The Rust getActive lookup is staff-wide, so a satellite
+                    // shift usually ALSO appears in staffActiveShifts as a
+                    // plain local row without remote metadata. Prefer the
+                    // directory-enriched satellite entry (one-open-shift-per-
+                    // staff guarantees they describe the same shift) so the
+                    // terminal chip and live totals always render.
+                    const activeShiftForMember =
+                      satelliteShiftsByStaffId.get(staffMember.id) ||
+                      staffActiveShifts.get(staffMember.id);
+                    const activeRoleName = activeShiftForMember?.role_type || staffMember.role_name;
+                    const satelliteTerminalName: string | null =
+                      activeShiftForMember?.remote === true
+                        ? String(activeShiftForMember?.remote_terminal_name || '')
+                        : null;
 
-                <div className="mt-5 space-y-3">
-                  {activeCheckInStaff.length > 0 ? (
-                    activeCheckInStaff.map((staffMember) => {
-                      // The Rust getActive lookup is staff-wide, so a satellite
-                      // shift usually ALSO appears in staffActiveShifts as a
-                      // plain local row without remote metadata. Prefer the
-                      // directory-enriched satellite entry (one-open-shift-per-
-                      // staff guarantees they describe the same shift) so the
-                      // terminal chip and live totals always render.
-                      const activeShiftForMember =
-                        satelliteShiftsByStaffId.get(staffMember.id) ||
-                        staffActiveShifts.get(staffMember.id);
-                      const activeRoleName = activeShiftForMember?.role_type || staffMember.role_name;
-                      const activePresentation = getRolePresentation(activeRoleName);
-                      const satelliteTerminalName: string | null =
-                        activeShiftForMember?.remote === true
-                          ? String(activeShiftForMember?.remote_terminal_name || '')
-                          : null;
-
-                      return (
-                        <motion.button
-                          key={staffMember.id}
-                          onClick={() => {
-                            void handleStaffSelect(staffMember);
-                          }}
-                          className={`w-full rounded-[24px] border p-4 text-left ${activePresentation.accentBorder} ${activePresentation.accentSurface}`}
-                          {...getInteractiveMotion('card')}
-                        >
-                          <div className="flex flex-col gap-4">
-                            <div className="flex min-w-0 items-center gap-4">
-                              <User className={`h-8 w-8 shrink-0 ${activePresentation.iconColor}`} strokeWidth={1.8} />
-
-                              <div className="min-w-0 space-y-2">
-                                <div className="truncate text-lg font-black liquid-glass-modal-text">
-                                  {staffMember.name}
-                                </div>
-
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-white/20 bg-black/45 px-3 py-1 text-xs font-semibold text-white dark:border-white/20 dark:bg-black/45 dark:text-white">
-                                    <CheckCircle className="h-3.5 w-3.5 shrink-0" />
-                                    {translateRoleName(activeRoleName)}
-                                  </span>
-                                  <span className={`inline-flex items-center gap-1.5 text-sm ${checkInMutedTextClass}`}>
-                                    <Clock className="h-4 w-4 shrink-0" />
-                                    {t('modals.staffShift.activeSince', {
-                                      time: activeShiftForMember?.check_in_time
-                                        ? formatTime(activeShiftForMember.check_in_time)
-                                        : t('shift.labels.active', 'Active'),
-                                    })}
-                                  </span>
-                                  {satelliteTerminalName ? (
-                                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1 text-xs font-semibold text-sky-700 dark:text-sky-200">
-                                      {t('modals.staffShift.satelliteTerminalChip', {
-                                        defaultValue: 'on {{terminal}}',
-                                        terminal: satelliteTerminalName,
-                                      })}
-                                      {' · '}
-                                      {t('modals.staffShift.satelliteTotalsChip', {
-                                        defaultValue: '{{orders}} orders · {{sales}}',
-                                        orders: activeShiftForMember?.total_orders_count ?? 0,
-                                        sales: formatCurrency(
-                                          Number(activeShiftForMember?.total_sales_amount ?? 0),
-                                        ),
-                                      })}
-                                    </span>
-                                  ) : null}
-                                </div>
-                              </div>
-                            </div>
-
-                            <span
-                              className={`inline-flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-semibold leading-tight ${activePresentation.buttonSurface}`}
-                            >
-                              <span className="text-center">{t('modals.staffShift.manageActiveShift')}</span>
-                              <ChevronRight className="h-4 w-4 shrink-0" />
+                    return (
+                      <motion.button
+                        key={staffMember.id}
+                        onClick={() => {
+                          void handleStaffSelect(staffMember);
+                        }}
+                        className="pos-row relative w-full text-left active:bg-(--pos-s-surface-2)"
+                        {...getInteractiveMotion('card')}
+                      >
+                        {/* Founder 01/11: staff already checked in show in green (the kit ok colour). */}
+                        <span aria-hidden="true" className="absolute inset-y-2 left-0 w-1 rounded-r-full bg-(--pos-s-ok)" />
+                        <span className="flex min-w-0 items-center gap-3">
+                          <User className="h-7 w-7 shrink-0 text-(--pos-s-ok)" strokeWidth={1.8} />
+                          <span className="pos-row__label">
+                            <span className="pos-row__title truncate">{staffMember.name}</span>
+                            <WorkCardLine status={workCard} staffId={staffMember.id} />
+                            <span className="pos-row__help flex flex-wrap items-center gap-x-2 gap-y-1">
+                              <span className="inline-flex items-center gap-1 font-semibold text-(--pos-s-ok)">
+                                <CheckCircle className="h-4 w-4 shrink-0" />
+                                {translateRoleName(activeRoleName)}
+                              </span>
+                              <span className="inline-flex items-center gap-1">
+                                <Clock className="h-4 w-4 shrink-0" />
+                                {t('modals.staffShift.activeSince', {
+                                  time: activeShiftForMember?.check_in_time
+                                    ? formatTime(activeShiftForMember.check_in_time)
+                                    : t('shift.labels.active', 'Active'),
+                                })}
+                              </span>
+                              {satelliteTerminalName ? (
+                                <span className="text-(--pos-s-muted)">
+                                  {t('modals.staffShift.satelliteTerminalChip', {
+                                    defaultValue: 'on {{terminal}}',
+                                    terminal: satelliteTerminalName,
+                                  })}
+                                  {' · '}
+                                  {t('modals.staffShift.satelliteTotalsChip', {
+                                    defaultValue: '{{orders}} orders · {{sales}}',
+                                    orders: activeShiftForMember?.total_orders_count ?? 0,
+                                    sales: formatCurrency(
+                                      Number(activeShiftForMember?.total_sales_amount ?? 0),
+                                    ),
+                                  })}
+                                </span>
+                              ) : null}
                             </span>
-                          </div>
-                        </motion.button>
-                      );
-                    })
-                  ) : (
-                    <div className="rounded-[24px] border border-dashed border-slate-200/90 bg-slate-50/80 px-4 py-6 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-white/3 dark:text-slate-400">
-                      {t('modals.staffShift.noCheckedInStaff')}
-                    </div>
-                  )}
-                </div>
+                          </span>
+                        </span>
+                        <span className="pos-row__control text-sm font-semibold text-(--pos-s-fg)">
+                          {t('modals.staffShift.manageActiveShift')}
+                          <ChevronRight className="h-5 w-5 shrink-0" />
+                        </span>
+                      </motion.button>
+                    );
+                  })
+                ) : (
+                  <p className="pos-row text-sm text-(--pos-s-muted)">{t('modals.staffShift.noCheckedInStaff')}</p>
+                )}
               </section>
 
-              <section className={checkInSurfaceClass}>
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className={checkInEyebrowClass}>{t('modals.staffShift.readyToStart')}</div>
-                    <h4 className="mt-2 text-xl font-black tracking-tight liquid-glass-modal-text">
-                      {t('modals.staffShift.selectStaff')}
-                    </h4>
-                    <p className={`mt-2 ${checkInMutedTextClass}`}>
-                      {t('modals.staffShift.readyToStartHelper')}
-                    </p>
-                  </div>
-                  <span className="inline-flex items-center rounded-full border border-slate-200/90 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/4 dark:text-slate-200">
-                    {readyCheckInStaff.length}
-                  </span>
+              {/* Ready to start: a card each, two across; the card itself goes on to the PIN. */}
+              <section className="pos-group" data-testid="checkin-ready-staff">
+                <div className="pos-group__head flex items-center justify-between gap-3 pb-3">
+                  <h4 className="pos-group__title">{t('modals.staffShift.readyToStart')}</h4>
+                  <span className="text-base font-semibold text-(--pos-s-muted)">{readyCheckInStaff.length}</span>
                 </div>
-
-                <div className="mt-5 space-y-3">
-                  {readyCheckInStaff.length > 0 ? (
-                    readyCheckInStaff.map((staffMember) => {
+                {readyCheckInStaff.length > 0 ? (
+                  <div className="grid gap-3 px-4 pb-4 sm:grid-cols-2">
+                    {readyCheckInStaff.map((staffMember) => {
                       const roles = getStaffRoles(staffMember);
-                      const primaryRole = roles[0];
-                      const primaryPresentation = getRolePresentation(primaryRole?.role_name);
                       const busyInfo = busyElsewhereByStaffId.get(staffMember.id);
 
-                      // Busy-elsewhere card: disabled, muted, shows terminal + role subtitle.
+                      // Busy-elsewhere card: shown, not selectable, with where and as what.
                       if (busyInfo) {
                         const busyTerminal =
                           busyInfo.terminalName ||
@@ -7011,30 +6902,25 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             key={staffMember.id}
                             role="presentation"
                             aria-disabled="true"
-                            className="w-full cursor-not-allowed rounded-[24px] border border-slate-300/80 bg-slate-100/85 p-4 text-left dark:border-white/10 dark:bg-white/4"
+                            className="pos-choice-card pos-choice-card--row cursor-not-allowed bg-(--pos-s-surface-2)"
                           >
-                            <div className="flex flex-col gap-4">
-                              <div className="flex min-w-0 items-center gap-4">
-                                <User className="h-8 w-8 shrink-0 text-slate-500 dark:text-slate-400" strokeWidth={1.8} />
-
-                                <div className="min-w-0 space-y-1.5">
-                                  <div className="truncate text-lg font-black text-slate-600 dark:text-slate-300">
-                                    {staffMember.name}
-                                  </div>
-                                  <div className="text-sm text-slate-600 dark:text-slate-300">
-                                    {t('modals.staffShift.busyElsewhere', {
-                                      defaultValue: 'Checked in at {{terminal}} as {{role}}',
-                                      terminal: busyTerminal,
-                                      role: busyRole,
-                                    })}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <span className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-slate-200/70 px-4 py-2 text-xs font-semibold text-slate-600 dark:border-white/10 dark:bg-white/6 dark:text-slate-300">
-                                {t('modals.staffShift.unavailable', 'Unavailable')}
+                            <User className="h-7 w-7 shrink-0 text-(--pos-s-muted)" strokeWidth={1.8} />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-base font-semibold text-(--pos-s-muted)">
+                                {staffMember.name}
                               </span>
-                            </div>
+                              <WorkCardLine status={workCard} staffId={staffMember.id} />
+                              <span className="block text-sm text-(--pos-s-muted)">
+                                {t('modals.staffShift.busyElsewhere', {
+                                  defaultValue: 'Checked in at {{terminal}} as {{role}}',
+                                  terminal: busyTerminal,
+                                  role: busyRole,
+                                })}
+                              </span>
+                            </span>
+                            <span className="shrink-0 text-sm font-semibold text-(--pos-s-muted)">
+                              {t('modals.staffShift.unavailable', 'Unavailable')}
+                            </span>
                           </div>
                         );
                       }
@@ -7045,44 +6931,32 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           onClick={() => {
                             void handleStaffSelect(staffMember);
                           }}
-                          className="w-full rounded-[24px] border border-slate-200/90 bg-white/95 p-4 text-left dark:border-white/10 dark:bg-white/3"
+                          aria-label={`${staffMember.name} · ${t('modals.staffShift.enterPinAction')}`}
+                          className="pos-choice-card pos-choice-card--row active:bg-(--pos-s-surface-2)"
                           {...getInteractiveMotion('card')}
                         >
-                          <div className="flex flex-col gap-4">
-                            <div className="flex min-w-0 items-center gap-4">
-                              <User className={`h-8 w-8 shrink-0 ${primaryPresentation.iconColor}`} strokeWidth={1.8} />
-
-                              <div className="min-w-0 space-y-2">
-                                <div className="truncate text-lg font-black liquid-glass-modal-text">
-                                  {staffMember.name}
-                                </div>
-
-                                <div className="flex flex-wrap gap-2">
-                                  {roles.map((role) =>
-                                    renderRoleBadge(role, {
-                                      emphasized: role.is_primary,
-                                    }),
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-
-                            <span
-                              className={`inline-flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-semibold leading-tight ${primaryPresentation.buttonSurface}`}
-                            >
-                              <span className="text-center">{t('modals.staffShift.enterPinAction')}</span>
-                              <ChevronRight className="h-4 w-4 shrink-0" />
+                          <User className="h-7 w-7 shrink-0 text-(--pos-s-muted)" strokeWidth={1.8} />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-base font-semibold text-(--pos-s-fg)">
+                              {staffMember.name}
                             </span>
-                          </div>
+                            <WorkCardLine status={workCard} staffId={staffMember.id} />
+                            <span className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                              {roles.map((role) =>
+                                renderRoleBadge(role, {
+                                  emphasized: role.is_primary,
+                                }),
+                              )}
+                            </span>
+                          </span>
+                          <ChevronRight className="h-5 w-5 shrink-0 text-(--pos-s-fg)" />
                         </motion.button>
                       );
-                    })
-                  ) : (
-                    <div className="rounded-[24px] border border-dashed border-slate-200/90 bg-slate-50/80 px-4 py-6 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-white/3 dark:text-slate-400">
-                      {t('modals.staffShift.noReadyStaff')}
-                    </div>
-                  )}
-                </div>
+                    })}
+                  </div>
+                ) : (
+                  <p className="pos-row text-sm text-(--pos-s-muted)">{t('modals.staffShift.noReadyStaff')}</p>
+                )}
               </section>
             </div>
           )}
@@ -7100,22 +6974,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               onReload={() => loadGiftPending(selectedStaff.id)}
             />
           )}
-          <div className="grid gap-4 xl:grid-cols-[minmax(280px,0.9fr)_minmax(0,1.1fr)]">
-            {renderSelectedStaffSummary({
-              helper: t('modals.staffShift.enterPinHelper'),
-            })}
+          <div className={checkInStepColumnClass}>
+            {renderSelectedStaffSummary()}
 
             <div className={checkInSurfaceClass}>
-              {/* Round 313 (2nd follow-up): a single PIN heading (the duplicate eyebrow + inset label that
-                  repeated "Enter PIN" are gone) so the input + full keypad + footer fit the first viewport. */}
-              <h3 className="text-xl font-black tracking-tight liquid-glass-modal-text">
-                {t('modals.staffShift.enterPIN')}
-              </h3>
-              <p className="mt-1 text-xs leading-snug text-slate-600 dark:text-slate-300/80">{t('modals.staffShift.enterPinHelper')}</p>
+              {/* One PIN heading and its help, once. */}
+              <h3 className="pos-pane-title">{t('modals.staffShift.enterPIN')}</h3>
+              <p className={`mt-0.5 ${checkInMutedTextClass}`}>{t('modals.staffShift.enterPinHelper')}</p>
 
-              <div className={`mt-3 ${checkInInsetSurfaceClass}`}>
+              <div className="mt-3">
                 <div
-                  className="relative overflow-hidden rounded-[22px] border border-slate-200/90 bg-white/92 p-2.5 transition-all focus-within:border-yellow-400 dark:border-white/10 dark:bg-black/20 dark:shadow-none"
+                  className="relative overflow-hidden rounded-2xl border border-(--pos-s-control) bg-(--pos-s-surface-2) p-2 transition-colors focus-within:border-(--pos-s-yellow)"
                   onClick={() => pinInputRef.current?.focus()}
                 >
                   <input
@@ -7127,18 +6996,18 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     value={enteredPin}
                     onChange={(e) => setEnteredPin(e.target.value.replace(/\D/g, ''))}
                     onKeyDown={(e) => e.key === 'Enter' && enteredPin.length === 4 && handlePinSubmit()}
-                    className="w-full bg-transparent py-2.5 text-center text-3xl font-black tracking-[0.7em] text-slate-900 outline-hidden dark:text-white"
+                    aria-label={t('modals.staffShift.enterPIN')}
+                    className="w-full bg-transparent py-2.5 text-center text-3xl font-black tracking-[0.7em] text-(--pos-s-fg) outline-hidden"
                     autoFocus
                     autoComplete="off"
                     style={{ paddingLeft: '0.7em' }}
                   />
 
                   {enteredPin.length === 0 && (
-                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-3 opacity-35">
-                      <div className="h-2.5 w-2.5 rounded-full bg-slate-500 dark:bg-slate-300" />
-                      <div className="h-2.5 w-2.5 rounded-full bg-slate-500 dark:bg-slate-300" />
-                      <div className="h-2.5 w-2.5 rounded-full bg-slate-500 dark:bg-slate-300" />
-                      <div className="h-2.5 w-2.5 rounded-full bg-slate-500 dark:bg-slate-300" />
+                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-3">
+                      {[0, 1, 2, 3].map((slot) => (
+                        <div key={slot} className="h-3 w-3 rounded-full border-2 border-(--pos-s-control)" />
+                      ))}
                     </div>
                   )}
                 </div>
@@ -7153,7 +7022,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       type="button"
                       onClick={() => setEnteredPin((prev) => (prev.length >= 4 ? prev : prev + digit))}
                       aria-label={digit}
-                      className="flex min-h-touch items-center justify-center rounded-xl border border-slate-200/80 bg-white/85 text-xl font-black text-slate-900 transition active:scale-[0.97] active:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-white dark:active:bg-white/10"
+                      className={checkInKeyClass}
                     >
                       {digit}
                     </button>
@@ -7162,15 +7031,15 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     type="button"
                     onClick={() => setEnteredPin('')}
                     aria-label={t('login.clear', 'Clear')}
-                    className="flex min-h-touch items-center justify-center rounded-xl border border-slate-200/80 bg-white/60 text-sm font-bold text-slate-500 transition active:scale-[0.97] active:bg-slate-100 dark:border-white/10 dark:bg-white/3 dark:text-slate-300 dark:active:bg-white/10"
+                    className={`${checkInKeyClass} text-(--pos-s-muted)`}
                   >
-                    {t('login.clear', 'Clear')}
+                    <X className="h-5 w-5" />
                   </button>
                   <button
                     type="button"
                     onClick={() => setEnteredPin((prev) => (prev.length >= 4 ? prev : prev + '0'))}
                     aria-label="0"
-                    className="flex min-h-touch items-center justify-center rounded-xl border border-slate-200/80 bg-white/85 text-xl font-black text-slate-900 transition active:scale-[0.97] active:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-white dark:active:bg-white/10"
+                    className={checkInKeyClass}
                   >
                     0
                   </button>
@@ -7178,7 +7047,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     type="button"
                     onClick={() => setEnteredPin((prev) => prev.slice(0, -1))}
                     aria-label={t('login.backspace', 'Backspace')}
-                    className="flex min-h-touch items-center justify-center rounded-xl border border-slate-200/80 bg-white/60 text-slate-500 transition active:scale-[0.97] active:bg-slate-100 dark:border-white/10 dark:bg-white/3 dark:text-slate-300 dark:active:bg-white/10"
+                    className={`${checkInKeyClass} text-(--pos-s-muted)`}
                   >
                     <Delete className="h-5 w-5" />
                   </button>
@@ -7186,107 +7055,81 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               </div>
             </div>
           </div>
-
         </div>
       );
     }
 
     if (checkInStep === 'select-role' && selectedStaff) {
       return (
-        <div className="space-y-6" data-testid="staff-role-section">
-          <div className="grid gap-6 xl:grid-cols-[minmax(280px,0.9fr)_minmax(0,1.1fr)]">
-            {renderSelectedStaffSummary({
-              helper: t('modals.staffShift.roleSelectionHelper'),
-              statusLabel: t('modals.staffShift.selectRole'),
-              statusClass:
-                'border-slate-200/90 bg-slate-50 text-slate-700 dark:border-slate-400/30 dark:bg-slate-500/10 dark:text-slate-200',
-            })}
+        <div className={checkInStepColumnClass} data-testid="staff-role-section">
+          {renderSelectedStaffSummary()}
 
-            <div className={checkInSurfaceClass}>
-              <div className={checkInEyebrowClass}>{t('modals.staffShift.roleStepLabel', 'Role')}</div>
-              <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
-                {t('modals.staffShift.selectRoleForShift')}
-              </h3>
-              <p className={`mt-2 ${checkInMutedTextClass}`}>{t('modals.staffShift.roleSelectionHelper')}</p>
+          <div className={checkInSurfaceClass}>
+            <h3 className="pos-pane-title">{t('modals.staffShift.selectRoleForShift')}</h3>
+            <p className={`mt-0.5 ${checkInMutedTextClass}`}>{t('modals.staffShift.roleSelectionHelper')}</p>
 
-              {cashierFirstGateActive && (
-                <div className="mt-6 rounded-[22px] border border-(--pos-s-warn) bg-(--pos-s-warn-bg) p-4 text-sm text-yellow-900 dark:text-yellow-100">
-                  <div className="flex items-start gap-3">
-                    <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-yellow-700 dark:text-yellow-300" />
-                    <div className="space-y-1">
-                      <p className="font-semibold">
-                        {t('modals.staffShift.cashierFirstCheckInRequired')}
-                      </p>
-                      <p className="text-yellow-800 dark:text-yellow-100">
-                        {selectedStaffHasCashierRole
-                          ? t('modals.staffShift.cashierFirstCheckInHelper')
-                          : t('modals.staffShift.cashierFirstCheckInBlocked')}
-                      </p>
-                    </div>
-                  </div>
+            {cashierFirstGateActive && (
+              <div className="pos-notice pos-notice--warn mt-4 text-sm">
+                <AlertTriangle className="pos-notice__icon h-5 w-5" />
+                <div className="space-y-1">
+                  <p className="font-semibold">
+                    {t('modals.staffShift.cashierFirstCheckInRequired')}
+                  </p>
+                  <p>
+                    {selectedStaffHasCashierRole
+                      ? t('modals.staffShift.cashierFirstCheckInHelper')
+                      : t('modals.staffShift.cashierFirstCheckInBlocked')}
+                  </p>
                 </div>
-              )}
-
-              <div className="mt-6 space-y-3">
-                {selectedStaffRoles.map((role) => {
-                  const rolePresentation = getRolePresentation(role.role_name);
-                  const isRoleLockedByCashierFirstGate =
-                    cashierFirstGateActive &&
-                    (role.role_name || '').trim().toLowerCase() !== 'cashier';
-                  const roleHelper = isRoleLockedByCashierFirstGate
-                    ? t('modals.staffShift.cashierFirstRoleLockedHelper')
-                    : getCheckInRoleHelper(role.role_name);
-
-                  return (
-                    <motion.button
-                      key={role.role_id}
-                      disabled={isRoleLockedByCashierFirstGate}
-                      onClick={() => {
-                        void handleRoleSelect(role.role_name);
-                      }}
-                      className={`group w-full rounded-[24px] border p-4 text-left transition-all ${
-                        isRoleLockedByCashierFirstGate
-                          ? 'cursor-not-allowed border-slate-300/80 bg-slate-100 dark:border-white/10 dark:bg-white/4'
-                          : 'border-slate-200/90 bg-white/95 dark:border-white/10 dark:bg-white/3'
-                      }`}
-                      {...getInteractiveMotion('card')}
-                    >
-                      <div className="flex items-start gap-4">
-                          <User className={`h-8 w-8 shrink-0 ${rolePresentation.iconColor}`} strokeWidth={1.8} />
-
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-lg font-black liquid-glass-modal-text">
-                              {translateRoleName(role.role_name)}
-                            </span>
-                            <span
-                              className={`text-xs font-semibold ${
-                                role.is_primary ? rolePresentation.accentText : rolePresentation.iconColor
-                              }`}
-                            >
-                              {role.is_primary
-                                ? t('modals.staffShift.primaryRole')
-                                : t('modals.staffShift.secondaryRole')}
-                            </span>
-                            {isRoleLockedByCashierFirstGate && (
-                              <span className="text-xs font-semibold text-yellow-700 dark:text-yellow-200">
-                                {t('modals.staffShift.roleLockedUntilCashier')}
-                              </span>
-                            )}
-                          </div>
-
-                          <p className={`mt-2 ${checkInMutedTextClass}`}>{roleHelper}</p>
-                        </div>
-
-                        <ChevronRight className={`mt-1 h-5 w-5 shrink-0 ${rolePresentation.iconColor}`} />
-                      </div>
-                    </motion.button>
-                  );
-                })}
               </div>
+            )}
+
+            <div className="mt-4 space-y-3">
+              {selectedStaffRoles.map((role) => {
+                const isRoleLockedByCashierFirstGate =
+                  cashierFirstGateActive &&
+                  (role.role_name || '').trim().toLowerCase() !== 'cashier';
+                const roleHelper = isRoleLockedByCashierFirstGate
+                  ? t('modals.staffShift.cashierFirstRoleLockedHelper')
+                  : getCheckInRoleHelper(role.role_name);
+
+                return (
+                  <motion.button
+                    key={role.role_id}
+                    disabled={isRoleLockedByCashierFirstGate}
+                    onClick={() => {
+                      void handleRoleSelect(role.role_name);
+                    }}
+                    className="pos-choice-card pos-choice-card--row active:bg-(--pos-s-surface-2)"
+                    {...getInteractiveMotion('card')}
+                  >
+                    <User className="h-7 w-7 shrink-0 text-(--pos-s-muted)" strokeWidth={1.8} />
+
+                    <span className="min-w-0 flex-1">
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span className="text-base font-semibold text-(--pos-s-fg)">
+                          {translateRoleName(role.role_name)}
+                        </span>
+                        <span className="text-sm text-(--pos-s-muted)">
+                          {role.is_primary
+                            ? t('modals.staffShift.primaryRole')
+                            : t('modals.staffShift.secondaryRole')}
+                        </span>
+                        {isRoleLockedByCashierFirstGate && (
+                          <span className="text-sm font-semibold text-(--pos-s-warn)">
+                            {t('modals.staffShift.roleLockedUntilCashier')}
+                          </span>
+                        )}
+                      </span>
+                      <span className={`mt-1 block ${checkInMutedTextClass}`}>{roleHelper}</span>
+                    </span>
+
+                    <ChevronRight className="h-5 w-5 shrink-0 text-(--pos-s-fg)" />
+                  </motion.button>
+                );
+              })}
             </div>
           </div>
-
         </div>
       );
     }
@@ -7311,112 +7154,94 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         : undefined;
 
       return (
-        <div className="space-y-6" data-testid="staff-cash-section">
-          <div className="grid gap-6 xl:grid-cols-[minmax(280px,0.9fr)_minmax(0,1.1fr)]">
-            {renderSelectedStaffSummary({
-              helper: cashHelper,
-              statusLabel: translateRoleName(roleType),
-              statusClass: `${selectedRolePresentation.accentBorder} ${selectedRolePresentation.accentSurface} ${selectedRolePresentation.accentText}`,
-              highlightedRoleName: roleType,
-            })}
+        <div className={checkInStepColumnClass} data-testid="staff-cash-section">
+          {renderSelectedStaffSummary({ highlightedRoleName: roleType })}
 
-            <div className={checkInSurfaceClass}>
-              <div className={checkInEyebrowClass}>{t('modals.staffShift.checkInSummaryLabel')}</div>
-              <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
-                {cashTitle}
-              </h3>
-              <p className={`mt-2 ${checkInMutedTextClass}`}>{cashHelper}</p>
+          <div className={checkInSurfaceClass}>
+            <h3 className="pos-pane-title">{cashTitle}</h3>
+            <p className={`mt-0.5 ${checkInMutedTextClass}`}>{cashHelper}</p>
 
-              {(roleType === 'driver' || roleType === 'server') && !activeCashierExists && (
-                <div className="mt-5 rounded-[22px] border border-(--pos-s-warn) bg-(--pos-s-warn-bg) p-4">
-                  <div className="flex items-start gap-3">
-                    <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-yellow-700 dark:text-yellow-300" />
-                    <p className="text-sm font-medium text-yellow-900 dark:text-yellow-100">
-                      {t('modals.staffShift.noCashierWarning')}
+            {(roleType === 'driver' || roleType === 'server') && !activeCashierExists && (
+              <div className="pos-notice pos-notice--warn mt-4">
+                <AlertCircle className="pos-notice__icon h-5 w-5" />
+                <p className="text-sm font-medium">
+                  {t('modals.staffShift.noCashierWarning')}
+                </p>
+              </div>
+            )}
+
+            <div className={`mt-4 flex items-center gap-4 ${checkInInsetSurfaceClass}`}>
+              {roleType === 'cashier' && financialEntry.status !== 'ordinary' ? (
+                <span data-testid="financial-opening-currency" className="text-xl font-bold">{financialEntry.currency ?? '—'}</span>
+              ) : <CashHandIcon
+                className="h-10 w-10 shrink-0 text-(--pos-s-muted)"
+              />}
+
+              <CentsMoneyInput
+                aria-label={cashTitle}
+                value={cashValue}
+                onValueChange={(val) => {
+                  if (isStartingCashRole) {
+                    setDriverStartingAmount(val);
+                  } else {
+                    setOpeningCash(val);
+                  }
+                }}
+                placeholder="0,00"
+                className="liquid-glass-modal-input flex-1 text-3xl font-black text-center"
+                readOnly={!!originalOpening || financialBusy.current || (isStartingCashRole && !activeCashierExists)}
+                autoFocus
+              />
+            </div>
+
+            {originalOpening && (
+              <p role="status" className={`mt-4 ${checkInMutedTextClass}`}>
+                {t(financialEntry.original?.state === 'confirmed_unusable' ||
+                  (financialEntry.original?.state === 'confirmed_usable' && !financialEntry.original.usable)
+                  ? 'modals.staffShift.financialOpeningUnusable'
+                  : financialEntry.original?.hostedAuthorization.state === 'required'
+                    ? 'modals.staffShift.financialOpeningReauthorize'
+                    : 'modals.staffShift.financialOpeningPending')}
+              </p>
+            )}
+
+            {showZeroCashConfirm && roleType === 'cashier' && (
+              <div className="pos-notice pos-notice--warn pos-notice--stack mt-4">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="pos-notice__icon h-5 w-5" />
+                  <div>
+                    <h4 className="font-semibold">
+                      {t('modals.staffShift.zeroCashConfirmTitle')}
+                    </h4>
+                    <p className="mt-1 text-sm">
+                      {t('modals.staffShift.zeroCashConfirmMessage')}
                     </p>
                   </div>
                 </div>
-              )}
 
-              <div className={`mt-5 ${checkInInsetSurfaceClass}`}>
-                <label className={`block ${checkInEyebrowClass}`}>{cashTitle}</label>
-
-                <div className="mt-4 flex items-center gap-4">
-                  {roleType === 'cashier' && financialEntry.status !== 'ordinary' ? (
-                    <span data-testid="financial-opening-currency" className="text-xl font-bold">{financialEntry.currency ?? '—'}</span>
-                  ) : <Banknote
-                    className={`h-14 w-14 shrink-0 ${selectedRolePresentation.iconColor}`}
-                    strokeWidth={3}
-                  />}
-
-                  <CentsMoneyInput
-                    aria-label={cashTitle}
-                    value={cashValue}
-                    onValueChange={(val) => {
-                      if (isStartingCashRole) {
-                        setDriverStartingAmount(val);
-                      } else {
-                        setOpeningCash(val);
-                      }
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <motion.button
+                    onClick={() => setShowZeroCashConfirm(false)}
+                    className="pos-solid-btn pos-solid-btn--sm"
+                    {...getInteractiveMotion('button')}
+                  >
+                    {t('common.actions.cancel')}
+                  </motion.button>
+                  <motion.button
+                    onClick={() => {
+                      setShowZeroCashConfirm(false);
+                      void handleCheckIn(true);
                     }}
-                    placeholder="0,00"
-                    className="liquid-glass-modal-input flex-1 text-3xl font-black text-center"
-                    readOnly={!!originalOpening || financialBusy.current || (isStartingCashRole && !activeCashierExists)}
-                    autoFocus
-                  />
+                    disabled={loading}
+                    className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--primary"
+                    {...getInteractiveMotion('primary', loading)}
+                  >
+                    {t('modals.staffShift.confirmZeroCash')}
+                  </motion.button>
                 </div>
               </div>
-
-              {originalOpening && (
-                <p role="status" className={`mt-4 ${checkInMutedTextClass}`}>
-                  {t(financialEntry.original?.state === 'confirmed_unusable' ||
-                    (financialEntry.original?.state === 'confirmed_usable' && !financialEntry.original.usable)
-                    ? 'modals.staffShift.financialOpeningUnusable'
-                    : financialEntry.original?.hostedAuthorization.state === 'required'
-                      ? 'modals.staffShift.financialOpeningReauthorize'
-                      : 'modals.staffShift.financialOpeningPending')}
-                </p>
-              )}
-
-              {showZeroCashConfirm && roleType === 'cashier' && (
-                <div className="mt-5 rounded-[22px] border border-(--pos-s-warn) bg-(--pos-s-warn-bg) p-4">
-                  <div className="flex items-start gap-3">
-                    <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-yellow-700 dark:text-yellow-300" />
-                    <div>
-                      <h4 className="font-semibold text-yellow-900 dark:text-yellow-100">
-                        {t('modals.staffShift.zeroCashConfirmTitle')}
-                      </h4>
-                      <p className="mt-1 text-sm text-yellow-800 dark:text-yellow-100">
-                        {t('modals.staffShift.zeroCashConfirmMessage')}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-                    <motion.button
-                      onClick={() => setShowZeroCashConfirm(false)}
-                      className="inline-flex items-center justify-center rounded-xl border border-slate-200/90 bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-700 transition-all dark:border-white/10 dark:bg-white/5 dark:text-slate-100"
-                      {...getInteractiveMotion('button')}
-                    >
-                      {t('common.actions.cancel')}
-                    </motion.button>
-                    <motion.button
-                      onClick={() => {
-                        setShowZeroCashConfirm(false);
-                        void handleCheckIn(true);
-                      }}
-                      disabled={loading}
-                      className="inline-flex items-center justify-center rounded-xl bg-yellow-400 px-4 py-2.5 text-sm font-bold text-black transition-all disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-600 dark:disabled:bg-white/10 dark:disabled:text-slate-300"
-                      {...getInteractiveMotion('primary', loading)}
-                    >
-                      {t('modals.staffShift.confirmZeroCash')}
-                    </motion.button>
-                  </div>
-                </div>
-              )}
-            </div>
+            )}
           </div>
-
         </div>
       );
     }
@@ -7444,7 +7269,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               void handlePinSubmit();
             }}
             disabled={loading || enteredPin.length !== 4}
-            className="inline-flex items-center justify-center gap-3 rounded-xl bg-yellow-400 px-6 py-3.5 text-base font-bold text-black transition-all disabled:cursor-not-allowed disabled:border disabled:border-slate-300 disabled:bg-slate-100 disabled:text-slate-600 disabled:shadow-none dark:disabled:border-white/10 dark:disabled:bg-white/10 dark:disabled:text-slate-300 sm:min-w-[220px]"
+            className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary sm:min-w-[220px]"
             {...getInteractiveMotion('primary', loading || enteredPin.length !== 4)}
           >
             {loading ? (
@@ -7479,7 +7304,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   void handleCheckIn();
                 }}
                 disabled={loading}
-                className="inline-flex items-center justify-center rounded-xl border border-slate-200/90 bg-white/90 px-5 py-3 text-sm font-semibold text-slate-700 transition-all disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-100"
+                className="pos-solid-btn pos-solid-btn--md"
                 {...getInteractiveMotion('button', loading)}
               >
                 {t('modals.staffShift.skipCash')}
@@ -7499,7 +7324,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   !activeCashierExists &&
                   parseMoneyInputValue(driverStartingAmount || '0') > 0)
               }
-              className="inline-flex items-center justify-center gap-3 rounded-xl bg-(--pos-s-yellow) px-6 py-3.5 text-base font-bold text-black transition-all disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none sm:min-w-[220px]"
+              className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary sm:min-w-[220px]"
               {...getInteractiveMotion(
                 'primary',
                 loading ||
@@ -7574,7 +7399,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       <LiquidGlassModal
         modalId={keyboardDialogId}
         recoveryAccess
-        blur={effectiveMode !== 'checkin'}
+        // Founder 01/11/2026 («γιατι το checkin δεν ειναι σε γυαλι???»): check-in is glass like every other window
+        // (solid since 1.4.103); its staff cards stay solid and raised on it.
+        blur
         isOpen={isOpen}
         onClose={handleModalClose}
         title={effectiveMode === 'checkin' ? t('modals.staffShift.checkIn') : t('modals.staffShift.checkOut')}
@@ -7595,7 +7422,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           data-testid={effectiveMode === 'checkout' ? 'staff-checkout-shell' : 'staff-checkin-shell'}
         >
           <div
-            className={`flex-1 min-h-0 space-y-4 overflow-y-auto pr-2 scrollbar-hide ${
+            className={`pos-scroll-room flex-1 min-h-0 space-y-4 overflow-y-auto scrollbar-hide ${
               effectiveMode === 'checkout' && checkoutFooterData ? 'pb-36' : ''
             }`}
             data-testid="staff-shift-scroll-body"
@@ -7659,104 +7486,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
 
 
-          {lastShiftResult && effectiveShift?.role_type === 'cashier' && lastShiftResult.breakdown && (
-            <div className="space-y-4">
-              <div className="flex flex-col items-center justify-center py-4 bg-white/5 dark:bg-gray-800/20 rounded-2xl border liquid-glass-modal-border">
-                <span className="text-sm text-gray-400 mb-2">{t('modals.staffShift.varianceLabel', 'Cash Variance')}</span>
-                <VarianceBadge currency={lastShiftResult.currency} variance={lastShiftResult.variance} size="lg" showIcon />
-                <p className="text-xs text-gray-500 mt-2 max-w-xs text-center">
-                  {lastShiftResult.variance === 0
-                    ? t('modals.staffShift.varianceBalanced', 'Perfect! The drawer is balanced.')
-                    : lastShiftResult.variance > 0
-                      ? t('modals.staffShift.variancePositive', 'Surplus money in drawer.')
-                      : t('modals.staffShift.varianceNegative', 'Missing money from drawer.')
-                  }
-                </p>
-              </div>
-
-              {/* Detailed Breakdown Card */}
-              <div className={liquidGlassModalCard()}>
-                <h4 className="text-sm font-bold liquid-glass-modal-text mb-3 uppercase tracking-wider">{t('modals.staffShift.varianceBreakdown', 'Cash Breakdown')}</h4>
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between items-center p-2 rounded-sm">
-                    <span className="text-gray-400">{t('modals.staffShift.openingCashLabel')}</span>
-                    <span className="font-medium text-slate-300">+{(lastShiftResult.breakdown.opening || 0).toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between items-center p-2 rounded-sm">
-                    <span className="text-gray-400">{t('modals.staffShift.cashOrdersLabel')}</span>
-                    <span className="font-medium text-green-800 dark:text-green-300">+{(lastShiftResult.breakdown.sales || 0).toFixed(2)}</span>
-                  </div>
-                  {(lastShiftResult.breakdown.cashRefunds || 0) > 0 && (
-                    <div className="flex justify-between items-center p-2 rounded-sm">
-                      <span className="text-gray-400">{t('modals.staffShift.cashRefundsLabel', 'Cash Refunds')}</span>
-                      <span className="font-medium text-red-800 dark:text-red-300">-{(lastShiftResult.breakdown.cashRefunds || 0).toFixed(2)}</span>
-                    </div>
-                  )}
-                  <div className="flex justify-between items-center p-2 rounded-sm">
-                    <span className="text-gray-400">{t('modals.staffShift.expensesLabel')}</span>
-                    <span className="font-medium text-red-800 dark:text-red-300">-{(lastShiftResult.breakdown.expenses || 0).toFixed(2)}</span>
-                  </div>
-                  {(lastShiftResult.breakdown.cashDrops || 0) > 0 && (
-                    <div className="flex justify-between items-center p-2 rounded-sm">
-                      <span className="text-gray-400">{t('modals.staffShift.cashDropsLabel', 'Cash Drops')}</span>
-                      <span className="font-medium text-red-800 dark:text-red-300">-{(lastShiftResult.breakdown.cashDrops || 0).toFixed(2)}</span>
-                    </div>
-                  )}
-                  {(lastShiftResult.breakdown.driverGiven || 0) > 0 && (
-                    <div className="flex justify-between items-center p-2 rounded-sm">
-                      <span className="text-gray-400">{t('modals.staffShift.driverCashGivenLabel', 'Driver Cash Given')}</span>
-                      <span className="font-medium text-red-800 dark:text-red-300">-{(lastShiftResult.breakdown.driverGiven || 0).toFixed(2)}</span>
-                    </div>
-                  )}
-                  {(lastShiftResult.breakdown.driverReturned || 0) > 0 && (
-                    <div className="flex justify-between items-center p-2 rounded-sm">
-                      <span className="text-gray-400">{t('modals.staffShift.driverCashReturnedLabel', 'Driver Cash Returned')}</span>
-                      <span className="font-medium text-green-800 dark:text-green-300">+{(lastShiftResult.breakdown.driverReturned || 0).toFixed(2)}</span>
-                    </div>
-                  )}
-                  {(lastShiftResult.breakdown.inheritedDriverExpectedReturns || 0) > 0 && (
-                    <div className="flex justify-between items-center p-2 rounded-sm">
-                      <span className="text-gray-400">{t('modals.staffShift.inheritedDriverReturnsLabel', 'Transferred Staff Returns')}</span>
-                      <span className="font-medium text-green-800 dark:text-green-300">+{(lastShiftResult.breakdown.inheritedDriverExpectedReturns || 0).toFixed(2)}</span>
-                    </div>
-                  )}
-                  {(lastShiftResult.breakdown.deductedStaffPayments || 0) > 0 && (
-                    <div className="flex justify-between items-center p-2 rounded-sm">
-                      <span className="text-gray-400">{t('modals.staffShift.staffPaymentsDeductedLabel', 'Staff Payouts')}</span>
-                      <span className="font-medium text-red-800 dark:text-red-300">-{formatCurrency(lastShiftResult.breakdown.deductedStaffPayments || 0)}</span>
-                    </div>
-                  )}
-                  <div className="h-px bg-white/10 my-1"></div>
-                  <div className="flex justify-between items-center p-2 bg-white/5 rounded-sm font-medium">
-                    <span className="text-gray-300">{t('modals.staffShift.expectedAmountLabel')}</span>
-                    <span className="text-slate-300">{formatCurrency(lastShiftResult.breakdown.expected || 0)}</span>
-                  </div>
-                  <div className="flex justify-between items-center p-2 bg-white/5 rounded-sm font-bold">
-                    <span className="text-white">
-                      {t('modals.staffShift.closingCashLabel')} ({t('modals.staffShift.actualLabel', 'Actual')})
-                    </span>
-                    <span className="text-white">{formatCurrency(lastShiftResult.breakdown.actual || 0)}</span>
-                  </div>
-                  {(lastShiftResult.breakdown.recordedStaffPayments || 0) > 0 && (
-                    <>
-                      <div className="h-px bg-white/10 my-1"></div>
-                      <div className="flex justify-between items-center p-2 rounded-sm">
-                        <span className="text-gray-400">{t('modals.staffShift.totalStaffPayments')}</span>
-                        <span className="font-medium text-yellow-800 dark:text-yellow-300">{formatCurrency(lastShiftResult.breakdown.recordedStaffPayments || 0)}</span>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Fallback for other roles or missing breakdown */}
-          {lastShiftResult && !lastShiftResult.breakdown && (
-            <div className="flex justify-center">
-              <VarianceBadge currency={lastShiftResult.currency} variance={lastShiftResult.variance} size="md" />
-            </div>
-          )}
 
           <AnimatePresence mode="wait" initial={false} custom={contentDirection}>
             <motion.div
@@ -7802,6 +7531,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 </button>
               )}
 
+              <WorkCardLine status={workCard} staffId={effectiveShift?.staff_id} />
               {checkoutHeaderData && (
                 checkoutHeaderData!.minimal ? (
                   <POSGlassCard
@@ -7811,10 +7541,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   >
                     <div className="space-y-4">
                       <div className="min-w-0">
-                        <div className="text-xs uppercase tracking-[0.24em] text-slate-500 dark:text-slate-400">
+                        <div className="text-sm text-(--pos-s-muted) font-semibold">
                           {checkoutHeaderData!.roleLabel}
                         </div>
-                        <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+                        <h3 className="mt-2 text-xl font-semibold text-(--pos-s-fg)">
                           {effectiveShift?.staff_name || checkoutHeaderData!.roleLabel}
                         </h3>
                         <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/80">
@@ -7823,7 +7553,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       </div>
 
                       <div className="rounded-2xl border border-slate-200/80 bg-white/90 p-4 md:p-5 dark:border-white/10 dark:bg-black/20 dark:shadow-none">
-                        <div className="text-xs uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
+                        <div className="text-sm text-(--pos-s-muted) font-semibold">
                           {checkoutHeaderData!.primaryLabel}
                         </div>
                         <p className="mt-3 text-sm text-slate-600 dark:text-slate-300/80">
@@ -7841,10 +7571,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     <div className="space-y-4">
                       <div className="flex items-start justify-between gap-4">
                         <div className="min-w-0">
-                          <div className="text-xs uppercase tracking-[0.24em] text-slate-500 dark:text-slate-400">
+                          <div className="text-sm text-(--pos-s-muted) font-semibold">
                             {checkoutHeaderData!.roleLabel}
                           </div>
-                          <h3 className="mt-2 text-2xl font-black tracking-tight liquid-glass-modal-text">
+                          <h3 className="mt-2 text-xl font-semibold text-(--pos-s-fg)">
                             {effectiveShift?.staff_name || checkoutHeaderData!.roleLabel}
                           </h3>
                           <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/80">
@@ -7853,7 +7583,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         </div>
 
                         <div className="rounded-2xl border border-slate-200/80 bg-white/85 px-4 py-3 text-right dark:border-white/10 dark:bg-black/15 dark:shadow-none">
-                          <div className="text-xs uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+                          <div className="text-sm text-(--pos-s-muted) font-semibold">
                             {t('modals.staffShift.ordersCount', 'Orders')}
                           </div>
                           <div className="mt-1 text-3xl font-black text-slate-950 dark:text-white">
@@ -7864,7 +7594,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                       <div className="grid gap-3 md:grid-cols-[1.4fr_1fr]">
                         <div className="rounded-2xl border border-slate-200/80 bg-white/90 p-4 md:p-5 dark:border-white/10 dark:bg-black/20 dark:shadow-none">
-                          <div className="text-xs uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
+                          <div className="text-sm text-(--pos-s-muted) font-semibold">
                             {checkoutHeaderData!.primaryLabel}
                           </div>
                           <div className="mt-2 text-4xl font-black tracking-tight text-slate-950 dark:text-white">
@@ -7877,7 +7607,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                         <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-1">
                           <div className="rounded-2xl border border-slate-200/80 bg-slate-50/90 p-4 dark:border-white/10 dark:bg-white/5">
-                            <div className="text-xs uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+                            <div className="text-sm text-(--pos-s-muted) font-semibold">
                               {t('modals.staffShift.totalSalesLabel', 'Total Sales')}
                             </div>
                             <div className="mt-1 text-2xl font-bold text-emerald-800 dark:text-emerald-300">
@@ -7885,7 +7615,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             </div>
                           </div>
                           <div className="rounded-2xl border border-slate-200/80 bg-slate-50/90 p-4 dark:border-white/10 dark:bg-white/5">
-                            <div className="text-xs uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+                            <div className="text-sm text-(--pos-s-muted) font-semibold">
                               {effectiveShift?.role_type === 'cashier'
                                 ? t('modals.staffShift.openingCashLabel')
                                 : t('modals.staffShift.startingAmount', 'Starting Amount')}
@@ -7994,7 +7724,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       <details className="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-white/5">
                         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-semibold text-slate-700 transition-colors dark:text-slate-200 [&::-webkit-details-marker]:hidden">
                           <span>{t('modals.staffShift.inheritedDriverReturnsLabel', 'Transferred Staff Returns')}</span>
-                          <span className="rounded-full border border-slate-200/80 bg-white/90 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-slate-500 dark:border-white/10 dark:bg-white/10 dark:text-slate-300">
+                          <span className="shrink-0 text-base font-semibold text-(--pos-s-muted)">
                             {shiftSummary.driverDeliveries.length}
                           </span>
                         </summary>
@@ -8028,7 +7758,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                 : 'bg-(--pos-s-surface-2) border-(--pos-s-border)'}`}>
                                 <div className="flex justify-between items-start mb-2">
                                   <div>
-                                    <span className="text-xs uppercase text-slate-500 dark:text-gray-400">{driver.role}</span>
+                                    <span className="text-sm text-(--pos-s-muted)">{driver.role}</span>
                                     <div className="font-semibold text-slate-900 dark:text-white">{driver.name}</div>
                                   </div>
                                 </div>
@@ -8134,9 +7864,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             >
                               <span className="liquid-glass-modal-text-muted">
                                 {t('modals.staffShift.tipOrder', 'Order')}{' '}
-                                {allocation.orderNumber
-                                  ? `#${allocation.orderNumber}`
-                                  : allocation.orderId}
+                                {formatGridOrderNumber({ order_number: allocation.orderNumber, order_id: allocation.orderId })}
                               </span>
                               <span className="font-bold text-emerald-700 dark:text-emerald-400">
                                 {formatCurrency(Number(allocation.amount || 0))}
@@ -8218,7 +7946,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       <button
                         onClick={handleRecordExpense}
                         disabled={!canRecordInlineExpense}
-                        className="w-full bg-(--pos-s-yellow) text-black font-medium py-2 px-4 rounded-lg text-sm transition-all duration-300 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="pos-raised pos-raised--yellow w-full bg-(--pos-s-yellow) text-black font-medium py-2 px-4 rounded-lg text-sm transition-all duration-300 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         {recordExpenseLabel}
                       </button>
@@ -8333,7 +8061,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             <span className="font-bold text-green-700 dark:text-green-400 text-lg">{cashCount}</span>
                           </div>
                           <div className="text-right">
-                            <Banknote className="w-5 h-5 text-green-800 dark:text-green-300 ml-auto" />
+                            <CashHandIcon className="w-5 h-5 text-green-800 dark:text-green-300 ml-auto" />
                             <div className="font-bold text-green-800 dark:text-green-300">{formatCurrency(cashTotal)}</div>
                           </div>
                         </div>
@@ -8366,7 +8094,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       {showOrderDetailsTable && (
                         <div className="overflow-x-auto max-h-64 overflow-y-auto scrollbar-hide rounded-2xl border border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
                           <table className="w-full text-sm text-left" role="table">
-                            <thead className="text-xs uppercase bg-white/5 text-gray-400 sticky top-0 backdrop-blur-md">
+                            <thead className="text-sm bg-white/5 text-(--pos-s-muted) sticky top-0 backdrop-blur-md">
                               <tr role="row">
                                 <th scope="col" className="px-3 py-2 font-medium">{t('modals.staffShift.orderNoHeader', 'No.')}</th>
                                 <th scope="col" className="px-3 py-2 font-medium">{t('modals.staffShift.orderAddressHeader', 'Address')}</th>
@@ -8376,7 +8104,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             </thead>
                             <tbody className="divide-y divide-white/5" role="rowgroup">
                               {deliveries.map((delivery: any, index: number) => {
-                                const orderLabel = delivery.order_number ? `#${delivery.order_number}` : `#${index + 1}`;
+                                const orderLabel = delivery.order_number ? formatGridOrderNumber(delivery) : `#${index + 1}`;
                                 return (
                                   <tr key={delivery.id} className="transition-colors" role="row">
                                     <td className="px-3 py-2 font-medium liquid-glass-modal-text" role="cell">{orderLabel}</td>
@@ -8423,7 +8151,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               {/* Order Header */}
                               <div className="flex justify-between items-start mb-3">
                                 <div>
-                                  <div className="font-semibold liquid-glass-modal-text">Order #{delivery.order_number}</div>
+                                  <div className="font-semibold liquid-glass-modal-text">{t('modals.staffShift.tipOrder', 'Order')} {formatGridOrderNumber(delivery)}</div>
                                   <div className="liquid-glass-modal-text-muted text-sm">{formatCurrency(delivery.total_amount)}</div>
                                 </div>
                                 <div className={`text-xs px-2 py-1 rounded ${delivery.payment_method === 'cash' ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300' :
@@ -8535,7 +8263,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             <span className="font-bold text-green-700 dark:text-green-400 text-lg">{cashCount}</span>
                           </div>
                           <div className="text-right">
-                            <Banknote className="w-5 h-5 text-green-800 dark:text-green-300 ml-auto" />
+                            <CashHandIcon className="w-5 h-5 text-green-800 dark:text-green-300 ml-auto" />
                             <div className="font-bold text-green-800 dark:text-green-300">{formatCurrency(cashTotal)}</div>
                           </div>
                         </div>
@@ -8568,7 +8296,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       {showTableDetailsTable && (
                         <div className="overflow-x-auto max-h-64 overflow-y-auto scrollbar-hide rounded-2xl border border-white/5 animate-in fade-in slide-in-from-top-2 duration-200">
                           <table className="w-full text-sm text-left" role="table">
-                            <thead className="text-xs uppercase bg-white/5 text-gray-400 sticky top-0 backdrop-blur-md">
+                            <thead className="text-sm bg-white/5 text-(--pos-s-muted) sticky top-0 backdrop-blur-md">
                               <tr role="row">
                                 <th scope="col" className="px-3 py-2 font-medium">{t('modals.staffShift.tableNumber', 'Table')}</th>
                                 <th scope="col" className="px-3 py-2 font-medium">{t('modals.staffShift.ordersCount', 'Orders')}</th>
@@ -8655,7 +8383,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               <div className="space-y-1 mb-3 pb-3 border-b liquid-glass-modal-border">
                                 {table.orders && Array.isArray(table.orders) ? table.orders.map((order: any) => (
                                   <div key={order.order_id} className="flex justify-between text-xs">
-                                    <span className="liquid-glass-modal-text-muted">#{order.order_number}</span>
+                                    <span className="liquid-glass-modal-text-muted">{formatGridOrderNumber(order)}</span>
                                     <span className="liquid-glass-modal-text">{formatCurrency(order.total_amount)} ({order.payment_method})</span>
                                   </div>
                                 )) : null}
@@ -8894,7 +8622,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             }`}>
                             {/* Role and Name */}
                             <div className="mb-2">
-                              <span className="text-xs text-gray-400 uppercase">{roleType}</span>
+                              <span className="text-sm text-(--pos-s-muted)">{roleType}</span>
                               <div className="font-semibold liquid-glass-modal-text">{driver.driver_name}</div>
                             </div>
                             {/* Grid: Starting, Earnings, Returns */}
@@ -9068,7 +8796,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           )}
                         </label>
                         <div className="relative">
-                          <Banknote className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                          <CashHandIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                           <CentsMoneyInput
                             aria-label={t('modals.staffShift.amountLabel', 'Amount')}
                             value={paymentAmount}
@@ -9110,7 +8838,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         <button
                           onClick={handleRecordStaffPayment}
                           disabled={loading || !selectedStaffForPayment || !paymentAmount}
-                          className="px-4 py-2 bg-(--pos-s-yellow) text-black rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="pos-raised pos-raised--yellow px-4 py-2 bg-(--pos-s-yellow) text-black rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {loading
                             ? t('common.saving', 'Saving...')
@@ -9126,7 +8854,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   {/* List of Recorded Payments from current session */}
                   {staffPaymentsList.length > 0 && (
                     <div className="space-y-2 max-h-48 overflow-auto pr-1 scrollbar-hide">
-                      <div className="text-xs text-gray-400 uppercase tracking-wide mb-2">{t('modals.staffShift.recordedThisSession', 'Recorded This Session')}</div>
+                      <div className="text-sm text-(--pos-s-muted) mb-2">{t('modals.staffShift.recordedThisSession', 'Recorded This Session')}</div>
                       {staffPaymentsList.map((p) => (
                         <div key={p.id} className="flex items-center justify-between p-3 bg-white/5 rounded-2xl border border-white/10 text-sm">
                           <div className="flex-1">
@@ -9141,7 +8869,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               type="button"
                               disabled={loading}
                               onClick={() => { void beginEditStaffPayment(p); }}
-                              className="inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-yellow-800 transition-colors disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-yellow-200"
+                              className="pos-raised inline-flex items-center gap-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-1.5 text-xs font-semibold text-yellow-800 transition-colors disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-yellow-200"
                             >
                               <Pencil className="h-3.5 w-3.5" />
                               {t('modals.staffShift.editPayment', 'Edit')}
@@ -9233,8 +8961,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 <div className="space-y-3">
                   {/* Cashier Payment */}
                   <div className="rounded-2xl border border-slate-200/80 bg-white/85 p-4 dark:border-white/10 dark:bg-white/5 dark:shadow-none">
-                    <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-2 uppercase tracking-wide flex items-center gap-2">
-                      <Banknote className="w-4 h-4 text-green-500" />
+                    <label className="block text-sm font-bold text-slate-600 dark:text-slate-300 mb-2 flex items-center gap-2">
+                      <CashHandIcon className="w-4 h-4 text-green-500" />
                       {t('modals.staffShift.cashierPaymentLabel')}
                     </label>
                     <div className="flex items-center gap-3">
@@ -9251,8 +8979,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                   {/* Closing Cash */}
                   <div className="rounded-2xl border border-slate-200/80 bg-white/85 p-4 dark:border-white/10 dark:bg-white/5 dark:shadow-none">
-                    <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-2 uppercase tracking-wide flex items-center gap-2">
-                      <Banknote className="w-4 h-4 text-green-500" />
+                    <label className="block text-sm font-bold text-slate-600 dark:text-slate-300 mb-2 flex items-center gap-2">
+                      <CashHandIcon className="w-4 h-4 text-green-500" />
                       {t('modals.staffShift.closingCashLabel')}
                     </label>
                     <div className="flex items-center gap-3">
@@ -9419,7 +9147,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                       {/* Formula Explanation */}
                       <div className="mt-2 rounded-2xl border border-slate-200/80 bg-slate-50/90 p-3 dark:border-slate-600/30 dark:bg-slate-800/50">
-                        <p className="text-center text-xs text-slate-500 dark:text-slate-400">
+                        <p className="text-center text-xs text-(--pos-s-muted)">
                           <span className="font-semibold text-slate-700 dark:text-slate-300">{t('receipt.formula.label')}</span>{' '}
                           {t('receipt.formula.driver')}
                         </p>
@@ -9447,7 +9175,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             >
               <div className="staff-checkout-footer-panel flex flex-col gap-3 rounded-2xl p-4 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
-                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                  <div className="text-sm text-(--pos-s-muted) font-semibold">
                     {checkoutFooterData.label}
                   </div>
                   {!checkoutFooterData.minimal && (
@@ -9455,7 +9183,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       {isCashierCheckoutRole ? formatDrawerCurrency(checkoutFooterData.amount) : formatCurrency(checkoutFooterData.amount)}
                     </div>
                   )}
-                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  <p className="mt-1 text-xs text-(--pos-s-muted)">
                     {checkoutFooterData.note}
                   </p>
                 </div>
@@ -9517,7 +9245,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 </button>
                 <button
                   onClick={handleConfirmLargePayment}
-                  className="px-6 py-3 rounded-xl bg-yellow-400 font-bold text-black shadow-lg transition-all duration-200"
+                  className="pos-raised pos-raised--yellow px-6 py-3 rounded-xl bg-yellow-400 font-bold text-black shadow-lg transition-all duration-200"
                   autoFocus
                 >
                   {t('modals.staffShift.confirmPayment', 'Confirm Payment')}

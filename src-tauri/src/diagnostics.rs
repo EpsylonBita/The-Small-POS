@@ -20,10 +20,173 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 #[path = "diagnostics_runtime_logs.rs"]
-mod runtime_logs;
+pub(crate) mod runtime_logs;
 
 pub(crate) fn is_runtime_error_code(code: &str) -> bool {
     runtime_logs::RUNTIME_ERROR_CODES.contains(&code)
+}
+
+/// Observation-only storage, separate from all business/device locks. Neither
+/// publishing nor reading ever waits; contention means unavailable evidence.
+#[derive(Default)]
+pub(crate) struct RetainedObservations(std::sync::Mutex<std::collections::HashMap<String, Value>>);
+
+impl RetainedObservations {
+    pub(crate) fn publish(&self, key: String, content: Value) {
+        if let Ok(mut cache) = self.0.try_lock() {
+            if cache.len() >= 256 && !cache.contains_key(&key) {
+                cache.clear();
+            }
+            cache.insert(
+                key,
+                json!({"at":chrono::Utc::now().to_rfc3339(),"content":content}),
+            );
+        }
+    }
+
+    fn failed(&self, key: &str) {
+        if let Ok(mut cache) = self.0.try_lock() {
+            if let Some(observation) = cache.get_mut(key) {
+                observation["failed"] = json!(true);
+            }
+        }
+    }
+
+    pub(crate) fn read(&self, key: &str) -> Value {
+        self.0
+            .try_lock()
+            .ok()
+            .and_then(|cache| cache.get(key).cloned())
+            .unwrap_or_else(|| json!({"status":"unavailable","at":null,"content":null}))
+    }
+}
+
+fn health_observations() -> &'static RetainedObservations {
+    static CACHE: std::sync::OnceLock<RetainedObservations> = std::sync::OnceLock::new();
+    CACHE.get_or_init(RetainedObservations::default)
+}
+
+fn bundle_observations() -> &'static RetainedObservations {
+    static CACHE: std::sync::OnceLock<RetainedObservations> = std::sync::OnceLock::new();
+    CACHE.get_or_init(RetainedObservations::default)
+}
+
+/// The actual diagnostics builder's last observation, never a new device read.
+pub(crate) fn support_health_observation(conn: &rusqlite::Connection) -> Value {
+    health_observations().read(conn.path().unwrap_or(""))
+}
+
+/// Uses the same backlog builder as the bundle, on the caller's support handle.
+pub(crate) fn support_sync_backlog(conn: &rusqlite::Connection) -> Result<Value, String> {
+    get_sync_backlog(conn)
+}
+
+fn support_read_state(
+    conn: &rusqlite::Connection,
+    permit: &crate::support::critical_op::SupportPermit,
+) -> Result<DbState, String> {
+    let path = Path::new(conn.path().ok_or("unavailable")?);
+    let read = crate::support::replica::read_connection(
+        path,
+        permit,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )?;
+    read.execute_batch("PRAGMA query_only=ON")
+        .map_err(|_| "unavailable")?;
+    Ok(DbState {
+        conn: std::sync::Mutex::new(read),
+        db_path: path.into(),
+    })
+}
+
+pub(crate) fn support_financial_queue_status(
+    conn: &rusqlite::Connection,
+    permit: &crate::support::critical_op::SupportPermit,
+) -> Result<Value, String> {
+    get_financial_queue_status(&support_read_state(conn, permit)?)
+}
+
+/// Reuse the existing query-only readiness builder with an isolated support
+/// handle. Its private mutex cannot contend with the business writer. The
+/// permit supplies interruption and the deadline to every SQLite read.
+pub(crate) fn support_closeout_readiness(
+    conn: &rusqlite::Connection,
+    permit: &crate::support::critical_op::SupportPermit,
+) -> Result<Value, String> {
+    let scope = crate::support::identity::local(conn)?;
+    crate::zreport::get_support_closeout_readiness_snapshot(
+        &support_read_state(conn, permit)?,
+        &scope,
+    )
+}
+
+/// One real bundle section, with the bundle's list/text caps and redaction.
+fn support_truncation(entries: &[Value]) -> Result<Value, String> {
+    entries
+        .iter()
+        .map(|entry| {
+            let text = entry.as_str().ok_or("INTERNAL_ERROR")?;
+            // These are the two formats emitted by this diagnostics owner. Do not
+            // forward arbitrary prose or guess a reason for an unknown suffix.
+            let field = if let Some(field) = text.strip_suffix(": bounded history") {
+                field
+            } else if let Some((field, total)) = text.rsplit_once(" (total ") {
+                total
+                    .strip_suffix(')')
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .ok_or("INTERNAL_ERROR")?;
+                field
+            } else {
+                return Err("INTERNAL_ERROR".into());
+            };
+            Ok(json!({"field":field,"reason":"rows"}))
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map(Value::Array)
+}
+
+pub(crate) fn support_bundle_section(
+    conn: &rusqlite::Connection,
+    section: &str,
+    permit: &crate::support::critical_op::SupportPermit,
+) -> Result<Value, String> {
+    let content = match section {
+        "about" => get_about_info(),
+        "system_health" => {
+            let observation = support_health_observation(conn);
+            if observation["content"].is_null() {
+                return Err("unavailable".into());
+            }
+            observation["content"].clone()
+        }
+        "sync_backlog" => get_sync_backlog(conn)?,
+        "payment_adjustment_backlog" => get_payment_adjustment_backlog(conn),
+        "terminal_settings_snapshot" => get_terminal_settings_snapshot(conn)?,
+        "closeout_readiness" => support_closeout_readiness(conn, permit)?,
+        "financial_queue_status" => support_financial_queue_status(conn, permit)?,
+        "printer_diagnostics" => get_printer_diagnostics(conn)?,
+        "sync_errors" => json!(get_recent_sync_errors(conn, 20)?),
+        _ => {
+            let observation =
+                bundle_observations().read(&format!("{}|{section}", conn.path().unwrap_or("")));
+            if observation["content"].is_null() {
+                return Err("unavailable".into());
+            }
+            let content = &observation["content"]["section_content"];
+            let status = content["status"]
+                .as_str()
+                .filter(|s| matches!(*s, "partial" | "unavailable" | "not_collected"))
+                .unwrap_or("ok");
+            return Ok(
+                json!({"section":section,"collector_status":status,"content":content,"truncation":support_truncation(observation["content"]["truncation"].as_array().ok_or("INTERNAL_ERROR")?)?,"redaction_dropped":0,"last_observation_at":observation["at"]}),
+            );
+        }
+    };
+    let mut truncation = Vec::new();
+    let content = redact_value_for_export(content, section, &mut truncation);
+    Ok(
+        json!({"section":section,"collector_status":"ok","content":content,"truncation":support_truncation(&truncation.into_iter().map(Value::String).collect::<Vec<_>>())?,"redaction_dropped":0}),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +237,84 @@ pub fn get_about_info() -> Value {
 // ---------------------------------------------------------------------------
 
 /// Collects system health status for display on the System Health screen.
+///
+/// Health reads through its own read-only connection, never under the
+/// business mutex (`DbState.conn`). On the business connection it runs when
+/// the Health panel of the right rail mounts or refreshes, from the recovery
+/// modal, from remote support's remedy listing and for a diagnostics export.
+/// Its reads once held the business mutex for about 0.5 s at 5,000 local
+/// orders on a 2-core till, and a checkout that started meanwhile waited for
+/// them (02/11/2026). Its one write, the legacy order-update queue cleanup,
+/// still runs on the business connection. (The 30 s monitor and the 45 s
+/// incident reporter call it on connections of their own.)
 pub fn get_system_health(db: &DbState) -> Result<Value, String> {
+    let result = match open_health_reader(db) {
+        Some(reader) => build_system_health(&reader, db),
+        None => build_system_health(db, db),
+    };
+    let key = db.db_path.to_string_lossy().into_owned();
+    match &result {
+        Ok(observation) => health_observations().publish(key, observation.clone()),
+        Err(_) => health_observations().failed(&key),
+    }
+    result
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs on the Health reader right after it opens, on this thread only.
+    pub(crate) static HEALTH_READER_OPENED: std::cell::RefCell<Option<Box<dyn FnOnce(&mut rusqlite::Connection)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A read-only connection to the business database for Health's reads.
+///
+/// In WAL mode it reads while the business connection writes, and neither
+/// waits for the other. `None` when the database is not a WAL file this
+/// process can reopen: an in-memory test database, or a rollback journal,
+/// where a reader would block the writer. Health then reads through the
+/// business connection, as before.
+fn open_health_reader(db: &DbState) -> Option<DbState> {
+    if !db.db_path.is_file() {
+        return None;
+    }
+    let opened = rusqlite::Connection::open_with_flags(
+        &db.db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .and_then(|conn| {
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch("PRAGMA query_only = ON")?;
+        let journal_mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        Ok((conn, journal_mode))
+    });
+    #[cfg_attr(not(test), allow(unused_mut))]
+    let mut conn = match opened {
+        Ok((conn, journal_mode)) if journal_mode.eq_ignore_ascii_case("wal") => conn,
+        Ok((_, journal_mode)) => {
+            warn!(%journal_mode, "Health reads on the business connection: not a WAL database");
+            return None;
+        }
+        Err(error) => {
+            warn!(error = %error, "Health reads on the business connection: no read-only connection");
+            return None;
+        }
+    };
+    #[cfg(test)]
+    HEALTH_READER_OPENED.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook(&mut conn);
+        }
+    });
+    Some(DbState {
+        conn: std::sync::Mutex::new(conn),
+        db_path: db.db_path.clone(),
+    })
+}
+
+/// [`get_system_health`] over `db`, its read connection. `business` is the
+/// business connection, for the one write.
+pub(crate) fn build_system_health(db: &DbState, business: &DbState) -> Result<Value, String> {
     // Collect all connection-based queries in a scoped block so the lock
     // is released before calling validate_pending_orders (which acquires
     // its own lock — std::sync::Mutex is not reentrant).
@@ -182,7 +422,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         Default::default()
     });
     let terminal_context = get_terminal_context(db);
-    let sync_status_summary = get_sync_status_summary(db).unwrap_or_else(|_| {
+    let sync_status_summary = get_sync_status_summary(db, business).unwrap_or_else(|_| {
         read_failures.push("syncStatusSummary");
         json!({})
     });
@@ -219,7 +459,8 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
             Value::Null
         });
 
-    Ok(json!({
+    let observation = json!({
+        "remoteSupport": crate::support::db::startup_health(db.db_path.parent().unwrap_or_else(|| Path::new(""))),
         "schemaVersion": schema_version,
         "syncBacklog": sync_backlog,
         "syncBacklogStatus": sync_backlog_status,
@@ -244,7 +485,8 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
             "details": invalid_orders
         },
         "readFailures": read_failures,
-    }))
+    });
+    Ok(observation)
 }
 
 /// Unsynced rows by queue entity and status, plus the payment and adjustment
@@ -569,9 +811,15 @@ fn build_diagnostics_sync_state() -> crate::sync::SyncState {
     crate::sync::SyncState::new()
 }
 
-fn get_sync_status_summary(db: &DbState) -> Result<Value, String> {
+/// The sync status read through `db`. Its one write, the legacy order-update
+/// queue cleanup, runs first on `business`, the business connection.
+fn get_sync_status_summary(db: &DbState, business: &DbState) -> Result<Value, String> {
     let sync_state = build_diagnostics_sync_state();
-    let mut summary = crate::sync::get_sync_status(db, &sync_state)?;
+    crate::sync::cleanup_order_update_queue_rows_for_order(business, None)?;
+    let mut summary = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::sync::read_sync_status(&conn, &sync_state)?
+    };
     if let Some(obj) = summary.as_object_mut() {
         obj.insert("parityQueueStatus".into(), get_parity_queue_status(db)?);
         obj.insert(
@@ -819,6 +1067,7 @@ fn get_printer_status(conn: &rusqlite::Connection) -> Value {
         "defaultProfile": serde_json::Value::Null,
         "recentJobs": recent_jobs,
         "recentJobsUnavailable": recent_jobs_unavailable,
+        "brandRecovery": crate::printers::restore_brand::observations(conn).ok(),
         "pendingJobs": pending_jobs,
     })
 }
@@ -1088,7 +1337,7 @@ fn export_diagnostics_bundle_with_log_dir(
     };
     documents.push(("terminal_context.json", terminal_context));
     let sync_status = run_collector(&mut records, "sync_status.json", || {
-        get_sync_status_summary(db)
+        get_sync_status_summary(db, db)
     });
     documents.push(("sync_status.json", sync_status));
     let closeout_readiness = run_collector(&mut records, "closeout_readiness.json", || {
@@ -1196,6 +1445,14 @@ fn export_diagnostics_bundle_with_log_dir(
             truncated.push(format!("{file_name}: bounded history"));
         }
         let value = redact_value_for_export(value, file_name, &mut truncated);
+        bundle_observations().publish(
+            format!(
+                "{}|{}",
+                db.db_path.display(),
+                file_name.trim_end_matches(".json")
+            ),
+            json!({"section_content":value.clone(),"truncation":truncated.iter().filter(|t|t.starts_with(file_name)).collect::<Vec<_>>()}),
+        );
         if let Err(error) = write_json_to_zip(&mut zip, &zip_options, file_name, &value) {
             write_errors.push(json!({ "entry": file_name, "error": error }));
         }
@@ -1263,12 +1520,13 @@ fn export_diagnostics_bundle_with_log_dir(
         "truncated": truncated,
     });
     let mut manifest_truncated = Vec::new();
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        DIAGNOSTICS_MANIFEST_FILE,
-        &redact_value_for_export(manifest, DIAGNOSTICS_MANIFEST_FILE, &mut manifest_truncated),
-    )?;
+    let manifest =
+        redact_value_for_export(manifest, DIAGNOSTICS_MANIFEST_FILE, &mut manifest_truncated);
+    bundle_observations().publish(
+        format!("{}|diagnostics_manifest", db.db_path.display()),
+        json!({"section_content":manifest.clone(),"truncation":manifest_truncated}),
+    );
+    write_json_to_zip(&mut zip, &zip_options, DIAGNOSTICS_MANIFEST_FILE, &manifest)?;
 
     zip.finish().map_err(|e| e.to_string())?;
 
@@ -4676,5 +4934,231 @@ mod bundle_v2_tests {
         );
         assert_eq!(health_view_source(Some(&json!({}))), "unknown");
         assert_eq!(health_view_source(None), "unknown");
+    }
+}
+
+#[cfg(test)]
+mod support_observation_tests {
+    use super::*;
+    use crate::support::{critical_op, replica};
+    use std::time::{Duration, Instant};
+    #[test]
+    fn support_truncation_maps_only_owner_suffixes_without_losing_paths() {
+        assert_eq!(
+            support_truncation(&[
+                json!("health_view: issues[0].details (total 60)"),
+                json!("runtime_logs.json: bounded history"),
+            ])
+            .unwrap(),
+            json!([
+                {"field":"health_view: issues[0].details","reason":"rows"},
+                {"field":"runtime_logs.json","reason":"rows"},
+            ])
+        );
+        for invalid in [
+            json!("your-private-prose"),
+            json!("health_view: issues (total bad)"),
+            json!({"raw":"your-prose"}),
+        ] {
+            assert!(support_truncation(&[invalid]).is_err());
+        }
+    }
+    #[test]
+    fn health_facade_is_unavailable_without_observation_even_with_writer_held() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _gate = critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        let gate = critical_op::CriticalOpGate::new();
+        let permit = gate.try_begin_support(false, None).unwrap();
+        let read = replica::read_connection(
+            db.db_path(),
+            &permit,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        let _writer = db.state.conn.lock().unwrap();
+        let at = Instant::now();
+        assert_eq!(support_health_observation(&read)["status"], "unavailable");
+        assert!(support_closeout_readiness(&read, &permit).is_err());
+        assert!(at.elapsed() < Duration::from_millis(250));
+    }
+    #[test]
+    fn health_uses_real_builder_and_named_sections_use_bundle_caps() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _gate = critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        let expected = get_system_health(&db.state).unwrap();
+        let gate = critical_op::CriticalOpGate::new();
+        let permit = gate.try_begin_support(false, None).unwrap();
+        let read = replica::read_connection(
+            db.db_path(),
+            &permit,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(support_health_observation(&read)["content"], expected);
+        assert_eq!(
+            support_bundle_section(&read, "system_health", &permit).unwrap()["content"],
+            redact_value_for_export(expected, "system_health", &mut vec![])
+        );
+        let key = format!("{}|health_view", db.db_path().display());
+        let mut truncated = Vec::new();
+        let content = redact_value_for_export(
+            json!({"issues":vec![json!({"code":"test"});60]}),
+            "health_view",
+            &mut truncated,
+        );
+        bundle_observations().publish(
+            key,
+            json!({"section_content":content,"truncation":truncated}),
+        );
+        let section = support_bundle_section(&read, "health_view", &permit).unwrap();
+        assert_eq!(section["content"]["issues"].as_array().unwrap().len(), 50);
+        assert_eq!(
+            section["truncation"],
+            json!([{"field":"health_view: issues","reason":"rows"}])
+        );
+        assert!(chrono::DateTime::parse_from_rfc3339(
+            section["last_observation_at"].as_str().unwrap()
+        )
+        .is_ok());
+    }
+    #[test]
+    fn closeout_facade_reuses_the_query_only_readiness_check() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _gate = critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        {
+            let writer = db.state.conn.lock().unwrap();
+            crate::db::set_setting(&writer, "terminal", "branch_id", "your-test-branch").unwrap();
+            crate::db::set_setting(&writer, "terminal", "organization_id", "your-org").unwrap();
+            crate::db::set_setting(&writer, "terminal", "terminal_id", "your-terminal").unwrap();
+        }
+        let expected = crate::zreport::get_closeout_readiness_snapshot(
+            &db.state,
+            &json!({"branchId":"your-test-branch"}),
+        )
+        .unwrap();
+        let gate = critical_op::CriticalOpGate::new();
+        let permit = gate.try_begin_support(false, None).unwrap();
+        let read = replica::read_connection(
+            db.db_path(),
+            &permit,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        let _writer = db.state.conn.lock().unwrap();
+        let actual = support_closeout_readiness(&read, &permit).unwrap();
+        assert_eq!(
+            actual["activeStaffBlockers"],
+            expected["activeStaffBlockers"]
+        );
+        assert_eq!(actual["giftCloseProof"], expected["giftCloseProof"]);
+        assert_eq!(
+            actual["fiscalQueueBlockers"],
+            expected["fiscalQueueBlockers"]
+        );
+    }
+    #[test]
+    fn support_closeout_never_reads_keyring_and_partial_reads_fail_closed() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _gate = critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        {
+            let writer = db.state.conn.lock().unwrap();
+            for (key, value) in [
+                ("organization_id", "your-org"),
+                ("branch_id", "your-branch"),
+                ("terminal_id", "your-terminal"),
+            ] {
+                crate::db::set_setting(&writer, "terminal", key, value).unwrap();
+            }
+        }
+        crate::tests::fake_keyring::before_each_read(|key| panic!("support read keyring: {key}"));
+        let permit = critical_op::global()
+            .try_begin_support(false, None)
+            .unwrap();
+        let read = replica::read_connection(
+            db.db_path(),
+            &permit,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        let before = db.state.conn.lock().unwrap().total_changes();
+        let value = support_closeout_readiness(&read, &permit).unwrap();
+        assert_eq!(value["queuedCloseouts"]["count"], 0);
+        assert_eq!(before, db.state.conn.lock().unwrap().total_changes());
+        {
+            let writer = db.state.conn.lock().unwrap();
+            crate::db::set_setting(
+                &writer,
+                "diagnostics",
+                "last_closeout_attempt",
+                "your-invalid-json",
+            )
+            .unwrap();
+        }
+        assert!(support_closeout_readiness(&read, &permit).is_err());
+        db.state.conn.lock().unwrap().execute("DELETE FROM local_settings WHERE setting_category='diagnostics' AND setting_key='last_closeout_attempt'",[]).unwrap();
+        assert!(support_closeout_readiness(&read, &permit).is_ok());
+        db.state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE parity_sync_queue")
+            .unwrap();
+        assert!(support_closeout_readiness(&read, &permit).is_err());
+        let section = crate::support::collectors::diagnostics::collect(
+            &read,
+            &json!({"section":"closeout_readiness"}),
+            &permit,
+        )
+        .unwrap();
+        assert_eq!(section["collector_status"], "unavailable");
+    }
+    #[test]
+    fn stale_and_failed_real_observations_never_become_healthy() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _test_gate = critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        get_system_health(&db.state).unwrap();
+        let gate = critical_op::CriticalOpGate::new();
+        let permit = gate.try_begin_support(false, None).unwrap();
+        let read = replica::read_connection(
+            db.db_path(),
+            &permit,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        let key = db.db_path().to_string_lossy().into_owned();
+        health_observations().failed(&key);
+        let failed_load = crate::support::collectors::health::collect(&read).unwrap();
+        assert_eq!(failed_load["health_state"], "stale");
+        assert_eq!(failed_load["last_observation_ok"], false);
+        {
+            let mut cache = health_observations().0.lock().unwrap();
+            cache.get_mut(&key).unwrap()["at"] = json!("2020-01-01T00:00:00Z");
+        }
+        let stale = crate::support::collectors::health::collect(&read).unwrap();
+        assert_eq!(stale["health_state"], "stale");
+        assert_eq!(stale["last_observation_ok"], false);
+        db.state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE sync_queue")
+            .unwrap();
+        get_system_health(&db.state).unwrap();
+        let failed = crate::support::collectors::health::collect(&read).unwrap();
+        assert_eq!(failed["health_state"], "unavailable");
+        assert_eq!(failed["last_observation_ok"], false);
+    }
+    #[test]
+    fn observation_contention_never_waits() {
+        let cache = RetainedObservations::default();
+        let _held = cache.0.lock().unwrap();
+        let at = Instant::now();
+        assert_eq!(cache.read("test")["status"], "unavailable");
+        assert!(at.elapsed() < Duration::from_millis(50));
     }
 }

@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => {
   const getOrderById = vi.fn();
 
   return {
+    supportIpc: vi.fn().mockResolvedValue({}),
     getOrderPayments,
     getPaidItems,
     getOrderById,
@@ -34,6 +35,10 @@ const mocks = vi.hoisted(() => {
     },
   };
 });
+
+vi.mock('../../../../lib/ipc-adapter', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../../lib/ipc-adapter')>(), supportIpc: mocks.supportIpc,
+}));
 
 vi.mock('../../../contexts/i18n-context', () => ({
   useI18n: () => ({
@@ -170,12 +175,15 @@ describe('split-payment close lifecycle', () => {
       onSplitComplete: vi.fn(),
     };
     const view = render(<SplitPaymentModal {...props} />);
+    const token = mocks.supportIpc.mock.calls[0][1].token;
+    expect(mocks.supportIpc).toHaveBeenCalledWith('support_payment_open', { token });
 
     await waitFor(() => expect(mocks.getOrderById).toHaveBeenCalledWith('order-1'));
     const dialog = screen.getByRole('dialog', { name: 'Split Payment' });
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
 
     expect(onClose).toHaveBeenCalledTimes(1);
+    expect(mocks.supportIpc).toHaveBeenCalledWith('support_payment_closed', { token });
     expect(dialog).toBeInTheDocument();
     expect(dialog).not.toHaveClass('leaving');
 

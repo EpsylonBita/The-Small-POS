@@ -52,6 +52,8 @@ npm run pos:tauri:dev
 
 Lets an agent drive the running dev app through structured page elements instead of screenshots and pixel clicks.
 
+This door is for test devices only. It is never a remote-support path; store support uses the in-app support code and visible session banner.
+
 ```bash
 npm run pos:tauri:dev:agent
 ```
@@ -67,7 +69,7 @@ npm run pos:tauri:dev:agent
 - When the app is not running with this script, the server's tools just fail to connect.
 
 Limits:
-- Only the dev script opens the port. Release builds, installers and store tills never set the variable.
+- Release startup must strip `--remote-debugging-port` from inherited `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` before creating a WebView. `scripts/check-release-runtime-config.mjs` checks the native startup guard, including in the public source mirror.
 - Native Windows dialogs and the print spooler are outside the WebView, so the door cannot reach them.
 - Staff PINs and passwords are always typed by a person, never by the agent.
 

@@ -36,8 +36,8 @@ test('main quantity stepper buttons are accessibly labeled with matching lucide 
   );
   assert.match(
     source,
-    /className="liquid-glass-modal-icon-button flex h-9 w-9 items-center justify-center rounded-full"/,
-    'the footer stepper buttons must inherit the shared theme-aware contrast',
+    /className="pos-raised flex h-11 w-11 items-center justify-center rounded-full text-\(--pos-s-fg\)"/,
+    'the footer stepper buttons are the kit\'s raised round buttons in both themes (founder 01/11/2026)',
   );
 });
 

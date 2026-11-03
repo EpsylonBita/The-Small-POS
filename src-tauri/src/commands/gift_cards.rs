@@ -1199,8 +1199,7 @@ fn import_canonical_gift_payment(
     )
     .map_err(|e| format!("record remote gift card debit: {e}"))?;
 
-    let tx = conn
-        .unchecked_transaction()
+    let tx = crate::db::immediate_transaction(&conn)
         .map_err(|e| format!("begin gift card mirror: {e}"))?;
     let (local_order_id, local_payment_id) = sync::mirror_canonical_payment(&tx, payment)?
         .ok_or("The canonical gift card payment could not be mirrored locally")?;

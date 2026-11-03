@@ -832,7 +832,11 @@ pub async fn shift_close(
     arg0: Option<serde_json::Value>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::ShiftClose,
+    );
     run_blocking_command("shift_close", move || {
+        let _support_critical = _support_critical;
         let db = app.state::<db::DbState>();
         let payload = arg0.ok_or("Missing shift close payload")?;
         let requested_shift_id = value_str(&payload, &["shiftId", "shift_id"]);

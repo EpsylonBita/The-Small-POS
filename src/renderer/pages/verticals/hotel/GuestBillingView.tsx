@@ -232,9 +232,9 @@ const FolioActionModal: React.FC<{
             type="button"
             onClick={onClose}
             aria-label={t('common.close', { defaultValue: 'Close' })}
-            className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition-transform active:scale-95 ${isDark ? 'text-zinc-300 active:bg-white/10' : 'text-gray-600 active:bg-black/5'}`}
+            className="liquid-glass-modal-close"
           >
-            <X className="w-5 h-5" />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
 
@@ -598,7 +598,7 @@ export const GuestBillingView: React.FC = memo(() => {
           <button
             type="button"
             onClick={() => fetchFolios()}
-            className="px-4 py-2 bg-yellow-400 text-black rounded-xl border border-yellow-500 font-medium transition-transform active:scale-95 active:bg-yellow-500"
+            className="pos-raised pos-raised--yellow px-4 py-2 bg-yellow-400 text-black rounded-xl border border-yellow-500 font-medium transition-transform active:scale-95 active:bg-yellow-500"
           >
             {t('common.retry', { defaultValue: 'Retry' })}
           </button>
@@ -730,9 +730,9 @@ export const GuestBillingView: React.FC = memo(() => {
               type="button"
               onClick={() => setSelectedFolio(null)}
               aria-label={t('common.close', { defaultValue: 'Close' })}
-              className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition-transform active:scale-95 ${isDark ? 'text-gray-400 active:bg-white/10' : 'text-gray-600 active:bg-black/5'}`}
+              className="liquid-glass-modal-close"
             >
-              <X className="w-4 h-4" />
+              <X className="h-5 w-5" aria-hidden="true" />
             </button>
           </div>
 
@@ -823,7 +823,7 @@ export const GuestBillingView: React.FC = memo(() => {
                       setPaymentPrefill(null);
                       setActionModal('charge');
                     }}
-                    className="flex items-center justify-center gap-2 py-2 rounded-xl border border-yellow-500 bg-yellow-400 text-black font-medium transition-transform active:scale-95 active:bg-yellow-500"
+                    className="pos-raised pos-raised--yellow flex items-center justify-center gap-2 py-2 rounded-xl border border-yellow-500 bg-yellow-400 text-black font-medium transition-transform active:scale-95 active:bg-yellow-500"
                   >
                     <Plus className="w-4 h-4" />
                     {t('guestBilling.addCharge', { defaultValue: 'Add Charge' })}
@@ -834,7 +834,7 @@ export const GuestBillingView: React.FC = memo(() => {
                       setPaymentPrefill(selectedFolio.balance > 0 ? selectedFolio.balance : null);
                       setActionModal('payment');
                     }}
-                    className="flex items-center justify-center gap-2 py-2 rounded-xl bg-(--pos-s-yellow) text-black font-medium transition-transform active:scale-95 active:bg-yellow-500"
+                    className="pos-raised pos-raised--yellow flex items-center justify-center gap-2 py-2 rounded-xl bg-(--pos-s-yellow) text-black font-medium transition-transform active:scale-95 active:bg-yellow-500"
                   >
                     <CreditCard className="w-4 h-4" />
                     {t('guestBilling.payment', { defaultValue: 'Payment' })}

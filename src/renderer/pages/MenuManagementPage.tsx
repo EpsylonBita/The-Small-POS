@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
-import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
 import { Eye, EyeOff, Search, RefreshCw, BadgePercent } from 'lucide-react';
 import { getBridge, offEvent, onEvent } from '../../lib';
@@ -57,7 +56,6 @@ interface Category {
 export const MenuManagementPage: React.FC = () => {
   const bridge = getBridge();
   const { t, i18n } = useTranslation();
-  const { resolvedTheme } = useTheme();
   const language = i18n.language;
   const [activeTab, setActiveTab] = useState<'categories' | 'subcategories' | 'ingredients' | 'offers'>('categories');
   const [loading, setLoading] = useState(false);
@@ -332,25 +330,15 @@ export const MenuManagementPage: React.FC = () => {
     (offer.description || '').toLowerCase().includes(searchLower)
   );
 
-  const getTabClass = (tab: typeof activeTab) => `px-4 py-2 rounded-2xl transition-transform active:scale-[0.98] ${
-    activeTab === tab
-      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) font-semibold border border-(--pos-s-sel-bg)'
-      : resolvedTheme === 'dark'
-        ? 'bg-zinc-900 text-zinc-200 active:bg-zinc-800'
-        : 'bg-gray-100 text-gray-700 active:bg-gray-200'
-  }`;
+  // Founder 01/11 (module pages one by one, Menu Management first): the page in the kit. Tabs are kit options
+  // (the open one in the selection yellow), cards are kit cards, words are the kit fg / muted.
+  const getTabClass = (tab: typeof activeTab) => `pos-choice${activeTab === tab ? ' is-selected' : ''}`;
 
-  const gridCardClass = `p-4 rounded-xl border ${
-    resolvedTheme === 'dark'
-      ? 'bg-zinc-900 border-zinc-700'
-      : 'bg-white border-gray-200'
-  }`;
-  // Keep the full touch target while letting the availability icon stand alone.
+  const gridCardClass = 'pos-card p-4';
+  // Keep the full touch target while letting the availability icon stand alone: shown = the kit ok green.
   const getAvailabilityToggleClass = (active: boolean) =>
-    `inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-amber-500 ${
-      active
-        ? resolvedTheme === 'dark' ? 'text-green-400 active:bg-zinc-800' : 'text-green-700 active:bg-gray-100'
-        : resolvedTheme === 'dark' ? 'text-zinc-400 active:bg-zinc-800' : 'text-gray-600 active:bg-gray-100'
+    `inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 active:bg-(--pos-s-surface-2) focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-(--pos-s-fg) ${
+      active ? 'text-(--pos-s-ok)' : 'text-(--pos-s-muted)'
     }`;
   const refreshLabel = loading
     ? t('menu.refreshingMenu', 'Refreshing menu')
@@ -360,12 +348,14 @@ export const MenuManagementPage: React.FC = () => {
     <motion.div variants={pageMotionItem} className="flex flex-wrap gap-2 mb-6">
       <button
         onClick={() => setActiveTab('categories')}
+        aria-pressed={activeTab === 'categories'}
         className={getTabClass('categories')}
       >
         {t('menu.managementTabs.categories', 'Categories')}
       </button>
       <button
         onClick={() => setActiveTab('subcategories')}
+        aria-pressed={activeTab === 'subcategories'}
         className={getTabClass('subcategories')}
       >
         {/* Historical data model: the 'subcategories' tab/table actually stores menu items.
@@ -374,12 +364,14 @@ export const MenuManagementPage: React.FC = () => {
       </button>
       <button
         onClick={() => setActiveTab('ingredients')}
+        aria-pressed={activeTab === 'ingredients'}
         className={getTabClass('ingredients')}
       >
         {t('menu.managementTabs.ingredients', 'Ingredients')}
       </button>
       <button
         onClick={() => setActiveTab('offers')}
+        aria-pressed={activeTab === 'offers'}
         className={getTabClass('offers')}
       >
         {t('menu.managementTabs.offers', 'Offers')}
@@ -390,19 +382,13 @@ export const MenuManagementPage: React.FC = () => {
   const renderSearchBar = () => (
     <motion.div variants={pageMotionItem} className="mb-6">
       <div className="relative">
-        <Search className={`absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 ${
-          resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-        }`} />
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-(--pos-s-muted)" />
         <input
           type="text"
           placeholder={t('menu.searchPlaceholder')}
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
-          className={`w-full pl-10 pr-4 py-2 rounded-2xl border ${
-            resolvedTheme === 'dark'
-              ? 'bg-zinc-900 border-white text-white placeholder-zinc-400'
-              : 'bg-gray-100 border-white text-gray-900 placeholder-gray-500'
-          } focus:outline-hidden focus:ring-2 focus:ring-white/70`}
+          className="min-h-[48px] w-full rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) pl-10 pr-4 text-(--pos-s-fg) outline-hidden transition-colors placeholder:text-zinc-400 focus:border-(--pos-s-yellow) dark:placeholder:text-zinc-500"
         />
       </div>
     </motion.div>
@@ -414,11 +400,12 @@ export const MenuManagementPage: React.FC = () => {
         <motion.div
           key={category.id}
           variants={pageMotionItem}
-          className={`${gridCardClass} ${!category.is_active ? 'opacity-60 grayscale' : ''}`}
+          className={gridCardClass}
         >
-          <div className="flex items-center justify-between">
+          {/* The fade sits inside: the card's entrance animation owns its opacity. */}
+          <div className={`flex items-center justify-between ${!category.is_active ? 'opacity-60 grayscale' : ''}`}>
             <div>
-              <h3 className={`font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+              <h3 className="font-semibold text-(--pos-s-fg)">
                 {(language === 'el'
                   ? (category.name_el || category.name_en || category.name)
                   : (category.name_en || category.name_el || category.name)
@@ -445,14 +432,15 @@ export const MenuManagementPage: React.FC = () => {
         <motion.div
           key={item.id}
           variants={pageMotionItem}
-          className={`${gridCardClass} ${!item.is_available ? 'opacity-60 grayscale' : ''}`}
+          className={gridCardClass}
         >
-          <div className="flex items-start justify-between mb-2">
+          {/* The fade sits inside: the card's entrance animation owns its opacity. */}
+          <div className={`flex items-start justify-between mb-2 ${!item.is_available ? 'opacity-60 grayscale' : ''}`}>
             <div className="flex-1">
-              <h3 className={`font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+              <h3 className="font-semibold text-(--pos-s-fg)">
                 {item.name}
               </h3>
-              <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
+              <p className="text-sm text-(--pos-s-muted)">
                 {renderMenuItemPrice(item)}
               </p>
             </div>
@@ -476,9 +464,10 @@ export const MenuManagementPage: React.FC = () => {
         <motion.div
           key={ingredient.id}
           variants={pageMotionItem}
-          className={`${gridCardClass} ${!ingredient.is_available ? 'opacity-60 grayscale' : ''}`}
+          className={gridCardClass}
         >
-          <div className="flex items-start justify-between mb-2">
+          {/* The fade sits inside: the card's entrance animation owns its opacity. */}
+          <div className={`flex items-start justify-between mb-2 ${!ingredient.is_available ? 'opacity-60 grayscale' : ''}`}>
             <div className="flex-1">
               <div className="flex items-center gap-2">
                 {ingredient.item_color && (
@@ -487,12 +476,12 @@ export const MenuManagementPage: React.FC = () => {
                     style={{ backgroundColor: ingredient.item_color }}
                   />
                 )}
-                <h3 className={`font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+                <h3 className="font-semibold text-(--pos-s-fg)">
                   {ingredient.name || t('menu.unnamed', 'Unnamed')}
                 </h3>
               </div>
               {ingredient.price != null && ingredient.price > 0 && (
-                <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
+                <p className="text-sm text-(--pos-s-muted)">
                   {formatCurrency(ingredient.price, undefined, language)}
                 </p>
               )}
@@ -524,28 +513,14 @@ export const MenuManagementPage: React.FC = () => {
           data-menu-offers-empty
           className="flex justify-center py-12"
         >
-          <div
-            className={`flex max-w-md flex-col items-center gap-3 rounded-2xl border px-8 py-10 text-center backdrop-blur-md ${
-              resolvedTheme === 'dark'
-                ? 'border-white/10 bg-white/5'
-                : 'border-black/10 bg-black/5'
-            }`}
-          >
-            <span
-              className={`inline-flex h-14 w-14 items-center justify-center rounded-2xl border ${
-                resolvedTheme === 'dark'
-                  ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200'
-                  : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300'
-              }`}
-            >
-              <BadgePercent className="w-7 h-7" />
-            </span>
-            <h3 className={`text-lg font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+          <div className="flex max-w-md flex-col items-center gap-3 rounded-2xl border border-dashed border-zinc-400 px-8 py-10 text-center dark:border-zinc-600">
+            <BadgePercent className="h-10 w-10 text-(--pos-s-muted)" aria-hidden="true" />
+            <h3 className="text-lg font-semibold text-(--pos-s-fg)">
               {isSearching
                 ? t('menu.offersEmpty.searchTitle', 'No offers match the search')
                 : t('menu.offersEmpty.title', 'No offers configured')}
             </h3>
-            <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
+            <p className="text-sm text-(--pos-s-muted)">
               {isSearching
                 ? t('menu.offersEmpty.searchSubtitle', 'Clear the search or try another term')
                 : t('menu.offersEmpty.subtitle', 'Create offers in the admin dashboard or refresh after syncing.')}
@@ -554,11 +529,7 @@ export const MenuManagementPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setSearchTerm('')}
-                className={`mt-1 inline-flex min-h-touch items-center justify-center gap-2 rounded-2xl border px-5 transition active:scale-95 ${
-                  resolvedTheme === 'dark'
-                    ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)'
-                    : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700 active:bg-(--pos-s-surface-2)'
-                }`}
+                className="pos-solid-btn pos-solid-btn--sm mt-1"
               >
                 {t('menu.offersEmpty.clearSearch', 'Clear search')}
               </button>
@@ -573,15 +544,16 @@ export const MenuManagementPage: React.FC = () => {
         <motion.div
           key={offer.id}
           variants={pageMotionItem}
-          className={`${gridCardClass} ${!offer.is_active ? 'opacity-60 grayscale' : ''}`}
+          className={gridCardClass}
         >
-          <div className="flex items-start justify-between mb-2">
+          {/* The fade sits inside: the card's entrance animation owns its opacity. */}
+          <div className={`flex items-start justify-between mb-2 ${!offer.is_active ? 'opacity-60 grayscale' : ''}`}>
             <div className="flex-1">
-              <h3 className={`font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+              <h3 className="font-semibold text-(--pos-s-fg)">
                 {offer.name || t('menu.unnamed', 'Unnamed')}
               </h3>
               {offer.description && (
-                <p className={`mt-1 text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
+                <p className="mt-1 text-sm text-(--pos-s-muted)">
                   {offer.description}
                 </p>
               )}
@@ -605,10 +577,10 @@ export const MenuManagementPage: React.FC = () => {
     <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="p-6">
       <motion.div variants={pageMotionItem} className="mb-6 flex items-start justify-between gap-4">
         <div>
-          <h1 className={`text-3xl font-bold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+          <h1 className="text-3xl font-bold text-(--pos-s-fg)">
             {t('menu.header')}
           </h1>
-          <p className={`text-lg mt-2 ${resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'}`}>
+          <p className="mt-2 text-lg text-(--pos-s-muted)">
             {t('menu.description')}
           </p>
         </div>
@@ -616,7 +588,7 @@ export const MenuManagementPage: React.FC = () => {
           onClick={loadData}
           disabled={loading}
           aria-label={refreshLabel}
-          className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl border backdrop-blur-xl transition shadow-xs ${resolvedTheme === 'dark' ? 'border-(--pos-s-border) bg-white/10 text-amber-300 active:bg-white/20' : 'border-(--pos-s-border) bg-black/5 text-amber-600 active:bg-black/10'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+          className="pos-icon-btn h-12! w-12!"
         >
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
         </button>
@@ -627,7 +599,7 @@ export const MenuManagementPage: React.FC = () => {
 
       {loading ? (
         <motion.div variants={pageMotionItem} className="flex items-center justify-center py-12">
-          <RefreshCw className="w-8 h-8 animate-spin text-yellow-400" />
+          <RefreshCw className="h-8 w-8 animate-spin text-(--pos-s-muted)" />
         </motion.div>
       ) : (
         <>

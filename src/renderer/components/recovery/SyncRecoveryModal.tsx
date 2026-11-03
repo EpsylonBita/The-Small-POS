@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
-import { FolderOpen, RefreshCw } from 'lucide-react';
+import { FolderOpen, RefreshCw, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import {
@@ -302,17 +302,10 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
                 ref={closeButtonRef}
                 type="button"
                 onClick={onClose}
-                className="liquid-glass-modal-button min-h-touch min-w-touch rounded-2xl p-2 transition-transform active:scale-95"
+                className="liquid-glass-modal-close"
                 aria-label={t('common.actions.close', { defaultValue: 'Close' })}
               >
-                <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M6 18L18 6M6 6l12 12"
-                  />
-                </svg>
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
           </div>

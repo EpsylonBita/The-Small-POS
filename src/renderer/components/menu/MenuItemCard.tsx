@@ -179,13 +179,13 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
           <div className="flex gap-2">
             <button
               onClick={handleCancelQuickAdd}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all bg-(--pos-s-surface-2) border border-(--pos-s-border) active:bg-(--pos-s-border) text-(--pos-s-fg)"
+              className="pos-raised px-3 py-1.5 rounded-lg text-xs font-medium transition-all bg-(--pos-s-surface-2) border border-(--pos-s-border) active:bg-(--pos-s-border) text-(--pos-s-fg)"
             >
               {t('common.actions.cancel')}
             </button>
             <button
               onClick={handleQuickAdd}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-(--pos-s-yellow) active:bg-yellow-500 text-black transition-all"
+              className="pos-raised pos-raised--yellow px-3 py-1.5 rounded-lg text-xs font-medium bg-(--pos-s-yellow) active:bg-yellow-500 text-black transition-all"
             >
               {t('common.actions.add')} ({quickQuantity})
             </button>

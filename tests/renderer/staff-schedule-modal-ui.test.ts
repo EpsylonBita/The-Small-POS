@@ -14,10 +14,11 @@ const loadLocale = (language: string) =>
 test('add-shift modal is a bounded flex column that fits the viewport below the title bar', () => {
   // The card is a height-capped flex column that clips overflow, so header/body/footer
   // are laid out independently instead of the whole card scrolling as one unit.
+  // Founder 01/11: the shared glass shell, sized to its content (no empty band) and capped by the viewport.
   assert.match(
     viewSource,
-    /relative flex h-\[calc\(100vh-3\.5rem\)\] max-h-\[calc\(100vh-3\.5rem\)\] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border/,
-    'modal card should have a definite viewport-bounded flex height with hidden overflow',
+    /relative flex max-h-\[calc\(100vh-3\.5rem\)\] w-full max-w-3xl flex-col overflow-hidden \$\{modalPanelClass\}/,
+    'modal card should be a viewport-capped flex column with hidden overflow',
   );
   // The overlay leaves room for the fixed 32px (h-8) CustomTitleBar at the top.
   assert.match(
@@ -43,16 +44,16 @@ test('staff schedule modals portal outside the page container and blur the app b
 
 test('add-shift modal keeps a scrollable body and a non-scrolling footer for Cancel/Create', () => {
   // Scrollable body.
-  assert.match(viewSource, /flex-1 min-h-0 overflow-y-auto scrollbar-hide space-y-4 p-5 md:p-6/);
+  assert.match(viewSource, /flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto scrollbar-hide p-5 md:p-6/);
   // Footer stays out of the scroll region (shrink-0 + top divider) so the actions stay visible.
   assert.match(
     viewSource,
-    /flex items-center justify-end gap-3 shrink-0 border-t \$\{isDark \? 'border-zinc-800' : 'border-gray-200'\} p-5 md:p-6/,
+    /flex items-center justify-end gap-3 shrink-0 border-t border-\(--modal-glass-line\) p-5 md:p-6/,
   );
   // Header is also pinned (non-scrolling) so the close button stays visible.
   assert.match(
     viewSource,
-    /flex items-start justify-between gap-3 shrink-0 border-b \$\{isDark \? 'border-zinc-800' : 'border-gray-200'\} p-5 md:p-6/,
+    /flex items-start justify-between gap-3 shrink-0 border-b border-\(--modal-glass-line\) p-5 md:p-6/,
   );
 });
 

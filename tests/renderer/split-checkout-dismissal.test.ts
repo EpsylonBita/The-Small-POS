@@ -544,12 +544,34 @@ test('SplitPaymentModal blocks every terminal-card entry point during reconcilia
     source,
     // 16/09/2026: the same guard now also refuses money the platform is
     // holding, so a prepaid/platform-rider-COD order cannot be charged here
-    // either. Both locks, one condition.
-    /const handleTerminalCardPayment = useCallback\(async \(portionId: string\) => \{\s*if \(isReconciliationPending \|\| platformHeld\) return;/,
+    // either. Both locks, one condition. Since remote support the handler runs
+    // inside supportPayment.run (the support critical fence), and the guard is
+    // still its first statement.
+    /const handleTerminalCardPayment = useCallback\(async \(portionId: string\) => supportPayment\.run\(async \(\) => \{\s*if \(isReconciliationPending \|\| platformHeld\) return;/,
   );
   assert.match(
     source,
     /const locked = portion\.status !== 'draft' \|\| isProcessing \|\| isTerminalChargeInFlight \|\| isReconciliationPending \|\| platformHeld;/,
   );
   assert.match(source, /inert=\{isReconciliationPending \? true : undefined\}/);
+});
+
+// Founder 01/11/2026 («Τίποτα»; «όταν είναι παραγγελία για τραπέζι εννοείται πως μπορεί να πληρωθεί μετά»): Split
+// opens a counter order on its cart and saves it only with the first portion; a table order is still saved to its
+// table first and paid later. A split on a cart closed with nothing paid goes back to the menu's payment window.
+test('Split opens on the cart for counter orders only, and its back-out leaves nothing', () => {
+  const dashboard = rendererSource('components', 'OrderDashboard.tsx');
+  assert.match(
+    dashboard,
+    /onSplitCheckout=\{orderType !== "dine-in" && selectedOrderType !== "dine-in" && !selectedTable && !tableNumber\?\.trim\(\)\s*\?\s*handleSplitCheckoutStart\s*:\s*undefined\}/,
+  );
+  assert.match(
+    dashboard,
+    /if \(closingSplitPayment\.draftReference && !closingSplitPayment\.orderId\) \{[\s\S]*?\.checkoutDirectSale\(closingSplitPayment\.draftReference\)[\s\S]*?if \(held === undefined\) \{[\s\S]*?return;\s*\}\s*if \(held\) \{[\s\S]*?return;\s*\}\s*setSplitPaymentData\(null\);[\s\S]*?await session\?\.backOut\(\);\s*return;\s*\}/,
+    'a card charged for the checkout and not saved, or not known, keeps the split open; only a free checkout backs out',
+  );
+  assert.match(dashboard, /initialPayment: initialPayment \?\? splitFirstPayment,/);
+  assert.match(dashboard, /\.\.\.\(splitFirstPayment \? \{ checkoutKind: "split_first_portion" \} : \{\}\)/);
+  const menu = rendererSource('components', 'modals', 'MenuModal.tsx');
+  assert.match(menu, /if \(onSplitCheckout && admitted && admitted\.submission\.is_ghost !== true\) \{[\s\S]*?commit: async \(firstPayment\) => \{\s*const saved = await handlePaymentComplete\(paymentData, firstPayment\);[\s\S]*?backOut: async \(\) => \{\s*if \(!await cancelCheckoutPaymentAdmission\(\{ keepLoyaltyReservation: true \}\)\) return;\s*setSplitTipToRestore\(tipSelection\);\s*setShowPaymentModal\(true\);/);
 });

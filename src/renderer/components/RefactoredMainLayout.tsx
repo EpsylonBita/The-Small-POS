@@ -33,8 +33,10 @@ import {
   type RepairIntent,
 } from '../features/repairs/navigation';
 
-const ExpenseModal = lazy(() => import('./modals/ExpenseModal').then(m => ({ default: m.ExpenseModal })));
-const ZReportModal = lazy(() => import('./modals/ZReportModal'));
+const loadExpenseModal = () => import('./modals/ExpenseModal');
+const ExpenseModal = lazy(() => loadExpenseModal().then(m => ({ default: m.ExpenseModal })));
+const loadZReportModal = () => import('./modals/ZReportModal');
+const ZReportModal = lazy(loadZReportModal);
 
 // Only load the selected page. Import verticals directly so opening tables does
 // not also load the hotel, salon and retail screens from the shared barrel.
@@ -763,11 +765,11 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       </UtilityRailExpensesSlot>
 
       {/* Expenses Modal */}
-      <DeferredModal isOpen={showExpenses} onClose={() => setShowExpenses(false)}>
+      <DeferredModal isOpen={showExpenses} onClose={() => setShowExpenses(false)} preload={loadExpenseModal}>
         <ExpenseModal isOpen={showExpenses} onClose={() => setShowExpenses(false)} />
       </DeferredModal>
       {/* Z Report Modal */}
-      <DeferredModal isOpen={showZReport} onClose={() => setShowZReport(false)}>
+      <DeferredModal isOpen={showZReport} onClose={() => setShowZReport(false)} preload={loadZReportModal}>
         <ZReportModal
           isOpen={showZReport}
           onClose={() => setShowZReport(false)}

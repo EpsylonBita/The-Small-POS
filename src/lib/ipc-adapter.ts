@@ -1133,7 +1133,10 @@ export interface RecordPaymentParams {
   order_id?: string;
   method: "cash" | "card" | "room_charge" | "twint";
   payment_method?: "cash" | "card" | "room_charge" | "twint";
-  metadata?: { provider: 'twint'; confirmation: 'cashier'; confirmation_action: 'confirm' | 'skip'; qr_mode: 'static_qr_manual' };
+  /** TWINT's cashier confirmation, or a manual card's admission (founder 01/11/2026). */
+  metadata?:
+    | { provider: 'twint'; confirmation: 'cashier'; confirmation_action: 'confirm' | 'skip'; qr_mode: 'static_qr_manual' }
+    | { admission_basis: 'live' | 'cached'; admission_checked_at: string };
   amount: number;
   amount_cents?: number;
   currency?: string;
@@ -1446,6 +1449,12 @@ export interface OrderEditSettlementPreview {
   /** The refund due when `requiredAction` is `refund`: what the local rows
    * hold beyond the new total (never proven-but-missing money). */
   refundAmount?: number;
+  /** Exact difference from native; optional for older native replies. */
+  requiredCollectCents?: number;
+  requiredRefundCents?: number;
+  allowedMethods?: Array<"cash" | "card">;
+  /** Local savepoint proof refused these tenders before money was confirmed. */
+  methodRefusals?: Partial<Record<"cash" | "card", string>>;
   delta: number;
   paymentStatus: string;
   paymentMethod: string;
@@ -1613,6 +1622,8 @@ export interface ModuleSyncResponse {
 export interface EcrPaymentOptions {
   deviceId?: string;
   orderId?: string;
+  /** A split's first portion of a new order: the SALE is bound to its checkout until the order exists. */
+  checkoutRequestId?: string;
   tipAmount?: number;
   currency?: string;
   reference?: string;
@@ -2616,6 +2627,8 @@ export interface PlatformBridge {
     queryTransactions(filters: any): Promise<any[]>;
     getTransactionStats(filters?: any): Promise<any>;
     getTransactionForOrder(orderId: string): Promise<any>;
+    /** The card SALE of a new-order checkout: none, the approved original to record, or one to reconcile. */
+    checkoutDirectSale(checkoutRequestId: string): Promise<any>;
     testConnection(deviceId: string): Promise<IpcResult>;
     testPrint(deviceId: string): Promise<IpcResult>;
     fiscalPrint(orderId: string): Promise<IpcResult>;
@@ -3235,6 +3248,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "ecr:query-transactions": "ecr.queryTransactions",
   "ecr:get-transaction-stats": "ecr.getTransactionStats",
   "ecr:get-transaction-for-order": "ecr.getTransactionForOrder",
+  "ecr:checkout-direct-sale": "ecr.checkoutDirectSale",
   "ecr:test-connection": "ecr.testConnection",
   "ecr:test-print": "ecr.testPrint",
   "ecr:fiscal-print": "ecr.fiscalPrint",
@@ -3410,6 +3424,17 @@ export const CHANNEL_MAP: Record<string, string> = {
 // ============================================================================
 // TauriBridge Implementation
 // ============================================================================
+
+export type SupportIpcCommand =
+  | "support_banner_state" | "support_request_code" | "support_cancel_code"
+  | "support_end" | "support_extend" | "support_doorbell"
+  | "support_payment_open" | "support_payment_closed"
+  | "support_consent_fetch" | "support_consent_accept" | "support_consent_decline";
+
+/** Native support owns policy, identity, transport and offline notices; arg0 is the IPC payload. */
+export function supportIpc(command: SupportIpcCommand, payload?: Record<string, unknown>): Promise<unknown> {
+  return payload === undefined ? getBridge().invoke(command) : getBridge().invoke(command, payload);
+}
 
 /**
  * Tauri implementation of PlatformBridge.
@@ -4441,6 +4466,8 @@ export class TauriBridge implements PlatformBridge {
     getTransactionStats: (f?: any) => this.inv("ecr:get-transaction-stats", f),
     getTransactionForOrder: (oid: string) =>
       this.inv("ecr:get-transaction-for-order", oid),
+    checkoutDirectSale: (checkoutRequestId: string) =>
+      this.inv("ecr:checkout-direct-sale", checkoutRequestId),
     testConnection: (did: string) => this.inv("ecr:test-connection", did),
     testPrint: (did: string) => this.inv("ecr:test-print", did),
     fiscalPrint: (oid: string) => this.inv("ecr:fiscal-print", oid),

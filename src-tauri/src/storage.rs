@@ -123,6 +123,8 @@ const ALL_KEYS: &[&str] = &[
     KEY_ADMIN_URL,
     KEY_TERMINAL_ID,
     KEY_API_KEY,
+    ROTATION_OLD,
+    ROTATION_HASHES,
     KEY_BRANCH_ID,
     KEY_ORG_ID,
     KEY_BUSINESS_TYPE,
@@ -360,7 +362,7 @@ pub(crate) fn delete_lan_pair_credential(key: &str) -> Result<(), String> {
 /// a fake see the existing real-OS-keyring behaviour (namespaced to
 /// `the-small-pos-test`).
 pub fn get_credential(key: &str) -> Option<String> {
-    if is_lan_pair_private_key(key) || is_staff_pin_vault_key(key) {
+    if is_lan_pair_private_key(key) || is_staff_pin_vault_key(key) || is_rotation_slot(key) {
         return None;
     }
     match get_credential_strict(key) {
@@ -376,6 +378,123 @@ pub fn get_credential(key: &str) -> Option<String> {
 /// `NoEntry` becomes `Ok(None)`; backend/entry errors remain distinguishable
 /// so callers never rotate a key merely because the credential store failed.
 pub(crate) fn get_credential_strict(key: &str) -> Result<Option<Zeroizing<String>>, String> {
+    let value = read_credential_raw(key);
+    if key == KEY_API_KEY {
+        // Readers never wait on a switch. Until confirmation, either verified
+        // key is usable; a failed/torn primary write falls back to the backup.
+        if let Some(hashes) = rotation_marker() {
+            if value
+                .as_ref()
+                .ok()
+                .and_then(|v| v.as_ref())
+                .is_some_and(|v| hashes.contains(&crate::support::key_rotation::hash(v)))
+            {
+                return value;
+            }
+            let old = read_credential_raw(ROTATION_OLD)?;
+            if old
+                .as_ref()
+                .is_some_and(|v| hashes.first() == Some(&crate::support::key_rotation::hash(v)))
+            {
+                return Ok(old);
+            }
+            // A marker write can itself fail read-back before the primary
+            // changes. Such metadata must not hide the still-current slot.
+            return value;
+        }
+    }
+    value
+}
+
+const ROTATION_OLD: &str = "pos_support_rotation_old";
+const ROTATION_HASHES: &str = "pos_support_rotation_hashes";
+
+/// The rotation hash marker as last read from the keyring, so a normal API-key
+/// read costs one keyring read rather than two (keyring calls on hot paths are
+/// the window-freeze class of 20/10). `marker` is `None` until read; every raw
+/// write or delete of the marker, whichever path makes it (rotation, pairing,
+/// reset), clears it and bumps `generation`, so a read that raced a write never
+/// stores the stale answer. A new process starts unknown.
+#[derive(Default)]
+struct MarkerCache {
+    generation: u64,
+    marker: Option<Option<Vec<String>>>,
+}
+fn marker_cache() -> std::sync::Arc<std::sync::Mutex<MarkerCache>> {
+    #[cfg(test)]
+    if crate::tests::fake_keyring::is_installed() {
+        thread_local! {
+            static CACHE: std::sync::Arc<std::sync::Mutex<MarkerCache>> = Default::default();
+        }
+        return CACHE.with(Clone::clone);
+    }
+    static CACHE: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<MarkerCache>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default).clone()
+}
+fn rotation_marker() -> Option<Vec<String>> {
+    let cache = marker_cache();
+    let generation = {
+        let cache = cache.lock().ok()?;
+        if let Some(marker) = &cache.marker {
+            return marker.clone();
+        }
+        cache.generation
+    };
+    let marker = match read_credential_raw(ROTATION_HASHES) {
+        Ok(Some(raw)) => serde_json::from_str::<Vec<String>>(&raw)
+            .ok()
+            .filter(|hashes| hashes.len() == 2),
+        Ok(None) => None,
+        // A backend error is not an answer: read again next time.
+        Err(_) => return None,
+    };
+    if let Ok(mut cache) = cache.lock() {
+        if cache.generation == generation {
+            cache.marker = Some(marker.clone());
+        }
+    }
+    marker
+}
+fn invalidate_rotation_marker() {
+    if let Ok(mut cache) = marker_cache().lock() {
+        cache.generation = cache.generation.wrapping_add(1);
+        cache.marker = None;
+    }
+}
+#[cfg(test)]
+pub(crate) fn rotation_marker_cached_for_test() -> Option<bool> {
+    marker_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.marker.as_ref().map(Option::is_some))
+}
+#[cfg(test)]
+pub(crate) fn restart_rotation_marker_cache_for_test() {
+    if let Ok(mut cache) = marker_cache().lock() {
+        *cache = MarkerCache::default();
+    }
+}
+fn is_rotation_slot(key: &str) -> bool {
+    matches!(
+        key.trim().to_ascii_lowercase().as_str(),
+        ROTATION_OLD | ROTATION_HASHES
+    )
+}
+fn api_key_write_lock() -> std::sync::Arc<std::sync::Mutex<()>> {
+    #[cfg(test)]
+    if crate::tests::fake_keyring::is_installed() {
+        thread_local! {
+            static LOCK: std::sync::Arc<std::sync::Mutex<()>> = Default::default();
+        }
+        return LOCK.with(Clone::clone);
+    }
+    static LOCK: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<()>>> =
+        std::sync::OnceLock::new();
+    LOCK.get_or_init(Default::default).clone()
+}
+
+fn read_credential_raw(key: &str) -> Result<Option<Zeroizing<String>>, String> {
     #[cfg(test)]
     if crate::tests::fake_keyring::is_installed() {
         return crate::tests::fake_keyring::get_strict(key).map(|value| value.map(Zeroizing::new));
@@ -390,11 +509,102 @@ pub(crate) fn get_credential_strict(key: &str) -> Result<Option<Zeroizing<String
     }
 }
 
+/// Native rotation receiver only. The backup is durable and verified before
+/// the primary changes. Hash markers let concurrent readers reject a torn write.
+pub(crate) fn install_rotated_api_key(
+    old: &str,
+    new: &str,
+    permit: &crate::support::critical_op::SupportPermit,
+) -> Result<(), String> {
+    let lock = api_key_write_lock();
+    let _switch = lock.try_lock().map_err(|_| "KEY_ROTATION_BUSY")?;
+    let current = get_credential_strict(KEY_API_KEY)?.ok_or("KEY_ROTATION_READ_FAILED")?;
+    if crate::support::key_rotation::hash(&current) != crate::support::key_rotation::hash(old) {
+        return Err("KEY_ROTATION_CONFLICT".into());
+    }
+    if permit.is_cancelled() {
+        return Err("KEY_ROTATION_DEFERRED".into());
+    }
+    set_credential_uncoordinated(ROTATION_OLD, old).map_err(|_| "KEY_ROTATION_WRITE_FAILED")?;
+    if read_credential_raw(ROTATION_OLD)?
+        .as_ref()
+        .map(|v| crate::support::key_rotation::hash(v))
+        != Some(crate::support::key_rotation::hash(old))
+    {
+        return Err("KEY_ROTATION_READ_FAILED".into());
+    }
+    if permit.is_cancelled() {
+        return Err("KEY_ROTATION_DEFERRED".into());
+    }
+    let hashes = serde_json::json!([
+        crate::support::key_rotation::hash(old),
+        crate::support::key_rotation::hash(new)
+    ])
+    .to_string();
+    set_credential_uncoordinated(ROTATION_HASHES, &hashes)
+        .map_err(|_| "KEY_ROTATION_WRITE_FAILED")?;
+    if read_credential_raw(ROTATION_HASHES)?
+        .as_deref()
+        .map(String::as_str)
+        != Some(hashes.as_str())
+    {
+        return Err("KEY_ROTATION_READ_FAILED".into());
+    }
+    if permit.is_cancelled() {
+        return Err("KEY_ROTATION_DEFERRED".into());
+    }
+    set_credential_raw(KEY_API_KEY, new).map_err(|_| "KEY_ROTATION_WRITE_FAILED")?;
+    // Read the actual slot, not the fallback accessor, before ever confirming.
+    if read_credential_raw(KEY_API_KEY)?
+        .as_ref()
+        .map(|v| crate::support::key_rotation::hash(v))
+        != Some(crate::support::key_rotation::hash(new))
+    {
+        return Err("KEY_ROTATION_READ_FAILED".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn rotation_alternate(presented: &str) -> Option<Zeroizing<String>> {
+    let hashes = read_credential_raw(ROTATION_HASHES).ok()??;
+    let hashes: Vec<String> = serde_json::from_str(&hashes).ok()?;
+    if !hashes.contains(&crate::support::key_rotation::hash(presented)) {
+        return None;
+    }
+    for slot in [KEY_API_KEY, ROTATION_OLD] {
+        let Some(key) = read_credential_raw(slot).ok()? else {
+            continue;
+        };
+        let hash = crate::support::key_rotation::hash(&key);
+        if hashes.contains(&hash) && hash != crate::support::key_rotation::hash(presented) {
+            return Some(key);
+        }
+    }
+    None
+}
+
+pub(crate) fn finish_api_key_rotation(expected_hash: &str) -> Result<(), String> {
+    let lock = api_key_write_lock();
+    let _switch = lock.try_lock().map_err(|_| "KEY_ROTATION_BUSY")?;
+    let current = read_credential_raw(KEY_API_KEY)?.ok_or("KEY_ROTATION_READ_FAILED")?;
+    if crate::support::key_rotation::hash(&current) != expected_hash {
+        return Err("KEY_ROTATION_CONFLICT".into());
+    }
+    // Keep non-secret hashes so a request dispatched with the old key just
+    // before confirmation can retry with the current key after a 401. Normal
+    // pairing/reset writes clear the marker under the same API-key lock.
+    delete_credential_uncoordinated(ROTATION_OLD)
+        .map_err(|_| "KEY_ROTATION_WRITE_FAILED".to_string())
+}
+
 /// Store a credential in the OS keyring.
 ///
 /// Honours an installed `tests::fake_keyring` under `#[cfg(test)]`
 /// (see [`get_credential`] for the rationale).
 pub fn set_credential(key: &str, value: &str) -> Result<(), String> {
+    if is_rotation_slot(key) {
+        return Err("KEY_ROTATION_NATIVE_ONLY".into());
+    }
     if is_lan_pair_private_key(key) {
         return Err("LAN_PAIR_NATIVE_ONLY".to_string());
     }
@@ -482,6 +692,25 @@ pub(crate) fn delete_repair_transition_journal() -> Result<(), String> {
 }
 
 fn set_credential_uncoordinated(key: &str, value: &str) -> Result<(), String> {
+    if key == KEY_API_KEY {
+        let lock = api_key_write_lock();
+        let _switch = lock.lock().map_err(|_| "KEY_ROTATION_BUSY")?;
+        // A pairing/reset owner replacing the credential invalidates a prior
+        // handover. It must never resurrect that handover's old key.
+        delete_credential_raw(ROTATION_HASHES)?;
+        delete_credential_raw(ROTATION_OLD)?;
+        return set_credential_raw(key, value);
+    }
+    set_credential_raw(key, value)
+}
+fn set_credential_raw(key: &str, value: &str) -> Result<(), String> {
+    let result = set_credential_raw_inner(key, value);
+    if key == ROTATION_HASHES {
+        invalidate_rotation_marker();
+    }
+    result
+}
+fn set_credential_raw_inner(key: &str, value: &str) -> Result<(), String> {
     #[cfg(test)]
     if crate::tests::fake_keyring::is_installed() {
         crate::tests::fake_keyring::set_checked(key, value)?;
@@ -498,6 +727,9 @@ fn set_credential_uncoordinated(key: &str, value: &str) -> Result<(), String> {
 ///
 /// Honours an installed `tests::fake_keyring` under `#[cfg(test)]`.
 pub fn delete_credential(key: &str) -> Result<(), String> {
+    if is_rotation_slot(key) {
+        return Err("KEY_ROTATION_NATIVE_ONLY".into());
+    }
     if is_lan_pair_private_key(key) {
         return Err("LAN_PAIR_NATIVE_ONLY".to_string());
     }
@@ -565,6 +797,23 @@ pub(crate) fn delete_repair_actor_attestation() -> Result<(), String> {
 }
 
 fn delete_credential_uncoordinated(key: &str) -> Result<(), String> {
+    if key == KEY_API_KEY {
+        let lock = api_key_write_lock();
+        let _switch = lock.lock().map_err(|_| "KEY_ROTATION_BUSY")?;
+        delete_credential_raw(ROTATION_HASHES)?;
+        delete_credential_raw(ROTATION_OLD)?;
+        return delete_credential_raw(key);
+    }
+    delete_credential_raw(key)
+}
+fn delete_credential_raw(key: &str) -> Result<(), String> {
+    let result = delete_credential_raw_inner(key);
+    if key == ROTATION_HASHES {
+        invalidate_rotation_marker();
+    }
+    result
+}
+fn delete_credential_raw_inner(key: &str) -> Result<(), String> {
     #[cfg(test)]
     if crate::tests::fake_keyring::is_installed() {
         crate::tests::fake_keyring::delete_checked(key)?;

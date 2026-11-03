@@ -105,7 +105,8 @@ test('StaffShiftModal renders checkout add actions as yellow icon-only buttons',
   // Yellow icon-only action button. Touch-first: no hover-era class on this touch POS.
   assert.match(
     modal,
-    /const checkoutActionButtonClass = 'flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-yellow-400 text-black[^']*'/,
+    // The kit yellow primary (yellow fill, dark words), icon only, 48 px (founder 01/11).
+    /const checkoutActionButtonClass = 'pos-solid-btn pos-solid-btn--primary h-12 w-12 shrink-0 p-0'/,
   );
   assert.doesNotMatch(
     modal,
@@ -143,87 +144,80 @@ test('StaffShiftModal gates staff QR check-in behind an acquired and active ERGA
   assert.match(modal, /const ERGANI_PLUGIN_ID = 'ergani_digital_schedule'/);
   assert.match(modal, /posApiGet<\{ integrations\?: PosIntegrationPayload\[\] \}>\(\s*`\/pos\/integrations\?provider=\$\{ERGANI_PLUGIN_ID\}`/);
   assert.match(modal, /integration\.is_purchased === true &&\s*integration\.is_enabled === true &&\s*integration\.is_active === true/);
-  assert.match(modal, /\{hasActiveErganiPlugin && \(\s*<div className="rounded-\[24px\][\s\S]*staffQrBadge/);
+  assert.match(modal, /\{hasActiveErganiPlugin && \(\s*<div className="pos-card p-4">[\s\S]*staffQrBadge/);
   assert.match(modal, /if \(!hasActiveErganiPlugin\) \{[\s\S]*qrRequiresErgani/);
 });
 
-test('StaffShiftModal renders staff QR action in yellow with black text', () => {
+// Founder 01/11 («δεν έχουμε διορθώσει αυτά τα modals»): the check-in steps moved to the kit. The intent of
+// the older guards stays: one yellow primary with dark words, no hover-era classes, standalone neutral icons,
+// a readable cashier-first warning, and no decorative fills.
+test('StaffShiftModal renders the staff QR action as the kit yellow primary', () => {
   const modal = source(staffShiftModalPath);
+  const css = source(path.join(projectRoot, 'src', 'renderer', 'styles', 'glassmorphism.css'));
 
-  assert.match(modal, /className="[^"]*bg-yellow-400[^"]*text-black/);
-  assert.doesNotMatch(
+  assert.match(
     modal,
-    /className="[^"]*bg-yellow-400[^"]*hover:bg-yellow-300/,
-    'staff QR action must not carry a hover-era class on this touch POS',
+    /disabled=\{resolvingStaffQr \|\| staffQrCode\.trim\(\)\.length === 0\}\s*className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary"/,
   );
+  assert.match(css, /\.pos-solid-btn--primary \{ background: var\(--pos-s-yellow\); border-color: var\(--pos-s-yellow\); box-shadow: var\(--pos-s-depth-yellow\); color: var\(--pos-s-yellow-fg\); \}/);
+  assert.doesNotMatch(modal, /className="[^"]*bg-yellow-400[^"]*hover:bg-yellow-300/, 'no hover-era class on this touch POS');
   assert.match(modal, /t\('modals\.staffShift\.resolveQr', 'Scan QR'\)/);
   assert.doesNotMatch(modal, /bg-cyan-600 px-5 py-3 text-sm font-bold text-white/);
 });
 
-test('StaffShiftModal keeps check-in user icons standalone and PIN action surfaces unfilled', () => {
+test('StaffShiftModal keeps check-in person icons standalone and neutral', () => {
   const modal = source(staffShiftModalPath);
   const nonTransparentBackground = /(?:^|\s)(?:dark:)?(?:hover:)?bg-(?!transparent\b)/;
   const buttonSurfaces = [...modal.matchAll(/buttonSurface:\s*'([^']+)'/g)].map((match) => match[1]);
-
-  assert.ok(buttonSurfaces.length >= 2, 'expected a button surface for the fallback + cashier presentations');
 
   for (const value of buttonSurfaces) {
     assert.doesNotMatch(value, nonTransparentBackground);
   }
 
   assert.doesNotMatch(modal, /iconSurface:/, 'decorative icon-tile presentation tokens must be removed');
-  assert.match(modal, /<User className=\{`h-8 w-8 shrink-0/);
+  assert.match(modal, /<User className="h-7 w-7 shrink-0 text-\(--pos-s-muted\)" strokeWidth=\{1\.8\} \/>/);
+  assert.doesNotMatch(modal, /activePresentation|primaryPresentation|summaryPresentation|selectedRolePresentation/);
 });
 
-test('StaffShiftModal renders PIN step without the current-role wrapper or ready chip', () => {
+test('StaffShiftModal says each check-in fact once: the chosen person is one line, the step help appears once', () => {
   const modal = source(staffShiftModalPath);
+  const pinStart = modal.indexOf('data-testid="staff-pin-section"');
+  const pinEnd = modal.indexOf('data-testid="staff-role-section"', pinStart);
+  const pinStep = modal.slice(pinStart, pinEnd);
 
-  assert.doesNotMatch(
-    modal,
-    /rounded-\[24px\] border p-4 \$\{summaryPresentation\.accentBorder\} \$\{summaryPresentation\.accentSurface\}/,
-  );
-  // The selected-summary current-role row still exists (proving currentRoleLabel renders in the summary).
-  // Round 313 follow-up compacted this row (mt-5 gap-4 -> mt-3 gap-3), so match it spacing-tolerantly.
-  assert.match(
-    modal,
-    /<div className="mt-\d+ flex items-center gap-\d+">[\s\S]*?currentRoleLabel/,
-  );
-  assert.match(
-    modal,
-    /renderSelectedStaffSummary\(\{\s*helper: t\('modals\.staffShift\.enterPinHelper'\),\s*\}\)/,
-  );
+  assert.match(pinStep, /\{renderSelectedStaffSummary\(\)\}/);
+  assert.equal((pinStep.match(/t\('modals\.staffShift\.enterPinHelper'\)/g) ?? []).length, 1);
+  // The summary keeps the role for screen readers under its label, and no longer repeats the step help.
+  assert.match(modal, /<span className="sr-only">\{t\('modals\.staffShift\.currentRoleLabel'\)\}: <\/span>/);
+  assert.doesNotMatch(modal, /renderSelectedStaffSummary\(\{\s*helper:/);
+  // The cash step shows the chosen role once (in the summary line), not again as a badge.
+  assert.match(modal, /\{renderSelectedStaffSummary\(\{ highlightedRoleName: roleType \}\)\}/);
 });
 
-test('StaffShiftModal renders PIN continue action in yellow with black text', () => {
+test('StaffShiftModal renders the PIN continue action as the kit yellow primary', () => {
   const modal = source(staffShiftModalPath);
+  const footerStart = modal.indexOf('const renderCheckInFooter = () => {');
+  const footer = modal.slice(footerStart, modal.indexOf('// Keyboard Shortcuts', footerStart));
 
   assert.match(
-    modal,
-    /className="[^"]*bg-yellow-400[^"]*text-black[^"]*sm:min-w-\[220px\]"/,
+    footer,
+    /disabled=\{loading \|\| enteredPin\.length !== 4\}\s*className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary sm:min-w-\[220px\]"/,
   );
-  assert.doesNotMatch(
-    modal,
-    /className="[^"]*bg-yellow-400[^"]*hover:bg-yellow-300[^"]*sm:min-w-\[220px\]"/,
-    'PIN continue action must not carry a hover-era class on this touch POS',
-  );
-  assert.doesNotMatch(
-    modal,
-    /bg-blue-600 px-6 py-3\.5 text-base font-bold text-white/,
-  );
+  assert.doesNotMatch(footer, /hover:/, 'no hover-era class on this touch POS');
+  assert.doesNotMatch(modal, /bg-blue-600 px-6 py-3\.5 text-base font-bold text-white/);
 });
 
-test('ProgressStepper renders check-in step dots without filled shells', () => {
+test('ProgressStepper is the kit stepper: yellow current step, ticked done steps, no green, no pulse', () => {
   const stepper = source(progressStepperPath);
 
-  assert.match(stepper, /active:\s*\{[\s\S]*shell: 'bg-transparent dark:bg-transparent'/);
-  assert.match(stepper, /complete:\s*\{[\s\S]*shell: 'bg-transparent dark:bg-transparent'/);
-  assert.match(stepper, /error:\s*\{[\s\S]*shell: 'bg-transparent dark:bg-transparent'/);
-  assert.match(stepper, /case 'active':\s*return <Circle className="h-4 w-4" strokeWidth=\{2\.1\} \/>/);
-  assert.doesNotMatch(stepper, /bg-cyan-500\/\[0\.08\]|dark:bg-cyan-500\/10|bg-emerald-500\/\[0\.08\]|dark:bg-emerald-500\/10/);
-  assert.doesNotMatch(stepper, /rounded-full bg-current shadow-\[0_0_18px_currentColor\]/);
+  assert.match(stepper, /active:\s*\{\s*circle: 'border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)'/);
+  assert.match(stepper, /if \(status === 'complete'\) return <Check /);
+  assert.doesNotMatch(stepper, /emerald|green-|cyan-/);
+  assert.doesNotMatch(stepper, /repeat: Infinity/, 'no endlessly pulsing halo');
+  assert.match(stepper, /aria-current=\{step\.status === 'active' \? 'step' : undefined\}/);
 });
 
-test('StaffShiftModal renders cashier-first role gate with readable yellow semantic text', () => {
+test('StaffShiftModal renders the cashier-first role gate as a readable kit warning', () => {
   const modal = source(staffShiftModalPath);
   const cashierFirstFallbacks = [
     'The first check-in for this business day must be a cashier.',
@@ -233,9 +227,10 @@ test('StaffShiftModal renders cashier-first role gate with readable yellow seman
     'Locked until cashier starts',
   ];
 
+  // Kit warn notice: warn line + warn tint, words in the readable foreground colour.
   assert.match(
     modal,
-    /cashierFirstGateActive && \([\s\S]*border-\(--pos-s-warn\) bg-\(--pos-s-warn-bg\)[\s\S]*text-yellow-900[\s\S]*<AlertTriangle className="mt-0\.5 h-5 w-5 shrink-0 text-yellow-700 dark:text-yellow-300" \/>[\s\S]*<p className="text-yellow-800 dark:text-yellow-100">/,
+    /cashierFirstGateActive && \(\s*<div className="pos-notice pos-notice--warn mt-4 text-sm">\s*<AlertTriangle className="pos-notice__icon h-5 w-5" \/>/,
   );
   for (const fallback of cashierFirstFallbacks) {
     assert.doesNotMatch(modal, new RegExp(fallback.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
@@ -246,7 +241,6 @@ test('StaffShiftModal renders cashier-first role gate with readable yellow seman
   assert.match(modal, /t\('modals\.staffShift\.cashierFirstRoleLockedHelper'\)/);
   assert.match(modal, /t\('modals\.staffShift\.roleLockedUntilCashier'\)/);
   assert.doesNotMatch(modal, /text-amber-900[\s\S]*cashierFirstCheckInRequired/);
-  assert.doesNotMatch(modal, /text-amber-800\/90[\s\S]*cashierFirstCheckInHelper/);
 });
 
 test('cashier-first role gate copy exists in every POS locale and Greek is not English fallback', () => {
@@ -273,84 +267,41 @@ test('cashier-first role gate copy exists in every POS locale and Greek is not E
   }
 });
 
-test('StaffShiftModal renders role-selection chips as wrapperless text labels', () => {
+test('StaffShiftModal renders role choices as kit cards with plain primary/secondary words', () => {
+  const modal = source(staffShiftModalPath);
+  const roleStart = modal.indexOf('data-testid="staff-role-section"');
+  const roleStep = modal.slice(roleStart, modal.indexOf("if (checkInStep === 'enter-cash'", roleStart));
+
+  assert.match(roleStep, /className="pos-choice-card pos-choice-card--row active:bg-\(--pos-s-surface-2\)"/);
+  assert.match(roleStep, /<span className="text-sm text-\(--pos-s-muted\)">\s*\{role\.is_primary/);
+  assert.match(roleStep, /<span className="text-sm font-semibold text-\(--pos-s-warn\)">\s*\{t\('modals\.staffShift\.roleLockedUntilCashier'\)\}/);
+  assert.doesNotMatch(roleStep, /rolePresentation|badgeFilled|bg-amber-50/);
+});
+
+test('StaffShiftModal renders the cash-entry icon neutral, without a wrapper tile', () => {
   const modal = source(staffShiftModalPath);
 
-  assert.match(
-    modal,
-    /className=\{`text-xs font-semibold \$\{/,
-  );
-  assert.match(
-    modal,
-    /role\.is_primary \? rolePresentation\.accentText : rolePresentation\.iconColor/,
-  );
-  assert.match(
-    modal,
-    /<span className="text-xs font-semibold text-yellow-700 dark:text-yellow-200">[\s\S]*roleLockedUntilCashier/,
-  );
+  assert.match(modal, /<CashHandIcon\s+className="h-10 w-10 shrink-0 text-\(--pos-s-muted\)"\s*\/>/);
   assert.doesNotMatch(
     modal,
-    /inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold \$\{[\s\S]*role\.is_primary[\s\S]*rolePresentation\.badgeFilled/,
-  );
-  assert.doesNotMatch(
-    modal,
-    /inline-flex items-center rounded-full border border-amber-300\/80 bg-amber-50 px-3 py-1 text-xs font-semibold/,
+    /rounded-\[20px\] border \$\{selectedRolePresentation\.iconSurface\}[\s\S]*<CashHandIcon/,
   );
 });
 
-test('StaffShiftModal renders cash-entry currency-neutral icon without a wrapper', () => {
+test('StaffShiftModal lists staff on shift as kit rows; the row itself opens the shift', () => {
   const modal = source(staffShiftModalPath);
+  const listStart = modal.indexOf('data-testid="checkin-active-shifts"');
+  const list = modal.slice(listStart, modal.indexOf('data-testid="checkin-ready-staff"', listStart));
 
-  assert.match(
-    modal,
-    /<Banknote\s+className=\{`h-14 w-14 shrink-0 \$\{selectedRolePresentation\.iconColor\}`\}\s+strokeWidth=\{3\}\s+\/>/,
-  );
-  assert.doesNotMatch(
-    modal,
-    /className=\{`flex h-16 w-16 shrink-0 items-center justify-center rounded-\[20px\] border \$\{selectedRolePresentation\.iconSurface\}`\}[\s\S]*<Banknote className=\{`h-8 w-8 \$\{selectedRolePresentation\.iconColor\}`\} \/>/,
-  );
-});
-
-test('StaffShiftModal renders active shift cards with yellow card fill and standalone icons', () => {
-  const modal = source(staffShiftModalPath);
-
-  assert.match(
-    modal,
-    /border border-\(--pos-s-border\) bg-transparent px-3 py-1 text-xs font-semibold text-emerald-600 dark:border-zinc-700 dark:bg-transparent/,
-  );
-  assert.match(
-    modal,
-    /className=\{`w-full rounded-\[24px\] border p-4 text-left[\s\S]*\$\{activePresentation\.accentBorder\} \$\{activePresentation\.accentSurface\}`\}/,
-  );
-  assert.match(modal, /<User className=\{`h-8 w-8 shrink-0 \$\{activePresentation\.iconColor\}`\}/);
-  assert.doesNotMatch(modal, /bg-black\/45 dark:bg-black\/45 \$\{activePresentation\.accentBorder\}/);
-  assert.match(
-    modal,
-    /className="inline-flex shrink-0 items-center gap-1 rounded-full border border-white\/20 bg-black\/45 px-3 py-1 text-xs font-semibold text-white/,
-  );
-  // The manage-shift affordance is a full-width rounded-xl control that uses the role
-  // presentation's always-unfilled buttonSurface (guarded as transparent in the unfilled
-  // surfaces test) -- no group/hover, no static fill.
-  assert.match(
-    modal,
-    /className=\{`inline-flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-2\.5 text-sm font-semibold leading-tight \$\{activePresentation\.buttonSurface\}`\}/,
-  );
-  assert.doesNotMatch(
-    modal,
-    /activePresentation\.iconSurface[\s\S]*<User className=\{`h-8 w-8 \$\{activePresentation\.iconColor\}`\}/,
-  );
-  assert.doesNotMatch(
-    modal,
-    /inline-flex items-center gap-1\.5 text-emerald-600 dark:text-emerald-300[\s\S]*shift\.labels\.active/,
-  );
-  assert.doesNotMatch(
-    modal,
-    /\$\{activePresentation\.badgeFilled\}/,
-  );
-  assert.doesNotMatch(
-    modal,
-    /border-emerald-200\/90 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700/,
-  );
+  assert.match(list, /activeCheckInStaff\.length > 0 \? 'text-\(--pos-s-ok\)' : 'text-\(--pos-s-muted\)'/);
+  assert.match(list, /className="pos-row relative w-full text-left active:bg-\(--pos-s-surface-2\)"/);
+  // Founder 01/11: staff already checked in show in green, in the kit ok colour (bar, icon, role badge).
+  assert.match(list, /bg-\(--pos-s-ok\)/);
+  assert.match(list, /<User className="h-7 w-7 shrink-0 text-\(--pos-s-ok\)"/);
+  assert.match(list, /<span className="inline-flex items-center gap-1 font-semibold text-\(--pos-s-ok\)">\s*<CheckCircle/);
+  assert.match(list, /\{t\('modals\.staffShift\.manageActiveShift'\)\}\s*<ChevronRight className="h-5 w-5 shrink-0" \/>/);
+  assert.match(list, /satelliteShiftsByStaffId\.get\(staffMember\.id\) \|\|\s*staffActiveShifts\.get\(staffMember\.id\)/);
+  assert.doesNotMatch(list, /emerald|bg-black\/45|accentSurface|badgeFilled/);
 });
 
 test('Greek staff-shift/staff-payment closeout copy uses Greek, not the English word "checkout"', () => {
@@ -452,8 +403,53 @@ test('Round 338: the checkout footer action rail stays touch-first (no hover, no
 
   assert.doesNotMatch(footer, /hover:/, 'the footer action rail must not use hover variants on this touch POS');
   assert.doesNotMatch(footer, /\btitle=/, 'the footer action rail must not use native title tooltips');
-  // Tap feedback only (active:), rounded glass language, and the stable testids the live QA relies on.
-  assert.match(footer, /active:/);
+  // Tap feedback only: the kit buttons press through the shared base rule (founder 01/11), and the stable
+  // testids the live QA relies on.
+  assert.match(footer, /pos-solid-btn/);
   assert.match(footer, /data-testid="staff-checkout-print-button"/);
   assert.match(footer, /data-testid="staff-checkout-confirm-button"/);
+});
+
+test('StaffShiftModal chips are plain words, never pills (founder 01/11 «βγάλε τα wrappers από τα chips»)', () => {
+  const modal = source(staffShiftModalPath);
+
+  assert.doesNotMatch(modal, /\bpos-badge\b/, 'no kit pill badges in the shift window');
+  assert.doesNotMatch(modal, /rounded-full border px-2\.5 py-1/, 'no pill-shaped status chips');
+  // Order status in the audit list: coloured words only.
+  assert.match(modal, /<span className=\{`inline-flex items-center text-\[13px\] font-semibold \$\{getAuditStatusBadgeClass\(order\.status\)\}`\}>/);
+});
+
+test('StaffShiftModal checkout says each heading once and keeps every amount colour', () => {
+  const modal = source(staffShiftModalPath);
+
+  // No small-capitals, letter-spaced labels anywhere in the window (sentence case, kit muted).
+  assert.doesNotMatch(modal, /className="[^"]*\buppercase\b/);
+  // The card titles are not repeated by an eyebrow above them.
+  assert.equal((modal.match(/\{t\('modals\.staffShift\.auditDetails', 'Audit Details'\)\}/g) ?? []).length, 1);
+  assert.doesNotMatch(modal, /<(?:div|p|span) className="[^"]*text-(?:xs|\[11px\])[^"]*">\s*\{t\('modals\.staffShift\.expenses'\)\}/);
+  // Founder 01/11 («δεν ήθελα να βγάλεις τα χρώματα στα ποσά»): every amount keeps the colour that gives it
+  // meaning, zero included: income green, deductions red, payouts yellow, tips yellow, expenses red.
+  assert.doesNotMatch(modal, /row\.amount > 0 \? row\.tone/);
+  assert.match(modal, /tone: 'text-emerald-600 dark:text-emerald-300', prefix: '\+'/);
+  assert.match(modal, /tone: 'text-rose-600 dark:text-rose-300', prefix: '-'/);
+  assert.match(modal, /amount: breakdown\.deductedStaffPayments, tone: 'text-yellow-700 dark:text-yellow-300'/);
+  assert.match(modal, /className="mt-1 text-2xl font-black text-rose-500 dark:text-rose-300">\s*\{formatCurrency\(totalExpenses\)\}/);
+  assert.match(modal, /text-3xl font-black tracking-tight text-yellow-700 dark:text-yellow-300">\s*\{formatCurrency\(tipsReceived\)\}/);
+  // Founder 01/11/2026 («κανε το αναμενομενο πρασινο και στα 2»): the expected cash is green in the card and the bar;
+  // «Not entered» is amber until the counted cash is typed.
+  assert.match(modal, /accentClass: 'text-\(--pos-s-ok\)'/);
+  assert.match(modal, /data-expected-in-drawer className="mt-3 text-4xl font-black tracking-tight text-\(--pos-s-ok\)"/);
+  assert.match(modal, /actual === null \? 'text-\(--pos-s-warn\)' : Math\.abs\(actual - breakdown\.expected\) < 0\.005 \? 'text-\(--pos-s-ok\)' : 'text-rose-500 dark:text-rose-300'/);
+  // The checkout action is the one kit yellow primary (it was a red gradient).
+  const footer = source(checkoutFooterActionsPath);
+  assert.match(footer, /data-testid="staff-checkout-confirm-button"\s*className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary/);
+  assert.doesNotMatch(footer, /from-red-600|to-red-700/);
+});
+
+test('the shift window text key «noOrdersYet» exists in every POS language', () => {
+  for (const locale of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
+    const staffShift = JSON.parse(source(path.join(projectRoot, 'src', 'locales', `${locale}.json`))).modals.staffShift;
+    assert.equal(typeof staffShift.noOrdersYet, 'string', `${locale}.noOrdersYet`);
+    assert.notEqual(staffShift.noOrdersYet.trim(), '');
+  }
 });

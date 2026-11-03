@@ -333,5 +333,105 @@
         }
       }
     }
+  },
+  "connect": {
+    "action": "Connetti assistenza",
+    "permissionDisabled": "Non hai il permesso di connettere l’assistenza."
+  },
+  "code": {
+    "needsInternet": "È necessaria una connessione internet per connettere l’assistenza.",
+    "retry": "Impossibile ottenere un codice. Riprova.",
+    "expired": "Il codice è scaduto. Richiedi un nuovo codice.",
+    "cancel": "Annulla",
+    "warning": "Comunica questo codice solo all’assistenza di The Small.",
+    "label": "Codice di assistenza",
+    "qr": "Scansiona per aprire la pagina di connessione dell’assistenza",
+    "timeLeft": "Tempo rimanente",
+    "loading": "Richiesta del codice…",
+    "newCode": "Richiedi un nuovo codice"
+  },
+  "banner": {
+    "activity": "Verifica della cassa",
+    "waiting": "In attesa della connessione dell’assistenza",
+    "connected": "Assistenza connessa",
+    "executing": "Azione di assistenza in corso",
+    "awaitingOnsite": "L’assistenza richiede un’approvazione",
+    "deferredPayment": "In attesa del completamento del pagamento",
+    "pausedOffline": "In pausa — senza connessione",
+    "restarting": "Ripristino dati — la cassa si riavvia",
+    "restoreRestarting": "Riavvio per il ripristino",
+    "ended": "Assistenza terminata",
+    "end": "Termina",
+    "endDuringWrite": {
+      "committed": "La modifica è stata completata prima della fine dell’assistenza.",
+      "rolledBack": "La modifica è stata annullata prima della fine dell’assistenza. Nulla è cambiato."
+    },
+    "extend": "+30 minuti",
+    "noPinPromise": "L’assistenza non ti chiederà mai il PIN o la password."
+  },
+  "onsite": {
+    "title": "L’assistenza chiede di:",
+    "technicalDetails": "Dettagli tecnici",
+    "execute": "Esegui",
+    "decline": "Rifiuta",
+    "aiExplanation": "Spiegazione dell’assistente (IA)",
+    "storePinNotice": "Questo è il controllo PIN del tuo negozio. L’assistenza non vede il PIN.",
+    "terminalCommandWarning": "Il comando viene eseguito come utente della cassa e può leggere i dati locali e modificare il sistema. Le protezioni delle altre azioni non si applicano.",
+    "cataloguePause": "Sospendi i nuovi invii a questa stampante.",
+    "catalogueResume": "Rimuovi la pausa impostata da questa sessione di assistenza.",
+    "catalogueCancel": "Annulla un lavoro di stampa non fiscale bloccato.",
+    "cataloguePauseScope": "Modifica solo la pausa degli invii di questa stampante. Non annulla lavori, non richiama dati già inviati e non modifica ricevute, pagamenti, turni o rapporti Z.",
+    "catalogueCancelScope": "Conserva il lavoro di stampa originale e la sua cronologia. Annulla solo l’invio incerto selezionato. Non ristampa e non modifica pagamenti, turni, rapporti Z o documenti fiscali.",
+    "cataloguePaperWarning": "La carta già parzialmente stampata non può essere richiamata. Eventuali ristampe seguono la procedura ordinaria della cassa.",
+    "catalogueResumeCheck": "Conferma solo dopo aver controllato sul posto la stampante e la configurazione. Riattiva gli invii; non dimostra che la stampa sia stata riparata."
+  },
+  "restore": {
+    "preparing": "Preparazione del ripristino. Riavvia l’app quando ti è comodo per applicarlo.",
+    "notices": {
+      "staged": "Ripristino preparato. Puoi continuare a vendere. Riavvia l’app quando ti è comodo. Ogni nuova attività della cassa annullerà il ripristino.",
+      "applied": "L’istantanea di assistenza è stata ripristinata.",
+      "refused": "Il ripristino è stato rifiutato perché i dati della cassa sono cambiati o l’istantanea non è più compatibile. I dati attuali sono stati conservati.",
+      "expired": "Il ripristino preparato è scaduto o l’assistenza è terminata. I dati attuali sono stati conservati.",
+      "rolled_back": "Impossibile completare il ripristino. I dati originali sono stati ripristinati. Puoi continuare a vendere."
+    },
+    "dismissNotice": "Chiudi",
+    "action": "Ripristina",
+    "snapshotFirst": "Prima verrà creata una copia locale completa.",
+    "snapshots": "Copie di assistenza",
+    "quarantine": "Gruppi in quarantena",
+    "resynced": "Sincronizzato di nuovo dal server",
+    "confirm": "Ripristinare questa modifica? È richiesta la verifica delle autorizzazioni del locale.",
+    "reasons": {
+      "pre_breakglass_sql": "Riparazione del database",
+      "pre_quarantine": "Sposta in quarantena",
+      "pre_quarantine_restore": "Ripristina i dati in quarantena",
+      "pre_command": "Comando del terminale",
+      "pre_restore": "Ripristina la copia"
+    }
+  },
+  "deviceApply": {
+    "undo": "Annulla modifica"
+  },
+  "physicalCheck": {
+    "done": "Fatto",
+    "notDone": "Non fatto",
+    "power_cycle_printer": "Spegni e riaccendi la stampante.",
+    "check_printer_paper": "Controlla che la stampante abbia carta.",
+    "check_printer_cable": "Controlla il cavo della stampante.",
+    "check_network_cable": "Controlla il cavo di rete della cassa.",
+    "power_cycle_card_terminal": "Spegni e riaccendi il terminale delle carte."
+  },
+  "consent": {
+    "title": "Consenso all’assistenza remota",
+    "required": "È necessario il consenso del negozio prima di connettere l’assistenza.",
+    "agree": "Acconsento",
+    "decline": "No",
+    "onlyOwnerAdmin": "Solo il proprietario o un amministratore del negozio può dare il consenso.",
+    "accepted": "Il consenso è stato registrato.",
+    "withdrawn": "Il negozio ha revocato il consenso. L’assistenza non è disponibile.",
+    "outdated": "Il testo del consenso è cambiato. È necessario un nuovo consenso.",
+    "textUnavailable": "Il testo del consenso non è ancora disponibile nella lingua del negozio.",
+    "version": "Versione del testo",
+    "storeAdminAlternative": "Il proprietario o un amministratore può accettare anche nell’amministrazione del negozio."
   }
 }

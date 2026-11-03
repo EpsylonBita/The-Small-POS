@@ -689,9 +689,9 @@ const PurchaseOrdersTab: React.FC = () => {
             <button
               onClick={closeReceive}
               aria-label={t('common.close', 'Close')}
-              className={`rounded-xl border p-2 ${iconButtonClass}`}
+              className="liquid-glass-modal-close"
             >
-              <X className="h-4 w-4" />
+              <X className="h-5 w-5" aria-hidden="true" />
             </button>
           </div>
 

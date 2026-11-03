@@ -28,6 +28,7 @@ import { roomStayNights, roomWorkflowError, addHotelCalendarDays } from '../../u
 import { getStoreCurrency } from '../../utils/store-currency';
 import { useModules } from '../../contexts/module-context';
 import { getRoomEffectiveStatus, type Room, type RoomStatus } from '../../services/RoomsService';
+import { KitDateField } from '../ui/KitDateField';
 
 type RoomStayVariant = 'checkin' | 'reservation';
 
@@ -95,7 +96,7 @@ export const RoomFloorChips: React.FC<RoomFloorChipsProps> = ({ floors, value, o
     }`;
 
   return (
-    <div className="mb-3 flex gap-1.5 overflow-x-auto scrollbar-hide pb-1" role="group">
+    <div className="pos-scroll-row mb-3 gap-1.5" role="group">
       <button type="button" onClick={() => onChange('all')} className={chipClass(value === 'all')}>
         {t('roomsView.allFloors', { defaultValue: 'All Floors' })}
       </button>
@@ -555,7 +556,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
             type="button"
             onClick={onClose}
             disabled={submitting}
-            className="flex-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) py-3 font-medium text-(--pos-s-fg) transition-transform duration-150 active:scale-95 active:bg-(--pos-s-surface-2) disabled:opacity-50"
+            className="pos-raised flex-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) py-3 font-medium text-(--pos-s-fg) transition-transform duration-150 active:scale-95 active:bg-(--pos-s-surface-2) disabled:opacity-50"
           >
             {t('common.actions.cancel', { defaultValue: 'Cancel' })}
           </button>
@@ -563,7 +564,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
             type="button"
             onClick={handleCheckin}
             disabled={!name.trim() || (requiresPhone && !phone.trim()) || submitting || loadingBooking}
-            className="flex-1 rounded-xl border border-(--pos-s-yellow) bg-(--pos-s-yellow) py-3 font-medium text-black transition-transform duration-150 active:scale-95 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
+            className="pos-raised pos-raised--yellow flex-1 rounded-xl border border-(--pos-s-yellow) bg-(--pos-s-yellow) py-3 font-medium text-black transition-transform duration-150 active:scale-95 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
           >
             {t('roomsView.completeCheckin', { defaultValue: 'Complete Check-in' })}
           </button>
@@ -706,8 +707,8 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
             <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
               {t('roomsView.checkInDate', { defaultValue: 'Check-in Date' })}
             </label>
-            <input
-              type="date"
+            <KitDateField
+              type="date" required
               aria-label={t('roomsView.checkInDate', { defaultValue: 'Check-in Date' })}
               value={checkInDate}
               onChange={(e) => setCheckInDate(e.target.value)}
@@ -718,8 +719,8 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
             <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
               {t('roomsView.checkOutDate', { defaultValue: 'Check-out Date' })}
             </label>
-            <input
-              type="date"
+            <KitDateField
+              type="date" required
               aria-label={t('roomsView.checkOutDate', { defaultValue: 'Check-out Date' })}
               min={checkInDate}
               value={checkOutDate}
@@ -751,7 +752,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
             type="button"
             onClick={onClose}
             disabled={submitting}
-            className="flex-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) py-3 font-medium text-(--pos-s-fg) transition-transform duration-150 active:scale-95 active:bg-(--pos-s-surface-2) disabled:opacity-50"
+            className="pos-raised flex-1 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) py-3 font-medium text-(--pos-s-fg) transition-transform duration-150 active:scale-95 active:bg-(--pos-s-surface-2) disabled:opacity-50"
           >
             {t('common.actions.cancel', { defaultValue: 'Cancel' })}
           </button>
@@ -759,7 +760,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
             type="button"
             onClick={handleReservation}
             disabled={!name.trim() || !phone.trim() || !nights || submitting}
-            className="flex-1 rounded-xl border border-(--pos-s-yellow) bg-(--pos-s-yellow) py-3 font-medium text-black transition-transform duration-150 active:scale-95 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
+            className="pos-raised pos-raised--yellow flex-1 rounded-xl border border-(--pos-s-yellow) bg-(--pos-s-yellow) py-3 font-medium text-black transition-transform duration-150 active:scale-95 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
           >
             {reservation ? t('common.actions.save', { defaultValue: 'Save' }) : t('roomsView.createReservation', { defaultValue: 'Create Reservation' })}
           </button>

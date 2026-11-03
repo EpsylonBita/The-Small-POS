@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Banknote, Bike, HandCoins, Scissors, UserRound, WalletCards } from 'lucide-react';
+import { Bike, HandCoins, Scissors, UserRound, WalletCards } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { formatCurrency } from '../../utils/format';
 import { roundMoney } from '@shared/utils/money';
@@ -7,6 +7,7 @@ import { parseMoneyInputValue } from '../../utils/moneyInput';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 import type { TipSelection, TipStaffOption, TipRecipientRole } from '../../utils/tip-recipient';
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 
 export type { TipRecipientRole, TipSelection, TipStaffOption } from '../../utils/tip-recipient';
 export { tipPaymentFields, tipStaffOptionsFromItems } from '../../utils/tip-recipient';
@@ -181,7 +182,7 @@ export const TipModal: React.FC<TipModalProps> = ({
             {t('modals.tip.manualLabel', 'Or enter an amount')}
           </label>
           <div className="relative">
-            <Banknote className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-emerald-700 dark:text-emerald-400" />
+            <CashHandIcon className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-emerald-700 dark:text-emerald-400" />
             <CentsMoneyInput
               aria-label={t('modals.tip.manualLabel', 'Or enter an amount')}
               value={manualAmount}

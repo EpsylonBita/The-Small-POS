@@ -61,9 +61,6 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
   const detailCardClass = `rounded-2xl border p-3 ${
     isDark ? 'border-white/10 bg-white/6' : 'border-black/10 bg-white/70'
   }`;
-  const closeButtonClass = `inline-flex h-10 w-10 items-center justify-center rounded-2xl transition-transform duration-150 active:scale-95 ${
-    isDark ? 'text-gray-300 active:bg-white/10' : 'text-gray-600 active:bg-black/10'
-  }`;
 
   const [reservation, setReservation] = useState<Reservation | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -163,9 +160,9 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
             type="button"
             onClick={onClose}
             aria-label={t('common.actions.close', { defaultValue: 'Close' })}
-            className={closeButtonClass}
+            className="liquid-glass-modal-close"
           >
-            <X className="w-5 h-5" />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
         <div className={`text-center py-6 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -187,9 +184,9 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
           type="button"
           onClick={onClose}
           aria-label={t('common.actions.close', { defaultValue: 'Close' })}
-          className={closeButtonClass}
+          className="liquid-glass-modal-close"
         >
-          <X className="w-5 h-5" />
+          <X className="h-5 w-5" aria-hidden="true" />
         </button>
       </div>
 
@@ -323,7 +320,7 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
             type="button"
             onClick={handleSeatGuest}
             disabled={isSeating}
-            className="flex w-full items-center justify-center gap-2 rounded-2xl bg-(--pos-s-yellow) py-3 font-medium text-black transition-transform duration-150 active:scale-[0.98] active:bg-yellow-500 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100"
+            className="pos-raised pos-raised--yellow flex w-full items-center justify-center gap-2 rounded-2xl bg-(--pos-s-yellow) py-3 font-medium text-black transition-transform duration-150 active:scale-[0.98] active:bg-yellow-500 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100"
           >
             {isSeating ? (
               <Loader2 className="w-5 h-5 animate-spin" />

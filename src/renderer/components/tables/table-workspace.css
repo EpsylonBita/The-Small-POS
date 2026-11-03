@@ -180,8 +180,8 @@
 /* Services (founder 31/10): the date stepper, the walk-in sale button on the standalone page, the hours
    as quiet ruled lines, and an empty day said on top of the hours. */
 .table-workspace-date { display: flex; align-items: center; gap: 4px; margin-left: 4px; }
-.table-workspace-date input { height: 44px; padding: 0 12px; border: 1px solid var(--table-border); border-radius: 12px; background: var(--table-surface); color: var(--table-text); font-size: 14px; font-weight: 600; color-scheme: light; }
-.table-workspace[data-theme='dark'] .table-workspace-date input { color-scheme: dark; }
+.table-workspace-date :is(input, [data-kit-date-field]) { height: 44px; padding: 0 12px; border: 1px solid var(--table-border); border-radius: 12px; background: var(--table-surface); color: var(--table-text); font-size: 14px; font-weight: 600; color-scheme: light; }
+.table-workspace[data-theme='dark'] .table-workspace-date :is(input, [data-kit-date-field]) { color-scheme: dark; }
 .table-workspace button.table-workspace-primary { padding: 0 16px; border-radius: 12px; background: var(--pos-s-sel-bg); color: var(--pos-s-sel-fg); font-size: 14px; font-weight: 700; }
 .table-workspace-hour-label { padding-top: 6px; border-top: 1px solid var(--table-border); color: var(--table-muted); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .table-workspace-hour { min-height: 56px; padding: 6px 0; border-top: 1px solid var(--table-border); }
@@ -189,3 +189,33 @@
 .table-workspace-empty svg { width: 28px; height: 28px; }
 .table-workspace-empty p { margin: 0; }
 .table-workspace-empty .table-workspace-empty-title { color: var(--table-text); font-size: 16px; font-weight: 700; }
+
+/* Founder 01/11 («αυτά πάλι δεν έχουν βάθος και δεν δένουν με τις υπόλοιπες σελίδες»): Tables, Rooms and Services
+   take the kit's depth. The workspace is a kit panel; its chips, cards, icon buttons and dropdown are raised (the
+   kit's raised surface and soft shadow, no outline) and sink while pressed; the chosen chip / segment rises in the
+   yellow; the List / 2D / Timeline toggle is the kit's sunken well; the one primary keeps the yellow depth. */
+.table-workspace { border-color: var(--pos-s-border); box-shadow: var(--pos-s-depth-card); }
+.table-workspace .table-workspace-status-filters button,
+.table-workspace button.table-workspace-icon-button,
+.table-workspace .table-workspace-select > button,
+.table-workspace button.table-workspace-card {
+  border-color: transparent;
+  background: var(--pos-s-raised);
+  box-shadow: var(--pos-s-depth);
+  transition: background-color 120ms, box-shadow 120ms, translate 120ms;
+}
+.table-workspace .table-workspace-status-filters button { color: var(--pos-s-fg); }
+.table-workspace .table-workspace-status-filters button span { color: var(--pos-s-muted); opacity: 1; }
+.table-workspace .table-workspace-status-filters button[aria-pressed='true'] { background: var(--pos-s-sel-bg); color: var(--pos-s-sel-fg); box-shadow: var(--pos-s-depth-yellow); }
+.table-workspace .table-workspace-status-filters button[aria-pressed='true'] span { color: var(--pos-s-sel-fg); }
+.table-workspace :is(.table-workspace-status-filters button, button.table-workspace-icon-button, .table-workspace-select > button, button.table-workspace-card):is(:active, [data-pressed]):not(:disabled) {
+  background: var(--pos-s-raised-press);
+  box-shadow: var(--pos-s-depth-press);
+  translate: 0 1px;
+}
+.table-workspace .table-workspace-status-filters button[aria-pressed='true']:is(:active, [data-pressed]) { background: var(--pos-s-sel-bg); box-shadow: var(--pos-s-depth-yellow-press); }
+.table-workspace-view-mode { border-color: transparent; background: var(--pos-s-surface-2); box-shadow: var(--pos-s-well); }
+.table-workspace .table-workspace-view-mode button[aria-pressed='true'] { box-shadow: var(--pos-s-depth-yellow); }
+.table-workspace button.table-workspace-primary { box-shadow: var(--pos-s-depth-yellow); }
+.table-workspace .table-workspace-select [role='listbox'] { border-color: var(--pos-s-border); background: var(--pos-s-surface); }
+@media (prefers-reduced-motion: reduce) { .table-workspace button:is(:active, [data-pressed]) { translate: none !important; } }

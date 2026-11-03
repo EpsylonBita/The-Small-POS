@@ -29,17 +29,11 @@ test('MenuCategoryTabs only renders flavor filters backed by real category items
 test('MenuCategoryTabs does not fade the trailing edge of category labels', () => {
   const source = readFileSync(tabsPath, 'utf8');
 
-  // A right-edge mask made the final pill label (e.g. "Room Service") read as clipped.
-  // Keep the left scroll hint only and let the trailing label render at full opacity.
-  assert.doesNotMatch(source, /showRightFade/);
-  assert.match(
-    source,
-    /maskImage: 'linear-gradient\(to right, transparent 0, black 2rem\)'/,
-  );
-  assert.match(
-    source,
-    /flex max-w-full gap-1 overflow-x-auto scrollbar-hide cursor-grab select-none touch-pan-x py-1\.5 pr-3 sm:gap-1\.5/,
-  );
+  // A permanent right-edge mask made the final pill label (e.g. "Room Service") read as clipped. Founder 01/11:
+  // the rows are kit scroll rows — an edge fades only while there is more to see that way (utils/scroll-rows.ts),
+  // so the last label shows in full at the end, and a mouse drag moves the row.
+  assert.doesNotMatch(source, /showRightFade|showLeftFade|handleMouseDown/);
+  assert.match(source, /<div className="pos-scroll-row max-w-full select-none gap-1 sm:gap-1\.5" data-testid="menu-categories">/);
   // Pills must not shrink or wrap, and the tighter padding keeps standard categories visible.
   assert.match(source, /min-h-\[38px\] shrink-0 whitespace-nowrap rounded-xl border px-3 py-2 text-\[13px\]/);
 });
@@ -96,18 +90,26 @@ test('flavor tab copy and selected styling avoid clipped glow artifacts', () => 
   assert.doesNotMatch(tabsSource, /bg-emerald-500\/75/);
   assert.match(tabsSource, /border-b border-gray-200\/20 pb-1/);
   assert.match(tabsSource, /relative px-2 py-3 sm:px-3 sm:py-4/);
-  assert.match(tabsSource, /cursor-grab select-none touch-pan-x py-1\.5/);
+  assert.match(tabsSource, /pos-scroll-row max-w-full select-none/);
   assert.match(tabsSource, /px-2 pb-4 pt-1 sm:px-4 sm:pb-5/);
-  assert.match(tabsSource, /overflow-x-auto scrollbar-hide touch-pan-x py-1\.5/);
+  assert.match(tabsSource, /<div className="pos-scroll-row gap-2" data-testid="menu-subcategories">/);
   assert.doesNotMatch(tabsSource, /from-emerald-500\/95/);
   assert.doesNotMatch(tabsSource, /shadow-\[0_10px_28px/);
-  assert.match(itemModalSource, /flavorFilterButtonBaseClass/);
-  assert.match(itemModalSource, /inline-flex h-12 min-w-28 items-center justify-center rounded-full border px-5/);
-  assert.match(itemModalSource, /border-orange-600 bg-orange-500/);
-  // Round 251: the sweet flavor filter is now slate/neutral (was pink) after the item-modal polish.
-  assert.match(itemModalSource, /border-slate-300\/70 bg-slate-500/);
-  assert.doesNotMatch(itemModalSource, /border-pink-400\/70 bg-pink-500/);
-  assert.match(itemModalSource, /overflow-x-auto overflow-y-hidden scrollbar-hide touch-pan-x/);
+  // Founder 01/11/2026 (proposal A): flavour and mode are the kit's segmented controls, the chosen segment in the
+  // selection yellow; no orange, slate or pink fills.
+  // The yellow slides to the new choice (founder 01/11/2026), as the order tabs' indicator; the press still selects.
+  assert.match(itemModalSource, /layoutId=\{`ingredients-\$\{group\}-indicator`\}/);
+  assert.match(itemModalSource, /transition=\{\{ duration: 0\.18, ease: \[0\.2, 0\.8, 0\.2, 1\] \}\}\s*className="absolute inset-0 rounded-full bg-\(--pos-s-sel-bg\) shadow-\(--pos-s-depth-yellow\)"/);
+  assert.match(itemModalSource, /\{activeFlavorType === 'savory' && segmentIndicator\('flavor'\)\}/);
+  assert.match(itemModalSource, /\{ingredientMode === 'without' && segmentIndicator\('mode'\)\}/);
+  assert.match(itemModalSource, /aria-pressed=\{activeFlavorType === 'savory'\}[\s\S]{0,120}className=\{segmentClass\(activeFlavorType === 'savory'\)\}/);
+  assert.match(itemModalSource, /aria-pressed=\{activeFlavorType === 'sweet'\}[\s\S]{0,120}className=\{segmentClass\(activeFlavorType === 'sweet'\)\}/);
+  assert.doesNotMatch(itemModalSource, /border-orange-600 bg-orange-500|border-slate-300\/70 bg-slate-500|border-pink-400\/70 bg-pink-500/);
+  // Founder 01/11/2026: the chosen ingredients wrap in a grid of plain rows, every one in view; no sideways strip,
+  // and the list grows with the choice (no inner scroll). Ingredients are unlimited: no cap, no «n / max».
+  assert.match(itemModalSource, /<ul className="mt-1 grid grid-cols-2 gap-x-4 sm:grid-cols-3 lg:grid-cols-4">/);
+  assert.doesNotMatch(itemModalSource, /overflow-x-auto overflow-y-hidden scrollbar-hide touch-pan-x/);
+  assert.doesNotMatch(itemModalSource, /menu\.validation\.maxIngredients|selectedOfMax|selectedIngredients\.length >= menuItem\.max_ingredients/);
   assert.match(itemModalSource, /<Minus className="h-5 w-5" strokeWidth=\{3\.5\}/);
   assert.doesNotMatch(itemModalSource, /activeFlavorType === 'savory'[\s\S]{0,160}liquid-glass-modal-button/);
   assert.doesNotMatch(itemModalSource, /activeFlavorType === 'sweet'[\s\S]{0,160}liquid-glass-modal-button/);

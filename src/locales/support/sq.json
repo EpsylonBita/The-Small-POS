@@ -333,5 +333,105 @@
         }
       }
     }
+  },
+  "connect": {
+    "action": "Lidh mbështetjen",
+    "permissionDisabled": "Nuk keni leje për të lidhur mbështetjen."
+  },
+  "code": {
+    "needsInternet": "Nevojitet lidhje interneti për të lidhur mbështetjen.",
+    "retry": "Kodi nuk mund të merrej. Provoni përsëri.",
+    "expired": "Kodi ka skaduar. Kërkoni një kod të ri.",
+    "cancel": "Anulo",
+    "warning": "Jepjani këtë kod vetëm mbështetjes së The Small.",
+    "label": "Kodi i mbështetjes",
+    "qr": "Skanoni për të hapur faqen e lidhjes së mbështetjes",
+    "timeLeft": "Koha e mbetur",
+    "loading": "Po kërkohet kodi…",
+    "newCode": "Kërko kod të ri"
+  },
+  "banner": {
+    "activity": "Po kontrollohet arka",
+    "waiting": "Në pritje të lidhjes së mbështetjes",
+    "connected": "Mbështetja u lidh",
+    "executing": "Veprimi i mbështetjes po kryhet",
+    "awaitingOnsite": "Mbështetja kërkon miratim",
+    "deferredPayment": "Në pritje të përfundimit të pagesës",
+    "pausedOffline": "Në pauzë — pa lidhje",
+    "restarting": "Po rikthehen të dhënat — arka po rindizet",
+    "restoreRestarting": "Rinisje për rikthim",
+    "ended": "Mbështetja përfundoi",
+    "end": "Përfundo",
+    "endDuringWrite": {
+      "committed": "Ndryshimi përfundoi para mbylljes së mbështetjes.",
+      "rolledBack": "Ndryshimi u anulua para mbylljes së mbështetjes. Asgjë nuk ndryshoi."
+    },
+    "extend": "+30 minuta",
+    "noPinPromise": "Mbështetja nuk do t’ju kërkojë kurrë PIN-in ose fjalëkalimin."
+  },
+  "onsite": {
+    "title": "Mbështetja kërkon të:",
+    "technicalDetails": "Hollësi teknike",
+    "execute": "Ekzekuto",
+    "decline": "Refuzo",
+    "aiExplanation": "Shpjegimi i asistentit (AI)",
+    "storePinNotice": "Ky është kontrolli i PIN-it të dyqanit tuaj. Mbështetja nuk e sheh PIN-in.",
+    "terminalCommandWarning": "Komanda ekzekutohet si përdoruesi i arkës dhe mund të lexojë të dhënat lokale e të ndryshojë sistemin. Mbrojtjet e veprimeve të tjera nuk zbatohen.",
+    "cataloguePause": "Ndalo dërgimet e reja te ky printer.",
+    "catalogueResume": "Hiq pauzën e vendosur nga kjo seancë mbështetjeje.",
+    "catalogueCancel": "Anulo një punë printimi jofiskale të bllokuar.",
+    "cataloguePauseScope": "Ndryshon vetëm pauzën e dërgimit të këtij printeri. Nuk anulon punë, nuk tërheq të dhënat e dërguara dhe nuk ndryshon kuponë, pagesa, turne ose raporte Z.",
+    "catalogueCancelScope": "Ruan punën origjinale të printimit dhe historikun e saj. Anulon vetëm dërgimin e pasigurt të zgjedhur. Nuk riprinton dhe nuk ndryshon pagesa, turne, raporte Z ose dokumente fiskale.",
+    "cataloguePaperWarning": "Letra e printuar pjesërisht nuk mund të tërhiqet. Çdo riprintim bëhet sipas procedurës së zakonshme të arkëtarit.",
+    "catalogueResumeCheck": "Konfirmo vetëm pasi të kontrollosh printerin dhe konfigurimin në vend. Kjo aktivizon dërgimin; nuk provon se printimi është rregulluar."
+  },
+  "restore": {
+    "preparing": "Po përgatitet rikthimi. Rinisni aplikacionin kur t’ju përshtatet për ta zbatuar.",
+    "notices": {
+      "staged": "Rikthimi u përgatit. Mund të vazhdoni shitjet. Rinisni aplikacionin kur t’ju përshtatet. Çdo veprim i ri në arkë do ta anulojë rikthimin.",
+      "applied": "Kopja e mbështetjes u rikthye.",
+      "refused": "Rikthimi u refuzua sepse të dhënat e arkës ndryshuan ose kopja nuk është më e përputhshme. Të dhënat aktuale u ruajtën.",
+      "expired": "Rikthimi i përgatitur skadoi ose mbështetja përfundoi. Të dhënat aktuale u ruajtën.",
+      "rolled_back": "Rikthimi nuk përfundoi. Të dhënat origjinale u rikthyen. Mund të vazhdoni shitjet."
+    },
+    "dismissNotice": "Mbyll",
+    "action": "Rikthe",
+    "snapshotFirst": "Fillimisht do të krijohet një kopje e plotë lokale.",
+    "snapshots": "Kopjet e mbështetjes",
+    "quarantine": "Grupet në karantinë",
+    "resynced": "Sinkronizuar sërish nga serveri",
+    "confirm": "Të rikthehet ky ndryshim? Kërkohet kontrolli i autorizimit të dyqanit tuaj.",
+    "reasons": {
+      "pre_breakglass_sql": "Riparim i bazës së të dhënave",
+      "pre_quarantine": "Zhvendos në karantinë",
+      "pre_quarantine_restore": "Rikthe të dhënat nga karantina",
+      "pre_command": "Komandë e terminalit",
+      "pre_restore": "Rikthe kopjen"
+    }
+  },
+  "deviceApply": {
+    "undo": "Zhbëj"
+  },
+  "physicalCheck": {
+    "done": "U krye",
+    "notDone": "Nuk u krye",
+    "power_cycle_printer": "Fikeni dhe ndizeni printerin.",
+    "check_printer_paper": "Kontrolloni që printeri ka letër.",
+    "check_printer_cable": "Kontrolloni kabllon e printerit.",
+    "check_network_cable": "Kontrolloni kabllon e rrjetit të arkës.",
+    "power_cycle_card_terminal": "Fikeni dhe ndizeni terminalin e kartave."
+  },
+  "consent": {
+    "title": "Pëlqimi për mbështetje në distancë",
+    "required": "Nevojitet pëlqimi i dyqanit para lidhjes së mbështetjes.",
+    "agree": "Pranoj",
+    "decline": "Jo",
+    "onlyOwnerAdmin": "Vetëm pronari ose një administrator i dyqanit mund të japë pëlqimin.",
+    "accepted": "Pëlqimi u regjistrua.",
+    "withdrawn": "Dyqani tërhoqi pëlqimin. Mbështetja nuk është e disponueshme.",
+    "outdated": "Teksti i pëlqimit ka ndryshuar. Nevojitet pëlqim i ri.",
+    "textUnavailable": "Teksti i pëlqimit nuk është ende i disponueshëm në gjuhën e dyqanit.",
+    "version": "Versioni i tekstit",
+    "storeAdminAlternative": "Pronari ose një administrator mund të pranojë edhe në administrimin e dyqanit."
   }
 }

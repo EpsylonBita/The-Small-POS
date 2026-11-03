@@ -75,12 +75,12 @@ pub(crate) fn schema(conn: &Connection) -> Result<(), String> {
 
 fn remember(
     conn: &Connection,
+    scope: &Scope,
     kind: &str,
     order: &str,
     session: Option<&str>,
     request: &Value,
 ) -> Result<(), String> {
-    let scope = table_session_cache::current_scope(conn)?;
     schema(conn)?;
     let event = request
         .get("client_event_id")
@@ -97,14 +97,25 @@ fn remember(
     Ok(())
 }
 pub(crate) fn remember_item(conn: &Connection, order: &str, request: &Value) -> Result<(), String> {
+    let scope = table_session_cache::current_scope(conn)?;
+    remember_item_scoped(conn, &scope, order, request)
+}
+pub(crate) fn remember_item_scoped(
+    conn: &Connection,
+    scope: &Scope,
+    order: &str,
+    request: &Value,
+) -> Result<(), String> {
     remember(
         conn,
+        scope,
         "item_edit",
         order,
         request.get("table_session_id").and_then(Value::as_str),
         request,
     )
 }
+#[cfg(test)]
 pub(crate) fn remember_cancel(
     conn: &Connection,
     order: &str,
@@ -113,16 +124,49 @@ pub(crate) fn remember_cancel(
     reason: &str,
     actor: &str,
 ) -> Result<(), String> {
+    let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
+    let scope = table_session_cache::scope_from_snapshot(&captured)?;
+    remember_cancel_scoped(
+        conn,
+        &scope,
+        captured.value("terminal_id").as_deref(),
+        order,
+        session,
+        event,
+        reason,
+        actor,
+    )
+}
+pub(crate) fn remember_cancel_scoped(
+    conn: &Connection,
+    scope: &Scope,
+    public_terminal: Option<&str>,
+    order: &str,
+    session: &str,
+    event: &str,
+    reason: &str,
+    actor: &str,
+) -> Result<(), String> {
     remember(
         conn,
+        scope,
         "whole_order_cancel",
         order,
         Some(session),
-        &crate::table_manual_cancellation::original(conn,event)?.unwrap_or_else(||json!({"client_event_id":event,"cancellation_reason":reason,"approved_staff_id":actor,"action":"whole_order_cancel"})),
+        &crate::table_manual_cancellation::original_scoped(conn,&scope.organization,&scope.branch,public_terminal,event)?.unwrap_or_else(||json!({"client_event_id":event,"cancellation_reason":reason,"approved_staff_id":actor,"action":"whole_order_cancel"})),
     )
 }
+#[cfg(test)]
 pub(crate) fn foreground_applied(conn: &Connection, kind: &str, event: &str) -> Result<(), String> {
     let scope = table_session_cache::current_scope(conn)?;
+    foreground_applied_scoped(conn, &scope, kind, event)
+}
+pub(crate) fn foreground_applied_scoped(
+    conn: &Connection,
+    scope: &Scope,
+    kind: &str,
+    event: &str,
+) -> Result<(), String> {
     schema(conn)?;
     conn.execute("UPDATE table_attempt_recovery_v1 SET status='applied',lease_until=NULL,next_retry_at=NULL,last_error_code=NULL,updated_at=?1
         WHERE organization_id=?2 AND branch_id=?3 AND terminal_id=?4 AND kind=?5 AND client_event_id=?6",
@@ -133,9 +177,11 @@ pub(crate) fn foreground_applied(conn: &Connection, kind: &str, event: &str) -> 
 /// Terminal `retired` preserves the immutable request without claiming application.
 /// Call inside the caller's transaction/DB lock; never retire a live dispatch.
 /// A pass is capped at 100 and its terminal state makes repeated passes idempotent.
-pub(crate) fn retire_cancelled_edits(conn: &Connection) -> Result<(), String> {
+pub(crate) fn retire_cancelled_edits_scoped(
+    conn: &Connection,
+    scope: &Scope,
+) -> Result<(), String> {
     schema(conn)?;
-    let scope = table_session_cache::current_scope(conn)?;
     let mut stmt = conn.prepare("SELECT client_event_id FROM table_attempt_recovery_v1 r
         WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND owner_terminal_id=?4
           AND kind='item_edit' AND status NOT IN ('applied','retired')
@@ -206,9 +252,11 @@ fn retire_edit(
 }
 
 fn claim(conn: &Connection) -> Result<Option<(Scope, Attempt)>, String> {
-    let scope = table_session_cache::current_scope(conn)?;
+    let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
+    let scope = table_session_cache::scope_from_snapshot(&captured)?;
     schema(conn)?;
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = crate::db::immediate_transaction(&conn).map_err(|e| e.to_string())?;
+    captured.revalidate(&tx)?;
     // Upgrade the exact immutable intent stores shipped before this worker.
     // Successful old attempts are harmless exact replays/receipt reads; no
     // legacy cancellation can obtain approval or send a mutation here.
@@ -231,7 +279,7 @@ fn claim(conn: &Connection) -> Result<Option<(Scope, Attempt)>, String> {
             json_object('client_event_id',c.client_event_id,'action','whole_order_cancel','cancellation_reason',c.cancellation_reason,'approved_staff_id',c.approved_staff_id),?4,?5
             FROM table_cancel_attempts_v1 c WHERE c.organization_id=?1 AND c.branch_id=?2 AND c.terminal_id=?3",params![scope.organization,scope.branch,scope.terminal,Utc::now().to_rfc3339(),scope.owner]).map_err(|e|e.to_string())?;
     }
-    retire_cancelled_edits(&tx)?;
+    retire_cancelled_edits_scoped(&tx, &scope)?;
     let row:Option<(String,String,String,Option<String>,String,i64,i64)>=tx.query_row("SELECT kind,client_event_id,local_order_id,session_id,request_json,generation,attempts FROM table_attempt_recovery_v1
         WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND owner_terminal_id=?4 AND
         (((status IN ('pending','approval_required') OR (kind='whole_order_cancel' AND status='auth_required')) AND (next_retry_at IS NULL OR julianday(next_retry_at)<=julianday('now')))
@@ -523,7 +571,13 @@ fn finish(
     attempt: &Attempt,
     result: Result<Option<Value>, Failure>,
 ) -> Result<Value, String> {
-    let current = table_session_cache::current_scope(conn)?;
+    let captured_scope = match result.as_ref() {
+        Ok(Some(response)) => {
+            crate::terminal_helpers::TerminalScopeSnapshot::capture_for_canonical(conn, response)?
+        }
+        _ => crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?,
+    };
+    let current = table_session_cache::scope_from_snapshot(&captured_scope)?;
     if current.organization != scope.organization
         || current.branch != scope.branch
         || current.terminal != scope.terminal
@@ -531,14 +585,20 @@ fn finish(
     {
         return Err("Recovery scope changed".into());
     }
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    let live:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM table_attempt_recovery_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3
-        AND kind=?4 AND client_event_id=?5 AND generation=?6 AND status='processing')",params![scope.organization,scope.branch,scope.terminal,attempt.kind,attempt.event,attempt.generation],|r|r.get(0)).map_err(|e|e.to_string())?;
-    if !live {
+    let is_live = |conn: &Connection| -> Result<bool, String> {
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM table_attempt_recovery_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3
+        AND kind=?4 AND client_event_id=?5 AND generation=?6 AND status='processing')",params![scope.organization,scope.branch,scope.terminal,attempt.kind,attempt.event,attempt.generation],|r|r.get(0)).map_err(|e|e.to_string())
+    };
+    if !is_live(conn)? {
+        return Ok(json!({"state":"stale"}));
+    }
+    let tx = crate::db::immediate_transaction(&conn).map_err(|e| e.to_string())?;
+    captured_scope.revalidate(&tx)?;
+    if !is_live(&tx)? {
         return Ok(json!({"state":"stale"}));
     }
     let (status, code, retry) = match result {
-        Ok(Some(response)) => match crate::sync::apply_lan_canonical_response(
+        Ok(Some(response)) => match crate::sync::apply_lan_canonical_response_scoped(
             &tx,
             if attempt.kind == "item_edit" {
                 "/api/pos/orders"
@@ -546,6 +606,7 @@ fn finish(
                 "/api/pos/table-sessions"
             },
             &response,
+            &captured_scope,
         ) {
             Ok(()) => ("applied", None, false),
             Err(_) => (
@@ -603,7 +664,9 @@ fn apply_foreground_item_snapshot(
     attempt: &Attempt,
     response: &Value,
 ) -> Result<Option<Value>, String> {
-    let current = table_session_cache::current_scope(conn)?;
+    let captured_scope =
+        crate::terminal_helpers::TerminalScopeSnapshot::capture_for_canonical(conn, response)?;
+    let current = table_session_cache::scope_from_snapshot(&captured_scope)?;
     if current.organization != captured.organization
         || current.branch != captured.branch
         || current.terminal != captured.terminal
@@ -611,9 +674,15 @@ fn apply_foreground_item_snapshot(
     {
         return Err("Recovery scope changed".into());
     }
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    crate::sync::apply_lan_canonical_response(&tx, "/api/pos/orders", response)?;
-    foreground_applied(&tx, "item_edit", &attempt.event)?;
+    let tx = crate::db::immediate_transaction(&conn).map_err(|e| e.to_string())?;
+    captured_scope.revalidate(&tx)?;
+    crate::sync::apply_lan_canonical_response_scoped(
+        &tx,
+        "/api/pos/orders",
+        response,
+        &captured_scope,
+    )?;
+    foreground_applied_scoped(&tx, &current, "item_edit", &attempt.event)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(response
         .pointer("/cafe_lan_snapshot/sessions")
@@ -695,11 +764,13 @@ pub(crate) fn inspect_edit(
 
 pub(crate) fn status(conn: &Connection) -> Result<Value, String> {
     schema(conn)?;
-    let scope = table_session_cache::current_scope(conn)?;
+    let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
+    let scope = table_session_cache::scope_from_snapshot(&captured)?;
     // Retirement writes: take the write reservation before its eligibility read.
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    retire_cancelled_edits(&tx)?;
+    captured.revalidate(&tx)?;
+    retire_cancelled_edits_scoped(&tx, &scope)?;
     let mut stmt=tx.prepare("SELECT kind,client_event_id,local_order_id,session_id,status,last_error_code,next_retry_at FROM table_attempt_recovery_v1
         WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND owner_terminal_id=?4 AND status NOT IN ('applied','retired') ORDER BY updated_at LIMIT 100").map_err(|e|e.to_string())?;
     let attempts=stmt.query_map(params![scope.organization,scope.branch,scope.terminal,scope.owner],|r|Ok(json!({"kind":r.get::<_,String>(0)?,"clientEventId":r.get::<_,String>(1)?,"orderId":r.get::<_,String>(2)?,"sessionId":r.get::<_,Option<String>>(3)?,"state":r.get::<_,String>(4)?,"errorCode":r.get::<_,Option<String>>(5)?,"nextRetryAt":r.get::<_,Option<String>>(6)?})))
@@ -955,7 +1026,7 @@ fn claim_original_cancel(
     attempt: &Attempt,
     snapshot_id: &str,
 ) -> Result<Attempt, String> {
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = crate::db::immediate_transaction(&conn).map_err(|e| e.to_string())?;
     let next_generation = attempt
         .generation
         .checked_add(1)
@@ -1220,6 +1291,7 @@ mod tests {
 
     #[test]
     fn tomikro_cancelled_refused_edit_retires_once_with_original_audit() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = crate::tests::harness::TestDb::open();
         let local = setup(&db.state);
         let conn = db.state.conn.lock().unwrap();
@@ -1267,6 +1339,7 @@ mod tests {
 
     #[test]
     fn cancelled_edit_retirement_preserves_active_applied_live_and_other_scope_rows() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for (state, cancelled, lease, foreign, retired) in [
             ("conflict", false, None, false, false),
             ("pending", true, None, false, true),
@@ -1375,6 +1448,7 @@ mod tests {
 
     #[tokio::test]
     async fn discard_edit_requires_exact_server_refusal_and_scoped_version() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for (http, version, allowed) in [
             (None, 2, false),
             (Some(409), 0, false),
@@ -1455,6 +1529,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_conflict_discard_verifies_exact_refusal_never_discards_journal_or_transport() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for outcome in [
             "409",
             "422",
@@ -1526,6 +1601,7 @@ mod tests {
 
     #[tokio::test]
     async fn original_cancel_confirmation_reads_selected_receipt_and_admits_once_after_restart() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         let (local, original) = original_conflict(&disk.state);
         let disk = disk.restart();
@@ -1634,6 +1710,7 @@ mod tests {
 
     #[tokio::test]
     async fn original_cancel_confirmation_snapshot_failure_prevents_claim_or_dispatch() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         let (local, original) = original_conflict(&disk.state);
         let root = crate::recovery::recovery_root_for_db(&disk.state);
@@ -1671,6 +1748,7 @@ mod tests {
 
     #[tokio::test]
     async fn original_cancel_confirmation_never_claims_another_pending_item_edit() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         let (local, original) = original_conflict(&disk.state);
         {
@@ -1709,6 +1787,7 @@ mod tests {
 
     #[tokio::test]
     async fn original_cancel_confirmation_rejects_wrong_kind_state_or_owner_without_network() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for change in [
             "status='pending'",
             "status='processing'",
@@ -1740,6 +1819,7 @@ mod tests {
 
     #[tokio::test]
     async fn original_cancel_confirmation_retains_uncommitted_or_invalid_original() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for reply in [
             None,
             Some({
@@ -1796,6 +1876,7 @@ mod tests {
 
     #[tokio::test]
     async fn original_cancel_confirmation_refuses_another_parent_with_a_valid_receipt_scope() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         let (local, original) = original_conflict(&disk.state);
         let mut receipt = cancel_receipt();
@@ -1880,6 +1961,7 @@ mod tests {
 
     #[tokio::test]
     async fn original_cancel_confirmation_checks_frozen_bytes_generation_and_binding_after_await() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for change in ["request", "generation", "owner"] {
             let disk = crate::tests::harness::TestDb::open();
             let (local, original) = original_conflict(&disk.state);
@@ -1926,6 +2008,7 @@ mod tests {
 
     #[tokio::test]
     async fn original_cancel_confirmation_preserves_conflicting_local_work() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         let (local, original) = original_conflict(&disk.state);
         disk.state
@@ -1968,6 +2051,7 @@ mod tests {
 
     #[test]
     fn original_cancel_confirmation_claim_and_scope_fences_reject_late_results() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         let (local, original) = original_conflict(&disk.state);
         let conn = disk.state.conn.lock().unwrap();
@@ -2010,6 +2094,7 @@ mod tests {
     }
     #[tokio::test]
     async fn crash_attempt_item_disk_restart_replays_immutable_body_and_applies_before_ack() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = crate::tests::harness::TestDb::open();
         let local = setup(&db.state);
         {
@@ -2050,6 +2135,7 @@ mod tests {
     }
     #[tokio::test]
     async fn crash_edit_foreground_mirrors_full_financial_header_before_ack_without_redispatch() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         let local = setup(&disk.state);
         let (scope, attempt) = {
@@ -2100,6 +2186,7 @@ mod tests {
 
     #[tokio::test]
     async fn crash_attempt_same_version_changed_money_snapshot_never_acknowledges() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         let local = setup(&disk.state);
         let (scope, attempt) = {
@@ -2132,6 +2219,7 @@ mod tests {
 
     #[test]
     fn crash_attempt_edit_inspection_accepts_canonical_alias_and_fences_owner() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         let local = setup(&disk.state);
         let conn = disk.state.conn.lock().unwrap();
@@ -2151,6 +2239,7 @@ mod tests {
 
     #[tokio::test]
     async fn crash_attempt_cancel_missing_receipt_never_dispatches_approval_or_mutation() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = crate::tests::harness::TestDb::open();
         let local = setup(&db.state);
         let (scope, attempt) = {
@@ -2202,6 +2291,7 @@ mod tests {
     }
     #[tokio::test]
     async fn crash_attempt_cancel_auth_renewal_rechecks_receipt_without_approval_or_mutation() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let disk = crate::tests::harness::TestDb::open();
         let local = setup(&disk.state);
         let (scope, attempt) = {
@@ -2253,6 +2343,7 @@ mod tests {
 
     #[tokio::test]
     async fn crash_attempt_cancel_committed_receipt_recovers_once_without_new_cancel() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = crate::tests::harness::TestDb::open();
         let local = setup(&db.state);
         {
@@ -2292,6 +2383,7 @@ mod tests {
     }
     #[tokio::test]
     async fn crash_attempt_incomplete_snapshot_or_wrong_actor_never_acknowledges() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = crate::tests::harness::TestDb::open();
         let local = setup(&db.state);
         let (scope, attempt) = {
@@ -2349,6 +2441,7 @@ mod tests {
     }
     #[test]
     fn crash_attempt_lease_generation_and_scope_fence_late_response() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = crate::tests::harness::TestDb::open();
         let local = setup(&db.state);
         let conn = db.state.conn.lock().unwrap();
@@ -2372,6 +2465,7 @@ mod tests {
     }
     #[test]
     fn crash_attempt_transport_cooldown_survives_restart_and_permanent_errors_park() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = crate::tests::harness::TestDb::open();
         let local = setup(&db.state);
         {
@@ -2421,6 +2515,7 @@ mod tests {
     }
     #[test]
     fn crash_attempt_changed_body_with_same_event_is_rejected() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = crate::tests::harness::TestDb::open();
         let local = setup(&db.state);
         let conn = db.state.conn.lock().unwrap();
@@ -2433,3 +2528,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "admission_tests/recovery.rs"]
+mod admission_regression_tests;

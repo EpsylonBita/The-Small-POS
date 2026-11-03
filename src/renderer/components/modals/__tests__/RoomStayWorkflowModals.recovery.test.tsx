@@ -18,6 +18,7 @@ vi.mock('../../../utils/api-helpers', () => ({ posApiFetch: mocks.api }));
 vi.mock('../../../services/RoomsService', () => ({ getRoomEffectiveStatus: (room: any) => room.status }));
 vi.mock('../../ui/pos-glass-components', () => ({ LiquidGlassModal: ({ children, title }: any) => <div role="dialog" aria-label={title}>{children}</div> }));
 import { RoomCheckinModal, RoomReservationModal } from '../RoomStayWorkflowModals';
+import { kitDayButton, pickKitDate } from '../../ui/__tests__/pickKitDate';
 const room = { id: 'room-101', roomNumber: '101', roomType: 'standard', ratePerNight: 145, capacity: 2, floor: 1, status: 'available' } as any;
 const booking = { id: 'booking-id', roomId: room.id, reservationNumber: 'R-1', customerName: 'Guest', customerPhone: '123', partySize: 1, checkInDate: '2026-09-08', checkOutDate: '2026-09-10', status: 'pending' } as any;
 const props = () => ({ room, branchId: 'branch', organizationId: 'org', updateRoomStatus: vi.fn(), refetchRooms: vi.fn().mockResolvedValue(undefined), onClose: vi.fn(), onCompleted: vi.fn() });
@@ -109,10 +110,14 @@ it('keeps the folio request id stable across a network failure', async () => {
 it('requires phone, blocks reversed dates, and saves room/date edits through the existing update API', async () => {
   const callbacks = props(); render(<RoomReservationModal {...callbacks} reservation={booking} rooms={[room, { ...room, id: 'room-102', roomNumber: '102' }]} />);
   expect(screen.getByRole('textbox', { name: 'Phone' })).toBeRequired();
-  fireEvent.change(screen.getByLabelText('Check-out Date'), { target: { value: '2026-09-07' } });
+  // The calendar never offers a check-out before the check-in (min); a later check-in still reverses them.
+  expect(kitDayButton(screen.getByLabelText('Check-out Date'), '2026-09-07')).toBeDisabled();
+  fireEvent.click(screen.getByLabelText('Check-out Date'));
+  pickKitDate(screen.getByLabelText('Check-in Date'), '2026-09-12');
   expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
   expect(mocks.create).not.toHaveBeenCalled();
-  fireEvent.change(screen.getByLabelText('Check-out Date'), { target: { value: '2026-09-11' } });
+  pickKitDate(screen.getByLabelText('Check-in Date'), '2026-09-08');
+  pickKitDate(screen.getByLabelText('Check-out Date'), '2026-09-11');
   fireEvent.change(screen.getByRole('combobox'), { target: { value: 'room-102' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(mocks.edit).toHaveBeenCalledWith(booking.id, expect.objectContaining({ roomId: 'room-102', checkOutDate: '2026-09-11' })));

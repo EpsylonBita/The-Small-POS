@@ -47,6 +47,7 @@ thread_local! {
     static WRITE_HOOKS: RefCell<HashMap<String, Box<dyn FnMut()>>> = RefCell::new(HashMap::new());
     static DELETE_HOOKS: RefCell<HashMap<String, Box<dyn FnMut()>>> = RefCell::new(HashMap::new());
     static DELETE_FAILURES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    static READ_HOOK: RefCell<Option<Box<dyn FnMut(&str)>>> = const { RefCell::new(None) };
 }
 
 /// RAII guard that uninstalls the fake on drop.
@@ -71,12 +72,14 @@ impl Drop for Guard {
         WRITE_HOOKS.with(|slot| slot.borrow_mut().clear());
         DELETE_HOOKS.with(|slot| slot.borrow_mut().clear());
         DELETE_FAILURES.with(|slot| slot.borrow_mut().clear());
+        READ_HOOK.with(|slot| *slot.borrow_mut() = None);
     }
 }
 
 /// Install an empty fake keyring on the current thread. Any existing
 /// fake is replaced.
 pub fn install_empty() -> Guard {
+    READ_HOOK.with(|slot| *slot.borrow_mut() = None);
     STATE.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
     READ_FAILURES.with(|slot| slot.borrow_mut().clear());
     DEFERRED_READ_FAILURES.with(|slot| slot.borrow_mut().clear());
@@ -96,6 +99,7 @@ where
     K: Into<String>,
     V: Into<String>,
 {
+    READ_HOOK.with(|slot| *slot.borrow_mut() = None);
     let map: HashMap<String, String> = entries
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
@@ -123,7 +127,17 @@ pub(crate) fn is_installed() -> bool {
 /// Fetch a value from the fake keyring. Returns `None` if no fake is
 /// installed OR the key is absent.
 pub(crate) fn get(key: &str) -> Option<String> {
+    READ_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(key);
+        }
+    });
     STATE.with(|slot| slot.borrow().as_ref()?.get(key).cloned())
+}
+
+/// Pause/observe actual credential reads in write-admission regression tests.
+pub(crate) fn before_each_read(hook: impl FnMut(&str) + 'static) {
+    READ_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
 /// Inject a backend-style read failure for one credential. This is deliberately

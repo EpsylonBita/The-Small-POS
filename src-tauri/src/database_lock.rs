@@ -69,6 +69,8 @@ pub(crate) const LOCK_LABELS: &[&str] = &[
     "checkout_draft_park",
     "checkout_draft_put",
     "checkout_draft_resume_declined",
+    "checkout_draft_set_aside_edit",
+    "edit_settlement_startup",
     "inventory_snapshot_overlays",
     "order_create_with_initial_payment",
     "orders_apply_table_session_snapshot",
@@ -320,6 +322,26 @@ pub(crate) fn observe(mutex: &Mutex<Connection>, tracker: &LockTracker) -> Obser
             Observation::Free
         }
         Err(TryLockError::WouldBlock) => Observation::Held(tracker.holder(mutex)),
+    }
+}
+
+/// Support preserves poison as a failure. Never wait for the business mutex.
+pub(crate) fn support_observe(mutex: &Mutex<Connection>) -> Result<Observation, &'static str> {
+    match mutex.try_lock() {
+        Ok(guard) => {
+            drop(guard);
+            Ok(Observation::Free)
+        }
+        Err(TryLockError::Poisoned(_)) => Err("poisoned"),
+        Err(TryLockError::WouldBlock) => {
+            let holders = TRACKER.holders.try_lock().map_err(|_| "unavailable")?;
+            Ok(Observation::Held(
+                holders
+                    .iter()
+                    .find(|(held, _)| *held == key(mutex))
+                    .map(|(_, holder)| *holder),
+            ))
+        }
     }
 }
 

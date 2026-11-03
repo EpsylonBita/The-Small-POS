@@ -9,16 +9,15 @@ const menuManagementPageSource = () =>
     'utf8',
   );
 
-test('MenuManagementPage uses yellow selected tabs with strong black text', () => {
+test('MenuManagementPage tabs are kit options: the open tab in the selection yellow', () => {
   const source = menuManagementPageSource();
 
   assert.match(source, /useState<'categories' \| 'subcategories' \| 'ingredients' \| 'offers'>\('categories'\)/);
-  assert.match(source, /const getTabClass = \(tab: typeof activeTab\)/);
-  assert.match(source, /'bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) font-semibold border border-\(--pos-s-sel-bg\)'/);
-  assert.match(source, /className=\{getTabClass\('categories'\)\}/);
-  assert.match(source, /className=\{getTabClass\('subcategories'\)\}/);
-  assert.match(source, /className=\{getTabClass\('ingredients'\)\}/);
-  assert.match(source, /className=\{getTabClass\('offers'\)\}/);
+  // Founder 01/11: the page in the kit (pos-choice; .is-selected = --pos-s-sel-bg with dark words).
+  assert.match(source, /const getTabClass = \(tab: typeof activeTab\) => `pos-choice\$\{activeTab === tab \? ' is-selected' : ''\}`;/);
+  for (const key of ['categories', 'subcategories', 'ingredients', 'offers']) {
+    assert.match(source, new RegExp(`aria-pressed=\\{activeTab === '${key}'\\}\\s*className=\\{getTabClass\\('${key}'\\)\\}`));
+  }
   assert.doesNotMatch(source, /bg-blue-500\/30 text-blue-200 border border-blue-500\/50/);
   assert.doesNotMatch(source, /bg-blue-500 text-white/);
 });
@@ -46,27 +45,20 @@ test('MenuManagementPage labels the menu-items tab via i18n, not "Subcategories"
   assert.match(source, /bridge\.menu\.getSubcategories\(\)/);
 });
 
-test('MenuManagementPage uses neutral controls and theme-aware grid cards', () => {
+test('MenuManagementPage uses a kit search field and kit cards in both themes', () => {
   const source = menuManagementPageSource();
 
-  // Round 165: inactive tabs use active: (touch) instead of hover:.
-  assert.match(source, /bg-zinc-900 text-zinc-200 active:bg-zinc-800/);
-  assert.match(source, /bg-gray-100 text-gray-700 active:bg-gray-200/);
-  assert.match(source, /px-4 py-2 rounded-2xl transition-transform active:scale-\[0\.98\]/);
-  assert.match(source, /w-full pl-10 pr-4 py-2 rounded-2xl border/);
-  assert.match(source, /bg-zinc-900 border-white text-white placeholder-zinc-400/);
-  assert.match(source, /bg-gray-100 border-white text-gray-900 placeholder-gray-500/);
-  assert.match(source, /focus:outline-hidden focus:ring-2 focus:ring-white\/70/);
-  assert.match(source, /const gridCardClass = `p-4 rounded-xl border/);
-  assert.match(source, /bg-zinc-900 border-zinc-700/);
-  assert.match(source, /bg-white border-gray-200/);
-  assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!category\.is_active \? 'opacity-60 grayscale' : ''\}`\}/);
-  assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!item\.is_available \? 'opacity-60 grayscale' : ''\}`\}/);
-  assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!ingredient\.is_available \? 'opacity-60 grayscale' : ''\}`\}/);
-  assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!offer\.is_active \? 'opacity-60 grayscale' : ''\}`\}/);
-  assert.doesNotMatch(source, /bg-gray-800\/50 border-gray-700/);
-  assert.doesNotMatch(source, /bg-slate-800\/70/);
-  assert.doesNotMatch(source, /bg-slate-100/);
+  assert.match(source, /className="min-h-\[48px\] w-full rounded-xl border border-\(--pos-s-control\) bg-\(--pos-s-surface\) pl-10 pr-4 text-\(--pos-s-fg\)/);
+  assert.match(source, /const gridCardClass = 'pos-card p-4';/);
+  // A hidden row fades inside its card (the card's entrance animation sets the card's own opacity).
+  assert.equal((source.match(/className=\{gridCardClass\}/g) ?? []).length, 4);
+  assert.match(source, /\$\{!category\.is_active \? 'opacity-60 grayscale' : ''\}`/);
+  assert.match(source, /\$\{!item\.is_available \? 'opacity-60 grayscale' : ''\}`/);
+  assert.match(source, /\$\{!ingredient\.is_available \? 'opacity-60 grayscale' : ''\}`/);
+  assert.match(source, /\$\{!offer\.is_active \? 'opacity-60 grayscale' : ''\}`/);
+  // The kit tokens switch with the theme: no per-theme colour branches or translucent washes left.
+  assert.doesNotMatch(source, /resolvedTheme/);
+  assert.doesNotMatch(source, /bg-white\/\d|bg-black\/\d|backdrop-blur/);
   assert.doesNotMatch(source, /focus:ring-blue-500/);
   assert.doesNotMatch(source, /rounded-lg|rounded-md/);
 });
@@ -80,27 +72,14 @@ test('MenuManagementPage places refresh as an icon-only header action like Order
   assert.match(source, /t\('menu\.refreshMenu', 'Refresh menu'\)/);
   assert.match(source, /className="mb-6 flex items-start justify-between gap-4"/);
   assert.match(source, /aria-label=\{refreshLabel\}/);
-  // Round 166 (live QA): native title tooltip removed; aria-label carries the accessible name.
   assert.doesNotMatch(source, /title=\{refreshLabel\}/);
-  // Round 233: the refresh button is now a 48x48 icon-centered GLASS button (was a stark white/black
-  // square that read like a default admin button). Translucent + backdrop blur + amber accent in both
-  // themes -- NOT the old opaque dark-mode bg-white / light-mode bg-black inversion.
-  assert.match(source, /inline-flex h-12 w-12 items-center justify-center rounded-2xl/);
-  assert.match(source, /backdrop-blur-xl/);
-  assert.match(source, /border-\(--pos-s-border\) bg-white\/10 text-amber-300 active:bg-white\/20/);
-  assert.match(source, /border-\(--pos-s-border\) bg-black\/5 text-amber-600 active:bg-black\/10/);
-  assert.doesNotMatch(source, /border border-white\/80 bg-white text-black/);
-  assert.doesNotMatch(source, /border border-black bg-black text-white/);
-  // No hover-only styling and no native title on the refresh control; touch active feedback only.
+  // Founder 01/11: the kit icon button (neutral, 48 px here as the page header action); the orange accent said
+  // nothing about a state.
+  assert.match(source, /className="pos-icon-btn h-12! w-12!"/);
+  assert.doesNotMatch(source, /text-amber-(?:300|600)/);
   assert.doesNotMatch(source, /hover:/);
-  assert.doesNotMatch(source, /title=\{refreshLabel\}/);
-  // Round 166: enabled tap transform presses down (active:scale-95), not grows (active:scale-[1.03]).
-  assert.match(source, /active:scale-95/);
-  assert.doesNotMatch(source, /active:scale-\[1\.03\]/);
   assert.match(source, /<RefreshCw className=\{`w-5 h-5 \$\{loading \? 'animate-spin' : ''\}`\} \/>/);
-  assert.match(source, /text-yellow-400/);
   assert.doesNotMatch(source, />\s*Refresh\s*<\/button>/);
-  assert.doesNotMatch(source, /px-4 py-2 rounded-lg flex items-center gap-2/);
   assert.doesNotMatch(source, /text-blue-500/);
 });
 
@@ -119,10 +98,8 @@ test('MenuManagementPage keeps 44px availability targets with standalone icons',
   assert.match(source, /disabled:opacity-50 disabled:cursor-not-allowed active:scale-95/);
 
   assert.match(source, /focus-visible:outline-2/);
-  assert.match(source, /text-green-400 active:bg-zinc-800/);
-  assert.match(source, /text-green-700 active:bg-gray-100/);
-  assert.match(source, /text-zinc-400 active:bg-zinc-800/);
-  assert.match(source, /text-gray-600 active:bg-gray-100/);
+  // Shown = the kit ok green, hidden = the kit muted (founder 01/11: colours say states).
+  assert.match(source, /active \? 'text-\(--pos-s-ok\)' : 'text-\(--pos-s-muted\)'/);
 
   // The old tiny borderless p-2 button styling is gone.
   assert.doesNotMatch(source, /p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed/);
@@ -157,7 +134,7 @@ test('MenuManagementPage renders a localized glass empty state for the offers ta
 
   // Lucide offers/discount icon imported and used (no emoji / custom SVG / ASCII art).
   assert.match(source, /import \{ Eye, EyeOff, Search, RefreshCw, BadgePercent \} from 'lucide-react'/);
-  assert.match(source, /<BadgePercent className="w-7 h-7" \/>/);
+  assert.match(source, /<BadgePercent className="h-10 w-10 text-\(--pos-s-muted\)" aria-hidden="true" \/>/);
 
   // Search-no-results copy + a clear-search button that only resets the search term.
   assert.match(source, /t\('menu\.offersEmpty\.searchTitle', 'No offers match the search'\)/);
@@ -169,15 +146,14 @@ test('MenuManagementPage renders a localized glass empty state for the offers ta
   assert.match(source, /t\('menu\.offersEmpty\.title', 'No offers configured'\)/);
   assert.match(source, /t\('menu\.offersEmpty\.subtitle', 'Create offers in the admin dashboard or refresh after syncing\.'\)/);
 
-  // Small centered glass surface (not a giant nested card): centered, rounded, blurred, amber accent.
+  // Small centered dashed area (not a giant nested card), a plain icon without a box, a kit button.
   const emptyStart = source.indexOf('data-menu-offers-empty');
   const emptyEnd = source.indexOf('filteredOffers.map', emptyStart);
   assert.ok(emptyStart >= 0 && emptyEnd > emptyStart, 'empty-state region must precede the grid');
   const emptyRegion = source.slice(emptyStart, emptyEnd);
   assert.match(emptyRegion, /flex justify-center py-12/);
-  assert.match(emptyRegion, /rounded-2xl border px-8 py-10 text-center backdrop-blur-md/);
-  assert.match(emptyRegion, /text-amber-300/);
-  assert.match(emptyRegion, /active:scale-95/);
+  assert.match(emptyRegion, /rounded-2xl border border-dashed border-zinc-400 px-8 py-10 text-center dark:border-zinc-600/);
+  assert.match(emptyRegion, /className="pos-solid-btn pos-solid-btn--sm mt-1"/);
   // Touch-first within the empty state: no hover-only styling and no native title tooltip.
   assert.doesNotMatch(emptyRegion, /hover:/);
   assert.doesNotMatch(emptyRegion, /\btitle=/);

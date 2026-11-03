@@ -476,3 +476,33 @@ describe('CheckoutDraftStore editable save coalescing', () => {
     expect((await owner.load())?.phase).toBe('checkout_pending');
   });
 });
+
+describe('setting aside an edit leaves native recovery in charge', () => {
+  it.each(['editing', 'checkout_pending'] as const)('archives a %s edit by exact identity and retires both ids', async phase => {
+    const draft = { ...cart(), phase, context: { editMode: true, editOrderId: 'order-19', supersedesEditEvent: 'old-event' } };
+    let saved: any = draft; let generation = 4;
+    const transport = vi.fn(async (command, input) => {
+      if (command === 'checkout_draft_set_aside_edit') { saved = null; generation++; }
+      return { success: true, scope, generation, draft: saved };
+    });
+    const store = new CheckoutDraftStore(scope, transport);
+    await store.setAsideEdit(draft.draftId, draft.checkoutRequestId);
+    expect(transport).toHaveBeenLastCalledWith('checkout_draft_set_aside_edit', {
+      ...scope, expectedGeneration: 4, draftId: draft.draftId, clientRequestId: draft.checkoutRequestId,
+    });
+    expect(await store.load()).toBeNull();
+    await expect(store.save({ ...draft, phase: 'editing' })).rejects.toThrow('CHECKOUT_DRAFT_CHANGED');
+    await expect(store.save({ ...draft, phase: 'editing', draftId: 'another-draft' })).rejects.toThrow('CHECKOUT_REQUEST_ID_CHANGED');
+    expect(transport.mock.calls.map(call => call[0])).not.toContain('checkout_draft_delete');
+  });
+
+  it.each(['draft', 'request', 'kind', 'generation', 'reply'] as const)('refuses a changed %s without accepting an empty slot', async changed => {
+    const draft = { ...cart(), context: { editMode: changed !== 'kind' } };
+    const transport = vi.fn(async command => ({ success: true, scope, generation: 4,
+      draft: command === 'checkout_draft_get' || changed === 'reply' ? draft : null }));
+    const store = new CheckoutDraftStore(scope, transport);
+    await expect(store.setAsideEdit(changed === 'draft' ? 'other' : draft.draftId,
+      changed === 'request' ? 'other' : draft.checkoutRequestId)).rejects.toThrow();
+    expect(await store.load()).toEqual(draft);
+  });
+});

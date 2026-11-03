@@ -150,8 +150,11 @@ fn cancelled_edit_target(
 /// renderer that loaded before cancellation cannot resurrect it.
 fn load(conn: &Connection, input: &Value) -> Result<Value, String> {
     let scope = scope(conn, input)?;
+    let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
+    let table_scope = crate::table_session_cache::scope_from_snapshot(&captured)?;
     let tx = write_transaction(conn)?;
-    crate::table_attempt_recovery::retire_cancelled_edits(&tx)?;
+    captured.revalidate(&tx)?;
+    crate::table_attempt_recovery::retire_cancelled_edits_scoped(&tx, &table_scope)?;
     let previous = read(&tx, &scope)?;
     let draft = &previous["draft"];
     let Some(order) = cancelled_edit_target(&tx, &scope, draft)? else {
@@ -477,6 +480,7 @@ pub(crate) fn log_create_failure(answer: &Result<Value, String>) {
     }
 }
 
+#[cfg(test)]
 fn save_failure_event(error: &str) -> String {
     failure_event(DraftOperation::Save, error)
 }
@@ -551,7 +555,131 @@ pub async fn checkout_draft_delete(arg0: Value, app: tauri::AppHandle) -> Result
     .await
 }
 
+/// Archive this exact editor and free the terminal slot. The journal and all
+/// money keep their own recovery, even when a pending draft was never journaled.
+pub(crate) fn set_aside_edit_write(conn: &Connection, input: &Value) -> Result<Value, String> {
+    let scope = scope(conn, input)?;
+    let expected = input
+        .get("expectedGeneration")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or("CHECKOUT_DRAFT_GENERATION_REQUIRED")?;
+    let draft_id = input
+        .get("draftId")
+        .and_then(Value::as_str)
+        .ok_or("CHECKOUT_DRAFT_REQUIRED")?;
+    let request = input
+        .get("clientRequestId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 255)
+        .ok_or("CHECKOUT_REQUEST_ID_REQUIRED")?;
+    let tx = write_transaction(conn)?;
+    let previous = read(&tx, &scope)?;
+    if previous["generation"].as_i64() != Some(expected) {
+        return Err("CHECKOUT_DRAFT_VERSION_CHANGED".into());
+    }
+    let draft = &previous["draft"];
+    if !draft.is_object() {
+        return Err("CHECKOUT_DRAFT_CHANGED".into());
+    }
+    if draft["context"]["editMode"].as_bool() != Some(true) {
+        return Err("CHECKOUT_DRAFT_NOT_EDIT".into());
+    }
+    if draft["draftId"].as_str() != Some(draft_id)
+        || draft["checkoutRequestId"].as_str() != Some(request)
+    {
+        return Err("CHECKOUT_DRAFT_CHANGED".into());
+    }
+    let event = draft["submission"]["client_event_id"]
+        .as_str()
+        .unwrap_or(request);
+    let has_journal: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='edit_settlement_attempts_v1')", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    let journaled = has_journal
+        && tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM edit_settlement_attempts_v1
+        WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND client_event_id=?4)",
+                params![scope.organization, scope.branch, scope.terminal, event],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| error.to_string())?;
+    let phase = match draft["phase"].as_str() {
+        Some("editing") => "editing",
+        Some("checkout_pending") => "checkout_pending",
+        _ => "invalid",
+    };
+    let reason = if phase == "checkout_pending" && !journaled {
+        "edit_set_aside_unjournaled"
+    } else {
+        "edit_set_aside"
+    };
+    let next = expected
+        .checked_add(1)
+        .ok_or("CHECKOUT_DRAFT_VERSION_EXHAUSTED")?;
+    let now = chrono::Utc::now().to_rfc3339();
+    archive_schema(&tx)?;
+    tx.execute("INSERT INTO checkout_draft_archive_v1
+        SELECT organization_id,branch_id,terminal_id,generation,draft_json,?1,?2 FROM checkout_drafts_v1
+        WHERE organization_id=?3 AND branch_id=?4 AND terminal_id=?5 AND generation=?6",
+        params![reason,now,scope.organization,scope.branch,scope.terminal,expected])
+        .map_err(|error| error.to_string())?;
+    let changed = tx
+        .execute(
+            "UPDATE checkout_drafts_v1 SET generation=?1,draft_json=NULL,updated_at=?2
+        WHERE organization_id=?3 AND branch_id=?4 AND terminal_id=?5 AND generation=?6",
+            params![
+                next,
+                now,
+                scope.organization,
+                scope.branch,
+                scope.terminal,
+                expected
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed != 1 {
+        return Err("CHECKOUT_DRAFT_VERSION_CHANGED".into());
+    }
+    let mut reply = read(&tx, &scope)?;
+    reply["parked"] = json!({"outcome":"set_aside","generation":expected});
+    tx.commit().map_err(|error| error.to_string())?;
+    tracing::info!(
+        event_code = "checkout_edit_set_aside",
+        draft_phase = phase,
+        journaled,
+        "Edit draft set aside"
+    );
+    Ok(reply)
+}
+
+#[tauri::command]
+pub async fn checkout_draft_set_aside_edit(
+    arg0: Value,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    run_blocking_command("checkout_draft_set_aside_edit", move || {
+        let db = app.state::<db::DbState>();
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let conn = db
+            .lock_traced("checkout_draft_set_aside_edit")
+            .map_err(|error| error.to_string())?;
+        db::with_full_sync(&conn, |conn| set_aside_edit_write(conn, &arg0))
+    })
+    .await
+}
+
 /// A missing row, cancelled/error response, or returned flag is never a refusal proof.
+/// A SALE reserved for a checkout before its order exists (`ecr_process_payment` with `checkoutRequestId`).
+fn is_checkout_direct_sale(receipt: Option<&str>, request: &str) -> bool {
+    receipt
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .is_some_and(|receipt| {
+            receipt["directSaleAdmissionVersion"].as_u64() == Some(1)
+                && receipt["checkoutRequestId"].as_str() == Some(request)
+        })
+}
+
 fn refusal_outcome(
     conn: &Connection,
     scope: &Scope,
@@ -598,6 +726,12 @@ fn refusal_outcome(
     let mut not_sent = false;
     for (status, receipt) in statuses {
         if status.trim().eq_ignore_ascii_case("declined") {
+            // A split's first card SALE bound to this checkout (coordinator decision A, 01/11/2026) that the
+            // terminal declined moved no money: the checkout stays free under the same identity (back-out to
+            // the cart, or another payment), so it is no refusal to resume from.
+            if is_checkout_direct_sale(receipt.as_deref(), request) {
+                continue;
+            }
             declined = true;
             continue;
         }
@@ -626,6 +760,9 @@ fn refusal_outcome(
             return Ok(None);
         }
         not_sent = true;
+    }
+    if !declined && !not_sent {
+        return Ok(None);
     }
     Ok(Some(if declined && not_sent {
         "not_charged"
@@ -770,6 +907,9 @@ pub(crate) fn is_cashier_confirmed_card(payment: &Value) -> bool {
 }
 
 pub(crate) fn inspect(conn: &Connection, input: &Value) -> Result<Value, String> {
+    if input["view"] == "support_status_only" {
+        return support_status(conn);
+    }
     let scope = scope(conn, input)?;
     if let (Some(order), Some(event)) = (
         input.get("editOrderId").and_then(Value::as_str),
@@ -863,6 +1003,119 @@ pub(crate) fn inspect(conn: &Connection, input: &Value) -> Result<Value, String>
     Ok(
         json!({"success":true,"outcome":outcome,"orderId":order,"payments":payments,"ecr":ecr,"canCollect":false,
             "cashierCanConfirmCard":cashier_can_confirm_card}),
+    )
+}
+
+/// Catalogue-only projection on the caller's query-only connection. Do not use
+/// `scope`, `read`, `list` or schema helpers here: they read keys or write rows.
+fn support_status(conn: &Connection) -> Result<Value, String> {
+    let scope = crate::support::identity::local(conn)?;
+    let row: Option<(u64, Option<String>, Option<String>, String, bool)> = conn.query_row(
+        "SELECT generation,
+            CASE WHEN json_valid(draft_json) THEN json_extract(draft_json,'$.phase') END,
+            CASE WHEN json_valid(draft_json) THEN json_extract(draft_json,'$.checkoutRequestId') END,
+            updated_at,draft_json IS NULL OR json_valid(draft_json)
+        FROM checkout_drafts_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3",
+        params![scope.organization_id,scope.branch_id,scope.terminal_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))
+        .optional().map_err(|_| "unavailable")?;
+    let Some((generation, phase, request, at, valid)) = row else {
+        return Err("unavailable".into());
+    };
+    let age = chrono::DateTime::parse_from_rfc3339(&at).map_err(|_| "unavailable")?;
+    let age = (chrono::Utc::now() - age.with_timezone(&chrono::Utc)).num_milliseconds();
+    if !valid || !(0..=300_000).contains(&age) {
+        return Err("unavailable".into());
+    }
+    let request = request.unwrap_or_default();
+    let order: Option<String> = if request.is_empty() {
+        None
+    } else {
+        conn.query_row(
+        "SELECT id FROM orders WHERE client_request_id=?1 AND organization_id=?2 AND branch_id=?3
+            AND (source_terminal_id=?4 OR terminal_id=?4 OR owner_terminal_id=?4) LIMIT 1",
+        params![request,scope.organization_id,scope.branch_id,scope.terminal_id], |r| r.get(0))
+        .optional().map_err(|_| "unavailable")?
+    };
+    let (payments,pending,failed): (u64,u64,u64) = conn.query_row(
+        "SELECT count(*),coalesce(sum(status IN ('pending','processing')),0),coalesce(sum(status='failed'),0)
+         FROM order_payments WHERE order_id=?1 AND EXISTS(SELECT 1 FROM orders o WHERE o.id=order_payments.order_id AND o.organization_id=?2 AND o.branch_id=?3)",
+        params![order,scope.organization_id,scope.branch_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
+        .map_err(|_| "unavailable")?;
+    let ecr: bool = if request.is_empty() {
+        false
+    } else {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ecr_transactions WHERE order_id IN (?1,?2))",
+            params![request, order],
+            |r| r.get(0),
+        )
+        .map_err(|_| "unavailable")?
+    };
+    let has = |table: &str| -> Result<bool, String> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |r| r.get(0),
+        )
+        .map_err(|_| "unavailable".into())
+    };
+    let parked: u64 = if has("checkout_draft_parks_v1")? {
+        conn.query_row(
+        "SELECT count(*) FROM checkout_draft_parks_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3",
+        params![scope.organization_id,scope.branch_id,scope.terminal_id], |r| r.get(0)).map_err(|_| "unavailable")?
+    } else {
+        0
+    };
+    // Held corrections and unsaved charged money remain presence flags only.
+    let (unsaved, invalid_unsaved): (u64, bool) = conn
+        .query_row(
+            "SELECT coalesce(sum(CASE WHEN json_valid(setting_value)
+                THEN coalesce(json_extract(setting_value,'$.orderId') IN (?1,?2),0) ELSE 0 END),0),
+                coalesce(max(NOT json_valid(setting_value)),0)
+            FROM local_settings WHERE setting_category='unsaved_charged_payment'",
+            params![request, order],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "unavailable")?;
+    if invalid_unsaved {
+        return Err("unavailable".into());
+    }
+    let correction: bool = if has("edit_settlement_attempts_v1")? {
+        conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM edit_settlement_attempts_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3
+            AND order_id IN (?4,(SELECT CASE WHEN json_valid(draft_json) THEN json_extract(draft_json,'$.context.editOrderId') END
+                FROM checkout_drafts_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3))
+            AND state NOT IN ('applied','reconciled'))",params![scope.organization_id,scope.branch_id,scope.terminal_id,order],|r|r.get(0)).map_err(|_|"unavailable")?
+    } else {
+        false
+    };
+    let phase = match phase.as_deref() {
+        Some("editing") => "editing",
+        Some("checkout_pending") => "checkout_pending",
+        Some("pending_creation") => "pending_creation",
+        Some("canonical") => "canonical",
+        Some("acknowledged") => "acknowledged",
+        Some("blocked") => "blocked",
+        Some("parked") => "parked",
+        None if request.is_empty() => "none",
+        _ => "unknown",
+    };
+    let current: (u64, String) = conn
+        .query_row(
+            "SELECT generation,updated_at FROM checkout_drafts_v1
+        WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3",
+            params![scope.organization_id, scope.branch_id, scope.terminal_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "unavailable")?;
+    if current != (generation, at) || crate::support::identity::local(conn)? != scope {
+        return Err("unavailable".into());
+    }
+    Ok(
+        json!({"clientRequestId":request,"detail":{"state":if order.is_some() && unsaved==0 && !correction && !ecr {"saved"}else{"uncertain"},"phase":phase,"generation":generation,
+        "order_exists":order.is_some(),"payment_rows_present":payments>0,"ecr_attempt_present":ecr,"held_correction_present":correction,
+        "pending_payments":pending+unsaved,"failed_payments":failed,"parked_attempts":parked,"recovery":"unknown"}}),
     )
 }
 #[tauri::command]
@@ -1123,7 +1376,11 @@ pub(crate) fn recent_parks(conn: &Connection) -> Result<Value, String> {
         // No bound terminal: no checkout can have been parked for it.
         return Ok(json!({"count":0,"details":[]}));
     };
-    park_schema(conn)?;
+    // Read-only: Health reads this on its read-only connection (02/11/2026).
+    // No table yet means no checkout was ever parked here.
+    if !crate::payment_review::table_exists(conn, "checkout_draft_parks_v1")? {
+        return Ok(json!({"count":0,"details":[]}));
+    }
     let since = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
     let mut statement = conn
         .prepare(
@@ -1504,6 +1761,196 @@ mod tests {
         }
         json!({"organizationId":"org","branchId":"branch","terminalId":"11111111-1111-4111-8111-111111111111","expectedGeneration":0,"draft":{"cartItems":[{"name":"Coffee","quantity":2}],"checkoutRequestId":"original"}})
     }
+    fn edit_set_aside_fixture(conn: &Connection, phase: &str, journaled: bool) -> Value {
+        let mut input = seed(conn);
+        input["draft"] = json!({"schemaVersion":1,"draftId":"edit-draft","checkoutRequestId":"edit-request",
+            "phase":phase,"context":{"editMode":true,"editOrderId":"edited-order"},
+            "cartItems":[{"name":"Coffee","quantity":2}],"state":{}});
+        if phase == "checkout_pending" {
+            input["draft"]["submission"] = json!({"client_event_id":"edit-event","action":{"type":"collect","payments":[{"method":"card","amount":1.9}]}});
+        }
+        if journaled {
+            conn.execute_batch("CREATE TABLE edit_settlement_attempts_v1 (
+                organization_id TEXT NOT NULL, branch_id TEXT NOT NULL, terminal_id TEXT NOT NULL,
+                client_event_id TEXT NOT NULL, order_id TEXT NOT NULL, request_json TEXT NOT NULL,
+                state TEXT NOT NULL, response_json TEXT, created_at TEXT NOT NULL,
+                PRIMARY KEY(organization_id,branch_id,terminal_id,client_event_id));
+                INSERT INTO edit_settlement_attempts_v1 VALUES('org','branch','11111111-1111-4111-8111-111111111111',
+                    'edit-event','edited-order','{}','refused','{}','now');").unwrap();
+        }
+        write(conn, &input, false).unwrap();
+        input["expectedGeneration"] = json!(1);
+        input["draftId"] = json!("edit-draft");
+        input["clientRequestId"] = json!("edit-request");
+        input
+    }
+
+    fn assert_edit_set_aside(conn: &Connection, input: &Value, reason: &str) {
+        let raw: String = conn
+            .query_row("SELECT draft_json FROM checkout_drafts_v1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let reply = set_aside_edit_write(conn, input).unwrap();
+        assert_eq!(reply["generation"], 2);
+        assert!(reply["draft"].is_null());
+        assert_eq!(reply["parked"]["generation"], 1);
+        let archived: (String, String) = conn
+            .query_row(
+                "SELECT draft_json,reason FROM checkout_draft_archive_v1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(archived, (raw, reason.to_string()));
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM orders"), 0);
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM order_payments"), 0);
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM payment_adjustments"), 0);
+        assert_eq!(count(conn, "SELECT COUNT(*) FROM parity_sync_queue"), 0);
+        // A late save cannot put the old editor back into the clean slot.
+        assert_eq!(
+            write(conn, input, false).unwrap_err(),
+            "CHECKOUT_DRAFT_VERSION_CHANGED"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn checkout_editing_edit_set_aside_archives_exact_json_and_frees_the_slot() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([(
+            "terminal_id",
+            "11111111-1111-4111-8111-111111111111",
+        )]);
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let input = edit_set_aside_fixture(&conn, "editing", false);
+        // Preserve the stored text, even its harmless whitespace.
+        conn.execute(
+            "UPDATE checkout_drafts_v1 SET draft_json='  ' || draft_json || '  '",
+            [],
+        )
+        .unwrap();
+        assert_edit_set_aside(&conn, &input, "edit_set_aside");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn checkout_renewed_edit_set_aside_keeps_its_supersedes_evidence() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([(
+            "terminal_id",
+            "11111111-1111-4111-8111-111111111111",
+        )]);
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let input = edit_set_aside_fixture(&conn, "editing", false);
+        conn.execute("UPDATE checkout_drafts_v1 SET draft_json=json_set(draft_json,'$.context.supersedesEditEvent','older-event')", []).unwrap();
+        assert_edit_set_aside(&conn, &input, "edit_set_aside");
+        let event: String = conn.query_row("SELECT json_extract(draft_json,'$.context.supersedesEditEvent') FROM checkout_draft_archive_v1", [], |row| row.get(0)).unwrap();
+        assert_eq!(event, "older-event");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn checkout_pending_journaled_edit_set_aside_leaves_the_journal_untouched() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([(
+            "terminal_id",
+            "11111111-1111-4111-8111-111111111111",
+        )]);
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let input = edit_set_aside_fixture(&conn, "checkout_pending", true);
+        assert_edit_set_aside(&conn, &input, "edit_set_aside");
+        let journal: (String, String, String) = conn
+            .query_row(
+                "SELECT state,request_json,response_json FROM edit_settlement_attempts_v1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(journal, ("refused".into(), "{}".into(), "{}".into()));
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM edit_settlement_attempts_v1"),
+            1
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn checkout_pending_unjournaled_edit_set_aside_marks_the_archive_reason() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([(
+            "terminal_id",
+            "11111111-1111-4111-8111-111111111111",
+        )]);
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let input = edit_set_aside_fixture(&conn, "checkout_pending", false);
+        assert_edit_set_aside(&conn, &input, "edit_set_aside_unjournaled");
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='edit_settlement_attempts_v1'"
+            ),
+            0
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn checkout_non_edit_set_aside_refuses_without_changing_the_slot() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([(
+            "terminal_id",
+            "11111111-1111-4111-8111-111111111111",
+        )]);
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let input = edit_set_aside_fixture(&conn, "editing", false);
+        conn.execute("UPDATE checkout_drafts_v1 SET draft_json=json_set(draft_json,'$.context.editMode',json('false'))", []).unwrap();
+        let before = read(&conn, &scope(&conn, &input).unwrap()).unwrap();
+        assert_eq!(
+            set_aside_edit_write(&conn, &input).unwrap_err(),
+            "CHECKOUT_DRAFT_NOT_EDIT"
+        );
+        assert_eq!(read(&conn, &scope(&conn, &input).unwrap()).unwrap(), before);
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='checkout_draft_archive_v1'"
+            ),
+            0
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn checkout_edit_set_aside_refuses_stale_generation_and_changed_identity() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([(
+            "terminal_id",
+            "11111111-1111-4111-8111-111111111111",
+        )]);
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let input = edit_set_aside_fixture(&conn, "editing", false);
+        let before = read(&conn, &scope(&conn, &input).unwrap()).unwrap();
+        for (field, value, error) in [
+            (
+                "expectedGeneration",
+                json!(0),
+                "CHECKOUT_DRAFT_VERSION_CHANGED",
+            ),
+            ("draftId", json!("another-draft"), "CHECKOUT_DRAFT_CHANGED"),
+            (
+                "clientRequestId",
+                json!("another-request"),
+                "CHECKOUT_DRAFT_CHANGED",
+            ),
+        ] {
+            let mut changed = input.clone();
+            changed[field] = value;
+            assert_eq!(set_aside_edit_write(&conn, &changed).unwrap_err(), error);
+            assert_eq!(read(&conn, &scope(&conn, &input).unwrap()).unwrap(), before);
+        }
+    }
+
     #[test]
     fn checkout_draft_disk_restart_retains_identity_and_tombstone_fences_late_save() {
         let db = crate::tests::harness::TestDb::open();

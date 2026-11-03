@@ -689,38 +689,40 @@ fn persist_reservation_mutation(
         .as_str()
         .ok_or("Missing organization")?;
     let branch = reservation["branch_id"].as_str().ok_or("Missing branch")?;
-    conn.execute_batch("SAVEPOINT reservation_write")
-        .map_err(|e| e.to_string())?;
-    let result = (|| {
-        let local_id: Option<String> = conn
-            .query_row(
-                "SELECT local_id FROM reservation_local_identity WHERE
-          (local_id=?1 OR server_id=?1) AND organization_id=?2 AND branch_id=?3",
-                params![id, org, branch],
-                |r| r.get(0),
-            )
-            .optional()
+    crate::db::with_immediate_admission(conn, || {
+        conn.execute_batch("SAVEPOINT reservation_write")
             .map_err(|e| e.to_string())?;
-        conn.execute("INSERT INTO reservation_local_identity(local_id,server_id,organization_id,branch_id,data)
+        let result = (|| {
+            let local_id: Option<String> = conn
+                .query_row(
+                    "SELECT local_id FROM reservation_local_identity WHERE
+          (local_id=?1 OR server_id=?1) AND organization_id=?2 AND branch_id=?3",
+                    params![id, org, branch],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            conn.execute("INSERT INTO reservation_local_identity(local_id,server_id,organization_id,branch_id,data)
           VALUES(?1,?2,?3,?4,?5) ON CONFLICT(local_id) DO UPDATE SET data=excluded.data",
           params![local_id.as_deref().unwrap_or(id),if operation=="INSERT" {None} else {Some(id)},org,branch,reservation.to_string()]).map_err(|e|e.to_string())?;
-        enqueue_parity_item(
-            conn,
-            "reservations",
-            id,
-            operation,
-            payload,
-            "hospitality",
-            "manual",
-        )
-    })();
-    if result.is_ok() {
-        conn.execute_batch("RELEASE reservation_write")
-    } else {
-        conn.execute_batch("ROLLBACK TO reservation_write; RELEASE reservation_write")
-    }
-    .map_err(|e| e.to_string())?;
-    result
+            enqueue_parity_item(
+                conn,
+                "reservations",
+                id,
+                operation,
+                payload,
+                "hospitality",
+                "manual",
+            )
+        })();
+        if result.is_ok() {
+            conn.execute_batch("RELEASE reservation_write")
+        } else {
+            conn.execute_batch("ROLLBACK TO reservation_write; RELEASE reservation_write")
+        }
+        .map_err(|e| e.to_string())?;
+        result
+    })
 }
 
 fn reservation_patch(base: &mut Value, payload: &Value) {
@@ -1127,57 +1129,60 @@ fn mutate_staff_schedule_locally(
         );
     }
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute_batch("SAVEPOINT staff_schedule_mutation")
-        .map_err(|e| e.to_string())?;
-    let result = (|| {
-        let queue_id = enqueue_parity_item(
-            &conn,
-            "salon_staff_shifts",
-            &id,
-            operation,
-            &shift,
-            "salon",
-            "manual",
-        )?;
-        let mut statement = conn.prepare("SELECT scope_key, payload_json FROM branch_ops_cache WHERE branch_id = ?1 AND cache_key = 'staff_schedule'").map_err(|e| e.to_string())?;
-        let cached = statement
-            .query_map(params![branch], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
+
+    crate::db::with_immediate_admission(&conn, || {
+        conn.execute_batch("SAVEPOINT staff_schedule_mutation")
             .map_err(|e| e.to_string())?;
-        drop(statement);
-        for (scope, encoded) in cached {
-            let mut cached_payload: Value =
-                serde_json::from_str(&encoded).map_err(|e| e.to_string())?;
-            if let Some(rows) = get_array_mut_path(&mut cached_payload, &["shifts"]) {
-                if operation == "DELETE" {
-                    rows.retain(|row| row.get("id").and_then(Value::as_str) != Some(&id));
-                } else {
-                    upsert_array_record(rows, &shift);
-                }
-                conn.execute("UPDATE branch_ops_cache SET payload_json = ?1, version = ?2 WHERE branch_id = ?3 AND cache_key = 'staff_schedule' AND scope_key = ?4",
+        let result = (|| {
+            let queue_id = enqueue_parity_item(
+                &conn,
+                "salon_staff_shifts",
+                &id,
+                operation,
+                &shift,
+                "salon",
+                "manual",
+            )?;
+            let mut statement = conn.prepare("SELECT scope_key, payload_json FROM branch_ops_cache WHERE branch_id = ?1 AND cache_key = 'staff_schedule'").map_err(|e| e.to_string())?;
+            let cached = statement
+                .query_map(params![branch], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            drop(statement);
+            for (scope, encoded) in cached {
+                let mut cached_payload: Value =
+                    serde_json::from_str(&encoded).map_err(|e| e.to_string())?;
+                if let Some(rows) = get_array_mut_path(&mut cached_payload, &["shifts"]) {
+                    if operation == "DELETE" {
+                        rows.retain(|row| row.get("id").and_then(Value::as_str) != Some(&id));
+                    } else {
+                        upsert_array_record(rows, &shift);
+                    }
+                    conn.execute("UPDATE branch_ops_cache SET payload_json = ?1, version = ?2 WHERE branch_id = ?3 AND cache_key = 'staff_schedule' AND scope_key = ?4",
                     params![cached_payload.to_string(), format!("offline:{queue_id}"), branch, scope]).map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(
+                json!({ "success": true, "data": { "shift": shift, "queueId": queue_id, "queued": true, "deleted": operation == "DELETE" } }),
+            )
+        })();
+        match result {
+            Ok(value) => {
+                conn.execute_batch("RELEASE staff_schedule_mutation")
+                    .map_err(|e| e.to_string())?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch(
+                    "ROLLBACK TO staff_schedule_mutation; RELEASE staff_schedule_mutation",
+                );
+                Err(error)
             }
         }
-        Ok(
-            json!({ "success": true, "data": { "shift": shift, "queueId": queue_id, "queued": true, "deleted": operation == "DELETE" } }),
-        )
-    })();
-    match result {
-        Ok(value) => {
-            conn.execute_batch("RELEASE staff_schedule_mutation")
-                .map_err(|e| e.to_string())?;
-            Ok(value)
-        }
-        Err(error) => {
-            let _ = conn.execute_batch(
-                "ROLLBACK TO staff_schedule_mutation; RELEASE staff_schedule_mutation",
-            );
-            Err(error)
-        }
-    }
+    })
 }
 
 pub(crate) fn overlay_pending_staff_schedule(

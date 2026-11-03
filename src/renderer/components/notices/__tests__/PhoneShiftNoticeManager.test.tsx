@@ -1,3 +1,4 @@
+vi.mock('../WorkCardNoticeManager', () => ({ WorkCardNoticeManager: () => null }));
 /**
  * The Main's notice for a closed phone shift (founder rule 13/10/2026):
  * who, which phone, orders and sales, and the cash handover state.

@@ -57,13 +57,13 @@ import EditOrderItemsModal from "./modals/EditOrderItemsModal";
 import { CustomerSearchModal } from "./modals/CustomerSearchModal";
 import { CustomerInfoModal } from "./modals/CustomerInfoModal";
 import { AddCustomerModal } from "./modals/AddCustomerModal";
-import { MenuModal } from "./modals/MenuModal";
+import { MenuModal, type MenuSplitCheckoutSession } from "./modals/MenuModal";
 import { EditOrderRefundSettlementModal } from "./modals/EditOrderRefundSettlementModal";
 import {
   EditSettlementDeltaModal,
   type EditSettlementDeltaMethod,
 } from "./modals/EditSettlementDeltaModal";
-import { SplitPaymentModal } from "./modals/SplitPaymentModal";
+import { SplitPaymentModal, type SplitDraftCheckout, type SplitFirstPayment } from "./modals/SplitPaymentModal";
 import {
   OutstandingPaymentMethodModal,
   type OutstandingPaymentSelection,
@@ -97,7 +97,6 @@ import { emitTableSessionBalanceUpdate } from './tables/TableCheckManagerModal';
 import type { CreateReservationDto } from "./tables";
 import {
   AlertTriangle,
-  Banknote,
   BedDouble,
   CalendarClock,
   CalendarPlus,
@@ -143,6 +142,7 @@ import { getRoomEffectiveStatus, type Room } from "../services/RoomsService";
 import type { RoomChargeContext } from "./modals/PaymentModal";
 import { useModules } from "../contexts/module-context";
 import toast from "react-hot-toast";
+import { paymentRefusalMessage } from "../utils/paymentRefusalMessage";
 import { OrderDashboardSkeleton } from "./skeletons";
 import { ErrorDisplay } from "./error";
 import type { Order } from "../types/orders";
@@ -218,6 +218,7 @@ import { getBridge, offEvent, onEvent } from "../../lib";
 import {
   announceUnsavedCheckoutChanged,
   notifyPaymentNotSaved,
+  throwIfPaymentNotSaved,
   useUnsavedCheckoutPayments,
 } from "../utils/unsavedPayments";
 import { UnsavedChargedPaymentBanner } from "./ui/UnsavedChargedPaymentBanner";
@@ -243,6 +244,7 @@ import {
   resolveCheckoutTaxRate,
 } from "../utils/checkoutMoneySettings";
 import { PAYMENT_SET_ASIDE_TOAST_MS } from "../utils/paymentSetAside";
+import { editRefusalMessageKey } from "../utils/editRefusalMessage";
 import { formatSetAsidePaymentMessage } from "../../lib/payment-integrity";
 import { isExternalPlatform } from "../utils/plugin-icons";
 import type {
@@ -256,6 +258,7 @@ import { buildSplitPaymentItems } from "../utils/splitPaymentItems";
 import { resolveOrderCompletionOutcome } from "../utils/orderCompletionOutcome";
 import {
   loadPersistedSplitDismissal,
+  outstandingHasRecordedPayment,
   reconcileOutstandingPaymentAttempt,
   type OutstandingPaymentAttemptReconciliation,
   type PersistedSplitDismissalResolution,
@@ -265,6 +268,7 @@ import { repairMissingPayment } from "../utils/repairMissingPayment";
 import {
   deriveEditSettlementFinancials,
   resolveEditSettlementRefundAmount,
+  resolveEditSettlementCollectAmount,
 } from "../utils/editSettlementFinancials";
 import {
   calculatePickupToDeliveryTotal,
@@ -1170,7 +1174,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       tipRecipientStaffShiftId?: string;
       recoverySession?: number;
       settlementGeneration?: string;
+      /** A split on a cart with no order yet: the checkout it saves with its first portion (founder 01/11). */
+      draftReference?: string;
     } | null>(null);
+    // Founder 01/11/2026 («Τίποτα»): the menu checkout a split on a cart belongs to, and the answer of the
+    // checkout create that its first portion ran (the order id, or a charged card held as not saved).
+    const splitCheckoutRef = useRef<MenuSplitCheckoutSession | null>(null);
+    const splitFirstOrderRef = useRef<{ orderId?: string; notSaved?: unknown; failure?: { errorCode?: string; error?: string } } | null>(null);
     const [outstandingPaymentData, setOutstandingPaymentData] = useState<{
       orderId: string;
       orderTotal: number;
@@ -1211,8 +1221,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       [resolvedIdentityOrganizationId, resolvedTerminalId],
     );
     const ordinaryRefusalText = useCallback(
-      (code: string) =>
-        code === "GIFT_CARD_TERMINAL_SCOPE_REQUIRED"
+      (code: string) => paymentRefusalMessage(code, t) ?? (
+        code === "EDIT_NO_DRAWER_OWNER_ON_SHIFT"
+          ? t("modals.menu.editNoDrawerOwnerOnShift")
+          : code === "GIFT_CARD_TERMINAL_SCOPE_REQUIRED"
           ? t(
               "giftCardCheckout.refusal.scope",
               "This terminal has no confirmed organization or terminal identity. Pair the POS again.",
@@ -1220,7 +1232,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           : t(
               "giftCardCheckout.refusal.admission",
               "Earlier gift card attempts must be checked first.",
-            ),
+            )),
       [t],
     );
     // Verdict of one outstanding write from its raw reply facts; a lost or
@@ -4458,6 +4470,67 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             ? await shouldAskPaymentPrint()
             : false;
 
+        const buildSplitItems = () => buildSplitPaymentItems({
+          items: (orderData.items || []).map(
+            (item: any, index: number) => ({
+              name: item.name || "Item",
+              quantity: item.quantity || 1,
+              price: item.unitPrice || item.price || 0,
+              totalPrice:
+                item.totalPrice ||
+                (item.unitPrice || item.price || 0) *
+                  (item.quantity || 1),
+              itemIndex: item.itemIndex ?? index,
+            }),
+          ),
+          orderTotal: total,
+          deliveryFee,
+          discountAmount: totalDiscountAmount,
+          deliveryFeeLabel: t("payment.fields.deliveryFee", {
+            defaultValue: "Delivery Fee",
+          }),
+          discountLabel: t("modals.payment.discount", {
+            defaultValue: "Discount",
+          }),
+          adjustmentLabel: t("splitPayment.adjustment", {
+            defaultValue: "Adjustment",
+          }),
+        });
+
+        // Founder 01/11/2026 («Τίποτα»): Split for an order paid now opens on this cart and saves nothing; the
+        // order is saved below with its first portion (`splitFirstPortion`), the same create as any checkout.
+        if (isSplitPayment && orderData.paymentData?.splitPreview === true) {
+          setSplitPaymentData({
+            kind: "new-order",
+            orderId: "",
+            // The menu's checkout id, read without protecting it: a cart abandoned after a back-out never blocks
+            // the next checkout. The create below takes it.
+            draftReference: orderData.clientRequestId ?? takeCheckoutRequestId(),
+            orderTotal: total,
+            items: buildSplitItems(),
+            isGhostOrder,
+            initialMode: "by-items",
+            orderType: selectedOrderType || "pickup",
+            tipAmount,
+            tipRecipientRole,
+            tipRecipientStaffId,
+            tipRecipientStaffShiftId,
+          });
+          return true;
+        }
+        const splitFirstPortion: SplitFirstPayment | undefined = isSplitPayment
+          ? orderData.paymentData?.splitFirstPortion
+          : undefined;
+        const splitFirstPayment = splitFirstPortion
+          ? {
+              ...collectionAttribution,
+              ...splitFirstPortion,
+              payment_method: splitFirstPortion.method,
+              collectedBy: splitFirstPortion.collectedBy
+                ?? (['cashier', 'manager'].includes(activeShift?.role_type ?? '') ? 'cashier_drawer' : undefined),
+            }
+          : undefined;
+
         // Create order object
         const orderToCreate = {
           clientRequestId: takeCheckoutRequestId(orderData.clientRequestId),
@@ -4501,7 +4574,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           folio_id: isRoomChargePayment ? orderData.paymentData?.folio_id ?? orderData.paymentData?.roomCharge?.activeFolioId ?? null : null,
           roomId: isRoomChargePayment ? roomId : null,
           ...tableOrderCreateFields,
-          initialPayment,
+          initialPayment: initialPayment ?? splitFirstPayment,
+          // Native saves the split's first portion with the order and leaves the fiscal receipt to the split.
+          ...(splitFirstPayment ? { checkoutKind: "split_first_portion" } : {}),
           skipAutoPrint: askBeforeReceiptPrint,
           skip_auto_print: askBeforeReceiptPrint,
           // Full delivery address fields for proper sync to Supabase
@@ -4652,37 +4727,20 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
           // Capture split payment data for the SplitPaymentModal (rendered in OrderDashboard).
           // This must happen before finishOrderCompletion closes MenuModal.
-          if (isSplitPayment && createdOrderId) {
+          if (isSplitPayment && createdOrderId && splitFirstPayment) {
+            // The split on the cart continues on the order its first portion just saved: same window, same people.
+            const reference = orderToCreate.clientRequestId;
+            const savedOrderId = createdOrderId;
+            splitFirstOrderRef.current = { orderId: savedOrderId };
+            setSplitPaymentData((current) => current && current.draftReference === reference
+              ? { ...current, orderId: savedOrderId, orderNumber: result.orderNumber }
+              : current);
+          } else if (isSplitPayment && createdOrderId) {
             setSplitPaymentData({
               kind: "new-order",
               orderId: createdOrderId,
               orderTotal: total,
-              items: buildSplitPaymentItems({
-                items: (orderData.items || []).map(
-                  (item: any, index: number) => ({
-                    name: item.name || "Item",
-                    quantity: item.quantity || 1,
-                    price: item.unitPrice || item.price || 0,
-                    totalPrice:
-                      item.totalPrice ||
-                      (item.unitPrice || item.price || 0) *
-                        (item.quantity || 1),
-                    itemIndex: item.itemIndex ?? index,
-                  }),
-                ),
-                orderTotal: total,
-                deliveryFee,
-                discountAmount: totalDiscountAmount,
-                deliveryFeeLabel: t("payment.fields.deliveryFee", {
-                  defaultValue: "Delivery Fee",
-                }),
-                discountLabel: t("modals.payment.discount", {
-                  defaultValue: "Discount",
-                }),
-                adjustmentLabel: t("splitPayment.adjustment", {
-                  defaultValue: "Adjustment",
-                }),
-              }),
+              items: buildSplitItems(),
               isGhostOrder,
               initialMode: "by-items",
               orderNumber: result.orderNumber,
@@ -4818,8 +4876,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           // Item E: the card was charged and the order could not be saved
           // yet. The till holds the order and its payment; the checkout ends
           // here (a retry from this cart would be a new checkout and a second
-          // charge) and the banner offers "Save payment again".
-          notifyPaymentNotSaved(result, t);
+          // charge) and the banner offers "Save payment again". A split's first
+          // card says so on its own portion.
+          if (splitFirstPayment) splitFirstOrderRef.current = { notSaved: result };
+          else notifyPaymentNotSaved(result, t);
           announceUnsavedCheckoutChanged();
           return finishOrderCompletion(false, true);
         } else if (isCheckoutOutcomeUnknown(result)) {
@@ -4828,7 +4888,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           notifyCheckoutOutcomeUnknown(result, t);
           return finishOrderCompletion(false);
         } else {
-          toast.error(result.error || t("orderDashboard.orderCreateFailed"));
+          if (splitFirstPayment) splitFirstOrderRef.current = { failure: result };
+          toast.error(paymentRefusalMessage(result.error, t) ?? (result.error || t("orderDashboard.orderCreateFailed")));
           return finishOrderCompletion(false);
         }
       } catch (error) {
@@ -4839,12 +4900,58 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return finishOrderCompletion(false);
         }
         console.error("Error creating order:", error);
-        toast.error(t("orderDashboard.orderCreateFailed"));
+        toast.error(paymentRefusalMessage(error, t) ?? t("orderDashboard.orderCreateFailed"));
         // If the order persisted before the throw, finishOrderCompletion still
         // finalizes the UI — retrying from a stale cart would duplicate it.
         return finishOrderCompletion(false);
       }
     };
+
+    // Founder 01/11/2026 («Τίποτα»): Split from the menu for an order paid now. The window opens on the admitted
+    // cart (the same totals the create will use), and nothing is saved until its first portion is paid.
+    const handleSplitCheckoutStart = (session: MenuSplitCheckoutSession) => {
+      splitCheckoutRef.current = session;
+      void (async () => {
+        const opened = await handleOrderComplete({
+          ...session.submission,
+          paymentData: { ...session.submission.paymentData, splitPreview: true },
+        } as any);
+        if (opened) return;
+        // The cart could not open as a split (for example a delivery with no address): back to its payment window.
+        splitCheckoutRef.current = null;
+        await session.backOut();
+      })();
+    };
+
+    // The first portion of a split on a cart: the checkout saves the order with this payment and the window
+    // continues on that order. A charged card that could not be saved is held under the checkout and says so.
+    const handleSplitFirstPortion = async (payment: SplitFirstPayment): Promise<string> => {
+      const session = splitCheckoutRef.current;
+      if (!session) throw new Error(t("orderDashboard.orderCreateFailed"));
+      splitFirstOrderRef.current = null;
+      await session.commit(payment as unknown as Record<string, unknown>);
+      const outcome = splitFirstOrderRef.current as { orderId?: string; notSaved?: unknown; failure?: { errorCode?: string; error?: string } } | null;
+      splitFirstOrderRef.current = null;
+      if (outcome?.orderId) {
+        splitCheckoutRef.current = null;
+        return outcome.orderId;
+      }
+      if (outcome?.notSaved) throwIfPaymentNotSaved(outcome.notSaved, t, formatCurrency);
+      // A card of this checkout is held or not known: the split stays open to record it or wait for it.
+      if (outcome?.failure?.errorCode?.startsWith("CHECKOUT_CARD_SALE_")) {
+        throw new Error(outcome.failure.error || t("orderDashboard.orderCreateFailed"));
+      }
+      // Nothing was saved and no money is held: the split on the cart ends, and the menu keeps the cart.
+      splitCheckoutRef.current = null;
+      setSplitPaymentData((current) => (current?.draftReference && !current.orderId ? null : current));
+      throw new Error(t("orderDashboard.orderCreateFailed"));
+    };
+    const splitFirstPortionHandlerRef = useRef(handleSplitFirstPortion);
+    splitFirstPortionHandlerRef.current = handleSplitFirstPortion;
+    const splitDraftReference = splitPaymentData?.draftReference;
+    const splitDraft = useMemo<SplitDraftCheckout | undefined>(() => (splitDraftReference
+      ? { reference: splitDraftReference, createOrder: (payment) => splitFirstPortionHandlerRef.current(payment) }
+      : undefined), [splitDraftReference]);
 
     // Handle split payment completion — dismiss the modal and refresh orders
     const resetEditOrderState = useCallback(() => {
@@ -5056,10 +5163,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         // New simple cash/card delta picker replaces the former
         // SplitPaymentModal routing for edit-settlement collect cases.
         // Amount = how much more the customer still owes after the edit.
-        const amount = Math.max(
-          0,
-          Number(preview.nextTotal || 0) - Number(preview.paidTotal || 0),
-        );
+        const amount = resolveEditSettlementCollectAmount(preview);
         setEditSettlementDeltaPrompt({
           mode: "collect",
           amount,
@@ -5221,20 +5325,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderUpdates: request.orderUpdates,
           action: {
             type: "refund",
-            refunds: refunds.map((refund) => {
-              const attribution = resolveAdjustmentAttribution({
-                databaseStaffId: staff?.databaseStaffId,
-                shiftStaffOwnerId: activeShift?.staff_id,
-                staffShiftId: refund.staffShiftId ?? activeShift?.id,
-                candidateStaffIds: [refund.staffId, staff?.staffId],
-              });
-
-              return {
-                ...refund,
-                staffId: attribution.staffId,
-                staffShiftId: attribution.staffShiftId,
-              };
-            }),
+            refunds: refunds.map(({ staffId: _staffId, staffShiftId: _staffShiftId, ...refund }) => refund),
           },
         });
 
@@ -5243,13 +5334,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         await loadOrders();
       },
       [
-        activeShift?.id,
-        activeShift?.staff_id,
         bridge.orders,
         loadOrders,
         pendingEditRefundSettlement,
-        staff?.databaseStaffId,
-        staff?.staffId,
         t,
       ],
     );
@@ -5271,15 +5358,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           try {
             let action: Parameters<typeof commitMenuOrderEdit>[2];
             if (mode === 'collect') {
-              const collectionAttribution = resolveAdjustmentAttribution({ databaseStaffId: staff?.databaseStaffId,
-                shiftStaffOwnerId: activeShift?.staff_id, staffShiftId: activeShift?.id, candidateStaffIds: [staff?.staffId] });
               action = { type: 'collect', payments: [{ orderId: request.orderId, method, amount,
-                ...collectionAttribution, paymentOrigin: 'manual', collectedBy: 'cashier_drawer' }] };
+                paymentOrigin: 'manual', collectedBy: 'cashier_drawer' }] };
             } else {
-              const attribution = resolveAdjustmentAttribution({ databaseStaffId: staff?.databaseStaffId,
-                shiftStaffOwnerId: activeShift?.staff_id, staffShiftId: activeShift?.id, candidateStaffIds: [staff?.staffId] });
               action = menuEditRefundAction(preview, amount, method,
-                t('orderDashboard.editSettlementRefundReason', { defaultValue: 'Edit settlement refund' }), attribution);
+                t('orderDashboard.editSettlementRefundReason', { defaultValue: 'Edit settlement refund' }));
             }
             await commitMenuOrderEdit(bridge.orders, pending.data, action, pending.lifecycle);
             setEditSettlementDeltaPrompt(null);
@@ -5331,8 +5414,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         orderId: request.orderId,
                         method,
                         amount,
-                        ...resolveAdjustmentAttribution({ databaseStaffId: staff?.databaseStaffId,
-                          shiftStaffOwnerId: activeShift?.staff_id, staffShiftId: activeShift?.id, candidateStaffIds: [staff?.staffId] }),
                         paymentOrigin: "manual",
                         collectedBy: "cashier_drawer",
                       },
@@ -5364,7 +5445,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             if (run.status === "unknown") void loadOrders().catch(() => undefined);
             toast.error(
               run.status === "refused"
-                ? ordinaryRefusalText(run.code)
+                ? t(`modals.menu.${editRefusalMessageKey(run.code || '')}`)
                 : t("orderDashboard.collectPaymentFailed", {
                     defaultValue: "Failed to collect payment",
                   }),
@@ -5399,12 +5480,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             );
             throw new Error("no-eligible-payment-for-refund");
           }
-          const attribution = resolveAdjustmentAttribution({
-            databaseStaffId: staff?.databaseStaffId,
-            shiftStaffOwnerId: activeShift?.staff_id,
-            staffShiftId: activeShift?.id,
-            candidateStaffIds: [staff?.staffId],
-          });
           await bridge.orders.applyEditSettlement({
             orderId: request.orderId,
             items: request.items,
@@ -5421,10 +5496,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     defaultValue: "Edit settlement refund",
                   }),
                   refundMethod: method,
-                  // R2: who handed cash back is the till's rule (the courier
-                  // while their earning is unsettled), never sent from here.
-                  staffId: attribution.staffId,
-                  staffShiftId: attribution.staffShiftId,
                 },
               ],
             },
@@ -5436,15 +5507,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         await loadOrders();
       },
       [
-        activeShift?.id,
-        activeShift?.staff_id,
         bridge.orders,
         collectionScope,
         editSettlementDeltaPrompt,
         loadOrders,
         ordinaryRefusalText,
-        staff?.databaseStaffId,
-        staff?.staffId,
         silentRefresh,
         refetchTables,
         t,
@@ -5465,6 +5532,34 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       splitPaymentCompletedRef.current = null;
 
       if (!closingSplitPayment) return;
+
+      // A split on a cart with no order: nothing was paid and nothing is saved. Back to the menu's payment window,
+      // whose ✕ returns to the cart (founder 01/11/2026, «Τίποτα»).
+      if (closingSplitPayment.draftReference && !closingSplitPayment.orderId) {
+        // Money taken for this checkout is recorded, never dropped (coordinator, 01/11/2026): a card charged and not
+        // saved, or not known yet, keeps the split open and says why.
+        const held = await bridge.ecr
+          .checkoutDirectSale(closingSplitPayment.draftReference)
+          .then((answer: any) => (answer?.directSale ?? null) as { recoverable?: boolean; amountCents?: number; currency?: string } | null)
+          .catch(() => undefined);
+        if (held === undefined) {
+          toast.error(t("splitPayment.checkoutSaleReadFailed", { defaultValue: "The till could not check this order's card payments. Try again." }));
+          return;
+        }
+        if (held) {
+          const amount = formatCurrency((held.amountCents ?? 0) / 100, held.currency ?? undefined);
+          toast.error(held.recoverable
+            ? t("splitPayment.checkoutSaleHeld", { amount, defaultValue: "A card payment of {{amount}} was already charged for this order and is not saved yet. Save it as this order's payment; do not charge the card again." })
+            : t("splitPayment.checkoutSaleUnknown", { amount, defaultValue: "The card terminal did not answer for {{amount}}. Check the terminal's last transaction before taking another payment. This order cannot be left until the card is checked." }),
+            { duration: 12000 });
+          return;
+        }
+        setSplitPaymentData(null);
+        const session = splitCheckoutRef.current;
+        splitCheckoutRef.current = null;
+        await session?.backOut();
+        return;
+      }
 
       if (closingSplitPayment.kind !== "new-order") {
         setSplitPaymentData(null);
@@ -5712,6 +5807,20 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         if (!reentry) void loadOrders().catch(() => undefined);
         return;
       }
+      // Coordinator 01/11 (founder «Ναι, έτσι»): with nothing paid, closing leaves the order unpaid in Orders
+      // (PAY PENDING, as Android's back does) and says so. Reopening Split here made Split <-> this window an
+      // endless loop. The order is never marked paid: it stays unpaid, or the cashier cancels it.
+      if (!outstandingHasRecordedPayment(pendingPayment)) {
+        toast(
+          t("orderDashboard.unpaidOrderLeftPending", {
+            orderNumber: pendingPayment.orderNumber ?? "",
+            defaultValue: "Order {{orderNumber}} stays unpaid in Orders, waiting for payment.",
+          }),
+        );
+        void loadOrders().catch(() => undefined);
+        return;
+      }
+      // Part of it is paid: the split continues from what is left.
       setSplitPaymentData({
         kind: "new-order",
         orderId: pendingPayment.orderId,
@@ -5728,7 +5837,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
         recoverySession: (pendingPayment.recoverySession ?? 0) + 1,
       });
-    }, [giftReceiptReentryOrderId, giftSettledOrderId, loadOrders]);
+    }, [giftReceiptReentryOrderId, giftSettledOrderId, loadOrders, t]);
 
     const handleOutstandingPaymentSelect = useCallback(async (
       selection: OutstandingPaymentSelection,
@@ -6246,6 +6355,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setPendingCancelOrders(cancellable);
       setShowCancelModal(true);
       return true;
+    };
+
+    // «Cancel order» on the unpaid outstanding window (coordinator 01/11): hands the order to the normal
+    // cancellation above. Shown only while nothing is paid; once a portion is recorded the split owns the order.
+    const handleOutstandingCancelOrder = () => {
+      const pendingPayment = outstandingPaymentDataRef.current;
+      if (!pendingPayment || outstandingHasRecordedPayment(pendingPayment)) return;
+      setOutstandingPaymentData(null);
+      void beginOrderCancellation([pendingPayment.orderId]);
     };
 
     const handleBulkAction = async (action: string) => {
@@ -6910,6 +7028,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const localizePaymentMethodEditError = (error: unknown) => {
       const rawMessage = extractOrderDashboardErrorMessage(error) || "";
       if (rawMessage.includes("PAYMENT_METHOD_EDIT_PROVIDER_PAYMENT_IMMUTABLE")) return t("orderDashboard.paymentMethodEditProviderOwned");
+      if (rawMessage.includes("EDIT_NO_DRAWER_OWNER_ON_SHIFT")) return t("modals.menu.editNoDrawerOwnerOnShift");
       if (rawMessage.includes("ORDER_EDIT_SETTLEMENT_PENDING")) return t("orderDashboard.paymentMethodEditPending");
       if (rawMessage.includes("PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE")) {
         return t("orderDashboard.paymentMethodAdjustedOrder", {
@@ -7545,7 +7664,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       } catch (error) {
         console.error("Failed to update order items:", error);
         const errorMessage = extractOrderDashboardErrorMessage(error);
-        toast.error(errorMessage || t("orderDashboard.orderItemsFailed"));
+        toast.error(t(`modals.menu.${editRefusalMessageKey(errorMessage || '')}`));
       }
     };
 
@@ -7612,7 +7731,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
       await new Promise<void>((resolve, reject) => {
         setEditSettlementDeltaPrompt({ mode: preview.requiredAction as 'collect' | 'refund',
-          amount: preview.requiredAction === 'collect' ? Math.max(0, preview.nextTotal - preview.paidTotal) : resolveEditSettlementRefundAmount(preview),
+          amount: preview.requiredAction === 'collect' ? resolveEditSettlementCollectAmount(preview) : resolveEditSettlementRefundAmount(preview),
           orderNumber: currentEditOrderNumber, preview,
           request: { orderId: data.orderId, items: data.items, orderNotes: data.notes },
           menuCommit: { data, lifecycle, resolve, reject },
@@ -8610,6 +8729,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           deliveryZoneInfo={deliveryZoneInfo}
           onRepickDeliveryAddress={handleRepickDeliveryAddress}
           onOrderComplete={handleOrderComplete}
+          // A table order is saved to its table and paid later; any other order is saved with its first payment.
+          onSplitCheckout={orderType !== "dine-in" && selectedOrderType !== "dine-in" && !selectedTable && !tableNumber?.trim()
+            ? handleSplitCheckoutStart
+            : undefined}
           roomChargeContext={roomChargeContext}
           draftContext={{ selectedTable, tableNumber, tableGuestCount, deliveryZoneInfo }}
           onDraftRestore={restoreCheckoutContext}
@@ -8621,10 +8744,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           survives MenuModal closing after order creation */}
         {splitPaymentData && (
           <SplitPaymentModal
-            key={`${splitPaymentData.orderId}:${splitPaymentData.recoverySession ?? 0}`}
+            // A split on a cart keeps its window (and the cashier's people) when its first portion saves the order.
+            key={`${splitPaymentData.draftReference ? `draft:${splitPaymentData.draftReference}` : splitPaymentData.orderId}:${splitPaymentData.recoverySession ?? 0}`}
             isOpen={true}
             onClose={handleSplitPaymentClose}
             orderId={splitPaymentData.orderId}
+            draft={splitDraft}
             orderTotal={splitPaymentData.orderTotal}
             existingPayments={splitPaymentData.existingPayments}
             items={splitPaymentData.items}
@@ -8642,6 +8767,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           <OutstandingPaymentMethodModal
             isOpen={true}
             onClose={handleOutstandingClose}
+            onCancelOrder={outstandingHasRecordedPayment(outstandingPaymentData) ? undefined : handleOutstandingCancelOrder}
             amount={outstandingPaymentData.outstandingAmount}
             orderType={outstandingPaymentData.orderType}
             isProcessing={isProcessingOutstandingPayment}
@@ -8717,7 +8843,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           mode={editSettlementDeltaPrompt?.mode ?? "collect"}
           amount={editSettlementDeltaPrompt?.amount ?? 0}
           orderNumber={editSettlementDeltaPrompt?.orderNumber ?? null}
-          allowedMethods={(editSettlementDeltaPrompt?.preview as { allowedMethods?: Array<"cash" | "card"> } | undefined)?.allowedMethods}
+          allowedMethods={editSettlementDeltaPrompt?.preview.allowedMethods}
+          methodRefusals={editSettlementDeltaPrompt?.preview.methodRefusals}
           onConfirm={handleEditSettlementDeltaConfirm}
           onCancel={handleEditSettlementDeltaCancel}
         />

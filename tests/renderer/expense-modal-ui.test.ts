@@ -35,110 +35,83 @@ const expenseModalPath = path.join(
 
 const source = readFileSync(expenseModalPath, 'utf8');
 
-test('ExpenseModal uses yellow selected tabs and neutral inactive tabs', () => {
-  assert.match(
-    source,
-    /active\s*\?\s*'border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)'/,
-  );
-  assert.match(
-    source,
-    /:\s*'border-slate-200\/90 bg-white\/80 text-slate-700 dark:border-neutral-700\/60 dark:bg-neutral-950\/55 dark:text-neutral-200 dark:shadow-none'/,
-  );
-  assert.doesNotMatch(
-    source,
-    /border-blue-500\/60 bg-blue-600 text-white/,
-  );
-  assert.doesNotMatch(
-    source,
-    /hover:border-blue-300|hover:text-blue-700|dark:hover:border-blue-500\/30|dark:hover:text-blue-300/,
-  );
+// Founder 01/11 (screenshot of «Drawer Outflows»): the window in the kit style of the shift check-out
+// forms — kit cards on the solid shell, sentence-case labels, each heading once, kit fields, one yellow
+// primary per form — while every amount keeps the colour that gives it meaning.
+test('ExpenseModal tabs are kit options: the open tab in the kit selection yellow', () => {
+  assert.match(source, /aria-pressed=\{active\}\s*className=\{`pos-choice\$\{active \? ' is-selected' : ''\}`\}/);
+  assert.doesNotMatch(source, /border-blue-500\/60 bg-blue-600 text-white/);
   assert.doesNotMatch(source, /hover:/);
 });
 
-test('ExpenseModal surfaces and fields are light by default and retain dark-theme variants', () => {
-  assert.match(
-    source,
-    /const drawerPanelClass = 'rounded-\[28px\] border border-slate-200\/90 bg-white\/90 p-5[\s\S]*dark:border-neutral-700\/60 dark:bg-neutral-950\/80/,
-  );
-  assert.match(
-    source,
-    /const drawerSidePanelClass = 'rounded-\[28px\] border border-slate-200\/90 bg-white\/90 p-3\.5[\s\S]*dark:border-neutral-700\/60 dark:bg-neutral-950\/80/,
-  );
-  assert.match(
-    source,
-    /const drawerSummaryCardClass = 'rounded-3xl border border-slate-200\/90 bg-white\/80[\s\S]*dark:border-neutral-700\/60 dark:bg-black\/50/,
-  );
-  assert.match(
-    source,
-    /const drawerEmptyStateClass = 'rounded-3xl border border-dashed border-slate-300\/90 bg-slate-50\/80[\s\S]*dark:border-neutral-700\/70 dark:bg-neutral-900\/70'/,
-  );
-  assert.match(
-    source,
-    /const drawerInputClass = 'w-full rounded-2xl border border-slate-300\/90 bg-white\/95 px-4 py-3 text-slate-900[\s\S]*dark:border-neutral-700\/80 dark:bg-black dark:text-white/,
-  );
-  assert.match(source, /className=\{drawerPanelClass\}/);
-  assert.match(source, /className=\{drawerSidePanelClass\}/);
+test('ExpenseModal sits on the shared glass shell with kit cards, labels and fields', () => {
+  // Founder 01/11: «το modal των εξόδων δεν το έκανες γυαλί όπως τα υπόλοιπα» — the shared glass shell, its kit
+  // cards frost inside it.
+  assert.doesNotMatch(source, /blur=\{false\}/);
+  assert.match(source, /const drawerListItemClass = 'pos-frost /);
+  assert.match(source, /const drawerPanelClass = 'pos-card flex flex-col p-5';/);
+  assert.match(source, /const drawerSidePanelClass = 'pos-card p-4';/);
+  assert.match(source, /const drawerSummaryCardClass = 'pos-card p-4';/);
+  assert.match(source, /const drawerLabelClass = 'mb-1 block text-sm font-semibold text-\(--pos-s-fg\)';/);
+  assert.match(source, /const drawerInputClass = 'min-h-\[48px\] w-full rounded-xl border border-\(--pos-s-control\) bg-\(--pos-s-surface\)[^']*focus:border-\(--pos-s-yellow\)/);
   assert.match(source, /className=\{`\$\{drawerInputClass\} flex items-center justify-between gap-3 text-left/);
   assert.match(source, /className=\{`\$\{drawerInputClass\} pl-10! text-lg font-bold`\}/);
   assert.match(source, /className=\{`\$\{drawerInputClass\} min-h-\[92px\] resize-none`\}/);
   assert.doesNotMatch(source, /liquid-glass-modal-input/);
+  // No small-capitals eyebrows; no translucent glass surfaces.
+  assert.doesNotMatch(source, /\buppercase\b/);
+  assert.doesNotMatch(source, /backdrop-blur|bg-white\/\d|bg-black\/\d|bg-neutral-950\/\d/);
+  // The form headings are said once (the eyebrow repeated the button's words).
+  assert.doesNotMatch(source, /modals\.expense\.expenseFormTitle/);
+  assert.doesNotMatch(source, /modals\.expense\.staffPaymentFormTitle/);
+  assert.doesNotMatch(source, /modals\.expense\.latestEntries/);
 });
 
-test('ExpenseModal submit actions are light surfaces with dark-theme transparent variants', () => {
-  assert.match(
-    source,
-    /const drawerExpenseSubmitClass = 'border-slate-300\/80! bg-white\/70! font-bold! text-emerald-700![\s\S]*dark:border-neutral-700\/60! dark:bg-transparent! dark:text-emerald-400! dark:shadow-none!'/,
-  );
-  assert.match(
-    source,
-    /const drawerStaffPaymentSubmitClass = 'border-slate-300\/80! bg-white\/70! font-bold! text-amber-700![\s\S]*dark:border-neutral-700\/60! dark:bg-transparent! dark:text-yellow-400! dark:shadow-none!'/,
-  );
-  assert.match(
-    source,
-    /variant="success"[\s\S]*icon=\{<Receipt className="h-4 w-4" \/>\}[\s\S]*className=\{drawerExpenseSubmitClass\}/,
-  );
-  assert.match(
-    source,
-    /variant="warning"[\s\S]*icon=\{<BadgeDollarSign className="h-4 w-4" \/>\}[\s\S]*className=\{drawerStaffPaymentSubmitClass\}/,
-  );
+test('ExpenseModal record actions are the kit yellow primary, row actions kit buttons', () => {
+  assert.match(source, /const drawerSubmitClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';/);
+  assert.equal((source.match(/className=\{drawerSubmitClass\}/g) ?? []).length, 2);
+  assert.match(source, /\{submittingExpense \? drawerSpinner : <Receipt className="h-4 w-4" \/>\}/);
+  assert.match(source, /\{submittingPayment \? drawerSpinner : <BadgeDollarSign className="h-4 w-4" \/>\}/);
+  assert.equal((source.match(/className=\{`\$\{drawerRowActionClass\} pos-solid-btn--danger`\}/g) ?? []).length, 4);
+  assert.doesNotMatch(source, /POSGlassButton|POSGlassBadge/);
+  assert.doesNotMatch(source, /text-emerald-700!|text-amber-700!/);
 });
 
-test('ExpenseModal renders recent expenses empty state with unwrapped green money icon', () => {
-  assert.match(source, /Banknote,/);
-  assert.match(
-    source,
-    /renderEmptyState\(\s*<Banknote className="mx-auto block h-9 w-9 text-emerald-(?:700|800) dark:text-emerald-400" strokeWidth=\{2\.2\} \/>[\s\S]*\{ wrapIcon: false \},/,
-  );
-  assert.match(
-    source,
-    /options\?: \{ wrapIcon\?: boolean \}/,
-  );
-  assert.match(
-    source,
-    /options\?\.wrapIcon === false \? icon : \(/,
-  );
-  assert.doesNotMatch(
-    source,
-    /<Receipt className="h-5 w-5 text-rose-500 dark:text-rose-300" \/>/,
-  );
-  assert.doesNotMatch(
-    source,
-    /renderEmptyState\(\s*<Receipt className="h-6 w-6" \/>[\s\S]*noExpenses/,
-  );
+test('ExpenseModal keeps every amount colour (founder 01/11)', () => {
+  assert.match(source, /'text-rose-500 dark:text-rose-300',\s*\)\}/);
+  assert.match(source, /'text-amber-500 dark:text-amber-300',\s*\)\}/);
+  assert.match(source, /'text-emerald-500 dark:text-emerald-300',\s*\)\}/);
+  assert.match(source, /<div className="text-base font-black text-rose-500 dark:text-rose-300">\s*-\{formatCurrency\(expense\.amount\)\}/);
+  assert.match(source, /<div className="text-base font-black text-amber-500 dark:text-amber-300">\s*-\{formatCurrency\(payment\.amount\)\}/);
+  // Activity labels are coloured words, never pills.
+  assert.match(source, /isExpense \? 'text-rose-600 dark:text-rose-300' : 'text-amber-600 dark:text-amber-300'/);
 });
 
-test('ExpenseModal uses modern custom dropdowns and removes form total chips', () => {
+test('ExpenseModal renders recent expenses empty state with the founder cash glyph, unwrapped', () => {
+  // Founder 01/11 («αντικατέστησε και εδώ το εικονίδιο των μετρητών»): the payment window's cash glyph.
+  assert.match(source, /import \{ CashHandIcon \} from '\.\.\/icons\/PaymentMethodIcons';/);
+  assert.match(
+    source,
+    /renderEmptyState\([\s\S]{0,400}<CashHandIcon className="h-11 w-11 payment-option-cash-icon" \/>[\s\S]*\{ wrapIcon: false \},/,
+  );
+  assert.match(source, /options\?: \{ wrapIcon\?: boolean \}/);
+  assert.match(source, /options\?\.wrapIcon === false \? icon : \(/);
+  assert.doesNotMatch(source, /renderEmptyState\(\s*<Receipt className="h-6 w-6" \/>[\s\S]*noExpenses/);
+});
+
+test('ExpenseModal dropdowns open the kit list and the form has no total chips', () => {
   assert.match(source, /type DrawerDropdownKey = 'expenseType' \| 'staffMember' \| 'paymentType'/);
   assert.match(
     source,
-    /const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-2xl border border-slate-200\/90 bg-white[\s\S]*dark:border-neutral-700\/80 dark:bg-neutral-950/,
+    /const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 [^']*rounded-\[14px\] border border-\(--pos-s-border\) bg-\(--pos-s-surface\)/,
   );
+  assert.match(source, /const drawerDropdownOptionClass = 'flex min-h-11 w-full/);
+  assert.match(source, /selected \? 'bg-\(--pos-s-sel-bg\)! font-semibold text-\(--pos-s-sel-fg\)!' : ''/);
   assert.match(source, /const renderDrawerDropdown = \(\{/);
   assert.match(source, /aria-haspopup="listbox"/);
   assert.match(source, /role="listbox"/);
   assert.match(source, /role="option"/);
   assert.match(source, /<ChevronDown/);
-  assert.match(source, /<Check className="h-4 w-4 shrink-0" \/>/);
   assert.match(source, /dropdownKey: 'expenseType'/);
   assert.match(source, /dropdownKey: 'staffMember'/);
   assert.match(source, /dropdownKey: 'paymentType'/);
@@ -148,21 +121,23 @@ test('ExpenseModal uses modern custom dropdowns and removes form total chips', (
   assert.doesNotMatch(source, /variant="warning">\{formatCurrency\(totalStaffPayments\)\}/);
 });
 
-test('ExpenseModal pins the record actions in sticky bars so they stay visible at small viewport heights', () => {
-  // At 1282x802 the form was taller than the modal and the save button sat below
-  // the fold. Both the expense and staff-payment actions now live in a sticky bar.
-  const stickyBars = source.match(
-    /sticky bottom-0 z-10 -mx-5 -mb-5 mt-\d+ flex flex-wrap items-center gap-3 rounded-b-\[28px\] border-t border-slate-200\/80 bg-white\/95 px-5 py-4 backdrop-blur-xl dark:border-neutral-700\/60 dark:bg-neutral-950\/90/g,
-  );
-  assert.ok(
-    stickyBars && stickyBars.length === 2,
-    'both the expense and staff-payment action rows should be sticky bottom bars',
-  );
-  // The long staff-payment helper paragraph now scrolls above the sticky bar.
+test('ExpenseModal puts the record actions at the foot of each form card, without a band of their own', () => {
+  // Founder 01/11 («βλέπεις τα λάθη;»): on the glass shell a sticky bar with its own glass fill or blur drew a
+  // lighter band and left empty card below it. The bar now sits at the card's foot (a spacer fills the stretched
+  // card) with only a hairline above it.
   assert.match(
     source,
-    /<p className="mt-6 text-sm text-slate-500 dark:text-slate-400">\s*\{t\(\s*'modals\.expense\.staffPaymentHelper'/,
-    'the staff-payment helper text should sit above the sticky bar, not inside it',
+    /const drawerFooterClass = '-mx-5 -mb-5 flex flex-wrap items-center gap-3 border-t border-\(--modal-glass-line\) px-5 py-4';/,
+  );
+  assert.equal(
+    (source.match(/<div aria-hidden="true" className="min-h-4 flex-1" \/>\s*<div className=\{drawerFooterClass\}>/g) ?? []).length,
+    2,
+    'both the expense and staff-payment action rows sit at the foot of their card',
+  );
+  // The long staff-payment helper paragraph stays above the action row.
+  assert.match(
+    source,
+    /<p className="mt-4 text-sm text-\(--pos-s-muted\)">\s*\{t\(\s*'modals\.expense\.staffPaymentHelper'/,
   );
 });
 
@@ -175,16 +150,15 @@ test('ExpenseModal validation hint matches the save button enabled state', () =>
     /const expenseValidationHint = !canRecord\s*\?\s*''[\s\S]*invalidAmount[\s\S]*justificationRequired[\s\S]*:\s*'';/,
     'the hint should explain the missing field and be empty once the form is valid',
   );
-  assert.match(source, /disabled=\{!canSubmitExpense\}/);
+  assert.match(source, /disabled=\{!canSubmitExpense \|\| submittingExpense\}/);
   assert.match(
     source,
-    /\{expenseValidationHint && \(\s*<p className="text-sm text-slate-500 dark:text-slate-400">\s*\{expenseValidationHint\}/,
+    /\{expenseValidationHint && \(\s*<p className="text-sm text-\(--pos-s-muted\)">\s*\{expenseValidationHint\}/,
     'the hint paragraph should only render when there is an actual blocking reason',
   );
-  // Guard against regressing to the always-on "required" message.
   assert.doesNotMatch(
     source,
-    /<p className="text-sm text-slate-500 dark:text-slate-400">\s*\{t\('modals\.expense\.justificationRequired'/,
+    /<p className="[^"]*">\s*\{t\('modals\.expense\.justificationRequired'/,
     'the justification message must not render unconditionally next to an enabled button',
   );
 });

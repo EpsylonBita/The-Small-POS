@@ -19,6 +19,7 @@ import type {
 import type { RepairIntent } from './navigation'
 import { validateRepairIntakePolicy, type RepairConnectivity } from './policy'
 import { canCreateSecureRepairId, createSecureRepairId } from './secure-id'
+import { KitDateField } from '../../components/ui/KitDateField'
 
 export interface RepairDeviceDraft {
   customerId: string
@@ -458,7 +459,7 @@ export function RepairIntakeDialog({
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-sm font-semibold">{t('repairs.intake.title')}<input value={title} onChange={(event) => setTitle(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
           <label className="text-sm font-semibold">{t('repairs.filters.priority')}<select value={priority} onChange={(event) => setPriority(event.target.value as RepairPriority)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3 dark:border-white/15 dark:bg-zinc-900">{(['low', 'normal', 'high', 'urgent'] as RepairPriority[]).map((item) => <option key={item} value={item}>{t(`repairs.priority.${item}`)}</option>)}</select></label>
-          <label className="text-sm font-semibold">{t('repairs.fields.dueAt')}<input type="datetime-local" value={dueAt} onChange={(event) => setDueAt(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
+          <label className="text-sm font-semibold">{t('repairs.fields.dueAt')}<KitDateField type="datetime-local" value={dueAt} onChange={(event) => setDueAt(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
           <label className="text-sm font-semibold sm:col-span-2">{t('repairs.fields.intakeNotes')}<textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={3} maxLength={5000} className="mt-1 w-full rounded-xl border border-slate-300 bg-transparent p-3 dark:border-white/15" /></label>
         </div>
 

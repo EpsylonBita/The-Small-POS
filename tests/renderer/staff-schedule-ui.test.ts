@@ -111,38 +111,50 @@ test('StaffScheduleView uses a responsive calendar without visible scrollbars', 
   );
   assert.match(
     source,
-    /h-9 w-9/,
-    'day-card add buttons should fit inside seven-column cards',
+    /aria-label=\{t\('staffSchedule\.addShiftForDay', 'Add shift for this day'\)\}\s*className="pos-icon-btn"/,
+    'day-card add buttons are the 44 px kit icon button (fits a seven-column card)',
   );
 });
 
-test('StaffScheduleView uses yellow accents for selected controls instead of blue chrome', () => {
+// Founder 01/11 («ανάλυσε αυτό» → «και αυτό!!»): the page in the kit — colours say states, each fact once,
+// chips without wrappers, one role dropdown, kit cards / fields / buttons, the shared glass dialogs.
+test('StaffScheduleView is in the kit: yellow for selection, colours for states, no blue chrome', () => {
   const source = readScheduleSource();
 
-  assert.match(source, /focus:border-yellow-400 focus:ring-2 focus:ring-\(--pos-s-fg\)/);
-  assert.match(source, /bg-yellow-400 px-4 py-3 text-sm font-semibold text-black/);
-  assert.match(source, /bg-yellow-400 border-yellow-400 text-black/);
-  assert.match(source, /bg-\(--pos-s-surface-2\) border-yellow-500/);
-  assert.match(source, /bg-\(--pos-s-surface-2\) border-\(--pos-s-yellow\) text-yellow-800/);
-  assert.match(source, /active:border-yellow-500 active:text-yellow-200/);
-  assert.doesNotMatch(source, /staffSchedule\.actions\.addShift/);
+  assert.match(source, /const panelClass = 'pos-card';/);
+  assert.match(source, /const modalPanelClass = 'liquid-glass-modal-shell text-\(--pos-s-fg\)';/);
+  assert.match(source, /const inputClass = 'min-h-\[48px\] w-full rounded-xl border border-\(--pos-s-control\) bg-\(--pos-s-surface\)[^']*focus:border-\(--pos-s-yellow\)/);
+  assert.match(source, /const primaryButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';/);
+  assert.match(source, /const secondaryButtonClass = 'pos-solid-btn pos-solid-btn--md';/);
+  // Today's column: the kit selection outline; «Σήμερα» is a word, not a pill.
+  assert.match(source, /today \? 'border-2 border-\(--pos-s-sel-bg\) bg-\(--pos-s-surface\)' : softPanelClass/);
+  assert.doesNotMatch(source, /rounded-full border px-2 py-0\.5 text-\[10px\] font-semibold uppercase/);
+  // Stat icons are neutral; the numbers carry the state.
+  assert.doesNotMatch(source, /text-fuchsia-500|text-emerald-500|h-5 w-5 text-amber-500/);
+  assert.match(source, /scheduledStaffCount > 0 \? 'text-\(--pos-s-ok\)' : ''/);
+  assert.match(source, /unscheduledStaff\.length > 0 \? 'text-\(--pos-s-warn\)' : ''/);
+  // Each fact once: a day's count only when it has shifts; no «No shifts / Tap to add one» per day.
+  assert.match(source, /\{dayShifts\.length > 0 && \(/);
+  assert.doesNotMatch(source, /staffSchedule\.noShifts|staffSchedule\.tapToAddShift|staffSchedule\.unscheduledHint/);
+  // One role dropdown instead of a wall of role buttons.
+  assert.match(source, /<select\s+id=\{roleFilterId\}\s+value=\{roleFilter\}/);
+  assert.match(source, /<option key=\{role\} value=\{role\}>\{getRoleChipLabel\(role\)\}<\/option>/);
+  // Add Shift: presets are kit options, the matching one selected.
+  assert.match(source, /aria-pressed=\{isPresetActive\(preset\)\}\s*className=\{`pos-choice\$\{isPresetActive\(preset\) \? ' is-selected' : ''\}`\}/);
   assert.match(source, /staffSchedule\.addShiftForDay/);
-  assert.doesNotMatch(source, /focus:border-blue-500/);
-  assert.doesNotMatch(source, /bg-blue-600/);
-  assert.doesNotMatch(source, /border-blue-500/);
-  assert.doesNotMatch(source, /border-blue-600/);
-  assert.doesNotMatch(source, /text-blue-/);
-  assert.doesNotMatch(source, /rgba\(37,99,235/);
-  assert.doesNotMatch(source, /rgba\(59,130,246/);
+  assert.doesNotMatch(source, /staffSchedule\.actions\.addShift/);
+  assert.doesNotMatch(source, /focus:border-blue-500|bg-blue-600|border-blue-500|border-blue-600|text-blue-/);
+  assert.doesNotMatch(source, /rgba\(37,99,235|rgba\(59,130,246/);
   assert.doesNotMatch(source, /style=\{roleFilter === role \?/);
 });
 
 test('Round 430: StaffScheduleView keeps page controls and preview cards on smooth touch radii', () => {
   const source = readScheduleSource();
 
-  assert.match(source, /className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-red-600 active:bg-red-500 text-white transition-transform active:scale-95"/);
+  // The retry is a kit button; the preview's day cards keep their touch radius.
+  assert.match(source, /onClick=\{fetchStaffData\}\s*className="pos-solid-btn pos-solid-btn--md"/);
   assert.match(source, /className=\{`rounded-2xl border-l-4 px-2 py-2 \$\{isDark \? 'bg-zinc-900 border-zinc-800' : 'bg-slate-50 border-slate-200'\}`\}/);
-  assert.match(source, /className=\{`w-full px-3 py-2 rounded-2xl border text-sm \$\{/);
+  assert.match(source, /className="pos-solid-btn pos-solid-btn--sm w-full"/);
   assert.doesNotMatch(source, /rounded-lg/);
 });
 
@@ -238,7 +250,6 @@ test('StaffScheduleView has no native title tooltips and no hover utilities; con
   assert.match(source, /onClick=\{\(\) => openCreateModal\(defaultCreateDate, member\.id\)\}/);
   assert.match(source, /aria-label=\{`\$\{t\('staffSchedule\.addShiftForStaff', 'Add shift for this staff member'\)\}: \$\{member\.name\}`\}/);
 
-  // Touch-first state: yellow/active accents preserved, no blue chrome.
-  assert.match(source, /active:border-yellow-500 active:text-yellow-200/);
+  // Touch-first state: no blue chrome.
   assert.doesNotMatch(source, /text-blue-|bg-blue-|border-blue-/);
 });

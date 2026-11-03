@@ -83,6 +83,9 @@ pub async fn submit_for_order(
     terminal_id: String,
     branch_id: String,
 ) -> LocalOutcome {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Fiscal,
+    );
     {
         let db = match conn.lock() {
             Ok(guard) => guard,

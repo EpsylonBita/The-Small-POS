@@ -21,6 +21,7 @@ import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 import { usePaymentPrintPrompt, type PaymentPrintPromptContext } from '../hooks/usePaymentPrintPrompt';
 import toast from 'react-hot-toast';
+import { paymentRefusalMessage } from '../utils/paymentRefusalMessage';
 import { customerService } from '../services';
 import { NewOrderPageSkeleton } from '../components/skeletons/NewOrderPageSkeleton';
 import { ErrorDisplay } from '../components/error/ErrorDisplay';
@@ -835,7 +836,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         return false;
       }
       if (!result.success || !result.orderId) {
-        toast.error(t('orderFlow.orderFailed', 'Failed to create order'));
+        toast.error(paymentRefusalMessage('error' in result ? result.error : null, t) ?? t('orderFlow.orderFailed', 'Failed to create order'));
         return false;
       }
       // The order exists: the next checkout is a new one.
@@ -917,7 +918,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       return true;
     } catch (error) {
       console.error('Error creating order from NewOrderPage:', error);
-      toast.error(t('orderFlow.orderFailed', 'Failed to create order'));
+      toast.error(paymentRefusalMessage(error, t) ?? t('orderFlow.orderFailed', 'Failed to create order'));
       return false;
     } finally {
       setIsProcessingOrder(false);

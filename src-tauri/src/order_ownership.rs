@@ -842,6 +842,15 @@ pub fn release_driver_earning_money_for_payment(
     payment_id: &str,
     now: &str,
 ) -> Result<Option<String>, String> {
+    release_driver_earning_money_for_payment_with_organization(conn, payment_id, now, None)
+}
+
+pub(crate) fn release_driver_earning_money_for_payment_with_organization(
+    conn: &Connection,
+    payment_id: &str,
+    now: &str,
+    organization: Option<&str>,
+) -> Result<Option<String>, String> {
     let payment: Option<(String, String, i64, Option<String>)> = conn
         .query_row(
             "SELECT order_id,
@@ -934,7 +943,16 @@ pub fn release_driver_earning_money_for_payment(
         ],
     )
     .map_err(|e| format!("release courier money for {earning_id}: {e}"))?;
-    let payload = build_driver_earning_sync_payload(conn, &earning_id)?;
+    let mut payload = build_driver_earning_sync_payload(conn, &earning_id)?;
+    if payload
+        .get("organization_id")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        if let Some(organization) = organization.filter(|id| !id.trim().is_empty()) {
+            payload["organization_id"] = serde_json::json!(organization);
+        }
+    }
     enqueue_or_refresh_driver_earning_sync_row(conn, &earning_id, &payload)?;
     Ok(Some(earning_id))
 }
@@ -1032,6 +1050,7 @@ pub fn build_driver_earning_sync_payload(
         "createdAt": created_at,
         "updatedAt": updated_at,
     });
+    add_order_organization(conn, &order_id, &mut payload);
     crate::shifts::append_recorded_operating_currency(
         conn,
         "driver_earnings",
@@ -1041,19 +1060,51 @@ pub fn build_driver_earning_sync_payload(
     Ok(payload)
 }
 
+/// Organization already recorded on the parent is passed to enqueue explicitly.
+/// Legacy parents without it keep enqueue's existing fallback; no keyring read here.
+pub(crate) fn add_order_organization(conn: &Connection, order: &str, payload: &mut Value) {
+    if payload
+        .get("organization_id")
+        .or_else(|| payload.get("organizationId"))
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        return;
+    }
+    let organization: Option<String> = conn
+        .query_row(
+            "SELECT organization_id FROM orders WHERE id=?1 OR supabase_id=?1 LIMIT 1",
+            [order],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    if let Some(organization) = organization.filter(|id| !id.trim().is_empty()) {
+        payload["organization_id"] = serde_json::json!(organization);
+    }
+}
+
 /// Replace the outstanding canonical financial sync row for an earning.
 pub fn enqueue_or_refresh_driver_earning_sync_row(
     conn: &Connection,
     earning_id: &str,
     payload: &Value,
 ) -> Result<(), String> {
+    let mut payload = payload.clone();
+    if let Some(order) = payload
+        .get("order_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    {
+        add_order_organization(conn, &order, &mut payload);
+    }
     crate::sync_queue::clear_unsynced_items(conn, "driver_earnings", earning_id)?;
     crate::sync_queue::enqueue_payload_item(
         conn,
         "driver_earnings",
         earning_id,
         "INSERT",
-        payload,
+        &payload,
         Some(1),
         Some("financial"),
         Some("manual"),
@@ -2119,3 +2170,7 @@ mod tests {
         assert_eq!((processing, pending), (1, 1));
     }
 }
+
+#[cfg(test)]
+#[path = "admission_tests/ownership.rs"]
+mod admission_regression_tests;

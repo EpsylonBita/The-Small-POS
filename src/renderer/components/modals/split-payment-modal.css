@@ -1,4 +1,6 @@
-/* Scoped overrides for the split dialog's controls and the shared glass layer. */
+/* Scoped overrides for the split dialog's controls and the shared glass layer.
+   Founder 01/11 («και εδώ δεν έχουν όλα βάθος σωστό!!!»): every control is the kit's raised surface with its soft
+   shadow and no dark outline, pressed sinks; panels carry the card depth; money fields are sunken wells. */
 .split-payment-modal {
   --split-surface: #ffffff;
   --split-control: #f5f5f4;
@@ -32,22 +34,36 @@
   justify-content: center;
   gap: 8px;
   padding: 10px 16px;
-  border: 1px solid var(--split-border) !important;
+  border: 1px solid transparent !important;
   border-radius: 12px;
-  background: var(--split-control) !important;
+  background: var(--pos-s-raised) !important;
+  box-shadow: var(--pos-s-depth);
   color: var(--split-text) !important;
   font-size: 14px;
   font-weight: 600;
   line-height: 20px;
   text-shadow: none !important;
-  transition: background-color 150ms, border-color 150ms, transform 150ms;
+  transition: background-color 150ms, box-shadow 150ms, translate 150ms;
+}
+
+.split-payment-modal button.split-payment-method:active:not(:disabled),
+.split-payment-modal button.split-payment-secondary:active:not(:disabled) {
+  background: var(--pos-s-raised-press) !important;
+  box-shadow: var(--pos-s-depth-press);
+  translate: 0 1px;
 }
 
 /* Wave ΣΤ7: the chosen tender is the kit selection; yellow stays on the one primary (confirm). */
 .split-payment-modal button.split-payment-method[aria-pressed='true'] {
   border-color: var(--pos-s-sel-bg) !important;
   background: var(--pos-s-sel-bg) !important;
+  box-shadow: var(--pos-s-depth-yellow);
   color: var(--pos-s-sel-fg) !important;
+}
+
+.split-payment-modal button.split-payment-method[aria-pressed='true']:active:not(:disabled) {
+  background: var(--pos-s-sel-bg) !important;
+  box-shadow: var(--pos-s-depth-yellow-press);
 }
 
 .split-payment-modal button.split-payment-method svg,
@@ -59,6 +75,7 @@
 
 .split-payment-modal button.split-payment-method:disabled,
 .split-payment-modal button.split-payment-secondary:disabled {
+  box-shadow: var(--pos-s-depth-press);
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -73,6 +90,7 @@
   border: 1px solid var(--split-accent) !important;
   border-radius: 12px;
   background: var(--split-accent) !important;
+  box-shadow: var(--pos-s-depth-yellow);
   color: #18181b !important;
   font-size: 14px;
   font-weight: 700;
@@ -81,12 +99,25 @@
   text-shadow: none !important;
 }
 
+.split-payment-modal button.split-payment-confirm:active:not(:disabled) {
+  border-color: #eab308 !important;
+  background: #eab308 !important;
+  box-shadow: var(--pos-s-depth-yellow-press);
+  translate: 0 1px;
+}
+
 .split-payment-modal button.split-payment-confirm:disabled {
-  border-color: var(--split-border) !important;
-  background: var(--split-control) !important;
+  border-color: transparent !important;
+  background: var(--pos-s-raised) !important;
+  box-shadow: var(--pos-s-depth-press);
   color: var(--split-muted) !important;
   cursor: not-allowed;
   opacity: 1;
+}
+
+/* The chosen tab and receipt mode are raised yellow inside their sunken strips. */
+.split-payment-modal button.split-payment-segment-selected {
+  box-shadow: var(--pos-s-depth-yellow);
 }
 
 .split-payment-modal button:focus-visible,
@@ -97,9 +128,10 @@
 
 .split-payment-modal .split-payment-person {
   padding: 12px 16px;
-  border: 1px solid var(--split-border) !important;
+  border: 1px solid transparent !important;
   border-radius: 16px;
   background: var(--split-surface) !important;
+  box-shadow: var(--pos-s-depth-card);
 }
 
 .split-payment-modal .liquid-glass-modal-header {
@@ -129,11 +161,17 @@
 }
 
 .split-payment-modal .split-payment-quick button {
-  min-height: 40px;
-  border: 1px solid var(--split-border) !important;
-  background: var(--split-control) !important;
+  min-height: 44px;
+  border: 1px solid transparent !important;
+  background: var(--pos-s-raised) !important;
+  box-shadow: var(--pos-s-depth);
   color: var(--split-text) !important;
-  box-shadow: none !important;
+}
+
+.split-payment-modal .split-payment-quick button:active:not(:disabled) {
+  background: var(--pos-s-raised-press) !important;
+  box-shadow: var(--pos-s-depth-press);
+  translate: 0 1px;
 }
 
 .split-payment-modal .split-payment-details {
@@ -156,9 +194,10 @@
 .split-payment-modal .split-payment-money-input,
 .split-payment-modal input[type='number'] {
   min-height: 44px;
-  border: 1px solid var(--split-border) !important;
+  border: 1px solid transparent !important;
   border-radius: 12px;
-  background: var(--split-control) !important;
+  background: var(--pos-s-surface-2) !important;
+  box-shadow: var(--pos-s-well);
   color: var(--split-text) !important;
   font-size: 16px;
   font-variant-numeric: tabular-nums;
@@ -180,11 +219,18 @@
 .split-payment-modal button.split-payment-assignment {
   min-height: 44px;
   padding: 10px 12px;
-  border: 1px solid var(--split-border) !important;
+  border: 1px solid transparent !important;
   border-radius: 12px;
-  background: var(--split-control) !important;
+  background: var(--pos-s-raised) !important;
+  box-shadow: var(--pos-s-depth);
   color: var(--split-text) !important;
   font-size: 14px;
+}
+
+.split-payment-modal button.split-payment-assignment:active:not(:disabled) {
+  background: var(--pos-s-raised-press) !important;
+  box-shadow: var(--pos-s-depth-press);
+  translate: 0 1px;
 }
 
 .split-payment-modal button.split-payment-assignment[aria-expanded='true'] {

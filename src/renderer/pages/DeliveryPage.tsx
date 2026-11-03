@@ -520,9 +520,9 @@ export const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
             onClick={close}
             aria-label={t('common.close', 'Close')}
             disabled={isAssigning}
-            className={`min-w-11 min-h-11 p-2 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 active:scale-95 ${isDark ? 'active:bg-zinc-800 text-zinc-400' : 'active:bg-gray-100 text-gray-500'}`}
+            className="liquid-glass-modal-close"
           >
-            <X className="w-5 h-5" />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
 
@@ -912,7 +912,7 @@ const DeliveryPage: React.FC = () => {
 
       {/* Stats Row */}
       <motion.div variants={pageMotionItem} className="px-6 pb-4">
-        <motion.div variants={pageMotionContainer} className="flex gap-3 overflow-x-auto scrollbar-hide">
+        <motion.div variants={pageMotionContainer} className="pos-scroll-row gap-3">
           <motion.div variants={pageMotionItem} className={`px-4 py-2.5 rounded-2xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
             <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.total', 'Total')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.total}</div>

@@ -32,6 +32,11 @@ describe('edited gross-price VAT', () => {
 // missing (offline, restore timed out) was asked to refund money no local
 // row held — `paidTotal` counts that proven money — and could not be saved.
 describe('edit settlement refund amount', () => {
+  it('uses native refund cents, including zero, ahead of legacy amounts', () => {
+    expect(resolveEditSettlementRefundAmount({ requiredRefundCents: 30, refundAmount: 0.1 + 0.2 })).toBe(0.3);
+    expect(resolveEditSettlementRefundAmount({ requiredRefundCents: 190, refundAmount: 2 })).toBe(1.9);
+    expect(resolveEditSettlementRefundAmount({ requiredRefundCents: 0, refundAmount: 2 })).toBe(0);
+  });
   it('refunds what the native preview says the local rows hold beyond the new total', () => {
     // Paid 15.00, 10.00 held locally, edited down to 8.00.
     expect(

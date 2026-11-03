@@ -27,6 +27,10 @@ const SNAPSHOT_SHM_FILE_NAME: &str = "snapshot.db-shm";
 const METADATA_FILE_NAME: &str = "metadata.json";
 const RESTORE_FILE_NAME: &str = "restore.json";
 const APPLIED_RESTORE_FILE_NAME: &str = "restore.applied.json";
+
+#[cfg(test)]
+#[path = "support/tests/startup_restore_tests.rs"]
+mod support_restore_tests;
 const DENSE_RETENTION_HOURS: i64 = 24;
 const TOTAL_RETENTION_DAYS: i64 = 7;
 const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 15 * 60;
@@ -781,6 +785,452 @@ pub(crate) fn start_snapshot_monitor(
     });
 }
 
+const SUPPORT_RESTORE_FILE: &str = "support-restore.json";
+const SUPPORT_APPLIED_FILE: &str = "support-restore.applied.json";
+const SUPPORT_SWAP_FILE: &str = "support-restore-swap.json";
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SupportRestoreClock {
+    server_ms: i64,
+    ticks_ms: u64,
+    boot_id: [u8; 16],
+}
+impl SupportRestoreClock {
+    pub(crate) fn capture(server_ms: i64) -> Result<Self, String> {
+        let (boot_id, ticks_ms) = support_boot_clock()?;
+        Ok(Self {
+            server_ms,
+            ticks_ms,
+            boot_id,
+        })
+    }
+    fn now(&self) -> Result<i64, String> {
+        let (boot_id, ticks_ms) = support_boot_clock()?;
+        if boot_id != self.boot_id {
+            return Err("SESSION_ENDED".into());
+        }
+        let elapsed: i64 = ticks_ms
+            .checked_sub(self.ticks_ms)
+            .ok_or("SESSION_ENDED")?
+            .try_into()
+            .map_err(|_| "SESSION_ENDED")?;
+        self.server_ms
+            .checked_add(elapsed)
+            .ok_or_else(|| "SESSION_ENDED".into())
+    }
+}
+#[cfg(windows)]
+fn support_boot_clock() -> Result<([u8; 16], u64), String> {
+    // SystemBootEnvironmentInformation supplies a different identifier on each
+    // Windows boot. No file, keyring, device or network access is involved.
+    #[repr(C)]
+    struct BootEnvironment {
+        boot_id: [u8; 16],
+        _firmware_type: u32,
+        _boot_flags: u64,
+    }
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQuerySystemInformation(
+            class: u32,
+            output: *mut BootEnvironment,
+            length: u32,
+            returned: *mut u32,
+        ) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetTickCount64() -> u64;
+    }
+    let mut boot = BootEnvironment {
+        boot_id: [0; 16],
+        _firmware_type: 0,
+        _boot_flags: 0,
+    };
+    let mut returned = 0;
+    let status = unsafe {
+        NtQuerySystemInformation(
+            90,
+            &mut boot,
+            std::mem::size_of::<BootEnvironment>() as u32,
+            &mut returned,
+        )
+    };
+    if status < 0 || returned < 16 || boot.boot_id == [0; 16] {
+        return Err("SESSION_ENDED".into());
+    }
+    Ok((boot.boot_id, unsafe { GetTickCount64() }))
+}
+#[cfg(not(windows))]
+fn support_boot_clock() -> Result<([u8; 16], u64), String> {
+    Err("UNSUPPORTED_ON_PLATFORM".into())
+}
+
+#[derive(Serialize, Deserialize)]
+struct SupportPendingRestore {
+    snapshot: crate::support::snapshot::Snapshot,
+    pre_restore: crate::support::snapshot::Snapshot,
+    post_change_watermark: Value,
+    session_id: String,
+    command_id: Option<String>,
+    max_expires_at: String,
+    absolute_cap_at: String,
+    clock: SupportRestoreClock,
+}
+
+/// Called under the support restore lease, after the live watermark is checked.
+/// This only stages private files. Existing business connections keep selling.
+pub(crate) fn stage_verified_support_snapshot(
+    store: &Connection,
+    live: &Path,
+    snapshot: &crate::support::snapshot::Snapshot,
+    pre_restore: &crate::support::snapshot::Snapshot,
+    session: &str,
+    command: Option<&str>,
+    clock: SupportRestoreClock,
+) -> Result<(), String> {
+    use crate::support::{clock, guards};
+    let app_data = live.parent().ok_or("SNAPSHOT_FAILED")?;
+    let (max, absolute): (String, String) = store.query_row(
+        "SELECT max_expires_at,absolute_cap_at FROM support_session_state WHERE session_id=?1 AND status='active'",
+        [session], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).map_err(|_| "SESSION_ENDED")?;
+    let now = clock.now()?;
+    if clock::parse(&max).map_err(str::to_string)? <= now
+        || clock::parse(&absolute).map_err(str::to_string)? <= now
+    {
+        return Err("SESSION_ENDED".into());
+    }
+    ensure_recovery_dirs(app_data)?;
+    let pending = pending_restore_dir(&recovery_root_for_app_data(app_data));
+    // Never overwrite another manual or support restore intent.
+    fs::create_dir(&pending).map_err(|_| "CONCURRENT_OPERATION")?;
+    let work = (|| {
+        let mut staged = snapshot.clone();
+        staged.folder = pending.clone();
+        for name in std::iter::once("pos.db").chain(snapshot.files.keys().map(String::as_str)) {
+            fs::copy(snapshot.folder.join(name), pending.join(name))
+                .map_err(|_| "SNAPSHOT_FAILED")?;
+        }
+        crate::support::snapshot::verify(&staged)?;
+        let intent = SupportPendingRestore {
+            snapshot: staged,
+            pre_restore: pre_restore.clone(),
+            post_change_watermark: pre_restore.full.clone(),
+            session_id: session.into(),
+            command_id: command.map(str::to_string),
+            max_expires_at: max,
+            absolute_cap_at: absolute,
+            clock,
+        };
+        if let Some(command) = command {
+            let raw: String = store.query_row("SELECT envelope_json FROM support_accepted_commands WHERE command_id=?1 AND session_id=?2 AND started_at IS NOT NULL AND finished_at IS NULL",
+                rusqlite::params![command,session], |r| r.get(0)).map_err(guards::error)?;
+            let c: crate::support::contracts::Command =
+                serde_json::from_str(&raw).map_err(|_| "INVALID_INPUT")?;
+            if c.kind != "breakglass_propose_restore"
+                || c.payload["step"] != "execute"
+                || c.payload["target"]["snapshot_id"] != snapshot.id
+            {
+                return Err("INVALID_INPUT".into());
+            }
+            let mut result = json!({"command_id":command,"session_id":session,"status":"pending","outcome":"pending",
+                "data":{"snapshot":crate::support::snapshot::metadata(store, &pre_restore.id)?,"restore":{"staged":true,"restart_required":true,"restarted":false,"notice_key":"support.restore.notices.staged"}},
+                "timings":{"accepted_at":c.server_time,"finished_at":clock::iso(now),"ms":0}});
+            result["result_sha256"] = json!(crate::support::contracts::payload_hash(&result));
+            let tx = crate::support::db::transaction(store).map_err(guards::error)?;
+            crate::support::restore::resume_token(&tx, session, command)?;
+            tx.execute("UPDATE support_accepted_commands SET state='restore_staged' WHERE command_id=?1 AND finished_at IS NULL", [command]).map_err(guards::error)?;
+            tx.execute("INSERT INTO support_result_outbox VALUES(?1,?2,?3,?4,0) ON CONFLICT(command_id) DO UPDATE SET result_json=excluded.result_json,created_ms=excluded.created_ms,delivered=0", rusqlite::params![command,session,result.to_string(),now]).map_err(guards::error)?;
+            tx.commit().map_err(guards::error)?;
+        }
+        write_support_restore_json(&pending.join(SUPPORT_RESTORE_FILE), &intent)?;
+        support_restore_notice(app_data, "staged", None, command)?;
+        Ok(())
+    })();
+    if work.is_err() {
+        let _ = fs::remove_dir_all(&pending);
+        if let Some(command) = command {
+            let _ = store.execute("UPDATE support_session_state SET resume_token=NULL WHERE session_id=?1 AND resume_token=?2", rusqlite::params![session, command]);
+        }
+    }
+    work
+}
+
+fn write_support_restore_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|_| "SNAPSHOT_FAILED")?;
+        file.write_all(&serde_json::to_vec(value).map_err(|_| "SNAPSHOT_FAILED")?)
+            .map_err(|_| "SNAPSHOT_FAILED")?;
+        file.sync_all().map_err(|_| "SNAPSHOT_FAILED")?;
+        drop(file);
+        fs::rename(&temporary, path).map_err(|_| "SNAPSHOT_FAILED".to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
+fn support_restore_notice(
+    app_data: &Path,
+    status: &str,
+    code: Option<&str>,
+    command: Option<&str>,
+) -> Result<Value, String> {
+    let notice = json!({"id":Uuid::new_v4().to_string(),"status":status,"error_code":code,"command_id":command});
+    write_support_restore_json(&app_data.join("support-restore-notice.json"), &notice)?;
+    Ok(notice)
+}
+
+fn finish_support_restore(
+    app_data: &Path,
+    pending: &Path,
+    intent: &SupportPendingRestore,
+    store: &Connection,
+    status: &str,
+    code: Option<&str>,
+) -> Result<Option<Value>, String> {
+    use crate::support::{audit_local, guards};
+    let mut notice = support_restore_notice(app_data, status, code, intent.command_id.as_deref())?;
+    notice["snapshot"] = crate::support::snapshot::metadata(store, &intent.pre_restore.id)?;
+    write_support_restore_json(&app_data.join("support-restore-notice.json"), &notice)?;
+    let tx = crate::support::db::transaction(store).map_err(guards::error)?;
+    if let Some(command) = &intent.command_id {
+        tx.execute("UPDATE support_accepted_commands SET state=?1 WHERE command_id=?2 AND finished_at IS NULL", rusqlite::params![if status == "applied" { "restore_swapped" } else { "restore_rolled_back" },command]).map_err(guards::error)?;
+    }
+    audit_local::append(
+        &tx,
+        &audit_local::AuditEntry {
+            terminal_seq: 0,
+            session_id: Some(intent.session_id.clone()),
+            command_id: intent.command_id.clone(),
+            phase: if status == "applied" {
+                "finished"
+            } else {
+                "refused"
+            }
+            .into(),
+            status: code.map(str::to_string),
+            outcome: Some(
+                if status == "applied" {
+                    "succeeded"
+                } else {
+                    "rolled_back"
+                }
+                .into(),
+            ),
+            input_sha256: None,
+            result_sha256: None,
+            created_at: Utc::now().to_rfc3339(),
+        },
+    )
+    .map_err(guards::error)?;
+    tx.commit().map_err(guards::error)?;
+    fs::remove_dir_all(pending).map_err(|_| "SNAPSHOT_FAILED")?;
+    Ok(Some(notice))
+}
+
+/// Support-only startup branch. No business owner has opened a connection yet.
+fn maybe_apply_support_restore<H: PendingRestoreApplyHooks>(
+    app_data: &Path,
+    pending: &Path,
+    hooks: &mut H,
+) -> Result<Option<Value>, String> {
+    use crate::support::{clock, guards, snapshot};
+    let committed = pending.join(SUPPORT_APPLIED_FILE).exists();
+    let intent_path = pending.join(if committed {
+        SUPPORT_APPLIED_FILE
+    } else {
+        SUPPORT_RESTORE_FILE
+    });
+    let raw = fs::read(&intent_path).map_err(|_| "SNAPSHOT_FAILED")?;
+    let intent: SupportPendingRestore =
+        serde_json::from_slice(&raw).map_err(|_| "SNAPSHOT_FAILED")?;
+    if intent.snapshot.folder != pending
+        || intent
+            .snapshot
+            .files
+            .keys()
+            .any(|name| !["settings.json", "config.json"].contains(&name.as_str()))
+    {
+        return Err("POLICY_REFUSED".into());
+    }
+    // support.db is never a swap target, and is opened without running migrations.
+    let store = Connection::open_with_flags(
+        app_data.join("support.db"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .map_err(guards::error)?;
+    let live_path = app_data.join("pos.db");
+    if committed {
+        return finish_support_restore(app_data, pending, &intent, &store, "applied", None);
+    }
+    let rollback = pending.join("rollback");
+    let names: Vec<&str> = ["pos.db", "pos.db-wal", "pos.db-shm", "pos.db-journal"]
+        .into_iter()
+        .chain(["settings.json", "config.json"])
+        .collect();
+    // Recover a process kill during the swap. Only names from the native target
+    // set are accepted; never follow paths from a journal or intent.
+    if pending.join(SUPPORT_SWAP_FILE).exists() {
+        let originals: Vec<String> = serde_json::from_slice(
+            &fs::read(pending.join(SUPPORT_SWAP_FILE)).map_err(|_| "SNAPSHOT_FAILED")?,
+        )
+        .map_err(|_| "SNAPSHOT_FAILED")?;
+        if originals.iter().any(|name| !names.contains(&name.as_str()))
+            || originals.iter().collect::<HashSet<_>>().len() != originals.len()
+        {
+            return Err("POLICY_REFUSED".into());
+        }
+        let moved: Vec<_> = originals
+            .iter()
+            .filter(|name| rollback.join(name).exists())
+            .map(|name| (rollback.join(name), app_data.join(name)))
+            .collect();
+        let written: Vec<_> = names
+            .iter()
+            .filter(|name| {
+                !originals.iter().any(|original| original == **name) || rollback.join(name).exists()
+            })
+            .map(|name| app_data.join(name))
+            .collect();
+        rollback_pending_restore_file_swap(&written, &moved, &rollback, hooks)?;
+        return finish_support_restore(
+            app_data,
+            pending,
+            &intent,
+            &store,
+            "rolled_back",
+            Some("SNAPSHOT_FAILED"),
+        );
+    }
+    let checks = (|| -> Result<(), String> {
+        let (status, max, absolute): (String,String,String) = store.query_row("SELECT status,max_expires_at,absolute_cap_at FROM support_session_state WHERE session_id=?1", [&intent.session_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|_| "SESSION_ENDED")?;
+        let now = intent.clock.now()?;
+        for cap in [
+            &max,
+            &absolute,
+            &intent.max_expires_at,
+            &intent.absolute_cap_at,
+        ] {
+            if clock::parse(cap).map_err(str::to_string)? <= now {
+                return Err("SESSION_ENDED".into());
+            }
+        }
+        if status != "active" {
+            return Err("SESSION_ENDED".into());
+        }
+        if intent.snapshot.folder != pending
+            || snapshot::newest(&store)?.as_deref() != Some(&intent.pre_restore.id)
+            || intent.snapshot.version != env!("CARGO_PKG_VERSION")
+        {
+            return Err("POLICY_REFUSED".into());
+        }
+        let live = Connection::open_with_flags(&live_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(guards::error)?;
+        if intent.snapshot.versions != json!({"main":snapshot::schema_version(&live)?}) {
+            return Err("POLICY_REFUSED".into());
+        }
+        if snapshot::watermarks(&live)?.0 != intent.post_change_watermark {
+            return Err("RESTORE_WOULD_LOSE_SALES".into());
+        }
+        let mut files = BTreeMap::new();
+        for name in ["settings.json", "config.json"] {
+            if app_data.join(name).exists() {
+                files.insert(
+                    name.to_string(),
+                    crate::support::contracts::sha256(
+                        &fs::read(app_data.join(name)).map_err(|_| "SNAPSHOT_FAILED")?,
+                    ),
+                );
+            }
+        }
+        if files != intent.pre_restore.files {
+            return Err("RESTORE_WOULD_LOSE_SALES".into());
+        }
+        snapshot::verify(&intent.snapshot)?;
+        hooks.after_staged_validation(&pending.join("pos.db"))?;
+        Ok(())
+    })();
+    if let Err(code) = checks {
+        return finish_support_restore(
+            app_data,
+            pending,
+            &intent,
+            &store,
+            if code == "SESSION_ENDED" {
+                "expired"
+            } else {
+                "refused"
+            },
+            Some(&code),
+        );
+    }
+    fs::create_dir(&rollback).map_err(|_| "SNAPSHOT_FAILED")?;
+    let originals: Vec<_> = names
+        .iter()
+        .filter(|name| app_data.join(name).exists())
+        .collect();
+    write_support_restore_json(&pending.join(SUPPORT_SWAP_FILE), &originals)?;
+    let mut moved = Vec::new();
+    let mut written = Vec::new();
+    let swap = (|| -> Result<(), String> {
+        for (index, name) in names.iter().enumerate() {
+            let target = app_data.join(name);
+            if target.exists() {
+                let backup = rollback.join(name);
+                hooks.before_live_file_move(index, &target, &backup)?;
+                fs::rename(&target, &backup).map_err(|_| "SNAPSHOT_FAILED")?;
+                moved.push((backup, target));
+            }
+        }
+        written.extend(names.iter().map(|name| app_data.join(name)));
+        for name in
+            std::iter::once("pos.db").chain(intent.snapshot.files.keys().map(String::as_str))
+        {
+            fs::copy(pending.join(name), app_data.join(name)).map_err(|_| "SNAPSHOT_FAILED")?;
+        }
+        let mut final_snapshot = intent.snapshot.clone();
+        final_snapshot.folder = app_data.to_path_buf();
+        snapshot::verify(&final_snapshot)?;
+        hooks.before_marker_commit(&pending.join(SUPPORT_RESTORE_FILE))?;
+        // Reconcile only support-owned copies; no replay or financial mutation.
+        let live = Connection::open_with_flags(&live_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(guards::error)?;
+        crate::support::quarantine::recover(&store, &live)?;
+        fs::rename(
+            pending.join(SUPPORT_RESTORE_FILE),
+            pending.join(SUPPORT_APPLIED_FILE),
+        )
+        .map_err(|_| "SNAPSHOT_FAILED")?;
+        Ok(())
+    })();
+    if swap.is_err() {
+        rollback_pending_restore_file_swap(&written, &moved, &rollback, hooks)?;
+        return finish_support_restore(
+            app_data,
+            pending,
+            &intent,
+            &store,
+            "rolled_back",
+            Some("SNAPSHOT_FAILED"),
+        );
+    }
+    store
+        .execute(
+            "UPDATE support_snapshots SET post_change_watermark_json=?1 WHERE id=?2",
+            rusqlite::params![intent.snapshot.full.to_string(), intent.pre_restore.id],
+        )
+        .map_err(guards::error)?;
+    finish_support_restore(app_data, pending, &intent, &store, "applied", None)
+}
+
 pub(crate) fn maybe_apply_pending_restore(app_data_dir: &Path) -> Result<Option<Value>, String> {
     let mut hooks = NoopPendingRestoreApplyHooks;
     maybe_apply_pending_restore_with_hooks(app_data_dir, &mut hooks)
@@ -790,9 +1240,17 @@ fn maybe_apply_pending_restore_with_hooks<H: PendingRestoreApplyHooks>(
     app_data_dir: &Path,
     hooks: &mut H,
 ) -> Result<Option<Value>, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Restore,
+    );
     ensure_recovery_dirs(app_data_dir)?;
     let root = recovery_root_for_app_data(app_data_dir);
     let pending_dir = pending_restore_dir(&root);
+    if pending_dir.join(SUPPORT_RESTORE_FILE).exists()
+        || pending_dir.join(SUPPORT_APPLIED_FILE).exists()
+    {
+        return maybe_apply_support_restore(app_data_dir, &pending_dir, hooks);
+    }
     let restore_file = pending_dir.join(RESTORE_FILE_NAME);
     if !restore_file.exists() {
         return Ok(None);
@@ -1259,6 +1717,9 @@ pub(crate) fn stage_restore_from_point(
     db: &db::DbState,
     point_id: &str,
 ) -> Result<RecoveryRestoreResponse, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Restore,
+    );
     stage_restore_from_point_with_target_validated_hook(db, point_id, || {})
 }
 
@@ -2551,7 +3012,7 @@ mod tests {
         {
             let conn = db_state.conn.lock().expect("lock db");
             db::set_setting(&conn, "terminal", "terminal_id", "terminal-1").expect("set terminal");
-            // W4e Step 0: dual-populate (12.0 → 1200).
+            // W4e Step 0: dual-populate (12.0 â†’ 1200).
             conn.execute(
                 "INSERT INTO orders (
                     id, items, total_amount, total_amount_cents, status, order_type, sync_status, created_at, updated_at
@@ -3489,7 +3950,7 @@ mod tests {
                 let conn = db_state.conn.lock().expect("lock db");
                 db::set_setting(&conn, "terminal", "terminal_id", "terminal-restore")
                     .expect("set terminal");
-                // W4e Step 0: dual-populate (8.5 → 850).
+                // W4e Step 0: dual-populate (8.5 â†’ 850).
                 conn.execute(
                     "INSERT INTO orders (
                         id, items, total_amount, total_amount_cents, status, order_type, sync_status, created_at, updated_at
@@ -3515,7 +3976,7 @@ mod tests {
             let point = create_manual_snapshot(&db_state).expect("create snapshot");
             {
                 let conn = db_state.conn.lock().expect("lock db");
-                // W4e Step 0: dual-populate (9.5 → 950).
+                // W4e Step 0: dual-populate (9.5 â†’ 950).
                 conn.execute(
                     "INSERT INTO orders (
                         id, items, total_amount, total_amount_cents, status, order_type, sync_status, created_at, updated_at
@@ -4221,7 +4682,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------
-    // Wave 5 C18 — collect_sync_backlog covers parity_sync_queue too
+    // Wave 5 C18 â€” collect_sync_backlog covers parity_sync_queue too
     // ----------------------------------------------------------------------
 
     #[test]

@@ -185,13 +185,9 @@ export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
             onClick={onClose}
             data-testid="table-floor-plan-modal-close"
             aria-label={t('common.actions.close', 'Close')}
-            className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border transition-colors ${
-              isDark
-                ? 'border-white/15 bg-white/10 text-white active:bg-white/20'
-                : 'border-slate-300/80 bg-white text-slate-700 active:bg-slate-100'
-            }`}
+            className="liquid-glass-modal-close"
           >
-            <X className="h-5 w-5" strokeWidth={2.5} />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
 

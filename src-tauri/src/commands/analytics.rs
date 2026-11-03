@@ -946,8 +946,7 @@ fn driver_record_earning_inner(
     order_id: &str,
     now: &str,
 ) -> Result<(String, order_ownership::DriverOwnershipAssignment), String> {
-    let tx = conn
-        .transaction()
+    let tx = crate::db::immediate_transaction(&conn)
         .map_err(|e| format!("begin driver earning transaction: {e}"))?;
     let resolved_shift_id = order_ownership::resolve_driver_shift_id(&tx, driver_id, shift_id)?
         .ok_or("No active driver shift found")?;
@@ -1832,6 +1831,9 @@ pub async fn report_submit_z_report(
     sync_state: tauri::State<'_, std::sync::Arc<crate::sync::SyncState>>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::ZClose,
+    );
     let payload = arg0.unwrap_or(serde_json::json!({}));
     let mut stage = "pre_z_sync";
     let result = submit_z_report_through_stages(&payload, &db, &sync_state, &app, &mut stage).await;

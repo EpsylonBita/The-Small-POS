@@ -25,6 +25,7 @@ import {
   selectUpcomingTableReservations,
 } from '../../utils/reservationFormWarnings';
 import { X, Calendar, Clock, Users, Phone, User, MessageSquare, AlertCircle, AlertTriangle, Minus, Plus } from 'lucide-react';
+import { KitDateField } from '../ui/KitDateField';
 
 export interface CreateReservationDto {
   customerName: string;
@@ -425,8 +426,8 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
                 <Calendar className="w-4 h-4 inline mr-1" />
                 {t('reservationForm.date', { defaultValue: 'Date' })} *
               </label>
-              <input
-                type="date"
+              <KitDateField
+                type="date" required
                 value={reservationDate}
                 onChange={(e) => { setReservationDate(e.target.value); clearFieldError('reservationDate'); }}
                 min={minDate}
@@ -446,8 +447,8 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
                 <Clock className="w-4 h-4 inline mr-1" />
                 {t('reservationForm.time', { defaultValue: 'Time' })} *
               </label>
-              <input
-                type="time"
+              <KitDateField
+                type="time" required
                 value={reservationTime}
                 onChange={(e) => { setReservationTime(e.target.value); clearFieldError('reservationTime'); }}
                 className={`liquid-glass-modal-input w-full ${errors.reservationTime ? 'border-red-500!' : ''}`}
@@ -612,7 +613,7 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
             <button
               type="button"
               onClick={handleCancel}
-              className="flex-1 inline-flex min-h-touch items-center justify-center rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) font-medium text-(--pos-s-fg) transition active:scale-[0.98] active:bg-(--pos-s-surface-2)"
+              className="pos-raised flex-1 inline-flex min-h-touch items-center justify-center rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) font-medium text-(--pos-s-fg) transition active:scale-[0.98] active:bg-(--pos-s-surface-2)"
             >
               {t('reservationForm.cancel', { defaultValue: 'Cancel' })}
             </button>

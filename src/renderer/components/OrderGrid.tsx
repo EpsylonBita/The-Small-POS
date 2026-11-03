@@ -1,5 +1,5 @@
 import React, { memo, useMemo } from 'react';
-import { ClipboardList } from 'lucide-react';
+import { EmptyOrdersBench } from './icons/EmptyOrdersBench';
 import { useTranslation } from 'react-i18next';
 import { useOrderStore } from '../hooks/useOrderStore';
 import type { Order } from '../types/orders';
@@ -10,7 +10,6 @@ import type { StoreMapOrigin } from '../utils/delivery-routing';
 import { shouldShowInCompletedOrderLane, shouldShowInStandardOrderLane } from '../utils/tableOrderFlow';
 import { useAcquiredModules } from '../hooks/useAcquiredModules';
 import { useLocalPreparationSnapshot } from '../hooks/useLocalPreparation';
-import { useTheme } from '../contexts/theme-context';
 import { selectActiveKitchenStage } from './order/KitchenStageBadge';
 
 const isCancelledOrderStatus = (status: unknown): boolean => {
@@ -38,7 +37,6 @@ const OrderGrid = memo<OrderGridProps>(({
   storeMapOrigin = null,
 }) => {
   const { t } = useTranslation();
-  const { resolvedTheme } = useTheme();
   const { orders: storeOrders, filter, isLoading } = useOrderStore();
   // Live table checks use the Tables tab while its module is available.
   // Settled checks always remain in completion history.
@@ -142,10 +140,16 @@ const OrderGrid = memo<OrderGridProps>(({
 
   if (filteredOrders.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-64 space-y-4">
-        <ClipboardList className="h-14 w-14 opacity-50" />
-        <div className={`text-lg font-medium ${resolvedTheme === 'light' ? 'text-slate-500' : 'text-white/50'}`}>{t('dashboard.noOrders', 'No orders found')}</div>
-        <div className={`text-sm ${resolvedTheme === 'light' ? 'text-slate-600' : 'text-zinc-400'}`}>{t('dashboard.ordersWillAppear', 'Orders will appear here when created')}</div>
+      // Founder 01/11: the skeleton on the bench says «nothing yet» (EmptyOrdersBench) — larger, in the middle of the
+      // list, with only «No orders found» under it in the founder's brush hand (Mansalva, with Greek), in its ink.
+      <div data-orders-empty className="flex h-full min-h-[28rem] flex-1 flex-col items-center justify-center gap-6 py-10">
+        <EmptyOrdersBench className="w-64 text-(--pos-s-muted) opacity-70 sm:w-80" />
+        <div
+          className="text-4xl text-(--pos-s-muted) sm:text-5xl"
+          style={{ fontFamily: "'Mansalva', Georgia, serif" }}
+        >
+          {t('dashboard.noOrders', 'No orders found')}
+        </div>
       </div>
     );
   }

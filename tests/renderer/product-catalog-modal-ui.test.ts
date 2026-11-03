@@ -18,7 +18,8 @@ test('ProductCatalogModal is touch-first and on-theme', () => {
 });
 
 test('ProductCatalogModal category/product controls use yellow and active tap feedback', () => {
-  assert.match(source, /overflow-x-auto scrollbar-hide pb-2/);
+  // Founder 01/11: the category row is the kit scroll row (no rail, a drag, an edge fade, room for shadows).
+  assert.match(source, /<div className="pos-scroll-row mb-4 gap-2">/);
   assert.match(source, /bg-yellow-400 text-black/);
   assert.match(source, /bg-white\/10 text-white active:bg-white\/20/);
   assert.match(source, /transition-transform duration-150 active:scale-\[0\.98\]/);

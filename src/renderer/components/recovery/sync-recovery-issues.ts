@@ -58,9 +58,22 @@ const WAITING_PARENT_BLOCKING_AGE_MS = 10 * 60 * 1000;
 
 interface RecoveryRecipeDefinition extends RecoveryKnownSolution {
   actionId: string;
+  cooldownMs?: number;
+  attemptCap?: number;
 }
 
-const RECOVERY_RECIPES = {
+export const RECOVERY_RECIPES = {
+  restoreLastKnownPrinterBrand: {
+    recipeId: 'printer.restore_last_known_brand',
+    version: 1,
+    actionId: 'restoreLastKnownPrinterBrand',
+    labelKey: 'recovery.recipes.restoreLastKnownPrinterBrand.label',
+    explanationKey: 'recovery.recipes.restoreLastKnownPrinterBrand.explanation',
+    verificationKey: 'recovery.recipes.restoreLastKnownPrinterBrand.verification',
+    requiresSnapshot: true,
+    cooldownMs: 300_000,
+    attemptCap: 3,
+  },
   checkoutPaymentOpenPayment: {
     recipeId: 'checkout-payment-blocker.open-payment',
     version: 1,
@@ -479,7 +492,7 @@ const createRequeueFailedAdjustmentLegacyValidationRowsAction =
 const actionableSyncBacklogTotal = (
   syncBacklog: DiagnosticsSystemHealth['syncBacklog'] | undefined,
 ): number => {
-  if (!syncBacklog) return 0;
+  if (!syncBacklog) { return 0; }
   return Object.values(syncBacklog).reduce((sum, statuses) => {
     return (
       sum +
@@ -551,7 +564,7 @@ export const getRepresentativeParityFailureReason = (
 };
 
 const pushIssue = (issues: RecoveryIssue[], issue: RecoveryIssue | null) => {
-  if (!issue) return;
+  if (!issue) { return; }
   if (issues.some((existing) => existing.id === issue.id)) {
     return;
   }
@@ -1867,7 +1880,7 @@ const isWaitingParentIssueBlocking = (
 
   const timestamp =
     parseIssueTimestamp(issue.updatedAt) ?? parseIssueTimestamp(issue.createdAt);
-  if (timestamp == null) {
+  if (timestamp === null || timestamp === undefined) {
     return true;
   }
 
@@ -2147,6 +2160,22 @@ const getLegacyFinancialParityKey = (
   return null;
 };
 
+function buildPrinterBrandRecoveryIssues(health: DiagnosticsSystemHealth | null): RecoveryIssue[] {
+  // Older diagnostics payloads have no printerStatus at all.
+  return (health?.printerStatus?.brandRecovery ?? []).flatMap(observation => {
+    const age = Date.now() - Date.parse(observation.observedAt);
+    if (!Number.isFinite(age) || age < 0 || age > 60_000 || observation.code !== 'printer.brand_probe_unanswered') { return []; }
+    return [withKnownSolution({ id: `printer-brand:${observation.printerId}`, code: observation.code,
+      severity: 'warning', status: 'blocking', entityType: 'printer', entityId: observation.printerId,
+      titleKey: 'recovery.recipes.restoreLastKnownPrinterBrand.title',
+      summaryKey: 'recovery.recipes.restoreLastKnownPrinterBrand.explanation',
+      guidanceKey: 'recovery.recipes.restoreLastKnownPrinterBrand.verification',
+      params: { configuredPrinterRef: observation.configuredPrinterRef },
+      actions: [createAction('restoreLastKnownPrinterBrand', 'recovery.recipes.restoreLastKnownPrinterBrand.label'), createContactDevAction()],
+    }, RECOVERY_RECIPES.restoreLastKnownPrinterBrand)];
+  });
+}
+
 export function buildSyncRecoveryIssues({
   systemHealth,
   lastParitySync,
@@ -2254,6 +2283,7 @@ export function buildSyncRecoveryIssues({
     legacyEditReviewResult.issues.length > 0 ||
     zReportHeldResult.issues.length > 0 ||
     customerDirectoryFailureResult.issues.length > 0;
+  for (const issue of buildPrinterBrandRecoveryIssues(systemHealth)) { pushIssue(issues, issue); }
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
   for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth, localizePaymentBlocker)) {
     pushIssue(issues, issue);

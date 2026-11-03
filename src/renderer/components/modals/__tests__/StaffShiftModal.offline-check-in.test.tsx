@@ -16,12 +16,13 @@ const fixture = vi.hoisted(() => ({
   staffId: '30000000-0000-4000-8000-000000000001',
   getStatus: vi.fn(), setStaff: vi.fn(), setActiveShiftImmediate: vi.fn(), refreshActiveShift: vi.fn(), onClose: vi.fn(),
   toast: vi.fn(),
+  currentShift: null as any,
   t: (key: string, fallback?: string | { defaultValue?: string }) => typeof fallback === 'string' ? fallback : fallback?.defaultValue ?? key,
   bridge: {
     terminalConfig: { getTerminalId: vi.fn(), getBranchId: vi.fn(), getOrganizationId: vi.fn(), getSetting: vi.fn() },
     settings: { get: vi.fn(), updateLocal: vi.fn() },
     staffAuth: { refreshDirectory: vi.fn(), verifyCheckInPin: vi.fn() }, staffSchedule: { list: vi.fn() },
-    shifts: { getActive: vi.fn(), getActiveForBranch: vi.fn(), getCheckInEligibility: vi.fn(), getActiveCashierByTerminal: vi.fn(), open: vi.fn(), getById: vi.fn() },
+    shifts: { getActive: vi.fn(), getActiveForBranch: vi.fn(), getCheckInEligibility: vi.fn(), getActiveCashierByTerminal: vi.fn(), getActiveCashierByTerminalLoose: vi.fn(), open: vi.fn(), getById: vi.fn() },
     shiftFinancialOpening: { begin: vi.fn(), status: vi.fn(), authorize: vi.fn(), clearAuthorization: vi.fn() },
     modules: { getCached: vi.fn() },
     secureSession: { set: vi.fn(), clear: vi.fn() },
@@ -34,7 +35,7 @@ vi.mock('react-hot-toast', async (original) => {
 });
 vi.mock('react-i18next', async (original) => ({ ...(await original<typeof import('react-i18next')>()), useTranslation: () => ({ t: fixture.t }) }));
 vi.mock('../../../contexts/i18n-context', () => ({ useI18n: () => ({ language: 'en', setLanguage: vi.fn(), t: fixture.t }) }));
-vi.mock('../../../contexts/shift-context', () => ({ useShift: () => ({ staff: { staffId: 'main-login', ...fixture.scope }, activeShift: null, isShiftActive: false,
+vi.mock('../../../contexts/shift-context', () => ({ useShift: () => ({ staff: { staffId: fixture.currentShift?.staff_id || 'main-login', ...fixture.scope }, activeShift: fixture.currentShift, isShiftActive: Boolean(fixture.currentShift),
   setStaff: fixture.setStaff, setActiveShiftImmediate: fixture.setActiveShiftImmediate, refreshActiveShift: fixture.refreshActiveShift }) }));
 vi.mock('../../../hooks/useTerminalSettings', () => {
   const useTerminalSettings = () => ({ settings: {}, loading: false, error: null, refresh: vi.fn(),
@@ -80,6 +81,7 @@ async function cash(value = '5000') {
 describe('StaffShiftModal check-in without a connection', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    fixture.currentShift = null;
     setBridge(bridge as any);
     bridge.terminalConfig.getOrganizationId.mockResolvedValue(fixture.scope.organizationId);
     bridge.terminalConfig.getBranchId.mockResolvedValue(fixture.scope.branchId);
@@ -102,6 +104,42 @@ describe('StaffShiftModal check-in without a connection', () => {
     bridge.settings.get.mockResolvedValue(JSON.stringify({ branch_id: fixture.scope.branchId, staff: members }));
     bridge.staffSchedule.list.mockResolvedValue({ success: true, data: { staff: members } });
   };
+
+  it.each(['strict', 'loose'] as const)('a driver check-in keeps the active cashier through the %s lookup', async lookup => {
+    staff(['driver']);
+    const cashier = { id: 'cashier-shift', staff_id: 'cashier-1', role_type: 'cashier', status: 'active',
+      branch_id: fixture.scope.branchId, terminal_id: fixture.scope.terminalId };
+    fixture.currentShift = cashier;
+    bridge.shifts.getActiveCashierByTerminal.mockResolvedValue(lookup === 'strict' ? { success: true, data: cashier } : null);
+    bridge.shifts.getActiveCashierByTerminalLoose.mockResolvedValue(cashier);
+    bridge.shifts.open.mockResolvedValue({ success: true, shiftId: 'driver-shift' });
+    render(<StaffShiftModal {...props} />);
+    await enterPin();
+    await chooseRole('driverRoleHelper');
+    fireEvent.click(await screen.findByRole('button', { name: 'modals.staffShift.startShift' }));
+    // Founder 02/11/2026: the window closes at once, with no success banner.
+    await waitFor(() => expect(fixture.onClose).toHaveBeenCalledOnce());
+    expect(screen.queryByText('modals.staffShift.shiftStarted')).toBeNull();
+    expect(bridge.shifts.open).toHaveBeenCalledWith(expect.objectContaining({ staffId: fixture.staffId, roleType: 'driver' }));
+    expect(fixture.setStaff).not.toHaveBeenCalled();
+    expect(fixture.setActiveShiftImmediate).not.toHaveBeenCalled();
+    expect(fixture.refreshActiveShift).not.toHaveBeenCalled();
+  });
+
+  it('a cashier check-in becomes current when nobody owns the drawer', async () => {
+    staff(['cashier']);
+    bridge.shifts.getActiveCashierByTerminal.mockResolvedValue(null);
+    bridge.shifts.getActiveCashierByTerminalLoose.mockResolvedValue(null);
+    bridge.shifts.open.mockResolvedValue({ success: true, shiftId: 'cashier-new' });
+    render(<StaffShiftModal {...props} />);
+    await enterPin();
+    await chooseRole('cashierRoleHelper');
+    await waitFor(() => expect(screen.queryByText('modals.staffShift.financialOpeningChecking')).toBeNull());
+    await cash();
+    await waitFor(() => expect(fixture.setActiveShiftImmediate).toHaveBeenCalledWith(expect.objectContaining({ id: 'cashier-new', role_type: 'cashier' })));
+    expect(fixture.setStaff).toHaveBeenCalledWith(expect.objectContaining({ staffId: fixture.staffId, role: 'cashier' }));
+    expect(fixture.refreshActiveShift).toHaveBeenCalledWith(fixture.staffId);
+  });
 
   it('never writes the staff directory cache: only the native directory refresh does', async () => {
     staff(['cashier']);

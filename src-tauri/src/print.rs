@@ -12,12 +12,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use chrono::Utc;
 
-use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -2561,6 +2561,32 @@ fn durable_pause_and_cancel_pos_jobs(
     durable_pause_and_cancel_pos_jobs_with_conn(&conn, printer_profile_id, &HashSet::new(), now)
 }
 
+fn write_print_queue_pause(
+    conn: &Connection,
+    profile: Option<&str>,
+    paused: bool,
+) -> Result<(), String> {
+    db::set_setting(
+        conn,
+        PRINT_QUEUE_SETTINGS_CATEGORY,
+        &print_queue_pause_key(profile),
+        if paused { "true" } else { "false" },
+    )?;
+    // Even an operator writing the same boolean takes ownership away from
+    // support. Both writes run in the caller's owner transaction.
+    if let Some(profile) = profile {
+        conn.execute(
+            "DELETE FROM local_settings WHERE setting_category=?1 AND setting_key=?2",
+            params![
+                PRINT_QUEUE_SETTINGS_CATEGORY,
+                format!("support_pause:{profile}")
+            ],
+        )
+        .map_err(|_| "INTERNAL_ERROR")?;
+    }
+    Ok(())
+}
+
 fn durable_set_pause_and_select_windows_attempts(
     db: &DbState,
     printer_profile_id: Option<&str>,
@@ -2569,12 +2595,7 @@ fn durable_set_pause_and_select_windows_attempts(
     let conn = db.conn.lock().map_err(|error| error.to_string())?;
     let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)
         .map_err(|error| format!("Begin durable print queue pause change: {error}"))?;
-    db::set_setting(
-        &tx,
-        PRINT_QUEUE_SETTINGS_CATEGORY,
-        &print_queue_pause_key(printer_profile_id),
-        if paused { "true" } else { "false" },
-    )?;
+    write_print_queue_pause(&tx, printer_profile_id, paused)?;
     let eligible_states = if paused {
         "'windows_queued', 'windows_printing'"
     } else {
@@ -2698,10 +2719,32 @@ fn durable_cancel_print_job(db: &DbState, job_id: &str) -> Result<Value, String>
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let live_registered = active_print_job_is_registered_for_owner(&active_owner_id, job_id);
-    let now = Utc::now();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)
+    let result = durable_cancel_print_job_with_conn(
+        &conn,
+        job_id,
+        &active_owner_id,
+        live_registered,
+        true,
+        &|_| Ok(()),
+    );
+    drop(conn);
+    drop(association_guard);
+    result
+}
+
+fn durable_cancel_print_job_with_conn(
+    conn: &Connection,
+    job_id: &str,
+    active_owner_id: &str,
+    live_registered: bool,
+    request_stops: bool,
+    admission: &dyn Fn(&Connection) -> Result<(), String>,
+) -> Result<Value, String> {
+    let now = Utc::now();
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|error| format!("Begin POS print cancellation: {error}"))?;
+    admission(&tx)?;
     let all_active = active_attempt_predicate_sql("a");
     let mut statement = tx
         .prepare(&format!(
@@ -2883,13 +2926,11 @@ fn durable_cancel_print_job(db: &DbState, job_id: &str) -> Result<Value, String>
     };
     tx.commit()
         .map_err(|error| format!("Commit POS print cancellation: {error}"))?;
-    drop(conn);
-    let active_stops_requested = if request_stop {
+    let active_stops_requested = if request_stop && request_stops {
         request_active_print_stops_for_owner(&active_owner_id, Some(job_id), None).len()
     } else {
         0
     };
-    drop(association_guard);
     let cooperative_only_applied =
         windows_attempt_ids.is_empty() && affected == 0 && active_stops_requested > 0;
     let affected = affected + usize::from(cooperative_only_applied);
@@ -4182,6 +4223,48 @@ fn order_print_currency_code(conn: &rusqlite::Connection, order_id: &str) -> Opt
     order_print_currency(conn, order_id).ok().flatten()
 }
 
+fn support_layout_observations() -> &'static crate::diagnostics::RetainedObservations {
+    static CACHE: OnceLock<crate::diagnostics::RetainedObservations> = OnceLock::new();
+    CACHE.get_or_init(crate::diagnostics::RetainedObservations::default)
+}
+
+fn support_layout_key(path: &Path, profile: &str) -> String {
+    format!("{}|{profile}", path.display())
+}
+
+/// Last effective dispatch layout only. No brand detection, settings writes,
+/// print queue lock, hardware access or layout recomputation from support.
+pub(crate) fn support_effective_layout(path: &Path, profile: &str) -> Value {
+    support_layout_observations().read(&support_layout_key(path, profile))
+}
+
+fn retain_support_layout(db: &DbState, profile: &Value, entity: &str, layout: &LayoutConfig) {
+    let Some(id) = profile["id"].as_str() else {
+        return;
+    };
+    let emulation =
+        if receipt_renderer::uses_star_commands(layout.detected_brand, layout.emulation_mode) {
+            "star_line"
+        } else {
+            "escpos"
+        };
+    let code_brand =
+        receipt_renderer::effective_code_page_brand(layout.detected_brand, layout.emulation_mode);
+    let code_page = layout
+        .escpos_code_page
+        .or_else(|| receipt_renderer::resolve_auto_code_page(code_brand, &layout.character_set));
+    support_layout_observations().publish(support_layout_key(&db.db_path, id), serde_json::json!({
+        "effective_emulation":emulation,"code_page":code_page,"character_set":layout.character_set,
+        "greek_render_mode":layout.greek_render_mode,"detected_brand":layout.detected_brand.label().to_ascii_lowercase(),
+        "entity_type":entity,"paper_width_mm":match layout.paper_width {crate::escpos::PaperWidth::Mm58=>58,crate::escpos::PaperWidth::Mm80=>80,crate::escpos::PaperWidth::Mm112=>112},
+    }));
+}
+
+#[cfg(test)]
+pub(crate) fn retain_support_layout_fixture(db: &DbState, profile: &Value, layout: &LayoutConfig) {
+    retain_support_layout(db, profile, "order_receipt", layout);
+}
+
 pub fn resolve_layout_config(
     db: &DbState,
     profile: &Value,
@@ -4565,7 +4648,7 @@ pub fn resolve_layout_config(
         _ => 400,
     };
 
-    Ok(LayoutConfig {
+    let layout = LayoutConfig {
         paper_width: crate::escpos::PaperWidth::from_mm(paper_mm),
         template,
         command_profile,
@@ -4601,7 +4684,9 @@ pub fn resolve_layout_config(
         logo_scale,
         body_font_weight,
         store_time_zone: crate::store_time::resolve_store_time_zone(&conn),
-    })
+    };
+    retain_support_layout(db, profile, entity_type, &layout);
+    Ok(layout)
 }
 
 fn paper_logo_max_width_dots(paper: crate::escpos::PaperWidth) -> u32 {
@@ -7575,6 +7660,11 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         staff_payment_lines,
         phone_shifts: z_report_phone_shift_entries(payload),
         staff_tips: z_report_staff_tip_entries(payload),
+        discarded_corrections: payload
+            .get("discardedCorrections")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
         staff_reports: payload
             .get("staffReports")
             .and_then(Value::as_array)
@@ -7890,6 +7980,11 @@ fn build_z_report_doc_with_conn(
         staff_payment_lines,
         phone_shifts: z_report_phone_shift_entries(&rj),
         staff_tips: z_report_staff_tip_entries(&rj),
+        discarded_corrections: rj
+            .get("discardedCorrections")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
         staff_reports: rj
             .get("staffReports")
             .and_then(Value::as_array)
@@ -11493,6 +11588,36 @@ mod tests {
         assert_eq!(preview.phone_shifts.len(), 2);
         let without = build_z_report_doc_from_payload(&db, &serde_json::json!({}), "preview");
         assert!(without.phone_shifts.is_empty());
+    }
+
+    #[test]
+    fn discarded_corrections_reach_stored_and_preview_z_prints() {
+        let db = test_db();
+        let entries = serde_json::json!([{"orderNumber":"00055","action":"collect","method":"card",
+            "amountCents":190,"actorName":"Maria","at":"2026-11-03T10:00:00Z"}]);
+        let stored = serde_json::json!({"discardedCorrections":entries});
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,role_type,status,check_in_time,created_at,updated_at)
+                VALUES('discard-shift','staff','cashier','closed','2026-11-03T08:00:00Z','now','now')",[]).unwrap();
+            conn.execute("INSERT INTO z_reports(id,shift_id,branch_id,terminal_id,report_date,generated_at,report_json,created_at,updated_at)
+                VALUES('z-discards','discard-shift','branch','term','2026-11-03','2026-11-03T23:00:00Z',?1,'now','now')",params![stored.to_string()]).unwrap();
+        }
+        assert_eq!(
+            build_z_report_doc(&db, "z-discards")
+                .unwrap()
+                .discarded_corrections,
+            entries.as_array().unwrap().clone()
+        );
+        assert_eq!(
+            build_z_report_doc_from_payload(&db, &stored, "preview").discarded_corrections,
+            entries.as_array().unwrap().clone()
+        );
+        assert!(
+            build_z_report_doc_from_payload(&db, &serde_json::json!({}), "preview")
+                .discarded_corrections
+                .is_empty()
+        );
     }
 
     /// Stored Z snapshots in, visible lines out: the export (shared Jest
@@ -23729,3 +23854,494 @@ mod hotel_statement_tests {
         assert_eq!(stored, "folio_statement");
     }
 }
+
+#[cfg(test)]
+mod support_observation_tests {
+    use super::*;
+    use std::time::Instant;
+    #[test]
+    fn effective_layout_facade_never_takes_the_print_queue_lock() {
+        let _owner = active_print_jobs().lock().unwrap();
+        let at = Instant::now();
+        assert_eq!(
+            support_effective_layout(Path::new("your-test-unobserved-db"), "printer")["status"],
+            "unavailable"
+        );
+        assert!(at.elapsed() < Duration::from_millis(50));
+    }
+    #[test]
+    fn effective_layout_observation_comes_from_the_real_owner() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        let profile = serde_json::json!({"id":"your-test-printer","name":"Star mC-Print3","printerName":"Star mC-Print3","printerType":"system","paperWidthMm":80,"characterSet":"PC737_GREEK"});
+        let layout = resolve_layout_config(&db.state, &profile, "order_receipt").unwrap();
+        let _owner = active_print_jobs().lock().unwrap();
+        let observed = support_effective_layout(db.db_path(), "your-test-printer");
+        assert_eq!(
+            observed["content"]["detected_brand"],
+            layout.detected_brand.label().to_ascii_lowercase()
+        );
+        assert_eq!(observed["content"]["effective_emulation"], "star_line");
+        assert!(observed["at"].is_string());
+    }
+}
+
+// Catalogue adapters run only on a blocking command worker. The manual owner
+// keeps its ordinary locks; support acquires those same barriers with try_lock.
+/// Support-owned connection: never change the till connection's timeout or
+/// progress handler, and never run migrations or initialize credential owners.
+pub(crate) fn support_printer_connection(path: &Path) -> Result<DbState, String> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| "POLICY_REFUSED")?;
+    conn.busy_timeout(Duration::from_millis(5))
+        .map_err(|_| "INTERNAL_ERROR")?;
+    conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")
+        .map_err(|_| "POLICY_REFUSED")?;
+    Ok(DbState {
+        conn: Mutex::new(conn),
+        db_path: path.to_path_buf(),
+    })
+}
+struct SupportPrintConnectionReset<'a>(&'a Connection);
+impl Drop for SupportPrintConnectionReset<'_> {
+    fn drop(&mut self) {
+        self.0.progress_handler(0, None::<fn() -> bool>);
+    }
+}
+struct SupportOwnedSpooler {
+    owner: Arc<dyn crate::windows_spooler::WindowsSpooler>,
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+    checkpoint: std::sync::mpsc::Sender<std::sync::mpsc::SyncSender<()>>,
+}
+impl SupportOwnedSpooler {
+    fn current(&self) -> Result<(), crate::windows_spooler::SpoolerError> {
+        if self.cancelled.load(Ordering::Acquire) || Instant::now() >= self.deadline {
+            return Err(crate::windows_spooler::SpoolerError::Cancelled);
+        }
+        // The owner thread rechecks the consumed approval, scope, switch and
+        // permission after each native wait, before another OS effect.
+        let (ack, answer) = std::sync::mpsc::sync_channel(1);
+        self.checkpoint
+            .send(ack)
+            .map_err(|_| crate::windows_spooler::SpoolerError::Cancelled)?;
+        answer
+            .recv_timeout(self.deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| crate::windows_spooler::SpoolerError::Cancelled)?;
+        if self.cancelled.load(Ordering::Acquire) || Instant::now() >= self.deadline {
+            return Err(crate::windows_spooler::SpoolerError::Cancelled);
+        }
+        Ok(())
+    }
+}
+impl crate::windows_spooler::WindowsSpooler for SupportOwnedSpooler {
+    fn submit_raw(
+        &self,
+        _: crate::windows_spooler::WindowsRawRequest,
+        _: &AtomicBool,
+        _: &mut dyn FnMut(
+            &crate::windows_spooler::SpoolStarted,
+        ) -> Result<(), crate::windows_spooler::SpoolerError>,
+    ) -> Result<crate::windows_spooler::SpoolSubmission, crate::windows_spooler::SpoolerError> {
+        Err(crate::windows_spooler::SpoolerError::Cancelled)
+    }
+    fn enum_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<crate::windows_spooler::SpoolJobSnapshot>, crate::windows_spooler::SpoolerError>
+    {
+        Err(crate::windows_spooler::SpoolerError::Cancelled)
+    }
+    fn get_job(
+        &self,
+        printer: &str,
+        job: u32,
+    ) -> Result<
+        Option<crate::windows_spooler::SpoolJobSnapshot>,
+        crate::windows_spooler::SpoolerError,
+    > {
+        self.current()?;
+        let result = self.owner.get_job(printer, job);
+        self.current()?;
+        result
+    }
+    fn control_job(
+        &self,
+        printer: &str,
+        job: u32,
+        control: crate::windows_spooler::SpoolJobControl,
+    ) -> Result<(), crate::windows_spooler::SpoolerError> {
+        self.current()?;
+        if control != crate::windows_spooler::SpoolJobControl::Delete {
+            return Err(crate::windows_spooler::SpoolerError::Cancelled);
+        }
+        let result = self.owner.control_job(printer, job, control);
+        self.current()?;
+        result
+    }
+}
+fn support_control_check(
+    permit: &crate::support::critical_op::SupportPermit,
+    deadline: Instant,
+) -> Result<(), String> {
+    if permit.is_cancelled() {
+        return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+    }
+    if Instant::now() >= deadline {
+        return Err("QUERY_TIMEOUT".into());
+    }
+    Ok(())
+}
+fn support_control_lock<'a, T>(
+    mutex: &'a Mutex<T>,
+    permit: &crate::support::critical_op::SupportPermit,
+    deadline: Instant,
+) -> Result<std::sync::MutexGuard<'a, T>, String> {
+    loop {
+        support_control_check(permit, deadline)?;
+        match mutex.try_lock() {
+            Ok(guard) => {
+                support_control_check(permit, deadline)?;
+                return Ok(guard);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err("INTERNAL_ERROR".into()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(Duration::from_millis(5))
+            }
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub(crate) struct SupportPrintPreview {
+    pub job_id: String,
+    pub attempt_id: Uuid,
+    pub fingerprint: String,
+}
+fn support_preview_with_conn(
+    conn: &Connection,
+    profile: &str,
+    owner: &str,
+) -> Result<SupportPrintPreview, String> {
+    let registry = active_print_jobs()
+        .try_lock()
+        .map_err(|_| "CONCURRENT_OPERATION")?;
+    if registry.iter().any(|((_, _), e)| {
+        e.owner_id == owner && e.printer_profile_registrations.contains_key(profile)
+    }) {
+        return Err("CONCURRENT_OPERATION".into());
+    }
+    let sql = format!("SELECT j.id,a.id,j.entity_type,a.state,j.status,j.created_at,j.updated_at,j.document_snapshot_sha256,j.render_profile_snapshot_json FROM print_jobs j JOIN print_job_attempts a ON a.print_job_id=j.id WHERE j.printer_profile_id=?1 AND {} ORDER BY julianday(a.started_at),a.id LIMIT 1",active_attempt_predicate_sql("a"));
+    let row: Option<(String, String, String, String, Value)> = conn
+        .query_row(&sql, [profile], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, serde_json::json!({"status":r.get::<_,String>(4)?,"created_at":r.get::<_,String>(5)?,"updated_at":r.get::<_,String>(6)?,"snapshot":r.get::<_,Option<String>>(7)?,"render_profile":r.get::<_,Option<String>>(8)?})))
+        })
+        .optional()
+        .map_err(|_| "POLICY_REFUSED")?;
+    let (job, id, kind, state, job_projection) = row.ok_or("POLICY_REFUSED")?;
+    if !matches!(
+        kind.as_str(),
+        "order_receipt" | "kitchen_ticket" | "test_print"
+    ) || !matches!(state.as_str(), "submitting" | "unknown")
+        || registry.contains_key(&(owner.to_owned(), job.clone()))
+    {
+        return Err("POLICY_REFUSED".into());
+    }
+    let count: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT count(*) FROM print_job_attempts a WHERE a.print_job_id=?1 AND {}",
+                active_attempt_predicate_sql("a")
+            ),
+            [&job],
+            |r| r.get(0),
+        )
+        .map_err(|_| "POLICY_REFUSED")?;
+    if count != 1 {
+        return Err("POLICY_REFUSED".into());
+    }
+    let attempt_id = Uuid::parse_str(&id).map_err(|_| "POLICY_REFUSED")?;
+    let attempt = crate::print_dispatch::read_attempt(conn, attempt_id)
+        .map_err(|_| "POLICY_REFUSED")?
+        .ok_or("PAYLOAD_DRIFT")?;
+    let marker = crate::windows_spooler::parse_document_marker(&attempt.document_name)
+        .map_err(|_| "POLICY_REFUSED")?;
+    if marker.local_job_id.to_string() != job
+        || marker.attempt_id != attempt_id
+        || !matches!(
+            marker.document_kind.as_str(),
+            "receipt" | "order_receipt" | "kitchen_ticket" | "test_print"
+        )
+    {
+        return Err("POLICY_REFUSED".into());
+    }
+    let fingerprint = crate::support::contracts::payload_hash(
+        &serde_json::json!({"job":job,"kind":kind,"job_state":job_projection,"attempt":format!("{attempt:?}")}),
+    );
+    Ok(SupportPrintPreview {
+        job_id: job,
+        attempt_id,
+        fingerprint,
+    })
+}
+pub(crate) fn support_preview_uncertain(
+    db: &DbState,
+    profile: &str,
+    permit: &crate::support::critical_op::SupportPermit,
+    deadline: Instant,
+) -> Result<SupportPrintPreview, String> {
+    let _association = support_control_lock(profile_association_coordination(), permit, deadline)?;
+    let conn = support_control_lock(&db.conn, permit, deadline)?;
+    let owner = if db.db_path == Path::new(":memory:") {
+        active_print_owner_id_with_conn(&conn)?
+    } else {
+        file_database_identity(&db.db_path)
+    };
+    support_preview_with_conn(&conn, profile, &owner)
+}
+fn support_pause_state(conn: &Connection, profile: Option<&str>) -> Result<bool, String> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT setting_value FROM local_settings WHERE setting_category=?1 AND setting_key=?2",
+            params![
+                PRINT_QUEUE_SETTINGS_CATEGORY,
+                print_queue_pause_key(profile)
+            ],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| "OUTCOME_UNKNOWN")?;
+    match value.as_deref() {
+        Some("true") => Ok(true),
+        Some("false") | None => Ok(false),
+        _ => Err("OUTCOME_UNKNOWN".into()),
+    }
+}
+pub(crate) fn support_set_profile_pause(
+    db: &DbState,
+    profile: &str,
+    session: &str,
+    action: &str,
+    paused: bool,
+    permit: &crate::support::critical_op::SupportPermit,
+    deadline: Instant,
+    checkpoint: &dyn Fn() -> Result<(), String>,
+    before_effect: &dyn Fn() -> Result<(), String>,
+) -> Result<Value, String> {
+    checkpoint()?;
+    let _association = support_control_lock(profile_association_coordination(), permit, deadline)?;
+    checkpoint()?;
+    let conn = support_control_lock(&db.conn, permit, deadline)?;
+    checkpoint()?;
+    let owner = if db.db_path == Path::new(":memory:") {
+        active_print_owner_id_with_conn(&conn)?
+    } else {
+        file_database_identity(&db.db_path)
+    };
+    let registry = active_print_jobs()
+        .try_lock()
+        .map_err(|_| "CONCURRENT_OPERATION")?;
+    let in_flight = registry
+        .values()
+        .any(|e| e.owner_id == owner && e.printer_profile_registrations.contains_key(profile));
+    let _reset = SupportPrintConnectionReset(&conn);
+    let tx = permit.begin_write(&conn)?;
+    let key = print_queue_pause_key(Some(profile));
+    let record_key = format!("support_pause:{profile}");
+    let previous = support_pause_state(&tx, Some(profile))?;
+    if paused {
+        let fresh:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM print_jobs WHERE printer_profile_id=?1 AND status='failed' AND julianday(updated_at)<=julianday('now') AND julianday(updated_at)>=julianday('now','-5 minutes'))",[profile],|r|r.get(0)).map_err(|_|"POLICY_REFUSED")?;
+        if previous || support_pause_state(&tx, None)? || !fresh {
+            return Err("POLICY_REFUSED".into());
+        }
+    } else {
+        let encoded = db::get_setting(&tx, PRINT_QUEUE_SETTINGS_CATEGORY, &record_key)
+            .ok_or("POLICY_REFUSED")?;
+        let record: Value = serde_json::from_str(&encoded).map_err(|_| "POLICY_REFUSED")?;
+        let stamp:String=tx.query_row("SELECT updated_at FROM local_settings WHERE setting_category=?1 AND setting_key=?2",params![PRINT_QUEUE_SETTINGS_CATEGORY,key],|r|r.get(0)).map_err(|_|"POLICY_REFUSED")?;
+        let uncertain:bool=tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM print_jobs j JOIN print_job_attempts a ON a.print_job_id=j.id WHERE j.printer_profile_id=?1 AND {})",active_attempt_predicate_sql("a")),[profile],|r|r.get(0)).map_err(|_|"POLICY_REFUSED")?;
+        if !previous
+            || record["session"] != session
+            || record["previous"] != false
+            || record["owner"] != "printer.pause_dispatch.v1"
+            || record["stamp"] != stamp
+            || uncertain
+            || in_flight
+        {
+            return Err("POLICY_REFUSED".into());
+        }
+    }
+    before_effect()?;
+    support_control_check(permit, deadline)?;
+    write_print_queue_pause(&tx, Some(profile), paused)?;
+    if paused {
+        let stamp:String=tx.query_row("SELECT updated_at FROM local_settings WHERE setting_category=?1 AND setting_key=?2",params![PRINT_QUEUE_SETTINGS_CATEGORY,key],|r|r.get(0)).map_err(|_|"INTERNAL_ERROR")?;
+        db::set_setting(&tx,PRINT_QUEUE_SETTINGS_CATEGORY,&record_key,&serde_json::json!({"session":session,"action":action,"previous":previous,"stamp":stamp,"owner":"printer.pause_dispatch.v1"}).to_string())?;
+    } else {
+        tx.execute(
+            "DELETE FROM local_settings WHERE setting_category=?1 AND setting_key=?2",
+            params![PRINT_QUEUE_SETTINGS_CATEGORY, record_key],
+        )
+        .map_err(|_| "INTERNAL_ERROR")?;
+    }
+    support_control_check(permit, deadline)?;
+    tx.commit().map_err(|_| "OUTCOME_UNKNOWN")?;
+    let observed = support_pause_state(&conn, Some(profile))?;
+    let eligible = !observed && !support_pause_state(&conn, None)?;
+    Ok(
+        serde_json::json!({"status":if observed==paused && (paused || eligible){"available"}else{"unknown"},"paused":observed,"in_flight":in_flight}),
+    )
+}
+
+pub(crate) fn support_cancel_uncertain(
+    db: &DbState,
+    profile: &str,
+    preview: &SupportPrintPreview,
+    permit: &crate::support::critical_op::SupportPermit,
+    deadline: Instant,
+    checkpoint: &dyn Fn() -> Result<(), String>,
+    before_effect: &dyn Fn() -> Result<(), String>,
+    spooler: Arc<dyn crate::windows_spooler::WindowsSpooler>,
+) -> Result<Value, String> {
+    checkpoint()?;
+    let association = support_control_lock(profile_association_coordination(), permit, deadline)?;
+    checkpoint()?;
+    let conn = support_control_lock(&db.conn, permit, deadline)?;
+    checkpoint()?;
+    let owner = if db.db_path == Path::new(":memory:") {
+        active_print_owner_id_with_conn(&conn)?
+    } else {
+        file_database_identity(&db.db_path)
+    };
+    let fresh = support_preview_with_conn(&conn, profile, &owner)?;
+    if fresh.job_id != preview.job_id
+        || fresh.attempt_id != preview.attempt_id
+        || fresh.fingerprint != preview.fingerprint
+    {
+        return Err("PAYLOAD_DRIFT".into());
+    }
+    support_control_check(permit, deadline)?;
+    conn.busy_timeout(Duration::from_millis(5))
+        .map_err(|_| "INTERNAL_ERROR")?;
+    permit.guard_connection(&conn, deadline);
+    let result =
+        durable_cancel_print_job_with_conn(&conn, &preview.job_id, &owner, false, false, &|tx| {
+            // The write transaction prevents a profile/job/attempt change between
+            // this final re-resolution and the owner's cancellation transition.
+            let fresh = support_preview_with_conn(tx, profile, &owner)?;
+            if fresh.job_id != preview.job_id
+                || fresh.attempt_id != preview.attempt_id
+                || fresh.fingerprint != preview.fingerprint
+            {
+                return Err("PAYLOAD_DRIFT".into());
+            }
+            before_effect()?;
+            support_control_check(permit, deadline)
+        });
+    conn.progress_handler(0, None::<fn() -> bool>);
+    result?;
+    drop(association);
+    let attempt = crate::print_dispatch::read_attempt(&conn, preview.attempt_id)
+        .map_err(|_| "OUTCOME_UNKNOWN")?
+        .ok_or("OUTCOME_UNKNOWN")?;
+    drop(conn);
+    checkpoint()?;
+    if attempt.transport == "windows" {
+        let path = db.db_path.clone();
+        let attempt_id = preview.attempt_id;
+        let cancelled = permit.cancelled.clone();
+        let worker_cancelled = cancelled.clone();
+        // Only an owned OS call can block here. Its worker owns a private SQLite
+        // handle, never the business mutex. Critical start prevents its next effect.
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (checkpoint_tx, checkpoint_rx) = std::sync::mpsc::channel();
+        let spooler = SupportOwnedSpooler {
+            owner: spooler.clone(),
+            cancelled: worker_cancelled.clone(),
+            deadline,
+            checkpoint: checkpoint_tx,
+        };
+        std::thread::Builder::new().name("support-print-cancel".into()).spawn(move || {
+            let result=(|| {
+                let conn=Connection::open(path).map_err(|_|"OUTCOME_UNKNOWN")?;
+                conn.busy_timeout(Duration::from_millis(5)).map_err(|_|"OUTCOME_UNKNOWN")?;
+                let progress_cancel=worker_cancelled.clone();
+                conn.progress_handler(1,Some(move || progress_cancel.load(Ordering::Acquire) || Instant::now()>=deadline));
+                let control=crate::print_dispatch::control_owned_windows_attempt_with_cancel(&conn,&spooler,attempt_id,crate::windows_spooler::SpoolJobControl::Delete,Utc::now(),worker_cancelled.as_ref()).map_err(|_|"OUTCOME_UNKNOWN")?;
+                if worker_cancelled.load(Ordering::Acquire) || Instant::now()>=deadline { return Err("OUTCOME_UNKNOWN"); }
+                if matches!(control,crate::print_dispatch::OwnedWindowsControlResult::OwnershipNotConfirmed{..}) { return Ok("unknown"); }
+                if matches!(control,crate::print_dispatch::OwnedWindowsControlResult::Failed{..}) {
+                    crate::print_dispatch::record_owned_windows_control_failure(&conn,attempt_id,crate::windows_spooler::SpoolJobControl::Delete,"support_native_control_failed",Utc::now()).map_err(|_|"OUTCOME_UNKNOWN")?;
+                    return Ok("observed");
+                }
+                // Native absence alone must not promote cancel_requested. The
+                // normal print owner confirms its durable state and releases
+                // its lane; support never waits on that owner's lane mutex.
+                let current=crate::print_dispatch::read_attempt(&conn,attempt_id).map_err(|_|"OUTCOME_UNKNOWN")?.ok_or("OUTCOME_UNKNOWN")?;
+                let job_id=current.spool_job_id.ok_or("OUTCOME_UNKNOWN")?;
+                match spooler.get_job(&current.resolved_target,job_id) {
+                    Ok(Some(native)) => {
+                        if crate::windows_spooler::validate_owned_job(&current.resolved_target,job_id,&current.document_name,&native).is_err() { return Ok("unknown"); }
+                    }
+                    Ok(None) => {},
+                    Err(_) => return Ok("unknown"),
+                }
+                Ok("observed")
+            })();
+            let _=tx.send(result);
+        }).map_err(|_|"OUTCOME_UNKNOWN")?;
+        loop {
+            if let Err(code) = support_control_check(permit, deadline).and_then(|()| checkpoint()) {
+                cancelled.store(true, Ordering::Release);
+                return Err(code);
+            }
+            while let Ok(ack) = checkpoint_rx.try_recv() {
+                if let Err(code) =
+                    checkpoint().and_then(|()| support_control_check(permit, deadline))
+                {
+                    cancelled.store(true, Ordering::Release);
+                    return Err(code);
+                }
+                let _ = ack.send(());
+            }
+            match rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(result) => {
+                    checkpoint()?;
+                    let state = result?;
+                    if state != "observed" {
+                        return Ok(
+                            serde_json::json!({"state":state,"lane_released":false,"physical_output":"unknown"}),
+                        );
+                    }
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => return Err("OUTCOME_UNKNOWN".into()),
+            }
+        }
+    }
+    checkpoint()?;
+    let conn = support_control_lock(&db.conn, permit, deadline)?;
+    let attempt = crate::print_dispatch::read_attempt(&conn, preview.attempt_id)
+        .map_err(|_| "OUTCOME_UNKNOWN")?
+        .ok_or("OUTCOME_UNKNOWN")?;
+    let live = active_print_jobs()
+        .try_lock()
+        .map_err(|_| "OUTCOME_UNKNOWN")?
+        .contains_key(&(owner, preview.job_id.clone()));
+    let blocker:bool=conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM print_job_attempts a WHERE a.resolved_target=?1 AND {})",active_attempt_predicate_sql("a")),[&attempt.resolved_target],|r|r.get(0)).map_err(|_|"OUTCOME_UNKNOWN")?;
+    let state = match attempt.state {
+        DispatchState::Cancelled if !live && !blocker => "cancel_confirmed",
+        DispatchState::CancelRequested => "cancel_requested",
+        DispatchState::CancelFailed => "cancel_failed",
+        _ => "unknown",
+    };
+    Ok(serde_json::json!({"state":state,"lane_released":false,"physical_output":"unknown"}))
+}
+
+#[cfg(test)]
+#[path = "print_support_tests.rs"]
+mod support_mutation_tests;

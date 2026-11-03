@@ -333,5 +333,105 @@
         }
       }
     }
+  },
+  "connect": {
+    "action": "Connecter l’assistance",
+    "permissionDisabled": "Vous n’avez pas l’autorisation de connecter l’assistance."
+  },
+  "code": {
+    "needsInternet": "Une connexion internet est nécessaire pour connecter l’assistance.",
+    "retry": "Impossible d’obtenir un code. Réessayez.",
+    "expired": "Le code a expiré. Demandez un nouveau code.",
+    "cancel": "Annuler",
+    "warning": "Communiquez ce code uniquement à l’assistance de The Small.",
+    "label": "Code d’assistance",
+    "qr": "Scannez pour ouvrir la page de connexion de l’assistance",
+    "timeLeft": "Temps restant",
+    "loading": "Demande de code…",
+    "newCode": "Demander un nouveau code"
+  },
+  "banner": {
+    "activity": "Vérification de la caisse",
+    "waiting": "En attente de connexion de l’assistance",
+    "connected": "Assistance connectée",
+    "executing": "Action d’assistance en cours",
+    "awaitingOnsite": "L’assistance demande une autorisation",
+    "deferredPayment": "En attente de la fin du paiement",
+    "pausedOffline": "En pause — hors ligne",
+    "restarting": "Restauration des données — la caisse redémarre",
+    "restoreRestarting": "Redémarrage pour la restauration",
+    "ended": "Assistance terminée",
+    "end": "Terminer",
+    "endDuringWrite": {
+      "committed": "La modification a été effectuée avant la fin de l’assistance.",
+      "rolledBack": "La modification a été annulée avant la fin de l’assistance. Rien n’a changé."
+    },
+    "extend": "+30 minutes",
+    "noPinPromise": "L’assistance ne vous demandera jamais votre code PIN ni votre mot de passe."
+  },
+  "onsite": {
+    "title": "L’assistance souhaite :",
+    "technicalDetails": "Détails techniques",
+    "execute": "Exécuter",
+    "decline": "Refuser",
+    "aiExplanation": "Explication de l’assistant (IA)",
+    "storePinNotice": "Il s’agit du contrôle PIN de votre magasin. L’assistance ne voit pas le PIN.",
+    "terminalCommandWarning": "La commande s’exécute en tant qu’utilisateur de la caisse et peut lire les données locales et modifier le système. Les protections des autres actions ne la couvrent pas.",
+    "cataloguePause": "Suspendre les nouveaux envois vers cette imprimante.",
+    "catalogueResume": "Lever la pause créée par cette session d’assistance.",
+    "catalogueCancel": "Annuler une impression non fiscale bloquée.",
+    "cataloguePauseScope": "Modifie uniquement la pause d’envoi de cette imprimante. N’annule aucun travail, ne rappelle pas les données envoyées et ne modifie ni reçus, ni paiements, ni services, ni rapports Z.",
+    "catalogueCancelScope": "Conserve le travail d’impression original et son historique. Annule uniquement l’envoi incertain sélectionné. Aucune réimpression ni modification des paiements, services, rapports Z ou documents fiscaux.",
+    "cataloguePaperWarning": "Le papier déjà partiellement imprimé ne peut pas être rappelé. Toute réimpression passe par le parcours habituel de la caisse.",
+    "catalogueResumeCheck": "Confirmez uniquement après avoir vérifié sur place l’imprimante et sa configuration. L’envoi est réactivé ; cela ne prouve pas que l’impression est réparée."
+  },
+  "restore": {
+    "preparing": "Préparation de la restauration. Redémarrez l’application quand cela vous convient pour l’appliquer.",
+    "notices": {
+      "staged": "Restauration préparée. Vous pouvez continuer les ventes. Redémarrez l’application quand cela vous convient. Toute nouvelle activité de la caisse annulera la restauration.",
+      "applied": "L’instantané d’assistance a été restauré.",
+      "refused": "La restauration a été refusée car les données de la caisse ont changé ou l’instantané n’est plus compatible. Vos données actuelles ont été conservées.",
+      "expired": "La restauration préparée a expiré ou l’assistance est terminée. Vos données actuelles ont été conservées.",
+      "rolled_back": "La restauration n’a pas pu se terminer. Vos données d’origine ont été rétablies. Vous pouvez continuer les ventes."
+    },
+    "dismissNotice": "Fermer",
+    "action": "Restaurer",
+    "snapshotFirst": "Une sauvegarde locale complète sera d'abord créée.",
+    "snapshots": "Sauvegardes d'assistance",
+    "quarantine": "Groupes en quarantaine",
+    "resynced": "Resynchronisé depuis le serveur",
+    "confirm": "Restaurer cette modification ? Le contrôle d'autorisation de votre établissement est requis.",
+    "reasons": {
+      "pre_breakglass_sql": "Réparation de la base de données",
+      "pre_quarantine": "Mise en quarantaine",
+      "pre_quarantine_restore": "Restaurer les données en quarantaine",
+      "pre_command": "Commande du terminal",
+      "pre_restore": "Restaurer la sauvegarde"
+    }
+  },
+  "deviceApply": {
+    "undo": "Annuler la modification"
+  },
+  "physicalCheck": {
+    "done": "Fait",
+    "notDone": "Non effectué",
+    "power_cycle_printer": "Éteignez puis rallumez l’imprimante.",
+    "check_printer_paper": "Vérifiez que l’imprimante contient du papier.",
+    "check_printer_cable": "Vérifiez le câble de l’imprimante.",
+    "check_network_cable": "Vérifiez le câble réseau de la caisse.",
+    "power_cycle_card_terminal": "Éteignez puis rallumez le terminal de paiement."
+  },
+  "consent": {
+    "title": "Consentement à l’assistance à distance",
+    "required": "Le consentement du magasin est nécessaire avant de connecter l’assistance.",
+    "agree": "J’accepte",
+    "decline": "Non",
+    "onlyOwnerAdmin": "Seul le propriétaire ou un administrateur du magasin peut donner son consentement.",
+    "accepted": "Le consentement a été enregistré.",
+    "withdrawn": "Le magasin a retiré son consentement. L’assistance n’est pas disponible.",
+    "outdated": "Le texte du consentement a changé. Un nouveau consentement est nécessaire.",
+    "textUnavailable": "Le texte du consentement n’est pas encore disponible dans la langue du magasin.",
+    "version": "Version du texte",
+    "storeAdminAlternative": "Le propriétaire ou un administrateur peut aussi accepter dans l’administration du magasin."
   }
 }

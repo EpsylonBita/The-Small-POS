@@ -233,7 +233,8 @@ test('RoomsView create-choice modal is portaled (blur/high-z) with separate chec
   // a high z-index, so the choice overlay never renders inside the page container.
   assert.match(viewSource, /return renderModalPortal\(/);
   assert.match(viewSource, /fixed inset-0 z-1200(?![\w.-])/);
-  assert.match(viewSource, /bg-black\/50 backdrop-blur-sm/);
+  // Founder 01/11: the shared glass backdrop and shell, like every window.
+  assert.match(viewSource, /className="liquid-glass-modal-backdrop absolute inset-0"/);
 
   // newCheckinOrReservation is now also a modal title, so it must exist everywhere.
   for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
@@ -346,7 +347,8 @@ test('RoomsView status change updates the open modal summary status AND effectiv
 
   // The shared Modal still portals with backdrop blur (portal/blur behavior intact).
   assert.match(viewSource, /return renderModalPortal\(/);
-  assert.match(viewSource, /bg-black\/50 backdrop-blur-sm/);
+  // Founder 01/11: the shared glass backdrop and shell, like every window.
+  assert.match(viewSource, /className="liquid-glass-modal-backdrop absolute inset-0"/);
 });
 
 test('roomsView status-update toasts exist in every locale with {{status}} kept and Greek translated', () => {
@@ -436,7 +438,7 @@ test('Round 429: Rooms reservation controls stay on the yellow/amber system with
   // Founder 31/10: status chips and the floor picker are the shared workspace controls.
   assert.match(viewSource, /<WorkspaceChips<RoomStatus \| 'all'>/);
   assert.match(viewSource, /<WorkspaceSelect/);
-  assert.match(viewSource, /className=\{`h-9 w-9 rounded-full inline-flex items-center justify-center transition-transform active:scale-95/);
+  assert.match(viewSource, /className="liquid-glass-modal-close[^"]*"/);
   assert.match(viewSource, /className=\{`flex items-center justify-center gap-2 py-3 px-4 rounded-2xl font-medium transition-transform active:scale-95/);
   assert.doesNotMatch(viewSource, /purple-/);
   assert.doesNotMatch(viewSource, /color="purple"/);

@@ -9,3 +9,10 @@
 .floor-plan-dialog--dark { background: #101113 !important; }
 .floor-plan-dialog--light { background: #f8f9fa !important; }
 .floor-plan-dialog-content { display: flex; flex-direction: column; min-height: 0; height: 100%; padding: 0 !important; }
+
+/* Founder 01/11: on the 2D plan a table rises off the floor like the kit's raised buttons — a soft shadow under a
+   light edge instead of the dark outline (the chosen one keeps its yellow ring); fixtures stay flat. */
+.table-floor-plan { --plan-node-stroke: #d4d4d8; --plan-node-shadow: drop-shadow(0 1px 2px rgb(24 24 27 / 0.10)) drop-shadow(0 6px 10px rgb(24 24 27 / 0.16)); }
+.table-floor-plan[data-theme='dark'] { --plan-node-stroke: #3f3f46; --plan-node-shadow: drop-shadow(0 2px 4px rgb(0 0 0 / 0.5)) drop-shadow(0 8px 14px rgb(0 0 0 / 0.6)); }
+.floor-plan-table-node > path { filter: var(--plan-node-shadow); }
+.floor-plan-table-node > path:not([stroke='#eab308']) { stroke: var(--plan-node-stroke); }

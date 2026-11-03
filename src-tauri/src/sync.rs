@@ -2689,19 +2689,24 @@ fn read_terminal_scope_value(conn: &Connection, key: &str) -> Option<String> {
 }
 
 fn load_order_terminal_visibility_scope(conn: &Connection) -> OrderTerminalVisibilityScope {
-    let mode = read_terminal_scope_value(conn, "pos_operating_mode")
+    order_terminal_visibility_scope(|key| read_terminal_scope_value(conn, key))
+}
+
+fn order_terminal_visibility_scope(
+    read: impl Fn(&str) -> Option<String>,
+) -> OrderTerminalVisibilityScope {
+    let mode = read("pos_operating_mode")
         .unwrap_or_else(|| "legacy_branch_shared".to_string())
         .to_ascii_lowercase();
 
-    let terminal_id = read_terminal_scope_value(conn, "terminal_id");
-    let source_terminal_id =
-        read_terminal_scope_value(conn, "source_terminal_id").or_else(|| terminal_id.clone());
-    let owner_terminal_id = read_terminal_scope_value(conn, "owner_terminal_id")
+    let terminal_id = read("terminal_id");
+    let source_terminal_id = read("source_terminal_id").or_else(|| terminal_id.clone());
+    let owner_terminal_id = read("owner_terminal_id")
         .or_else(|| source_terminal_id.clone())
         .or_else(|| terminal_id.clone());
-    let owner_terminal_db_id = read_terminal_scope_value(conn, "owner_terminal_db_id")
-        .or_else(|| read_terminal_scope_value(conn, "source_terminal_db_id"));
-    let terminal_type = read_terminal_scope_value(conn, "terminal_type")
+    let owner_terminal_db_id =
+        read("owner_terminal_db_id").or_else(|| read("source_terminal_db_id"));
+    let terminal_type = read("terminal_type")
         .unwrap_or_default()
         .to_ascii_lowercase();
     let has_self_owned_main_scope = matches!(terminal_type.as_str(), "main" | "primary")
@@ -2807,12 +2812,19 @@ pub(crate) fn remote_order_visible_to_current_terminal(
     remote_order: &Value,
 ) -> Result<bool, String> {
     let scope = load_order_terminal_visibility_scope(conn);
-    Ok(order_terminal_scope_visible(
-        &scope,
+    Ok(remote_order_visible_in_scope(&scope, remote_order))
+}
+
+fn remote_order_visible_in_scope(
+    scope: &OrderTerminalVisibilityScope,
+    remote_order: &Value,
+) -> bool {
+    order_terminal_scope_visible(
+        scope,
         str_any(remote_order, &["owner_terminal_id", "ownerTerminalId"]),
         str_any(remote_order, &["source_terminal_id", "sourceTerminalId"]),
         str_any(remote_order, &["terminal_id", "terminalId"]),
-    ))
+    )
 }
 
 /// Get the open working day's orders.
@@ -3455,6 +3467,13 @@ fn count_historical_z_report_conflicts(conn: &rusqlite::Connection) -> i64 {
 pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     cleanup_order_update_queue_rows(&conn, None)?;
+    read_sync_status(&conn, sync_state)
+}
+
+/// [`get_sync_status`] without its one write, the legacy order-update queue
+/// cleanup. Health reads it on its read-only connection after running that
+/// cleanup on the business connection.
+pub(crate) fn read_sync_status(conn: &Connection, sync_state: &SyncState) -> Result<Value, String> {
     let historical_pattern = historical_z_report_conflict_pattern();
 
     let pending: i64 = conn
@@ -4349,8 +4368,127 @@ fn build_terminal_heartbeat_payload(
     if let Some(remote_view_capabilities) = remote_view_capabilities {
         payload["remote_view_capabilities"] = remote_view_capabilities;
     }
+    // The server answers support availability only for the advertised,
+    // build-pinned protocol; without it the till always reads "unavailable".
+    if let Some(version) = crate::support::contracts::shared().protocol["version"].as_u64() {
+        payload["support_protocol_version"] = Value::from(version);
+    }
 
     Some(payload)
+}
+
+fn support_availability_observations() -> &'static crate::diagnostics::RetainedObservations {
+    static CACHE: std::sync::OnceLock<crate::diagnostics::RetainedObservations> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(crate::diagnostics::RetainedObservations::default)
+}
+
+fn support_availability_generation() -> &'static std::sync::atomic::AtomicU64 {
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    &GENERATION
+}
+
+/// Memory-only observation of the terminal heartbeat, independent of session
+/// presence and staff permission. Contention/missing/invalid evidence is null.
+pub(crate) fn support_availability(path: &std::path::Path, state: &SyncState) -> Value {
+    support_availability_with_age(path, state).0
+}
+
+/// Age belongs to the authenticated retained heartbeat observation. Reading
+/// this cache never refreshes it; invalid/future timestamps have unknown age.
+pub(crate) fn support_availability_with_age(
+    path: &std::path::Path,
+    state: &SyncState,
+) -> (Value, Option<u64>) {
+    let Ok(auth) = state.remote_auth_pause.try_lock() else {
+        return (Value::Null, None);
+    };
+    if auth.pause.remote_auth_paused || auth.revision == u64::MAX {
+        return (Value::Null, None);
+    }
+    let observation = support_availability_observations().read(&path.to_string_lossy());
+    let content = &observation["content"];
+    if content["auth_revision"].as_u64() == Some(auth.revision)
+        && content["generation"].as_u64()
+            == Some(support_availability_generation().load(Ordering::Acquire))
+    {
+        let age = availability_observation_age(&observation);
+        (content["support"].clone(), age)
+    } else {
+        (Value::Null, None)
+    }
+}
+
+fn availability_observation_age(observation: &Value) -> Option<u64> {
+    let at = chrono::DateTime::parse_from_rfc3339(observation["at"].as_str()?).ok()?;
+    chrono::Utc::now()
+        .signed_duration_since(at)
+        .num_milliseconds()
+        .try_into()
+        .ok()
+}
+
+fn validated_support_availability(value: &Value) -> Option<Value> {
+    fn keys(value: &Value, expected: &[&str]) -> bool {
+        value.as_object().is_some_and(|v| {
+            v.len() == expected.len() && expected.iter().all(|k| v.contains_key(*k))
+        })
+    }
+    fn strings(value: &Value) -> bool {
+        value
+            .as_array()
+            .is_some_and(|a| a.iter().all(Value::is_string))
+    }
+    let mut value = value.clone();
+    let object = value.as_object_mut()?;
+    object
+        .entry("catalogue_mutations")
+        .or_insert(Value::Bool(false));
+    let value = &value;
+    let consent = &value["consent"];
+    (keys(
+        value,
+        &[
+            "available",
+            "min_protocol_version",
+            "tiers_enabled",
+            "passkey_approvals",
+            "catalogue_mutations",
+            "disabled_tools",
+            "kill_epoch",
+            "consent",
+        ],
+    ) && value["available"].is_boolean()
+        && value["min_protocol_version"]
+            .as_u64()
+            .is_some_and(|n| n > 0)
+        && value["tiers_enabled"].as_array().is_some_and(|a| {
+            a.iter()
+                .all(|n| n.as_u64().is_some_and(|n| (1..=3).contains(&n)))
+        })
+        && value["passkey_approvals"].is_boolean()
+        && value["catalogue_mutations"].is_boolean()
+        && strings(&value["disabled_tools"])
+        && value["kill_epoch"].as_u64().is_some()
+        && keys(
+            consent,
+            &["state", "text_version", "locale", "accepting_base_roles"],
+        )
+        && consent["state"].as_str().is_some_and(|s| {
+            matches!(
+                s,
+                "valid" | "missing" | "outdated" | "withdrawn" | "text_unavailable" | "exempt"
+            )
+        })
+        && (consent["text_version"].is_null()
+            || consent["text_version"]
+                .as_str()
+                .is_some_and(|s| (1..=32).contains(&s.chars().count())))
+        && (consent["locale"].is_null() || consent["locale"].is_string())
+        && consent["accepting_base_roles"]
+            .as_array()
+            .is_some_and(|a| a.iter().all(|s| s.as_str().is_some_and(|s| !s.is_empty()))))
+    .then(|| value.clone())
 }
 
 async fn send_terminal_heartbeat_with_sender<F, Fut>(
@@ -4363,17 +4501,38 @@ where
     F: FnOnce(Value) -> Fut,
     Fut: std::future::Future<Output = Result<Value, String>>,
 {
+    // Invalidate even if the cache is contended, and reject late answers from
+    // older overlapping requests. No support cache lock can delay a heartbeat.
+    let generation = support_availability_generation()
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
+    let auth_revision = sync_state
+        .remote_auth_pause
+        .try_lock()
+        .ok()
+        .map(|a| a.revision);
     let Some(payload) = build_terminal_heartbeat_payload(db, sync_state, network_is_online) else {
         return Ok(false);
     };
 
-    sender(payload).await.map(|_| true)
+    let response = sender(payload).await?;
+    let availability = if response["success"] == true {
+        validated_support_availability(&response["support"]).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    support_availability_observations().publish(
+        db.db_path.to_string_lossy().into_owned(),
+        json!({"auth_revision":auth_revision,"generation":generation,"support":availability}),
+    );
+    Ok(true)
 }
 
 pub async fn send_terminal_heartbeat_now(
     db: &DbState,
     sync_state: &SyncState,
 ) -> Result<bool, String> {
+    support_availability_generation().fetch_add(1, Ordering::AcqRel);
     if sync_state.is_remote_auth_paused() {
         return Ok(false);
     }
@@ -4704,6 +4863,160 @@ fn capture_unsynced_sync_queue_snapshot_with_limit(
     limit: i64,
 ) -> Result<UnsyncedSyncQueueSnapshot, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    capture_unsynced_sync_queue_snapshot_with_conn(&conn, limit, None)
+}
+
+pub(crate) fn support_queued_closeout_count(conn: &rusqlite::Connection) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT (SELECT count(*) FROM sync_queue WHERE entity_type='z_report' AND status NOT IN ('synced','applied') AND (last_error IS NULL OR last_error NOT LIKE ?1)) + (SELECT count(*) FROM parity_sync_queue WHERE table_name='z_reports' AND COALESCE(module_type,'') <> 'repairs' AND status NOT IN ('synced','applied'))",
+        [format!("{HISTORICAL_Z_REPORT_CONFLICT_PREFIX}%")], |r| r.get(0),
+    ).map_err(|_| "unavailable".into())
+}
+
+/// Query-only catalogue facts. SQL returns counts and closed dispositions, never
+/// payloads, identifiers, money or error prose. Unknown failures stay unknown.
+pub(crate) fn support_catalogue_queue_facts(
+    conn: &rusqlite::Connection,
+    scope: &crate::support::guards::Scope,
+    view: crate::support::catalogue::contract::SyncView,
+) -> (Vec<Value>, bool) {
+    use crate::support::catalogue::contract::SyncView;
+    let capacity = matches!(view, SyncView::Capacity);
+    // Expressions are compiled owner projections, never caller-supplied SQL.
+    let projections = [
+        ("central_queue", "SELECT status,CASE
+            WHEN status='conflict' THEN 'conflict'
+            WHEN error_message IN ('RATE_LIMITED','HTTP_429','HTTP_429_RATE_LIMITED') THEN 'rate_limited'
+            WHEN substr(error_message,1,instr(error_message||':',':')-1) IN ('PARENT_ORDER_PENDING','PARENT_SHIFT_PENDING','WAITING_PARENT',
+                'SHIFT_WAITING_FOR_EARLIER_SHIFT','SHIFT_WAITING_FOR_CHECK_IN','Z_WAITING_FOR_EARLIER_Z','Z_WAITING_FOR_WINDOW_MONEY',
+                'LOYALTY_WAITING_FOR_RELEASE','SHIFT_WAITING_ON_SERVER')
+                OR error_message='Waiting for this table''s payment to reach the server' THEN 'dependency_wait'
+            WHEN error_message IN ('TERMINAL_REJECTED','HTTP_401','HTTP_403') THEN 'terminal_rejection'
+            WHEN status='failed' AND error_message IN ('TRANSPORT_RETRY_EXHAUSTED','NETWORK_RETRY_EXHAUSTED') THEN 'exhausted_transport'
+            ELSE 'unknown' END AS disposition FROM parity_sync_queue
+            WHERE organization_id=?1 AND coalesce(module_type,'')<>'repairs'
+            AND table_name NOT IN ('payments','order_payments','payment_adjustments','cash_drawer_sessions','z_reports')
+            AND NOT EXISTS(SELECT 1 FROM parity_sync_set_aside s WHERE s.queue_id=parity_sync_queue.id AND s.organization_id=?1)
+            UNION ALL SELECT 'set_aside','set_aside' FROM parity_sync_set_aside s
+            JOIN parity_sync_queue q ON q.id=s.queue_id WHERE q.organization_id=?1 AND s.organization_id=?1
+            UNION ALL SELECT status,CASE
+            WHEN status='conflict' THEN 'conflict'
+            WHEN last_error IN ('RATE_LIMITED','HTTP_429','HTTP_429_RATE_LIMITED') THEN 'rate_limited'
+            WHEN substr(last_error,1,instr(last_error||':',':')-1) IN ('PARENT_ORDER_PENDING','PARENT_SHIFT_PENDING','WAITING_PARENT',
+                'SHIFT_WAITING_FOR_EARLIER_SHIFT','SHIFT_WAITING_FOR_CHECK_IN','Z_WAITING_FOR_EARLIER_Z','Z_WAITING_FOR_WINDOW_MONEY',
+                'LOYALTY_WAITING_FOR_RELEASE','SHIFT_WAITING_ON_SERVER') THEN 'dependency_wait'
+            WHEN last_error IN ('TERMINAL_REJECTED','HTTP_401','HTTP_403') THEN 'terminal_rejection'
+            ELSE 'unknown' END FROM sync_queue
+            WHERE status NOT IN ('synced','applied') AND entity_type NOT IN ('payment','payment_adjustment','z_report')
+            AND (NOT json_valid(payload) OR coalesce(json_extract(payload,'$.organization_id'),json_extract(payload,'$.organizationId'),?1)=?1)"),
+        ("checkout_attempts", "SELECT 'pending' AS status,'unknown' AS disposition FROM checkout_drafts_v1
+            WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND draft_json IS NOT NULL"),
+        ("table_attempts", "SELECT status,CASE WHEN status='conflict' THEN 'conflict' WHEN last_error_code='AUTHORIZATION_REQUIRED' THEN 'terminal_rejection'
+            WHEN last_error_code IN ('WAITING_PARENT','PARENT_ORDER_PENDING','PARENT_SHIFT_PENDING')
+            THEN 'dependency_wait' ELSE 'unknown' END AS disposition FROM table_attempt_recovery_v1
+            WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND status NOT IN ('applied','superseded')"),
+        ("repair_attachments", "SELECT status,CASE WHEN status='conflict' THEN 'conflict'
+            WHEN error_message='REPAIR_RATE_LIMITED' THEN 'rate_limited' ELSE 'unknown' END AS disposition
+            FROM parity_sync_queue WHERE organization_id=?1 AND module_type='repairs' AND table_name='repair_attachments'
+            AND NOT EXISTS(SELECT 1 FROM parity_sync_set_aside s WHERE s.queue_id=parity_sync_queue.id AND s.organization_id=?1)"),
+        ("z_submissions", "SELECT sync_state AS status,'financial_gate' AS disposition FROM z_reports
+            WHERE branch_id=?2 AND terminal_id=?3 AND sync_state<>'applied'"),
+        ("gift_funding", "SELECT state AS status,'financial_gate' AS disposition FROM gift_card_funding_attempts
+            WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND state NOT IN ('completed','canceled','refused','abandoned')"),
+        ("gift_returns", "SELECT state AS status,'financial_gate' AS disposition FROM gift_card_return_attempts
+            WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND state='pending'"),
+        ("payment_sync", "SELECT p.sync_state AS status,CASE WHEN p.sync_state='waiting_parent' THEN 'dependency_wait' ELSE 'financial_gate' END AS disposition
+            FROM order_payments p JOIN orders o ON o.id=p.order_id WHERE o.organization_id=?1 AND o.branch_id=?2
+            AND (o.source_terminal_id=?3 OR o.terminal_id=?3 OR o.owner_terminal_id=?3) AND p.sync_state<>'applied'"),
+        ("adjustment_sync", "SELECT p.sync_state AS status,CASE WHEN p.sync_state='waiting_parent' THEN 'dependency_wait' ELSE 'financial_gate' END AS disposition
+            FROM payment_adjustments p JOIN orders o ON o.id=p.order_id WHERE o.organization_id=?1 AND o.branch_id=?2
+            AND (o.source_terminal_id=?3 OR o.terminal_id=?3 OR o.owner_terminal_id=?3) AND p.sync_state<>'applied'"),
+        ("drawer_sync", "SELECT status,'financial_gate' AS disposition FROM parity_sync_queue
+            WHERE organization_id=?1 AND table_name='cash_drawer_sessions'
+            AND NOT EXISTS(SELECT 1 FROM parity_sync_set_aside s WHERE s.queue_id=parity_sync_queue.id AND s.organization_id=?1)
+            UNION ALL SELECT status,'financial_gate' FROM sync_queue
+            WHERE entity_type IN ('cash_drawer','cash_drawer_session') AND status NOT IN ('synced','applied')
+            AND json_valid(payload) AND coalesce(json_extract(payload,'$.organization_id'),json_extract(payload,'$.organizationId'))=?1
+            AND coalesce(json_extract(payload,'$.branch_id'),json_extract(payload,'$.branchId'))=?2"),
+    ];
+    let mut details = Vec::new();
+    let mut complete = true;
+    for (source, projection) in projections {
+        let disposition = if capacity {
+            "'capacity'"
+        } else {
+            "disposition"
+        };
+        let capacity_filter = if capacity {
+            "WHERE status IN ('pending','processing','in_progress','deferred','queued_remote','prepare_pending','collection_pending','collection_started','complete_pending','cancel_pending','prepared','waiting_parent','syncing')"
+        } else {
+            ""
+        };
+        let sql = format!("SELECT {disposition},count(*) FROM ({projection}) {capacity_filter} GROUP BY {disposition}");
+        let collected = (|| -> rusqlite::Result<Vec<Value>> {
+            let mut stmt = conn.prepare(&sql)?;
+            // Numbered parameters may be absent from a particular owner query.
+            for (index, value) in [
+                (1, &scope.organization_id),
+                (2, &scope.branch_id),
+                (3, &scope.terminal_id),
+            ] {
+                if index <= stmt.parameter_count() {
+                    stmt.raw_bind_parameter(index, value)?;
+                }
+            }
+            let mut rows = stmt.raw_query();
+            let mut values = Vec::new();
+            while let Some(row) = rows.next()? {
+                let disposition: String = row.get(0)?;
+                let count: u64 = row.get(1)?;
+                let retry_after: Option<u64> = if disposition == "rate_limited" {
+                    conn.query_row("SELECT CAST(max(0,(max(julianday(next_retry_at))-julianday('now'))*86400+0.999) AS INTEGER)
+                        FROM (SELECT next_retry_at FROM parity_sync_queue WHERE organization_id=?1
+                            AND ((?2='central_queue' AND error_message IN ('RATE_LIMITED','HTTP_429','HTTP_429_RATE_LIMITED'))
+                                OR (?2='repair_attachments' AND table_name='repair_attachments' AND error_message='REPAIR_RATE_LIMITED'))
+                            UNION ALL SELECT next_retry_at FROM sync_queue WHERE ?2='central_queue'
+                                AND last_error IN ('RATE_LIMITED','HTTP_429','HTTP_429_RATE_LIMITED')
+                                AND json_valid(payload) AND coalesce(json_extract(payload,'$.organization_id'),json_extract(payload,'$.organizationId'),?1)=?1)",
+                        params![scope.organization_id,source], |r|r.get(0))?
+                } else {
+                    None
+                };
+                values.push(json!({"source":source,"disposition":disposition,"count":count,"retry_after_s":retry_after}));
+            }
+            if values.is_empty() {
+                values.push(json!({"source":source,"disposition":if capacity{"capacity"}else{"unknown"},"count":0,"retry_after_s":null}));
+            }
+            Ok(values)
+        })();
+        match collected {
+            Ok(values) => details.extend(values),
+            Err(_) => {
+                complete = false;
+                details.push(json!({"source":source,"disposition":"unavailable","count":0,"retry_after_s":null}));
+            }
+        }
+    }
+    (details, complete)
+}
+
+pub(crate) fn capture_support_sync_queue_snapshot(
+    conn: &rusqlite::Connection,
+    branch_id: &str,
+) -> Result<UnsyncedSyncQueueSnapshot, String> {
+    capture_unsynced_sync_queue_snapshot_with_conn(
+        conn,
+        CLOSEOUT_SYNC_BLOCKER_SUMMARY_LIMIT,
+        Some(branch_id),
+    )
+}
+
+fn capture_unsynced_sync_queue_snapshot_with_conn(
+    conn: &rusqlite::Connection,
+    limit: i64,
+    support_branch: Option<&str>,
+) -> Result<UnsyncedSyncQueueSnapshot, String> {
+    let strict = support_branch.is_some();
     let historical_pattern = format!("{HISTORICAL_Z_REPORT_CONFLICT_PREFIX}%");
 
     let sync_queue_count = conn
@@ -4713,9 +5026,9 @@ fn capture_unsynced_sync_queue_snapshot_with_limit(
              WHERE status NOT IN ('synced', 'applied')
                AND NOT (
                     entity_type = 'z_report'
-                    AND last_error LIKE ?1
+                    AND (CASE WHEN ?2 THEN COALESCE(last_error, '') ELSE last_error END) LIKE ?1
                )",
-            params![historical_pattern.as_str()],
+            params![historical_pattern.as_str(), strict],
             |row| row.get::<_, i64>(0),
         )
         .map_err(|e| format!("count unsynced sync queue items: {e}"))?;
@@ -4731,6 +5044,17 @@ fn capture_unsynced_sync_queue_snapshot_with_limit(
             |row| row.get(0),
         )
         .map_err(|e| format!("count unsynced parity z-report items: {e}"))?;
+
+    // Support consumes only counts/statuses. Do not read diagnostic identifiers,
+    // payment details or arbitrary queue error prose to produce that projection.
+    if let Some(branch_id) = support_branch {
+        let unsent_money = crate::zreport::unsynced_money_in_closing_window(conn, branch_id)?;
+        return Ok(UnsyncedSyncQueueSnapshot {
+            count: sync_queue_count + parity_z_report_count + unsent_money.len() as i64,
+            blockers_summary: String::new(),
+            blocker_details: Vec::new(),
+        });
+    }
 
     let mut stmt = conn
         .prepare(
@@ -4788,8 +5112,8 @@ fn capture_unsynced_sync_queue_snapshot_with_limit(
     // Money this till recorded that has not reached the server, for the
     // window the next Z closes (06/10/2026): the Z must not close, and so
     // never deletes, a payment or refund whose sync is still queued.
-    let branch_id = read_runtime_terminal_credential(&conn, "branch_id").unwrap_or_default();
-    let unsent_money = crate::zreport::unsynced_money_in_closing_window(&conn, &branch_id)?;
+    let branch_id = read_runtime_terminal_credential(conn, "branch_id").unwrap_or_default();
+    let unsent_money = crate::zreport::unsynced_money_in_closing_window(conn, &branch_id)?;
     summary_parts.extend(unsent_money_summary_parts(&unsent_money, limit));
 
     let blockers_summary = summary_parts.join(", ");
@@ -9530,6 +9854,14 @@ fn materialize_remote_order(
     conn: &rusqlite::Connection,
     remote_order: &Value,
 ) -> Result<Option<String>, String> {
+    materialize_remote_order_scoped(conn, remote_order, None)
+}
+
+fn materialize_remote_order_scoped(
+    conn: &rusqlite::Connection,
+    remote_order: &Value,
+    captured: Option<&crate::terminal_helpers::TerminalScopeSnapshot>,
+) -> Result<Option<String>, String> {
     if remote_order_is_repair_settlement(remote_order) {
         return Ok(None);
     }
@@ -9539,7 +9871,13 @@ fn materialize_remote_order(
         _ => return Ok(None),
     };
 
-    if !remote_order_visible_to_current_terminal(conn, remote_order)? {
+    if !match captured {
+        Some(captured) => remote_order_visible_in_scope(
+            &order_terminal_visibility_scope(|key| normalize_scope_value(captured.value(key))),
+            remote_order,
+        ),
+        None => remote_order_visible_to_current_terminal(conn, remote_order)?,
+    } {
         debug!(
             remote_id = %remote_id,
             "Skipping remote order outside current isolated terminal scope"
@@ -9548,7 +9886,11 @@ fn materialize_remote_order(
     }
 
     if crate::hotel_folio::is_settlement(remote_order) {
-        return crate::hotel_folio::import(conn, remote_order).map(Some);
+        return match captured {
+            Some(captured) => crate::hotel_folio::import_with_scope(conn, remote_order, captured),
+            None => crate::hotel_folio::import(conn, remote_order),
+        }
+        .map(Some);
     }
     if let Some(existing_local_id) = resolve_local_order_id(conn, remote_order) {
         if local_order_is_repair_settlement(conn, &existing_local_id)? {
@@ -9631,7 +9973,14 @@ fn materialize_remote_order(
         }
     }
 
-    crate::table_session_cache::remember_order_history(conn, remote_order)?;
+    match captured {
+        Some(captured) => crate::table_session_cache::remember_order_history_with_snapshot(
+            conn,
+            captured,
+            remote_order,
+        )?,
+        None => crate::table_session_cache::remember_order_history(conn, remote_order)?,
+    }
     let client_order_id = remote_order
         .get("client_order_id")
         .and_then(Value::as_str)
@@ -9852,17 +10201,6 @@ fn materialize_remote_order(
     stamp_remote_order_currency(conn, &local_id, remote_order)?;
     project_canonical_order_table_binding(conn, &local_id, remote_order)?;
     Ok(Some(local_id))
-}
-
-fn remote_payment_changed_at(remote_payment: &Value) -> String {
-    remote_payment
-        .get("updated_at")
-        .or_else(|| remote_payment.get("updatedAt"))
-        .or_else(|| remote_payment.get("created_at"))
-        .or_else(|| remote_payment.get("createdAt"))
-        .and_then(Value::as_str)
-        .map(|value| value.to_string())
-        .unwrap_or_default()
 }
 
 fn replace_local_payment_items(
@@ -10108,24 +10446,25 @@ pub(crate) fn mark_local_payment_applied(
     // already-accepted payment. SAVEPOINT works whether this function
     // runs standalone or inside an outer transaction, so callers do not
     // need to know which mode they are in.
-    conn.execute_batch("SAVEPOINT mark_local_payment_applied")
-        .map_err(|e| format!("savepoint mark_local_payment_applied: {e}"))?;
+    crate::db::with_immediate_admission(conn, || {
+        conn.execute_batch("SAVEPOINT mark_local_payment_applied")
+            .map_err(|e| format!("savepoint mark_local_payment_applied: {e}"))?;
 
-    let result = (|| -> Result<(), String> {
-        let order_id: Option<String> = conn
-            .query_row(
-                "SELECT order_id FROM order_payments WHERE id = ?1 LIMIT 1",
-                params![payment_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| format!("load payment order for apply: {e}"))?;
+        let result = (|| -> Result<(), String> {
+            let order_id: Option<String> = conn
+                .query_row(
+                    "SELECT order_id FROM order_payments WHERE id = ?1 LIMIT 1",
+                    params![payment_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| format!("load payment order for apply: {e}"))?;
 
-        // A payment set aside for review never takes a server id: the only
-        // server payment that could be named here is other money.
-        conn.execute(
-            &format!(
-                "UPDATE order_payments
+            // A payment set aside for review never takes a server id: the only
+            // server payment that could be named here is other money.
+            conn.execute(
+                &format!(
+                    "UPDATE order_payments
                  SET sync_status = 'synced',
                      sync_state = 'applied',
                      remote_payment_id = CASE
@@ -10137,34 +10476,35 @@ pub(crate) fn mark_local_payment_applied(
                      sync_next_retry_at = NULL,
                      updated_at = ?2
                  WHERE id = ?3",
-                crate::payment_review::set_aside_payment_sql("order_payments")
-            ),
-            params![remote_payment_id, synced_at, payment_id],
-        )
-        .map_err(|e| format!("mark local payment applied: {e}"))?;
+                    crate::payment_review::set_aside_payment_sql("order_payments")
+                ),
+                params![remote_payment_id, synced_at, payment_id],
+            )
+            .map_err(|e| format!("mark local payment applied: {e}"))?;
 
-        mark_payment_queue_row_synced(conn, payment_id, synced_at)?;
-        if let Some(order_id) = order_id {
-            recompute_local_order_payment_snapshot(conn, &order_id, synced_at)?;
-        }
+            mark_payment_queue_row_synced(conn, payment_id, synced_at)?;
+            if let Some(order_id) = order_id {
+                recompute_local_order_payment_snapshot(conn, &order_id, synced_at)?;
+            }
 
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => {
-            conn.execute_batch("RELEASE mark_local_payment_applied")
-                .map_err(|e| format!("release mark_local_payment_applied: {e}"))?;
             Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                conn.execute_batch("RELEASE mark_local_payment_applied")
+                    .map_err(|e| format!("release mark_local_payment_applied: {e}"))?;
+                Ok(())
+            }
+            Err(e) => {
+                // ROLLBACK TO unwinds the savepoint contents; RELEASE then
+                // removes the savepoint frame so it does not linger.
+                let _ = conn.execute_batch("ROLLBACK TO mark_local_payment_applied");
+                let _ = conn.execute_batch("RELEASE mark_local_payment_applied");
+                Err(e)
+            }
         }
-        Err(e) => {
-            // ROLLBACK TO unwinds the savepoint contents; RELEASE then
-            // removes the savepoint frame so it does not linger.
-            let _ = conn.execute_batch("ROLLBACK TO mark_local_payment_applied");
-            let _ = conn.execute_batch("RELEASE mark_local_payment_applied");
-            Err(e)
-        }
-    }
+    })
 }
 
 fn find_canonical_duplicate_payment_target_with_conn(
@@ -11797,10 +12137,11 @@ fn apply_remote_payment_status(
     }
 
     // What this till counted for it is taken back, as a local void does.
-    crate::order_ownership::release_driver_earning_money_for_payment(
+    crate::order_ownership::release_driver_earning_money_for_payment_with_organization(
         conn,
         local_payment_id,
         updated_at,
+        str_any(remote_payment, &["organization_id", "organizationId"]).as_deref(),
     )?;
     if payment_origin != "sync_reconstructed" && amount_cents > 0 {
         let order_shift_id: Option<String> = conn
@@ -11992,6 +12333,66 @@ fn new_canonical_payment_provenance(
 /// server id, or the local id the origin terminal stamped into its metadata —
 /// is still linked, as before, and (item D2) a linked local `completed` row
 /// takes the server's voided/refunded status ([`apply_remote_payment_status`]).
+/// Probe only outcomes that cannot touch a mirror. The mutating importer
+/// repeats identity/method/amount/link decisions after fresh writer admission.
+fn remote_payment_import_is_readonly(conn: &Connection, payment: &Value) -> Result<bool, String> {
+    let Some(id) = str_any(payment, &["id", "payment_id", "paymentId"]) else {
+        return Ok(true);
+    };
+    let Some(remote_order) = str_any(payment, &["order_id", "orderId"]) else {
+        return Ok(true);
+    };
+    let order: Option<String> = conn.query_row("SELECT id FROM orders WHERE (supabase_id=?1 OR id=?1) AND lower(trim(COALESCE(order_context,'')))<>'repair_settlement' LIMIT 1", [&remote_order], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+    let order = order.or_else(|| {
+        payment
+            .pointer("/metadata/local_order_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|candidate| {
+                conn.query_row(
+                    "SELECT id FROM orders WHERE id=?1 LIMIT 1",
+                    [candidate],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+            })
+    });
+    let Some(order) = order else {
+        return Ok(true);
+    };
+    let method = str_any(payment, &["payment_method", "paymentMethod", "method"])
+        .unwrap_or_else(|| "other".into());
+    if canonical_remote_payment_method(payment, &method).is_none()
+        || num_any(payment, &["amount"]).unwrap_or(0.0) <= 0.0
+    {
+        return Ok(true);
+    }
+    if !remote_payment_is_completed_money(payment)
+        && payment
+            .get("adjustments")
+            .and_then(Value::as_array)
+            .is_none()
+    {
+        let local = payment
+            .get("metadata")
+            .and_then(Value::as_object)
+            .and_then(|m| {
+                m.get("local_payment_id")
+                    .or_else(|| m.get("localPaymentId"))
+            })
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let not_set_aside = crate::payment_review::set_aside_payment_sql("op");
+        let linked: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM order_payments op WHERE op.order_id=?1 AND (op.remote_payment_id=?2 OR op.id=?3) AND NOT {not_set_aside})"), params![order,id,local], |r| r.get(0)).map_err(|e| e.to_string())?;
+        return Ok(!linked);
+    }
+    Ok(false)
+}
+
 fn sync_remote_payment_into_local_with_context(
     conn: &Connection,
     remote_payment: &Value,
@@ -12003,57 +12404,62 @@ fn sync_remote_payment_into_local_with_context(
         }
         return Ok(None);
     }
-    conn.execute_batch("SAVEPOINT canonical_payment_import")
-        .map_err(|e| e.to_string())?;
-    let result = (|| {
-        let mirror = sync_remote_payment_row_into_local(conn, remote_payment)?;
-        if let Some(mirror) = &mirror {
-            import_canonical_payment_adjustments(
-                conn,
-                &mirror.local_order_id,
-                &mirror.local_payment_id,
-                remote_payment,
-            )?;
-            // A mirror never held this till's original money. Returned mirrors
-            // are history only; locally collected originals retain custody.
-            conn.execute(
+    if conn.is_autocommit() && remote_payment_import_is_readonly(conn, remote_payment)? {
+        return Ok(None);
+    }
+    crate::db::with_immediate_admission(conn, || {
+        conn.execute_batch("SAVEPOINT canonical_payment_import")
+            .map_err(|e| e.to_string())?;
+        let result = (|| {
+            let mirror = sync_remote_payment_row_into_local(conn, remote_payment)?;
+            if let Some(mirror) = &mirror {
+                import_canonical_payment_adjustments(
+                    conn,
+                    &mirror.local_order_id,
+                    &mirror.local_payment_id,
+                    remote_payment,
+                )?;
+                // A mirror never held this till's original money. Returned mirrors
+                // are history only; locally collected originals retain custody.
+                conn.execute(
                 "UPDATE order_payments SET status=json_extract(metadata,'$.canonical_return_status')
                  WHERE id=?1 AND payment_origin='sync_reconstructed'
                    AND json_valid(metadata) AND json_extract(metadata,'$.canonical_return_status') IN ('voided','refunded')",
                 [&mirror.local_payment_id],
             ).map_err(|e|e.to_string())?;
-            // The retained balance follows the complete imported ledger, not
-            // the pre-import projection used while hydrating the receipt.
-            payments::recompute_order_payment_state(
-                conn,
-                &mirror.local_order_id,
-                &mirror.updated_at,
-                &mirror.local_payment_id,
-            )?;
-            // Targeted admission/repair also retires a previously retained
-            // snapshot so an older failed pull cannot overwrite fresh proof.
-            conn.execute(
-                "DELETE FROM unresolved_remote_payments WHERE id=?1",
-                [&mirror.remote_payment_id],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        Ok(mirror)
-    })();
-    match result {
-        Ok(mirror) => {
-            conn.execute_batch("RELEASE canonical_payment_import")
+                // The retained balance follows the complete imported ledger, not
+                // the pre-import projection used while hydrating the receipt.
+                payments::recompute_order_payment_state(
+                    conn,
+                    &mirror.local_order_id,
+                    &mirror.updated_at,
+                    &mirror.local_payment_id,
+                )?;
+                // Targeted admission/repair also retires a previously retained
+                // snapshot so an older failed pull cannot overwrite fresh proof.
+                conn.execute(
+                    "DELETE FROM unresolved_remote_payments WHERE id=?1",
+                    [&mirror.remote_payment_id],
+                )
                 .map_err(|e| e.to_string())?;
+            }
             Ok(mirror)
+        })();
+        match result {
+            Ok(mirror) => {
+                conn.execute_batch("RELEASE canonical_payment_import")
+                    .map_err(|e| e.to_string())?;
+                Ok(mirror)
+            }
+            Err(error) => {
+                conn.execute_batch(
+                    "ROLLBACK TO canonical_payment_import; RELEASE canonical_payment_import",
+                )
+                .map_err(|e| e.to_string())?;
+                Err(error)
+            }
         }
-        Err(error) => {
-            conn.execute_batch(
-                "ROLLBACK TO canonical_payment_import; RELEASE canonical_payment_import",
-            )
-            .map_err(|e| e.to_string())?;
-            Err(error)
-        }
-    }
+    })
 }
 
 /// Canonical adjustment ids are the submitted adjustment_id, including exact
@@ -12612,6 +13018,7 @@ pub(crate) fn apply_remote_orders_page_for_test(
     apply_remote_orders_page(conn, orders).error
 }
 
+#[cfg(test)]
 fn sync_remote_payment_into_local(
     conn: &Connection,
     remote_payment: &Value,
@@ -12633,17 +13040,29 @@ pub(crate) fn mirror_canonical_payment(
 
 /// Apply a gateway receipt inside the caller's durable receipt transaction.
 /// Check projections never replace a parent order's canonical item snapshot.
+#[cfg(test)]
 pub(crate) fn apply_lan_canonical_response(
     conn: &Connection,
     path: &str,
     response: &Value,
 ) -> Result<(), String> {
+    let captured = crate::terminal_helpers::TerminalScopeSnapshot::from_mirrors(conn);
+    apply_lan_canonical_response_scoped(conn, path, response, &captured)
+}
+
+pub(crate) fn apply_lan_canonical_response_scoped(
+    conn: &Connection,
+    path: &str,
+    response: &Value,
+    captured: &crate::terminal_helpers::TerminalScopeSnapshot,
+) -> Result<(), String> {
     if conn.is_autocommit() {
         return Err("LAN domain apply requires the durable receipt transaction".into());
     }
+    captured.revalidate(conn)?;
     conn.execute_batch("SAVEPOINT cafe_lan_domain_apply")
         .map_err(|error| error.to_string())?;
-    let applied = apply_lan_canonical_response_inner(conn, path, response);
+    let applied = apply_lan_canonical_response_inner(conn, path, response, captured);
     match applied {
         Ok(()) => conn
             .execute_batch("RELEASE cafe_lan_domain_apply")
@@ -12654,6 +13073,59 @@ pub(crate) fn apply_lan_canonical_response(
             Err(error)
         }
     }
+}
+
+/// Conservative empty-read fast path: singular/unknown domain evidence still applies.
+pub(crate) fn lan_canonical_has_domain_rows(response: &Value) -> bool {
+    for key in ["orders", "sessions", "tables", "payments"] {
+        if !lan_snapshot_rows(response, key).is_empty()
+            || response
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(|rows| !rows.is_empty())
+            || response
+                .get("data")
+                .and_then(|data| data.get(key))
+                .and_then(Value::as_array)
+                .is_some_and(|rows| !rows.is_empty())
+        {
+            return true;
+        }
+    }
+    if [
+        "order",
+        "canonicalOrder",
+        "session",
+        "source_session",
+        "target_session",
+        "table",
+        "payment",
+        "payment_id",
+        "workflow",
+    ]
+    .iter()
+    .any(|key| {
+        response.get(*key).is_some_and(|value| !value.is_null())
+            || response
+                .get("data")
+                .and_then(|data| data.get(*key))
+                .is_some_and(|value| !value.is_null())
+    }) {
+        return true;
+    }
+    response.get("data").is_some_and(|data| {
+        data.get("order_items").is_some()
+            || data.as_array().is_some_and(|rows| !rows.is_empty())
+            || data.as_object().is_some_and(|fields| {
+                fields.iter().any(|(key, value)| match key.as_str() {
+                    "success" => false,
+                    "orders" | "sessions" | "tables" | "payments" => {
+                        !value.is_null() && !value.as_array().is_some_and(Vec::is_empty)
+                    }
+                    _ => !value.is_null(),
+                })
+            })
+    })
 }
 
 fn lan_snapshot_rows(response: &Value, key: &str) -> Vec<Value> {
@@ -12726,7 +13198,7 @@ mod lan_canonical_response_tests {
         "amount":10,"payment_method":"cash","status":"completed","currency":"EUR","table_session_id":SESSION,
         "created_at":"2099-01-01T12:01:00Z","updated_at":"2099-01-01T12:01:00Z"})
     }
-    fn response() -> Value {
+    pub(super) fn response() -> Value {
         json!({"success":true,"cafe_lan_snapshot":{"orders":[parent()],"sessions":[scoped_session()],"tables":[table()],"payments":[]}})
     }
     fn local_id(conn: &Connection) -> String {
@@ -12745,6 +13217,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn full_parent_and_scoped_check_are_persisted_separately_inside_receipt_transaction() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         apply_lan_canonical_response(&conn, "/api/pos/table-sessions", &response()).unwrap();
@@ -12776,6 +13249,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn malformed_table_rolls_back_parent_and_cache_before_ack() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         let mut invalid = response();
@@ -12792,6 +13266,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn pending_local_edit_is_not_overwritten_by_canonical_ack() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         apply_lan_canonical_response(&conn, "/api/pos/table-sessions", &response()).unwrap();
@@ -12819,6 +13294,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn canonical_payment_is_mirrored_once_without_new_sync_charge() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         let mut reply = response();
         reply["payment_id"] = json!(PAYMENT);
@@ -12844,6 +13320,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn a_canonical_lan_order_carries_the_server_vat_whatever_the_till_stored() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         // LAN relays (07/10/2026): the main till applies the server's own
         // snapshot. The till's stored VAT never travels with it and never
         // changes the money the snapshot sets.
@@ -12899,6 +13376,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn historic_uncounted_receipts_do_not_become_new_payments() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         let mut reply = response();
         let mut failed = receipt();
@@ -12912,6 +13390,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn mapped_full_api_parent_keeps_full_items_instead_of_scoped_check_items() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         let mut reply = response();
         let mut mapped = parent();
@@ -12945,6 +13424,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn mapped_full_parent_does_not_replace_malformed_authoritative_relation() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         let mut reply = response();
         let order = &mut reply["cafe_lan_snapshot"]["orders"][0];
@@ -12962,6 +13442,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn scoped_check_items_never_substitute_a_missing_full_parent() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         let mut reply = response();
         reply["cafe_lan_snapshot"]["orders"] = json!([]);
@@ -12984,6 +13465,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn explicitly_scoped_parent_alias_is_refused_before_any_persistence() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         let mut reply = response();
         let order = &mut reply["cafe_lan_snapshot"]["orders"][0];
@@ -13006,6 +13488,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn canonical_cancel_clears_parent_table_identity_without_second_dispatch() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         apply_lan_canonical_response(&conn, "/api/pos/table-sessions", &response()).unwrap();
@@ -13033,6 +13516,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn ordinary_cloud_conversion_clears_binding_and_allows_pickup_cancel() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         apply_lan_canonical_response(&conn, "/api/pos/table-sessions", &response()).unwrap();
@@ -13080,6 +13564,7 @@ mod lan_canonical_response_tests {
     }
     #[test]
     fn header_only_check_or_order_and_version_mismatch_never_ack() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = connection();
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         assert!(apply_lan_canonical_response(
@@ -13134,12 +13619,13 @@ fn apply_lan_canonical_response_inner(
     conn: &Connection,
     path: &str,
     response: &Value,
+    captured: &crate::terminal_helpers::TerminalScopeSnapshot,
 ) -> Result<(), String> {
-    let organization = read_terminal_scope_value(conn, "organization_id")
+    let organization = normalize_scope_value(captured.value("organization_id"))
         .ok_or("LAN organization scope is unavailable")?;
-    let branch =
-        read_terminal_scope_value(conn, "branch_id").ok_or("LAN branch scope is unavailable")?;
-    let scope = load_order_terminal_visibility_scope(conn);
+    let branch = normalize_scope_value(captured.value("branch_id"))
+        .ok_or("LAN branch scope is unavailable")?;
+    let scope = order_terminal_visibility_scope(|key| normalize_scope_value(captured.value(key)));
     let mut orders = lan_snapshot_rows(response, "orders");
     if orders.is_empty() {
         if let Some(order) = response
@@ -13270,7 +13756,7 @@ fn apply_lan_canonical_response_inner(
             }
         }
     }
-    crate::table_manual_cancellation::mirror(conn, response)?;
+    crate::table_manual_cancellation::mirror_scoped(conn, response, captured)?;
     let mut local_parents = std::collections::BTreeMap::new();
     for (remote_id, (order, version)) in &parents {
         let existing = resolve_local_order_id(conn, order);
@@ -13297,7 +13783,7 @@ fn apply_lan_canonical_response_inner(
         }
         let local_id = match existing {
             Some(id) => id,
-            None => materialize_remote_order(conn, order)?
+            None => materialize_remote_order_scoped(conn, order, Some(captured))?
                 .ok_or("Canonical LAN order could not be materialized")?,
         };
         let mut apply_order = order.clone();
@@ -13323,11 +13809,12 @@ fn apply_lan_canonical_response_inner(
                     json!((stamp + chrono::Duration::milliseconds(1)).to_rfc3339());
             }
         }
-        if sync_remote_order_snapshot_into_local(
+        if sync_remote_order_snapshot_into_local_scoped(
             conn,
             &local_id,
             &apply_order,
             &Utc::now().to_rfc3339(),
+            Some(captured),
         )? == 0
         {
             return Err("Canonical LAN order was fenced by unresolved local state".into());
@@ -13335,7 +13822,7 @@ fn apply_lan_canonical_response_inner(
         conn.execute("UPDATE orders SET organization_id=?1,branch_id=?2,remote_version=?3,updated_at=?4 WHERE id=?5",
             params![organization,branch,version,order["updated_at"].as_str(),local_id]).map_err(|error|error.to_string())?;
         project_canonical_order_table_binding(conn, &local_id, order)?;
-        crate::table_session_cache::remember_order_history(conn, order)?;
+        crate::table_session_cache::remember_order_history_with_snapshot(conn, captured, order)?;
         local_parents.insert(remote_id.clone(), local_id);
     }
     let mut payments = lan_snapshot_rows(response, "payments");
@@ -13399,7 +13886,11 @@ fn apply_lan_canonical_response_inner(
             .get("active_order_id")
             .is_some_and(|id| !id.is_null())
         {
-            crate::table_session_cache::save(conn, session)?;
+            crate::table_session_cache::save_scoped(
+                conn,
+                &crate::table_session_cache::scope_from_snapshot(captured)?,
+                session,
+            )?;
             crate::sync_queue::apply_table_session_snapshot(conn, &json!({"session":session}))?;
         }
     }
@@ -14218,7 +14709,7 @@ async fn reconcile_remote_orders<H: SyncCycleHost>(
             .cloned()
             .unwrap_or_default();
         if !deleted_ids.is_empty() {
-            let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
             for deleted_id in &deleted_ids {
                 let Some(remote_id) = deleted_id.as_str().filter(|s| !s.trim().is_empty()) else {
                     continue;
@@ -14241,7 +14732,8 @@ async fn reconcile_remote_orders<H: SyncCycleHost>(
                     // it. Any other order is deleted (queue rows have no FK
                     // cascade to orders; the order's own rows cascade).
                     let now = Utc::now().to_rfc3339();
-                    let transaction = conn.transaction().map_err(|e| e.to_string())?;
+                    let transaction =
+                        crate::db::immediate_transaction(&conn).map_err(|e| e.to_string())?;
                     let outcome = crate::commands::orders::apply_server_order_deletion(
                         &transaction,
                         &local_id,
@@ -14601,33 +15093,38 @@ fn apply_remote_payment_page(conn: &Connection, response: &Value) -> Result<usiz
     if !rows.is_empty() && cursor.is_none() {
         return Err("Canonical payment page has no next_cursor".into());
     }
-    conn.execute_batch("SAVEPOINT canonical_payment_page")
-        .map_err(|e| e.to_string())?;
-    let result = (|| {
-        let mut changed = 0;
-        for row in rows {
-            changed += apply_or_retain_remote_payment(conn, row)?;
-        }
-        // Empty pages never advance, including on the first legacy-since pull.
-        if !rows.is_empty() {
-            crate::db::set_setting(conn, "sync", "payments_cursor", cursor.unwrap())?;
-        }
-        Ok(changed)
-    })();
-    match result {
-        Ok(changed) => {
-            conn.execute_batch("RELEASE canonical_payment_page")
-                .map_err(|e| e.to_string())?;
-            Ok(changed)
-        }
-        Err(error) => {
-            conn.execute_batch(
-                "ROLLBACK TO canonical_payment_page; RELEASE canonical_payment_page",
-            )
-            .map_err(|e| e.to_string())?;
-            Err(error)
-        }
+    if rows.is_empty() {
+        return Ok(0);
     }
+    crate::db::with_immediate_admission(conn, || {
+        conn.execute_batch("SAVEPOINT canonical_payment_page")
+            .map_err(|e| e.to_string())?;
+        let result = (|| {
+            let mut changed = 0;
+            for row in rows {
+                changed += apply_or_retain_remote_payment(conn, row)?;
+            }
+            // Empty pages never advance, including on the first legacy-since pull.
+            if !rows.is_empty() {
+                crate::db::set_setting(conn, "sync", "payments_cursor", cursor.unwrap())?;
+            }
+            Ok(changed)
+        })();
+        match result {
+            Ok(changed) => {
+                conn.execute_batch("RELEASE canonical_payment_page")
+                    .map_err(|e| e.to_string())?;
+                Ok(changed)
+            }
+            Err(error) => {
+                conn.execute_batch(
+                    "ROLLBACK TO canonical_payment_page; RELEASE canonical_payment_page",
+                )
+                .map_err(|e| e.to_string())?;
+                Err(error)
+            }
+        }
+    })
 }
 
 /// Exact authenticated parent reads can retire excluded history even when its
@@ -15360,12 +15857,34 @@ pub(crate) fn sync_remote_order_snapshot_into_local(
     remote_order: &Value,
     repaired_at: &str,
 ) -> Result<usize, String> {
+    sync_remote_order_snapshot_into_local_scoped(
+        conn,
+        local_order_id,
+        remote_order,
+        repaired_at,
+        None,
+    )
+}
+
+pub(crate) fn sync_remote_order_snapshot_into_local_scoped(
+    conn: &Connection,
+    local_order_id: &str,
+    remote_order: &Value,
+    repaired_at: &str,
+    captured: Option<&crate::terminal_helpers::TerminalScopeSnapshot>,
+) -> Result<usize, String> {
     ensure_generic_order_recovery_allowed(conn, local_order_id)?;
     if remote_order_is_repair_settlement(remote_order) {
         return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
     }
     let remote_order_id = str_any(remote_order, &["id"]);
-    if !remote_order_visible_to_current_terminal(conn, remote_order)? {
+    if !match captured {
+        Some(captured) => remote_order_visible_in_scope(
+            &order_terminal_visibility_scope(|key| normalize_scope_value(captured.value(key))),
+            remote_order,
+        ),
+        None => remote_order_visible_to_current_terminal(conn, remote_order)?,
+    } {
         debug!(
             local_order_id = %local_order_id,
             remote_order_id = remote_order_id.as_deref().unwrap_or(""),
@@ -15373,7 +15892,14 @@ pub(crate) fn sync_remote_order_snapshot_into_local(
         );
         return Ok(0);
     }
-    crate::table_session_cache::remember_order_history(conn, remote_order)?;
+    match captured {
+        Some(captured) => crate::table_session_cache::remember_order_history_with_snapshot(
+            conn,
+            captured,
+            remote_order,
+        )?,
+        None => crate::table_session_cache::remember_order_history(conn, remote_order)?,
+    }
 
     // A trusted privacy tombstone outranks stale financial/version snapshots.
     let privacy_metadata = remote_order
@@ -16652,33 +17178,47 @@ pub(crate) async fn refresh_canonical_payments_for_refund(
     let rows =
         fetch_order_payment_ledger(&admin_url, &api_key, &remote_id, Duration::from_secs(15))
             .await?;
+    if rows.is_empty() {
+        return Ok(());
+    }
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute_batch("SAVEPOINT refund_admission_refresh")
-        .map_err(|e| e.to_string())?;
-    let result = (|| {
-        for row in rows {
-            if sync_remote_payment_into_local_with_context(&conn, &row)?.is_none()
-                && !remote_payment_empty_mirror_is_intentional(&conn, &row)?
-            {
-                return Err(
-                    "Canonical payment could not be applied before refund admission".to_string(),
-                );
+
+    apply_refund_payment_ledger(&conn, &rows)
+}
+
+fn apply_refund_payment_ledger(conn: &Connection, rows: &[Value]) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    crate::db::with_immediate_admission(&conn, || {
+        conn.execute_batch("SAVEPOINT refund_admission_refresh")
+            .map_err(|e| e.to_string())?;
+        let result = (|| {
+            for row in rows {
+                if sync_remote_payment_into_local_with_context(&conn, &row)?.is_none()
+                    && !remote_payment_empty_mirror_is_intentional(&conn, &row)?
+                {
+                    return Err(
+                        "Canonical payment could not be applied before refund admission"
+                            .to_string(),
+                    );
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn
+                .execute_batch("RELEASE refund_admission_refresh")
+                .map_err(|e| e.to_string()),
+            Err(error) => {
+                conn.execute_batch(
+                    "ROLLBACK TO refund_admission_refresh; RELEASE refund_admission_refresh",
+                )
+                .map_err(|e| e.to_string())?;
+                Err(error)
             }
         }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => conn
-            .execute_batch("RELEASE refund_admission_refresh")
-            .map_err(|e| e.to_string()),
-        Err(error) => {
-            conn.execute_batch(
-                "ROLLBACK TO refund_admission_refresh; RELEASE refund_admission_refresh",
-            )
-            .map_err(|e| e.to_string())?;
-            Err(error)
-        }
-    }
+    })
 }
 
 /// The server ledger rows of one order (`GET /api/pos/payments?order_id=`),
@@ -16782,57 +17322,74 @@ pub(crate) fn apply_order_payment_ledger_before_payment_decision(
     remote_payments: &[Value],
     now: &str,
 ) -> Result<usize, String> {
-    let prior_status: String = conn
-        .query_row(
+    let read_prior = || -> Result<String, String> {
+        conn.query_row(
             "SELECT LOWER(TRIM(COALESCE(payment_status, 'pending'))) FROM orders WHERE id = ?1",
             params![local_order_id],
             |row| row.get(0),
         )
-        .map_err(|e| format!("load local payment status for {local_order_id}: {e}"))?;
-    conn.execute_batch("SAVEPOINT pre_edit_ledger_restore")
-        .map_err(|e| format!("begin ledger restore: {e}"))?;
-    let result = (|| -> Result<usize, String> {
-        let mut changed = 0usize;
-        let mut server_voided = 0usize;
-        for remote_payment in remote_payments {
-            if str_any(remote_payment, &["order_id", "orderId"]).as_deref() != Some(remote_order_id)
-            {
-                continue;
-            }
-            // A row that is not completed money is never created here; a
-            // local row linked to it takes the server's status (item D2).
-            if let Some(mirror) = sync_remote_payment_into_local_with_context(conn, remote_payment)?
-            {
-                changed += 1;
-                if mirror.server_status_applied {
-                    server_voided += 1;
-                }
-            }
-        }
-        // A payment the server voided is proof that money left: the label is
-        // what the ledger proves, never raised back to the prior one.
-        let prior_label = if server_voided > 0 {
-            "pending"
-        } else {
-            prior_status.as_str()
-        };
-        raise_local_payment_status_to_ledger(conn, local_order_id, prior_label, now)?;
-        Ok(changed)
-    })();
-    match result {
-        Ok(changed) => {
-            conn.execute_batch("RELEASE SAVEPOINT pre_edit_ledger_restore")
-                .map_err(|e| format!("commit ledger restore: {e}"))?;
-            Ok(changed)
-        }
-        Err(error) => {
-            let _ = conn.execute_batch(
-                "ROLLBACK TO SAVEPOINT pre_edit_ledger_restore;
-                 RELEASE SAVEPOINT pre_edit_ledger_restore;",
-            );
-            Err(error)
+        .map_err(|e| format!("load local payment status for {local_order_id}: {e}"))
+    };
+    if conn.is_autocommit()
+        && !remote_payments
+            .iter()
+            .any(|row| str_any(row, &["order_id", "orderId"]).as_deref() == Some(remote_order_id))
+    {
+        let prior = read_prior()?;
+        let (current, target) = local_payment_status_target(conn, local_order_id, &prior)?;
+        if current == target {
+            return Ok(0);
         }
     }
+    crate::db::with_immediate_admission(conn, || {
+        conn.execute_batch("SAVEPOINT pre_edit_ledger_restore")
+            .map_err(|e| format!("begin ledger restore: {e}"))?;
+        let result = (|| -> Result<usize, String> {
+            let prior_status = read_prior()?;
+            let mut changed = 0usize;
+            let mut server_voided = 0usize;
+            for remote_payment in remote_payments {
+                if str_any(remote_payment, &["order_id", "orderId"]).as_deref()
+                    != Some(remote_order_id)
+                {
+                    continue;
+                }
+                // A row that is not completed money is never created here; a
+                // local row linked to it takes the server's status (item D2).
+                if let Some(mirror) =
+                    sync_remote_payment_into_local_with_context(conn, remote_payment)?
+                {
+                    changed += 1;
+                    if mirror.server_status_applied {
+                        server_voided += 1;
+                    }
+                }
+            }
+            // A payment the server voided is proof that money left: the label is
+            // what the ledger proves, never raised back to the prior one.
+            let prior_label = if server_voided > 0 {
+                "pending"
+            } else {
+                prior_status.as_str()
+            };
+            raise_local_payment_status_to_ledger(conn, local_order_id, prior_label, now)?;
+            Ok(changed)
+        })();
+        match result {
+            Ok(changed) => {
+                conn.execute_batch("RELEASE SAVEPOINT pre_edit_ledger_restore")
+                    .map_err(|e| format!("commit ledger restore: {e}"))?;
+                Ok(changed)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch(
+                    "ROLLBACK TO SAVEPOINT pre_edit_ledger_restore;
+                 RELEASE SAVEPOINT pre_edit_ledger_restore;",
+                );
+                Err(error)
+            }
+        }
+    })
 }
 
 /// Settle an order's local payment label after a restore: the higher of the
@@ -16841,12 +17398,11 @@ pub(crate) fn apply_order_payment_ledger_before_payment_decision(
 /// proof that money is gone), never queues a push (the server's own ledger
 /// already holds this money). A label outside the ladder (`refunded`, ...) is
 /// kept as it was. Returns the new status when it changed.
-pub(crate) fn raise_local_payment_status_to_ledger(
+fn local_payment_status_target(
     conn: &Connection,
     order_id: &str,
     prior_status: &str,
-    now: &str,
-) -> Result<Option<String>, String> {
+) -> Result<(String, String), String> {
     fn rank(status: &str) -> Option<u8> {
         match status {
             "pending" | "unpaid" | "failed" => Some(0),
@@ -16884,6 +17440,16 @@ pub(crate) fn raise_local_payment_status_to_ledger(
             }
         }
     };
+    Ok((current, target))
+}
+
+pub(crate) fn raise_local_payment_status_to_ledger(
+    conn: &Connection,
+    order_id: &str,
+    prior_status: &str,
+    now: &str,
+) -> Result<Option<String>, String> {
+    let (current, target) = local_payment_status_target(conn, order_id, prior_status)?;
     if target == current {
         return Ok(None);
     }
@@ -20998,7 +21564,7 @@ async fn sync_financial_batch(
 }
 
 /// Keep receipt-owned provenance; absent historical collectors remain unknown.
-fn merge_recorded_payment_sync_metadata(data: &Value, trace: Value) -> Value {
+pub(crate) fn merge_recorded_payment_sync_metadata(data: &Value, trace: Value) -> Value {
     let recorded = data.get("metadata").cloned().unwrap_or(Value::Null);
     let recorded = match recorded {
         Value::String(raw) => serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null),
@@ -22804,16 +23370,21 @@ fn defer_financial_server_retry(
     retry_after_seconds: Option<i64>,
     mirror: Option<&str>,
 ) -> Result<(), String> {
-    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("begin financial retry: {e}"))?;
-    let delay = tx.query_row(
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let pending_delay = |conn: &Connection| -> Result<Option<i64>, String> {
+        conn.query_row(
         "SELECT retry_delay_ms FROM sync_queue WHERE id = ?1 AND entity_type = ?2 AND entity_id = ?3
          AND status IN ('pending', 'in_progress')",
         params![item.0, item.1, item.2],
         |row| row.get::<_, i64>(0),
-    ).optional().map_err(|e| format!("read financial retry: {e}"))?;
+    ).optional().map_err(|e| format!("read financial retry: {e}"))
+    };
+    if pending_delay(&conn)?.is_none() {
+        return Ok(());
+    }
+    let tx = crate::db::immediate_transaction(&conn)
+        .map_err(|e| format!("begin financial retry: {e}"))?;
+    let delay = pending_delay(&tx)?;
     if let Some(delay) = delay {
         let delay = delay
             .max(DEFAULT_RETRY_DELAY_MS)
@@ -30905,6 +31476,22 @@ mod tests {
         assert_eq!(
             payload.get("status").and_then(Value::as_str),
             Some("online")
+        );
+        assert_eq!(
+            payload.get("support_protocol_version"),
+            crate::support::contracts::shared().protocol.get("version")
+        );
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../shared/pos/support/__fixtures__/routes/pos-terminal-heartbeat-support.json"
+        ))
+        .expect("terminal heartbeat support fixture");
+        assert_eq!(
+            payload
+                .get("support_protocol_version")
+                .and_then(Value::as_u64),
+            fixture
+                .pointer("/request/support_protocol_version")
+                .and_then(Value::as_u64)
         );
         assert_eq!(
             payload.get("sync_status").and_then(Value::as_str),
@@ -43159,3 +43746,11 @@ mod appointment_checkout_sync_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "admission_tests/sync.rs"]
+mod admission_regression_tests;
+
+#[cfg(test)]
+#[path = "support/tests/heartbeat_availability_tests.rs"]
+mod heartbeat_availability_tests;

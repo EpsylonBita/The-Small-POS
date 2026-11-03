@@ -1,3 +1,5 @@
+import { paymentRefusalMessage } from './paymentRefusalMessage';
+
 /**
  * The till's refusal to refund or void a payment row that records no money:
  * a 1.4.119 placeholder guessed from the order's own label (item D3, round 2
@@ -16,6 +18,16 @@ export const PLATFORM_SETTLEMENT_NOT_REVERSIBLE = 'PLATFORM_SETTLEMENT_NOT_REVER
 
 type Translate = (key: string, options?: Record<string, unknown>) => unknown;
 
+const REFUND_REFUSALS: Record<string, string> = {
+  REFUND_PAYMENT_VOIDED: 'paymentVoided',
+  REFUND_PAYMENT_SET_ASIDE: 'paymentSetAside',
+  REFUND_AMOUNT_EXCEEDS_BALANCE: 'amountExceedsBalance',
+  REFUND_PAYMENT_NOT_FOUND: 'paymentNotFound',
+  REFUND_INVALID_REQUEST: 'invalidRequest',
+  REFUND_IDEMPOTENCY_CONFLICT: 'idempotencyConflict',
+  REFUND_DRIVER_EARNING_REQUIRED: 'driverEarningRequired',
+};
+
 const errorText = (error: unknown): string => {
   if (typeof error === 'string') return error;
   if (error instanceof Error) return error.message;
@@ -25,11 +37,15 @@ const errorText = (error: unknown): string => {
 
 /**
  * What the operator is told when a refund or void did not happen: the
- * placeholder or platform-settlement refusal in their language, otherwise
+ * known refund, placeholder or platform-settlement refusal in their language, otherwise
  * the till's own message, otherwise `fallback`.
  */
 export function refundVoidErrorMessage(error: unknown, t: Translate, fallback: string): string {
   const text = errorText(error);
+  for (const code of text.match(/[A-Za-z0-9_]+/g) ?? []) {
+    const key = Object.prototype.hasOwnProperty.call(REFUND_REFUSALS, code) ? REFUND_REFUSALS[code] : null;
+    if (key) return String(t(`modals.refund.refusals.${key}`));
+  }
   if (text.includes('PAYMENT_CANONICAL_REFRESH_REQUIRED')) {
     return String(t('modals.refund.canonicalRefreshRequired'));
   }
@@ -52,5 +68,5 @@ export function refundVoidErrorMessage(error: unknown, t: Translate, fallback: s
       }),
     );
   }
-  return text || fallback;
+  return paymentRefusalMessage(error, t) ?? (text || fallback);
 }

@@ -98,20 +98,6 @@ fn branch_info_field_cleared(resp: &serde_json::Value, field: &str) -> bool {
     }
 }
 
-/// Removes cached settings and reports each one that existed.
-fn delete_cached_settings(
-    conn: &rusqlite::Connection,
-    keys: &[(&str, &str)],
-    updated: &mut Vec<String>,
-) -> Result<(), String> {
-    for (category, key) in keys {
-        if db::delete_setting(conn, category, key)? > 0 {
-            updated.push(format!("{category}.{key}"));
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn extract_org_id_from_terminal_settings_response(
     resp: &serde_json::Value,
 ) -> Option<String> {
@@ -430,14 +416,229 @@ fn setting_value_to_string(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Persist terminal settings snapshot from `/api/pos/settings/{terminal_id}`
-/// into local settings for offline rendering.
+/// Credential-derived identity is captured before admission. Only this SQLite
+/// preimage is consulted again while holding the writer (under the caller's lease).
+pub(crate) struct TerminalScopeSnapshot {
+    mirrors: std::collections::BTreeMap<String, Option<String>>,
+    values: std::collections::BTreeMap<String, Option<String>>,
+    folio_credentials: Option<[Option<String>; 2]>,
+    canonical_terminal_fallback: Option<String>,
+}
+
+impl TerminalScopeSnapshot {
+    const KEYS: &'static [&'static str] = &[
+        "organization_id",
+        "branch_id",
+        "terminal_id",
+        "owner_terminal_db_id",
+        "owner_terminal_id",
+        "parent_terminal_id",
+        "source_terminal_id",
+        "source_terminal_db_id",
+        "terminal_type",
+        "pos_operating_mode",
+        "pos_api_key",
+        "api_key",
+    ];
+
+    pub(crate) fn capture(conn: &rusqlite::Connection) -> Result<Self, String> {
+        Self::capture_with(conn, |_, key| storage::get_credential(key))
+    }
+
+    pub(crate) fn capture_for_canonical(
+        conn: &rusqlite::Connection,
+        response: &serde_json::Value,
+    ) -> Result<Self, String> {
+        let mut captured = Self::capture(conn)?;
+        fn has_folio(value: &serde_json::Value) -> bool {
+            crate::hotel_folio::is_settlement(value)
+                || match value {
+                    serde_json::Value::Object(map) => map.values().any(has_folio),
+                    serde_json::Value::Array(rows) => rows.iter().any(has_folio),
+                    _ => false,
+                }
+        }
+        if has_folio(response) {
+            // Folio import has always required keyring authority, independently
+            // of legacy mirrors. Preserve that stricter source before admission.
+            captured.folio_credentials = Some([
+                storage::get_credential("organization_id"),
+                storage::get_credential("branch_id"),
+            ]);
+        }
+        Ok(captured)
+    }
+
+    pub(crate) fn folio_credential(&self, key: &str) -> Option<&str> {
+        self.folio_credentials.as_ref()?[usize::from(key == "branch_id")].as_deref()
+    }
+
+    pub(crate) fn capture_with(
+        conn: &rusqlite::Connection,
+        mut credential: impl FnMut(&rusqlite::Connection, &str) -> Option<String>,
+    ) -> Result<Self, String> {
+        if !conn.is_autocommit() {
+            return Err("Terminal scope must be captured before write admission".into());
+        }
+        let mirrors = Self::read_mirrors(conn)?;
+        let mut result = Self {
+            values: mirrors.clone(),
+            mirrors,
+            folio_credentials: None,
+            canonical_terminal_fallback: None,
+        };
+        for key in Self::KEYS {
+            if result.values[*key].is_none() && !matches!(*key, "pos_api_key" | "api_key") {
+                result.values.insert((*key).into(), credential(conn, key));
+            }
+        }
+        if result.mirrors["terminal_id"].is_some() && result.canonical_terminal().is_none() {
+            result.canonical_terminal_fallback =
+                normalize_terminal_identity(credential(conn, "terminal_id"));
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn from_mirrors(conn: &rusqlite::Connection) -> Self {
+        let mirrors = Self::read_mirrors(conn).unwrap_or_else(|_| {
+            Self::KEYS
+                .iter()
+                .map(|key| ((*key).to_owned(), None))
+                .collect()
+        });
+        Self {
+            values: mirrors.clone(),
+            mirrors,
+            folio_credentials: None,
+            canonical_terminal_fallback: None,
+        }
+    }
+
+    fn read_mirrors(
+        conn: &rusqlite::Connection,
+    ) -> Result<std::collections::BTreeMap<String, Option<String>>, String> {
+        // One statement gives a coherent preimage and is dropped before any
+        // credential read. Revalidation fails closed on an unreadable mirror.
+        let mut mirrors: std::collections::BTreeMap<_, _> = Self::KEYS
+            .iter()
+            .map(|key| ((*key).to_owned(), None))
+            .collect();
+        let mut statement = conn.prepare("SELECT setting_key,setting_value FROM local_settings WHERE setting_category='terminal'").map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (key, value) = row.map_err(|e| e.to_string())?;
+            if Self::KEYS.contains(&key.as_str()) {
+                mirrors.insert(key, value);
+            }
+        }
+        Ok(mirrors)
+    }
+
+    pub(crate) fn value(&self, key: &str) -> Option<String> {
+        self.values.get(key).cloned().flatten()
+    }
+
+    pub(crate) fn canonical_terminal(&self) -> Option<String> {
+        self.value("pos_api_key")
+            .or_else(|| self.value("api_key"))
+            .and_then(|raw| api::extract_terminal_id_from_connection_string(raw.trim()))
+            .and_then(|value| normalize_terminal_identity(Some(value)))
+            .or_else(|| {
+                resolve_managed_terminal_identity(
+                    self.mirrors["terminal_type"].as_deref(),
+                    self.mirrors["pos_operating_mode"].as_deref(),
+                    self.mirrors["owner_terminal_id"].as_deref(),
+                    self.mirrors["source_terminal_id"].as_deref(),
+                )
+            })
+            .or_else(|| normalize_terminal_identity(self.value("terminal_id")))
+            .or_else(|| self.canonical_terminal_fallback.clone())
+    }
+
+    pub(crate) fn revalidate(&self, conn: &rusqlite::Connection) -> Result<(), String> {
+        if self.mirrors != Self::read_mirrors(conn)? {
+            return Err("Terminal scope changed before write admission".into());
+        }
+        Ok(())
+    }
+}
+
+/// Persist the authenticated settings snapshot for offline rendering.
 pub(crate) fn cache_terminal_settings_snapshot(
     db: &db::DbState,
     resp: &serde_json::Value,
 ) -> Result<Vec<String>, String> {
-    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let transaction = conn.transaction().map_err(|e| e.to_string())?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mirrored_scope = TerminalScopeSnapshot::from_mirrors(&conn);
+    let (changes, mut updated) = terminal_settings_snapshot_plan(&conn, resp, &mirrored_scope)?;
+    if changes.is_empty() {
+        return Ok(updated);
+    }
+    let scope = TerminalScopeSnapshot::capture(&conn)?;
+    let transaction = crate::db::immediate_transaction(&conn).map_err(|e| e.to_string())?;
+    scope.revalidate(&transaction)?;
+    // Re-plan DB-dependent deletions against the admitted snapshot.
+    let (changes, fresh_updated) = terminal_settings_snapshot_plan(&transaction, resp, &scope)?;
+    updated = fresh_updated;
+    for (category, key, value) in changes {
+        match value {
+            Some(value) => db::set_setting(&transaction, &category, &key, &value)?,
+            None => {
+                db::delete_setting(&transaction, &category, &key)?;
+            }
+        }
+    }
+    transaction.commit().map_err(|e| e.to_string())?;
+    Ok(updated)
+}
+
+fn plan_setting(
+    changes: &mut SnapshotChanges,
+    category: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    changes.push((category.to_owned(), key.to_owned(), Some(value.to_owned())));
+    Ok(())
+}
+fn plan_deletion(
+    conn: &rusqlite::Connection,
+    changes: &mut SnapshotChanges,
+    category: &str,
+    key: &str,
+) -> bool {
+    if db::get_setting(conn, category, key).is_none() {
+        return false;
+    }
+    changes.push((category.to_owned(), key.to_owned(), None));
+    true
+}
+fn plan_deletions(
+    conn: &rusqlite::Connection,
+    changes: &mut SnapshotChanges,
+    keys: &[(&str, &str)],
+    updated: &mut Vec<String>,
+) -> Result<(), String> {
+    for (category, key) in keys {
+        if plan_deletion(conn, changes, category, key) {
+            updated.push(format!("{category}.{key}"));
+        }
+    }
+    Ok(())
+}
+
+type SnapshotChanges = Vec<(String, String, Option<String>)>;
+
+fn terminal_settings_snapshot_plan(
+    conn: &rusqlite::Connection,
+    resp: &serde_json::Value,
+    scope: &TerminalScopeSnapshot,
+) -> Result<(SnapshotChanges, Vec<String>), String> {
+    let mut changes = Vec::new();
     let mut updated = Vec::new();
 
     if let Some(settings_obj) = resp.get("settings").and_then(|value| value.as_object()) {
@@ -485,7 +686,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
                     && key == crate::fiscal::receipt_vat::OWNER_VAT_RATE_SETTING_KEY
                     && raw_value.is_null()
                 {
-                    if db::delete_setting(&transaction, category, key)? > 0 {
+                    if plan_deletion(conn, &mut changes, category, key) {
                         updated.push(format!("{category}.{key}"));
                     }
                     continue;
@@ -493,7 +694,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
                 let Some(serialized) = setting_value_to_string(raw_value) else {
                     continue;
                 };
-                db::set_setting(&transaction, category, key, &serialized)?;
+                plan_setting(&mut changes, category, key, &serialized)?;
                 updated.push(format!("{category}.{key}"));
             }
         }
@@ -502,16 +703,14 @@ pub(crate) fn cache_terminal_settings_snapshot(
     // Hotel business dates use only the authenticated branch-location zone.
     // An unresolved branch verdict clears it; generic organisation settings cannot admit dates.
     if resp.get("branch_info").is_some() {
-        let branch = db::get_setting(&transaction, "terminal", "branch_id")
-            .or_else(|| crate::storage::get_credential("branch_id"))
-            .unwrap_or_default();
+        let branch = scope.value("branch_id").unwrap_or_default();
         let zone = resp
             .pointer("/branch_info/timezone")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        db::set_setting(&transaction, "terminal", "hotel_timezone", zone)?;
-        db::set_setting(
-            &transaction,
+        plan_setting(&mut changes, "terminal", "hotel_timezone", zone)?;
+        plan_setting(
+            &mut changes,
             "terminal",
             "hotel_timezone_branch_id",
             &branch,
@@ -538,7 +737,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
                 .get(key)
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            db::set_setting(&transaction, "restaurant", key, value)?;
+            plan_setting(&mut changes, "restaurant", key, value)?;
             updated.push(format!("restaurant.{key}"));
         }
         let code = resp
@@ -546,8 +745,8 @@ pub(crate) fn cache_terminal_settings_snapshot(
             .and_then(serde_json::Value::as_str)
             .and_then(crate::fiscal::payload_builder::normalize_currency_code);
         let available = available && code.is_some();
-        db::set_setting(
-            &transaction,
+        plan_setting(
+            &mut changes,
             "restaurant",
             "store_currency_available",
             if available { "true" } else { "false" },
@@ -561,8 +760,8 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "terminal",
             "general",
         ] {
-            db::set_setting(
-                &transaction,
+            plan_setting(
+                &mut changes,
                 category,
                 "currency",
                 if available {
@@ -585,7 +784,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            db::set_setting(&transaction, "organization", "name", name)?;
+            plan_setting(&mut changes, "organization", "name", name)?;
             updated.push("organization.name".to_string());
         }
         if let Some(logo_url) = org
@@ -594,7 +793,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            db::set_setting(&transaction, "organization", "logo_url", logo_url)?;
+            plan_setting(&mut changes, "organization", "logo_url", logo_url)?;
             updated.push("organization.logo_url".to_string());
         }
     }
@@ -602,7 +801,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
     if let Some(branch_name) =
         nested_value_str(resp, &["/branch_info/name", "/branch_info/display_name"])
     {
-        db::set_setting(&transaction, "restaurant", "name", &branch_name)?;
+        plan_setting(&mut changes, "restaurant", "name", &branch_name)?;
         updated.push("restaurant.name".to_string());
 
         let branch_subtitle = nested_value_str(
@@ -614,7 +813,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             ],
         )
         .unwrap_or_else(|| branch_name.clone());
-        db::set_setting(&transaction, "restaurant", "subtitle", &branch_subtitle)?;
+        plan_setting(&mut changes, "restaurant", "subtitle", &branch_subtitle)?;
         updated.push("restaurant.subtitle".to_string());
     }
 
@@ -627,7 +826,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/settings/terminal/display_name",
         ],
     ) {
-        db::set_setting(&transaction, "terminal", "name", &terminal_name)?;
+        plan_setting(&mut changes, "terminal", "name", &terminal_name)?;
         updated.push("terminal.name".to_string());
     }
 
@@ -639,7 +838,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/settings/terminal/location",
         ],
     ) {
-        db::set_setting(&transaction, "terminal", "location", &terminal_location)?;
+        plan_setting(&mut changes, "terminal", "location", &terminal_location)?;
         updated.push("terminal.location".to_string());
     }
 
@@ -654,7 +853,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/organization_branding/name",
         ],
     ) {
-        db::set_setting(&transaction, "terminal", "store_name", &store_name)?;
+        plan_setting(&mut changes, "terminal", "store_name", &store_name)?;
         updated.push("terminal.store_name".to_string());
     }
     if let Some(store_address) = nested_value_str(
@@ -677,14 +876,15 @@ pub(crate) fn cache_terminal_settings_snapshot(
         } else {
             store_address
         };
-        db::set_setting(&transaction, "restaurant", "address", &full_address)?;
-        db::set_setting(&transaction, "terminal", "store_address", &full_address)?;
+        plan_setting(&mut changes, "restaurant", "address", &full_address)?;
+        plan_setting(&mut changes, "terminal", "store_address", &full_address)?;
         updated.push("restaurant.address".to_string());
     } else if branch_info_field_cleared(resp, "address") {
         // The owner cleared the branch address and nothing else supplies one:
         // the receipt header loses it too, instead of printing the old one.
-        delete_cached_settings(
-            &transaction,
+        plan_deletions(
+            conn,
+            &mut changes,
             &[("restaurant", "address"), ("terminal", "store_address")],
             &mut updated,
         )?;
@@ -698,12 +898,13 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/organization_branding/phone",
         ],
     ) {
-        db::set_setting(&transaction, "restaurant", "phone", &store_phone)?;
-        db::set_setting(&transaction, "terminal", "store_phone", &store_phone)?;
+        plan_setting(&mut changes, "restaurant", "phone", &store_phone)?;
+        plan_setting(&mut changes, "terminal", "store_phone", &store_phone)?;
         updated.push("restaurant.phone".to_string());
     } else if branch_info_field_cleared(resp, "phone") {
-        delete_cached_settings(
-            &transaction,
+        plan_deletions(
+            conn,
+            &mut changes,
             &[("restaurant", "phone"), ("terminal", "store_phone")],
             &mut updated,
         )?;
@@ -728,8 +929,8 @@ pub(crate) fn cache_terminal_settings_snapshot(
     ) {
         let normalized = phone_country.trim().to_ascii_uppercase();
         if normalized.len() == 2 && normalized.chars().all(|ch| ch.is_ascii_alphabetic()) {
-            db::set_setting(
-                &transaction,
+            plan_setting(
+                &mut changes,
                 "restaurant",
                 "phone_country_code",
                 &normalized,
@@ -745,8 +946,8 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/branch_info/latitude",
         ],
     ) {
-        db::set_setting(&transaction, "restaurant", "latitude", &latitude)?;
-        db::set_setting(&transaction, "terminal", "store_latitude", &latitude)?;
+        plan_setting(&mut changes, "restaurant", "latitude", &latitude)?;
+        plan_setting(&mut changes, "terminal", "store_latitude", &latitude)?;
         updated.push("restaurant.latitude".to_string());
     }
     if let Some(longitude) = nested_value_number_string(
@@ -757,13 +958,13 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/branch_info/longitude",
         ],
     ) {
-        db::set_setting(&transaction, "restaurant", "longitude", &longitude)?;
-        db::set_setting(&transaction, "terminal", "store_longitude", &longitude)?;
+        plan_setting(&mut changes, "restaurant", "longitude", &longitude)?;
+        plan_setting(&mut changes, "terminal", "store_longitude", &longitude)?;
         updated.push("restaurant.longitude".to_string());
     }
 
     if let Some(delivery_fee) = nested_value_number_string(resp, &["/branch_info/delivery_fee"]) {
-        db::set_setting(&transaction, "delivery", "delivery_fee", &delivery_fee)?;
+        plan_setting(&mut changes, "delivery", "delivery_fee", &delivery_fee)?;
         updated.push("delivery.delivery_fee".to_string());
     }
 
@@ -773,11 +974,12 @@ pub(crate) fn cache_terminal_settings_snapshot(
         resp,
         &["/branch_info/tax_id", "/organization_branding/vat_number"],
     ) {
-        db::set_setting(&transaction, "organization", "vat_number", &tax_id)?;
+        plan_setting(&mut changes, "organization", "vat_number", &tax_id)?;
         updated.push("organization.vat_number".to_string());
     } else if branch_info_field_cleared(resp, "tax_id") {
-        delete_cached_settings(
-            &transaction,
+        plan_deletions(
+            conn,
+            &mut changes,
             &[("organization", "vat_number")],
             &mut updated,
         )?;
@@ -785,18 +987,18 @@ pub(crate) fn cache_terminal_settings_snapshot(
 
     // Branch tax_office → organization.tax_office (for receipt header).
     if let Some(tax_office) = nested_value_str(resp, &["/branch_info/tax_office"]) {
-        db::set_setting(&transaction, "organization", "tax_office", &tax_office)?;
+        plan_setting(&mut changes, "organization", "tax_office", &tax_office)?;
         updated.push("organization.tax_office".to_string());
     } else if branch_info_field_cleared(resp, "tax_office") {
-        delete_cached_settings(
-            &transaction,
+        plan_deletions(
+            conn,
+            &mut changes,
             &[("organization", "tax_office")],
             &mut updated,
         )?;
     }
 
-    transaction.commit().map_err(|e| e.to_string())?;
-    Ok(updated)
+    Ok((changes, updated))
 }
 
 pub(crate) fn credential_key_for_terminal_setting(setting_key: &str) -> Option<&'static str> {
@@ -890,9 +1092,8 @@ pub(crate) fn scrub_sensitive_local_settings(db: &db::DbState) {
     let _ = scrub_sensitive_local_settings_checked(db);
 }
 
-pub(crate) fn scrub_sensitive_local_settings_checked(db: &db::DbState) -> Result<(), String> {
-    let mut conn = db.conn.lock().map_err(|error| error.to_string())?;
-    let sensitive_rows = {
+fn sensitive_local_rows(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>, String> {
+    Ok({
         let mut statement = conn
             .prepare("SELECT setting_category, setting_key FROM local_settings")
             .map_err(|error| error.to_string())?;
@@ -906,9 +1107,16 @@ pub(crate) fn scrub_sensitive_local_settings_checked(db: &db::DbState) -> Result
             .into_iter()
             .filter(|(category, key)| is_sensitive_setting_path(category, key))
             .collect::<Vec<_>>()
-    };
-    let transaction = conn.transaction().map_err(|error| error.to_string())?;
-    for (category, key) in sensitive_rows {
+    })
+}
+
+pub(crate) fn scrub_sensitive_local_settings_checked(db: &db::DbState) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    if sensitive_local_rows(&conn)?.is_empty() {
+        return Ok(());
+    }
+    let transaction = crate::db::immediate_transaction(&conn).map_err(|error| error.to_string())?;
+    for (category, key) in sensitive_local_rows(&transaction)? {
         transaction
             .execute(
                 "DELETE FROM local_settings WHERE setting_category = ?1 AND setting_key = ?2",
@@ -1458,6 +1666,7 @@ mod tests {
 
     #[test]
     fn native_repair_state_keys_are_renderer_sensitive_by_default() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for key in [
             crate::storage::KEY_REPAIR_QUEUE_AES_KEY_V1,
             crate::storage::KEY_REPAIR_SCOPE_V1,
@@ -1472,6 +1681,7 @@ mod tests {
 
     #[test]
     fn owner_vat_rate_null_clears_the_cached_rate_and_absent_keeps_it() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         let read = |db: &db::DbState| {
             let conn = db.conn.lock().unwrap();
@@ -1522,6 +1732,7 @@ mod tests {
 
     #[test]
     fn hotel_timezone_snapshot_comes_only_from_branch_location() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         set_terminal_setting(&db, "branch_id", "hotel-branch");
         cache_terminal_settings_snapshot(
@@ -1562,6 +1773,7 @@ mod tests {
 
     #[test]
     fn country_currency_snapshot_replaces_stale_aliases_and_persists_unknown() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         set_terminal_setting(&db, "branch_id", "branch-ch");
         let response = serde_json::json!({
@@ -1615,6 +1827,7 @@ mod tests {
 
     #[test]
     fn cache_snapshot_persists_branch_identity_and_receipt_fallbacks() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         let payload = serde_json::json!({
             "terminal_name": "Front Counter",
@@ -1707,6 +1920,7 @@ mod tests {
 
     #[test]
     fn cleared_branch_address_phone_and_tax_details_leave_the_receipt_header() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         let read = |db: &db::DbState| {
             let conn = db.conn.lock().unwrap();
@@ -1768,6 +1982,7 @@ mod tests {
 
     #[test]
     fn cleared_branch_tax_id_falls_back_to_the_organization_like_a_new_till() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         cache_terminal_settings_snapshot(
             &db,
@@ -1795,6 +2010,7 @@ mod tests {
 
     #[test]
     fn cache_snapshot_uses_display_name_when_branch_name_is_missing() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         let payload = serde_json::json!({
             "branch_info": {
@@ -1827,6 +2043,7 @@ mod tests {
 
     #[test]
     fn cache_snapshot_only_persists_whitelisted_system_settings() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         let payload = serde_json::json!({
             "settings": {
@@ -1876,6 +2093,7 @@ mod tests {
 
     #[test]
     fn cache_snapshot_does_not_replace_local_admin_connection_settings() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         set_terminal_setting(&db, "admin_dashboard_url", "https://admin.example.com");
         let payload = serde_json::json!({
@@ -1903,6 +2121,7 @@ mod tests {
 
     #[test]
     fn terminal_access_reset_reason_maps_structured_not_found_to_terminal_deleted() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         assert_eq!(
             terminal_access_reset_reason(
                 r#"Terminal not found (HTTP 401): {"success":false,"error":"Terminal not found","code":"terminal_not_found","authSource":"db"}"#
@@ -1913,6 +2132,7 @@ mod tests {
 
     #[test]
     fn terminal_access_reset_reason_maps_structured_inactive_terminal_to_terminal_inactive() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         assert_eq!(
             terminal_access_reset_reason(
                 r#"Terminal is inactive (HTTP 401): {"success":false,"error":"Terminal is inactive","code":"terminal_inactive","authSource":"cache","terminalActive":false}"#
@@ -1923,6 +2143,7 @@ mod tests {
 
     #[test]
     fn legacy_combined_terminal_message_no_longer_infers_terminal_deleted() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         assert_eq!(
             terminal_access_reset_reason("Terminal not found or inactive (HTTP 401)"),
             "invalid_terminal_credentials"
@@ -1931,6 +2152,7 @@ mod tests {
 
     #[test]
     fn generic_terminal_lookup_miss_is_not_treated_as_terminal_revocation() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         assert!(
             !is_terminal_auth_failure("Terminal not found (HTTP 404)"),
             "generic lookup misses must not wipe local terminal credentials"
@@ -1939,6 +2161,7 @@ mod tests {
 
     #[test]
     fn terminal_access_reset_reason_keeps_key_mismatch_non_destructive() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         assert_eq!(
             terminal_access_reset_reason(
                 r#"Invalid API key for terminal (HTTP 401): {"success":false,"error":"Invalid API key for terminal","code":"invalid_terminal_api_key","authSource":"db","terminalActive":true}"#
@@ -1955,6 +2178,7 @@ mod tests {
 
     #[test]
     fn terminal_auth_failure_helpers_extract_structured_metadata() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let error = r#"Terminal is inactive (HTTP 401): {"success":false,"error":"Terminal is inactive","code":"terminal_inactive","authSource":"cache","terminalActive":false}"#;
 
         assert_eq!(
@@ -1971,6 +2195,7 @@ mod tests {
 
     #[test]
     fn strict_terminal_endpoint_failures_are_actionable_auth_failures() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for error in [
             r#"Per-terminal authentication required (HTTP 403): {"success":false,"error":"Per-terminal authentication required","code":"per_terminal_auth_required","authSource":"bearer"}"#,
             r#"Missing terminal_id (HTTP 401): {"success":false,"error":"Missing terminal_id","code":"missing_terminal_id"}"#,
@@ -1985,6 +2210,7 @@ mod tests {
     #[test]
     #[serial]
     fn legacy_hydration_does_not_publish_connection_string_identity() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let _guard = credential_guard();
         let db = test_db();
         let connection_string =
@@ -2001,6 +2227,7 @@ mod tests {
     #[test]
     #[serial]
     fn ordinary_legacy_hydration_is_read_only_for_mapped_terminal_mirrors() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let _guard = credential_guard();
         let db = test_db();
         set_terminal_setting(&db, "business_type", "retail");
@@ -2024,6 +2251,7 @@ mod tests {
     #[test]
     #[serial]
     fn purge_keeps_plaintext_connection_string_until_companion_credentials_exist() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let _guard = credential_guard();
         let db = test_db();
         let connection_string =
@@ -2045,6 +2273,7 @@ mod tests {
     #[test]
     #[serial]
     fn purge_drops_plaintext_connection_string_after_companion_credentials_exist() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let _guard = credential_guard();
         let db = test_db();
         let connection_string =
@@ -2073,6 +2302,7 @@ mod tests {
     #[test]
     #[serial]
     fn purge_legacy_admin_url_uses_admin_dashboard_alias() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let _guard = credential_guard();
         let db = test_db();
 
@@ -2095,6 +2325,7 @@ mod tests {
     #[test]
     #[serial]
     fn purge_keeps_legacy_admin_url_when_dashboard_alias_is_missing() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let _guard = credential_guard();
         let db = test_db();
 
@@ -2112,6 +2343,7 @@ mod tests {
     #[test]
     #[serial]
     fn derive_terminal_identity_is_read_only_until_canonical_publication() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let _guard = credential_guard();
         let db = test_db();
 
@@ -2141,6 +2373,7 @@ mod tests {
     #[test]
     #[serial]
     fn clear_derived_terminal_context_removes_stale_managed_identity() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let _guard = credential_guard();
         let db = test_db();
 
@@ -2186,6 +2419,7 @@ mod tests {
     #[test]
     #[serial]
     fn checked_hard_auth_reset_propagates_bounded_durability_failure_without_event() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         struct Sink(std::sync::Mutex<Vec<(String, serde_json::Value)>>);
         impl TerminalEventSink for Sink {
             fn emit_json(&self, event: &str, payload: serde_json::Value) {
@@ -2226,3 +2460,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "admission_tests/terminal.rs"]
+mod admission_regression_tests;

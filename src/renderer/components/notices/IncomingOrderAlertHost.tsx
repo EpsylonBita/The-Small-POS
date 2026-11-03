@@ -45,7 +45,6 @@ import { BellRing } from 'lucide-react';
 import type { Order } from '../../types/orders';
 import { useCashierOperationsLocked, useCashierRecoveryActions } from '../../contexts/cashier-gate-context';
 import { MODAL_VIEWPORT_ATTR, useBackgroundAccessibilityIsolation } from '../ui/pos-glass-components';
-import { liquidGlassModalButton } from '../../styles/designSystem';
 import {
   INCOMING_ORDER_ALERT_TAP_GUARD_MS,
   INCOMING_ORDER_ALERT_Z_INDEX,
@@ -442,15 +441,16 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
         onKeyDown={handleKeyDown}
       >
         <div role="alert" className="flex items-start gap-4 px-6 pt-6">
+          {/* Founder 02/11/2026: a raised neutral tile; the platform colour is the bell and the glow behind it. */}
           <span
             aria-hidden="true"
-            className="flex h-14 w-14 shrink-0 motion-safe:animate-pulse items-center justify-center rounded-2xl text-white shadow-lg"
-            style={{ backgroundColor: accentColor }}
+            className="pos-raised pos-raised--tint flex h-14 w-14 shrink-0 motion-safe:animate-pulse items-center justify-center rounded-2xl border"
+            style={{ '--pos-tint': accentColor, color: accentColor } as React.CSSProperties}
           >
             <BellRing className="h-7 w-7" />
           </span>
           <div className="min-w-0">
-            <p className="text-xs font-bold uppercase tracking-[0.16em] text-amber-600 dark:text-amber-300">
+            <p className="text-xs font-bold uppercase tracking-[0.16em] text-(--pos-s-warn)">
               {t('orderApprovalPanel.pendingApproval', { defaultValue: 'Pending Approval' })}
             </p>
             <h2 id={titleId} className="mt-1 text-2xl font-black leading-tight liquid-glass-modal-text">
@@ -477,7 +477,7 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
               : t('incomingOrderAlert.explain', { defaultValue: 'Open it to accept or decline.' })}
           </p>
           {watch.escalated && (
-            <p className="font-semibold text-amber-700 dark:text-amber-300" data-testid="incoming-order-alert-escalated">
+            <p className="font-semibold text-(--pos-s-warn)" data-testid="incoming-order-alert-escalated">
               {t('incomingOrderAlert.waitingOver', {
                 seconds: Math.round(INCOMING_ORDER_WATCHDOG_MS / 1000),
                 defaultValue: 'Waiting over {{seconds}} seconds without an answer',
@@ -499,7 +499,7 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
             type="button"
             onClick={handleOpen}
             data-testid="incoming-order-alert-open"
-            className={`${liquidGlassModalButton('primary', 'lg')} min-h-touch-lg flex-1 text-lg font-bold`}
+            className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary pos-raised--tint [--pos-tint:var(--pos-s-yellow)] min-h-touch-lg flex-1 text-lg font-bold"
           >
             {cashierLocked
               ? t('incomingOrderAlert.checkInToAccept', { defaultValue: 'Check in a cashier' })
@@ -509,7 +509,7 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
             type="button"
             onClick={handleLater}
             data-testid="incoming-order-alert-later"
-            className={`${liquidGlassModalButton('secondary', 'lg')} min-h-touch-lg sm:w-40`}
+            className="pos-solid-btn pos-solid-btn--md min-h-touch-lg sm:w-40"
           >
             {t('incomingOrderAlert.later', { defaultValue: 'Later' })}
           </button>

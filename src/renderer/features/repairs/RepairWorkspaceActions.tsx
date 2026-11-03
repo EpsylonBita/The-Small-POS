@@ -20,6 +20,7 @@ import { canCreateSecureRepairId, createSecureRepairId } from './secure-id'
 import { normalizeUuid } from '../../utils/staffAttribution'
 import { CentsMoneyInput } from '../../components/ui/CentsMoneyInput'
 import type { RepairCatalogItem, RepairCatalogKind } from './RepairCatalogService'
+import { KitDateField } from '../../components/ui/KitDateField'
 
 export type RepairWorkspaceActionTab =
   | 'overview'
@@ -468,7 +469,7 @@ export function RepairWorkspaceActions({
       <section className="space-y-3 border-t border-slate-200 pt-4 dark:border-white/10">
         <div className="grid gap-3 sm:grid-cols-3">
           <label className="text-sm font-semibold">{t('repairs.actions.discount')}<CentsMoneyInput aria-label={t('repairs.actions.discount')} value={estimateDiscount} onValueChange={setEstimateDiscount} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
-          <label className="text-sm font-semibold">{t('repairs.actions.validUntil')}<input type="datetime-local" value={estimateValidUntil} onChange={(event) => setEstimateValidUntil(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
+          <label className="text-sm font-semibold">{t('repairs.actions.validUntil')}<KitDateField type="datetime-local" value={estimateValidUntil} onChange={(event) => setEstimateValidUntil(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
           <label className="text-sm font-semibold">{t('repairs.actions.estimateNote')}<input value={estimateNote} onChange={(event) => setEstimateNote(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
         </div>
         <div className="flex flex-wrap gap-2">

@@ -37,7 +37,6 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
-import { useTheme } from '../../contexts/theme-context';
 import { offEvent, onEvent } from '../../../lib';
 import { renderModalPortal } from '../../utils/render-modal-portal';
 import {
@@ -86,8 +85,6 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
   onSourcesChanged,
 }) => {
   const { t } = useTranslation();
-  const { resolvedTheme } = useTheme();
-  const isDark = resolvedTheme === 'dark';
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -108,22 +105,15 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
   const [folderArrived, setFolderArrived] = useState(false);
   const [confirmForgetId, setConfirmForgetId] = useState<string | null>(null);
 
-  const panelClass = isDark
-    ? 'bg-zinc-950 border-zinc-800 text-white'
-    : 'bg-white border-gray-200 text-gray-950';
-  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-600';
-  const fieldClass = isDark
-    ? 'bg-zinc-900 border-zinc-800 text-white placeholder:text-zinc-500'
-    : 'bg-white border-gray-200 text-gray-950 placeholder:text-gray-400';
-  const cardClass = isDark
-    ? 'border-zinc-800 bg-zinc-900/70'
-    : 'border-gray-200 bg-gray-50';
-  const secondaryButtonClass = isDark
-    ? 'border-zinc-800 bg-zinc-900 text-zinc-100 active:bg-zinc-800'
-    : 'border-gray-200 bg-white text-gray-800 active:bg-gray-100';
-  const primaryButtonClass = isDark
-    ? 'border-(--pos-s-yellow) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'
-    : 'border-yellow-400 text-gray-950 active:bg-(--pos-s-surface-2)';
+  // Founder 01/11: the shared glass window (shell, backdrop, header and footer on the glass line), frost sections,
+  // neutral icons, the source state as a coloured word, ONE kit field look, and kit buttons — each step has one
+  // yellow primary (Add a scanner on the list), every other action is neutral, Remove has red words.
+  const subtleClass = 'text-(--pos-s-muted)';
+  const fieldClass = 'min-h-[48px] w-full rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) px-3 text-base font-semibold text-(--pos-s-fg) outline-hidden transition-colors placeholder:font-normal placeholder:text-zinc-400 focus:border-(--pos-s-yellow) dark:placeholder:text-zinc-500';
+  const cardClass = 'pos-frost';
+  const secondaryButtonClass = 'pos-solid-btn pos-solid-btn--md';
+  const primaryButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';
+  const dangerButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--danger';
 
   const refreshSources = useCallback(async () => {
     const [loaded, storedDefault] = await Promise.all([
@@ -354,7 +344,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
   const renderList = () => (
     <div className="space-y-4">
       {sources.length === 0 ? (
-        <div className={`rounded-2xl border p-4 text-sm ${cardClass}`}>
+        <div className={`rounded-xl border p-4 text-sm ${cardClass}`}>
           <p className="font-semibold">
             {t('suppliers.capture.settings.emptyTitle', 'No scanner set up yet')}
           </p>
@@ -371,12 +361,12 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
             const status = statusOf(source);
             const isDefault = source.id === defaultSourceId;
             return (
-              <li key={source.id} className={`rounded-2xl border p-3 ${cardClass}`}>
+              <li key={source.id} className={`rounded-xl border p-3 ${cardClass}`}>
                 <div className="flex flex-wrap items-center gap-3">
                   {source.kind === 'watched_folder' ? (
-                    <FolderOpen className="h-5 w-5 shrink-0 text-amber-500" />
+                    <FolderOpen className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
                   ) : (
-                    <Printer className="h-5 w-5 shrink-0 text-amber-500" />
+                    <Printer className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
                   )}
                   <div className="min-w-0 flex-1">
                     <p className="truncate font-semibold">{source.name}</p>
@@ -387,14 +377,8 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
                   </div>
                   <span
                     data-testid={`capture-source-status-${source.id}`}
-                    className={`shrink-0 rounded-2xl border px-2 py-1 text-xs font-semibold ${
-                      status === 'unavailable'
-                        ? isDark
-                          ? 'border-red-900 text-red-800 dark:text-red-200'
-                          : 'border-(--pos-s-border) text-red-700'
-                        : isDark
-                          ? 'border-emerald-900 text-emerald-800 dark:text-emerald-200'
-                          : 'border-(--pos-s-border) text-emerald-700'
+                    className={`shrink-0 text-sm font-semibold ${
+                      status === 'unavailable' ? 'text-(--pos-s-bad)' : 'text-(--pos-s-ok)'
                     }`}
                   >
                     {t(sourceStatusKey(status), status)}
@@ -403,24 +387,22 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
                     type="button"
                     onClick={() => void makeSourceDefault(source.id)}
                     aria-label={t('suppliers.capture.settings.makeDefault', 'Use this one by default')}
-                    className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border ${
-                      isDefault ? primaryButtonClass : secondaryButtonClass
-                    }`}
+                    className={`pos-icon-btn${isDefault ? ' border-(--pos-s-sel-bg)! bg-(--pos-s-sel-bg)! text-(--pos-s-sel-fg)!' : ''}`}
                   >
-                    <Star className={`h-4 w-4 ${isDefault ? 'text-amber-500' : ''}`} />
+                    <Star className={`h-4 w-4${isDefault ? ' fill-current' : ''}`} />
                   </button>
                   <button
                     type="button"
                     onClick={() => setConfirmForgetId(source.id)}
                     aria-label={t('suppliers.capture.settings.forget', 'Remove')}
-                    className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border ${secondaryButtonClass}`}
+                    className="pos-icon-btn"
                   >
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
 
                 {confirmForgetId === source.id && (
-                  <div className={`mt-3 rounded-2xl border p-3 text-sm ${cardClass}`}>
+                  <div className="mt-3 rounded-xl border border-(--modal-glass-line) p-3 text-sm">
                     <p>
                       {t(
                         'suppliers.capture.settings.forgetConfirm',
@@ -431,14 +413,14 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
                       <button
                         type="button"
                         onClick={() => void forgetSource(source.id)}
-                        className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${primaryButtonClass}`}
+                        className={dangerButtonClass}
                       >
                         {t('suppliers.capture.settings.forget', 'Remove')}
                       </button>
                       <button
                         type="button"
                         onClick={() => setConfirmForgetId(null)}
-                        className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${secondaryButtonClass}`}
+                        className={secondaryButtonClass}
                       >
                         {t('common.cancel', 'Cancel')}
                       </button>
@@ -455,7 +437,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
         <button
           type="button"
           onClick={() => void startScannerFlow()}
-          className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold ${primaryButtonClass}`}
+          className={primaryButtonClass}
         >
           <Printer className="h-4 w-4" />
           {t('suppliers.capture.settings.addScanner', 'Add a scanner')}
@@ -464,7 +446,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
           type="button"
           onClick={() => void addWatchedFolder()}
           disabled={busy}
-          className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold ${secondaryButtonClass}`}
+          className={secondaryButtonClass}
         >
           <FolderOpen className="h-4 w-4" />
           {t('suppliers.capture.settings.addFolder', 'Watch a scan folder')}
@@ -491,16 +473,16 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
           key={device.deviceId}
           type="button"
           onClick={() => void runTestScan(device)}
-          className={`flex w-full min-h-10 items-center gap-3 rounded-2xl border p-3 text-left ${cardClass}`}
+          className="pos-choice-card pos-choice-card--row"
         >
-          <Printer className="h-5 w-5 shrink-0 text-amber-500" />
+          <Printer className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
           <span className="min-w-0 flex-1 truncate font-semibold">{device.name}</span>
           <Plus className="h-4 w-4 shrink-0" />
         </button>
       ))}
 
       {emptyDiscovery && (
-        <div className={`rounded-2xl border p-4 text-sm ${cardClass}`}>
+        <div className={`rounded-xl border p-4 text-sm ${cardClass}`}>
           <p className="font-semibold">
             {t('suppliers.capture.settings.noDevices', 'We could not find a scanner here.')}
           </p>
@@ -513,7 +495,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
           <button
             type="button"
             onClick={() => void addWatchedFolder()}
-            className={`mt-3 inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${primaryButtonClass}`}
+            className={`mt-3 ${primaryButtonClass}`}
           >
             <FolderOpen className="h-4 w-4" />
             {t('suppliers.capture.settings.addFolder', 'Watch a scan folder')}
@@ -540,7 +522,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
         <img
           src={testImage}
           alt={t('suppliers.capture.settings.testImageAlt', 'Test page')}
-          className={`max-h-64 w-full rounded-2xl border object-contain ${cardClass}`}
+          className="max-h-64 w-full rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface) object-contain"
         />
       )}
 
@@ -552,7 +534,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
             setFriendlyName(device.name);
             setStep({ kind: 'name_scanner', device });
           }}
-          className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${primaryButtonClass}`}
+          className={primaryButtonClass}
         >
           <Check className="h-4 w-4" />
           {t('suppliers.capture.settings.testLooksRight', 'That looks right')}
@@ -561,7 +543,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
           type="button"
           disabled={busy}
           onClick={() => void runTestScan(device)}
-          className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${secondaryButtonClass}`}
+          className={secondaryButtonClass}
         >
           <RefreshCw className="h-4 w-4" />
           {t('suppliers.capture.settings.testAgain', 'Try again')}
@@ -580,7 +562,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
         value={friendlyName}
         onChange={(event) => setFriendlyName(event.target.value)}
         placeholder={device.name}
-        className={`h-10 w-full rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
+        className={fieldClass}
       />
 
       <label className="flex min-h-10 items-center gap-3 text-sm">
@@ -588,7 +570,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
           type="checkbox"
           checked={makeDefault}
           onChange={(event) => setMakeDefault(event.target.checked)}
-          className="h-5 w-5"
+          className="h-5 w-5 accent-(--pos-s-yellow)"
         />
         {t('suppliers.capture.settings.useByDefault', 'Use this one when I press Scan invoice')}
       </label>
@@ -596,7 +578,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
       <button
         type="button"
         onClick={() => void saveScanner(device)}
-        className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${primaryButtonClass}`}
+        className={primaryButtonClass}
       >
         <Check className="h-4 w-4" />
         {t('suppliers.capture.settings.finish', 'Done')}
@@ -606,14 +588,14 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
 
   const renderFolderTest = (source: CaptureSourceConfig) => (
     <div className="space-y-4">
-      <div className={`rounded-2xl border p-4 text-sm ${cardClass}`}>
+      <div className={`rounded-xl border p-4 text-sm ${cardClass}`}>
         <p className="font-semibold">{source.name}</p>
         <p className={`mt-1 break-all ${subtleClass}`}>{source.folderPath}</p>
       </div>
 
       {folderArrived ? (
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <CheckCircle className="h-5 w-5 text-emerald-500" />
+        <div className="flex items-center gap-2 text-sm font-semibold text-(--pos-s-ok)">
+          <CheckCircle className="h-5 w-5 text-(--pos-s-muted)" aria-hidden="true" />
           {t('suppliers.capture.settings.folderArrived', 'It worked — your scan came through.')}
         </div>
       ) : (
@@ -629,9 +611,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
       <button
         type="button"
         onClick={() => setStep({ kind: 'list' })}
-        className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${
-          folderArrived ? primaryButtonClass : secondaryButtonClass
-        }`}
+        className={folderArrived ? primaryButtonClass : secondaryButtonClass}
       >
         <Check className="h-4 w-4" />
         {folderArrived
@@ -642,19 +622,17 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
   );
 
   return renderModalPortal(
-    <div
-      className="fixed inset-0 z-1200 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
-      onClick={onClose}
-    >
+    <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
+      <div className="liquid-glass-modal-backdrop" onClick={onClose} aria-hidden="true" />
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         onClick={(event) => event.stopPropagation()}
-        className={`flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl border shadow-2xl ${panelClass}`}
+        className="liquid-glass-modal-shell relative flex w-full max-w-2xl flex-col text-(--pos-s-fg)"
       >
-        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-inherit p-4">
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-(--modal-glass-line) p-5">
           <div className="min-w-0">
             <h2 id={titleId} className="truncate text-2xl font-bold">
               {t('suppliers.capture.settings.title', 'Scan settings')}
@@ -670,20 +648,16 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
             type="button"
             onClick={onClose}
             aria-label={t('common.close', 'Close')}
-            className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border ${secondaryButtonClass}`}
+            className="liquid-glass-modal-close"
           >
-            <X className="h-5 w-5" />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-4">
+        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-5">
           {problem && (
-            <div
-              className={`mb-4 flex items-center gap-2 rounded-2xl border px-3 py-2 text-sm ${
-                isDark ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-800 dark:text-red-200' : 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-red-700'
-              }`}
-            >
-              <AlertCircle className="h-4 w-4 shrink-0" />
+            <div className="pos-notice pos-notice--bad mb-4 text-sm">
+              <AlertCircle className="pos-notice__icon h-4 w-4" />
               <span className="min-w-0 flex-1">
                 {problem}
                 {problemDetail && (
@@ -703,7 +677,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
         </div>
 
         {step.kind !== 'list' && (
-          <div className="shrink-0 border-t border-inherit p-4">
+          <div className="flex shrink-0 items-center justify-end gap-3 border-t border-(--modal-glass-line) p-5">
             <button
               type="button"
               onClick={() => {
@@ -712,7 +686,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
                 setProblemDetail(null);
                 setTestImage(null);
               }}
-              className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${secondaryButtonClass}`}
+              className={secondaryButtonClass}
             >
               {t('suppliers.capture.settings.back', 'Back')}
             </button>

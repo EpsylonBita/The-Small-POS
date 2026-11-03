@@ -3135,6 +3135,7 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
 /// remains durably pending until the server-issued offline lease is persisted;
 /// same-identity module removal quarantines unacknowledged work and withdraws
 /// authority. Explicit identity changes still purge the old scope.
+#[cfg(test)]
 pub(crate) fn begin_authoritative_access_reconciliation(
     db: &crate::db::DbState,
     organization_id: &str,

@@ -43,7 +43,6 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
-import { useTheme } from '../../contexts/theme-context';
 import { renderModalPortal } from '../../utils/render-modal-portal';
 import {
   MAX_CAPTURE_PAGES,
@@ -95,8 +94,6 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
   onFinishAndStartAnother,
 }) => {
   const { t } = useTranslation();
-  const { resolvedTheme } = useTheme();
-  const isDark = resolvedTheme === 'dark';
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -106,17 +103,12 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const panelClass = isDark
-    ? 'bg-zinc-950 border-zinc-800 text-white'
-    : 'bg-white border-gray-200 text-gray-950';
-  const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-600';
-  const cardClass = isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50';
-  const secondaryButtonClass = isDark
-    ? 'border-zinc-800 bg-zinc-900 text-zinc-100 active:bg-zinc-800'
-    : 'border-gray-200 bg-white text-gray-800 active:bg-gray-100';
-  const primaryButtonClass = isDark
-    ? 'border-(--pos-s-yellow) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'
-    : 'border-yellow-400 text-gray-950 active:bg-(--pos-s-surface-2)';
+  // Founder 01/11: the shared glass window, frost sections, kit buttons and kit icon buttons. The two forward
+  // choices below stay equal (R5.1), so both carry the kit primary; every other action is neutral.
+  const subtleClass = 'text-(--pos-s-muted)';
+  const cardClass = 'pos-frost';
+  const secondaryButtonClass = 'pos-solid-btn pos-solid-btn--md';
+  const primaryButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';
 
   /**
    * Re-read the page list.
@@ -321,19 +313,17 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
   if (!isOpen || !captureId) return null;
 
   return renderModalPortal(
-    <div
-      className="fixed inset-0 z-1200 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
-      onClick={onClose}
-    >
+    <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
+      <div className="liquid-glass-modal-backdrop" onClick={onClose} aria-hidden="true" />
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         onClick={(event) => event.stopPropagation()}
-        className={`flex max-h-[90vh] w-full max-w-3xl flex-col rounded-2xl border shadow-2xl ${panelClass}`}
+        className="liquid-glass-modal-shell relative flex w-full max-w-3xl flex-col text-(--pos-s-fg)"
       >
-        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-inherit p-4">
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-(--modal-glass-line) p-5">
           <div className="min-w-0">
             <h2 id={titleId} className="truncate text-2xl font-bold">
               {t('suppliers.capture.pages.title', 'Your invoice')}
@@ -350,24 +340,24 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
             type="button"
             onClick={onClose}
             aria-label={t('common.close', 'Close')}
-            className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border ${secondaryButtonClass}`}
+            className="liquid-glass-modal-close"
           >
-            <X className="h-5 w-5" />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-4">
+        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-5">
           {notice && (
             <div
               data-testid="capture-pages-notice"
-              className={`mb-4 rounded-2xl border px-3 py-2 text-sm ${cardClass}`}
+              className={`mb-4 rounded-xl border px-3 py-2 text-sm ${cardClass}`}
             >
               <p>{notice}</p>
               {atPageCap && (
                 <button
                   type="button"
                   onClick={() => void handleFinishAndStartAnother()}
-                  className={`mt-3 inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${primaryButtonClass}`}
+                  className={`mt-3 ${secondaryButtonClass}`}
                 >
                   <Plus className="h-4 w-4" />
                   {t(
@@ -380,7 +370,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
           )}
 
           {pages.length === 0 ? (
-            <div className={`rounded-2xl border p-4 text-sm ${cardClass}`}>
+            <div className={`rounded-xl border p-4 text-sm ${cardClass}`}>
               {t('suppliers.capture.pages.empty', 'No pages yet. Add the first one.')}
             </div>
           ) : (
@@ -389,7 +379,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
                 <li
                   key={page.contentHash + page.pageIndex}
                   data-testid={`capture-page-${page.pageIndex}`}
-                  className={`rounded-2xl border p-3 ${cardClass}`}
+                  className={`rounded-xl border p-3 ${cardClass}`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-sm font-semibold">
@@ -410,10 +400,10 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
                         number: position + 1,
                         defaultValue: 'Page {{number}}',
                       })}
-                      className="mt-2 h-40 w-full rounded-2xl border border-inherit object-contain"
+                      className="mt-2 h-40 w-full rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface) object-contain"
                     />
                   ) : (
-                    <div className="mt-2 flex h-40 w-full items-center justify-center rounded-2xl border border-inherit">
+                    <div className="mt-2 flex h-40 w-full items-center justify-center rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface)">
                       <Loader2 className={`h-5 w-5 animate-spin ${subtleClass}`} />
                     </div>
                   )}
@@ -424,7 +414,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
                       disabled={position === 0 || busy !== null}
                       onClick={() => void handleMove(position, position - 1)}
                       aria-label={t('suppliers.capture.pages.moveEarlier', 'Move earlier')}
-                      className={`inline-flex h-10 w-10 items-center justify-center rounded-2xl border ${secondaryButtonClass}`}
+                      className="pos-icon-btn"
                     >
                       <ArrowLeft className="h-4 w-4" />
                     </button>
@@ -433,7 +423,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
                       disabled={position === pages.length - 1 || busy !== null}
                       onClick={() => void handleMove(position, position + 1)}
                       aria-label={t('suppliers.capture.pages.moveLater', 'Move later')}
-                      className={`inline-flex h-10 w-10 items-center justify-center rounded-2xl border ${secondaryButtonClass}`}
+                      className="pos-icon-btn"
                     >
                       <ArrowRight className="h-4 w-4" />
                     </button>
@@ -443,7 +433,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
                         disabled={busy !== null}
                         onClick={() => void handleRescan(page.pageIndex)}
                         aria-label={t('suppliers.capture.pages.rescan', 'Scan this page again')}
-                        className={`inline-flex h-10 w-10 items-center justify-center rounded-2xl border ${secondaryButtonClass}`}
+                        className="pos-icon-btn"
                       >
                         <RefreshCw className="h-4 w-4" />
                       </button>
@@ -453,7 +443,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
                       disabled={busy !== null}
                       onClick={() => void handleRemove(page.pageIndex)}
                       aria-label={t('suppliers.capture.pages.remove', 'Remove this page')}
-                      className={`inline-flex h-10 w-10 items-center justify-center rounded-2xl border ${secondaryButtonClass}`}
+                      className="pos-icon-btn"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
@@ -478,13 +468,13 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
           "the next step"; the user picks whichever describes their invoice.
           [R5.1, R15.6]
         */}
-        <div className="grid shrink-0 gap-2 border-t border-inherit p-4 sm:grid-cols-2">
+        <div className="grid shrink-0 gap-3 border-t border-(--modal-glass-line) p-5 sm:grid-cols-2">
           <button
             type="button"
             data-testid="capture-add-page"
             disabled={!canAddPage || busy !== null}
             onClick={() => void handleAddPage()}
-            className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold ${primaryButtonClass}`}
+            className={primaryButtonClass}
           >
             {busy === 'add' ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -498,7 +488,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
             data-testid="capture-done"
             disabled={pages.length === 0 || busy !== null}
             onClick={() => void handleDone()}
-            className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-semibold ${primaryButtonClass}`}
+            className={primaryButtonClass}
           >
             {busy === 'done' ? (
               <Loader2 className="h-4 w-4 animate-spin" />

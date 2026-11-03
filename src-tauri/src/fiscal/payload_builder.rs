@@ -771,14 +771,14 @@ pub(crate) fn resolve_order_payment_currency(
 ) -> Result<Option<String>, String> {
     let mut statement = conn
         .prepare("SELECT currency FROM order_payments WHERE order_id = ?1 AND status IN ('completed', 'partially_refunded', 'refunded', 'voided')")
-        .map_err(|error| format!("read payment currency: {error}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
     let rows = statement
         .query_map(params![order_id], |row| row.get::<_, Option<String>>(0))
-        .map_err(|error| format!("read payment currency: {error}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
     let mut currency: Option<String> = None;
     for row in rows {
         let code = row
-            .map_err(|error| error.to_string())?
+            .map_err(crate::edit_settlement_recovery::storage_error)?
             .as_deref()
             .and_then(normalize_currency_code)
             .ok_or_else(|| "PAYMENT_CURRENCY_UNAVAILABLE".to_string())?;

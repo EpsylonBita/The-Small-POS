@@ -65,6 +65,8 @@ export interface OutstandingPaymentMethodModalProps {
   ) => OutstandingPaymentSelectionResult | Promise<OutstandingPaymentSelectionResult>;
   /** Existing order being collected; passed through to the payment modal. */
   existingOrder?: PaymentModalExistingOrder;
+  /** Shown only while nothing is paid on the order: the host's normal cancellation. */
+  onCancelOrder?: () => void;
 }
 
 export const OutstandingPaymentMethodModal: React.FC<
@@ -79,6 +81,7 @@ export const OutstandingPaymentMethodModal: React.FC<
   isProcessing = false,
   onSelect,
   existingOrder,
+  onCancelOrder,
 }) => {
   const selectionInFlightRef = useRef(false);
   const inFlightOwnerRef = useRef<OrdinaryCollectionOwner | null>(null);
@@ -238,6 +241,7 @@ export const OutstandingPaymentMethodModal: React.FC<
       onPaymentComplete={handlePaymentComplete}
       onSplitPayment={allowSplit ? handleSplitPayment : undefined}
       existingOrder={existingOrder}
+      onCancelOrder={onCancelOrder}
     />
   );
 };

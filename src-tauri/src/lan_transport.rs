@@ -258,7 +258,7 @@ fn schema(conn: &Connection) -> Result<(), String> {
     if current {
         return Ok(());
     }
-    let tx = conn.unchecked_transaction().map_err(journal_error)?;
+    let tx = crate::db::immediate_transaction(&conn).map_err(journal_error)?;
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS cafe_lan_receipts_v1 (
         child_id TEXT NOT NULL, request_id TEXT NOT NULL, request_hash TEXT NOT NULL,
@@ -336,7 +336,7 @@ fn admit_frame(
     }
     schema(conn)?;
     let now = now_ms.div_euclid(1000);
-    let tx = conn.unchecked_transaction().map_err(journal_error)?;
+    let tx = crate::db::immediate_transaction(&conn).map_err(journal_error)?;
     tx.execute(
         "DELETE FROM cafe_lan_nonces_v1 WHERE child_id=?1 AND seen_at<?2",
         params![frame.scope.source_terminal_id, now - NONCE_RETENTION_SECS],
@@ -419,13 +419,26 @@ fn begin_receipt(
 ) -> Result<Receipt, String> {
     schema(conn)?;
     let now = chrono::Utc::now().timestamp();
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
-    let existing:Option<(String,Option<String>,String,i64)>=tx.query_row(
+    let read_existing =
+        |conn: &Connection| -> Result<Option<(String, Option<String>, String, i64)>, String> {
+            conn.query_row(
         "SELECT request_hash,response_ciphertext,state,updated_at FROM cafe_lan_receipts_v1 WHERE child_id=?1 AND request_id=?2",
         params![frame.scope.source_terminal_id,frame.request_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))
-        .optional().map_err(|_|"LAN_JOURNAL_UNAVAILABLE")?;
+        .optional().map_err(|_|"LAN_JOURNAL_UNAVAILABLE".to_string())
+        };
+    if let Some((existing_hash, response, state, updated)) = read_existing(conn)? {
+        if existing_hash != hash {
+            return Err("LAN_REQUEST_ID_CONFLICT".into());
+        }
+        if let Some(response) = response {
+            return Ok(Receipt::Cached(response));
+        }
+        if state == "dispatching" && now - updated < DISPATCH_CLAIM_SECS {
+            return Ok(Receipt::Busy);
+        }
+    }
+    let tx = crate::db::immediate_transaction(&conn).map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
+    let existing = read_existing(&tx)?;
     if existing.as_ref().is_some_and(|row| row.0 != hash) {
         return Err("LAN_REQUEST_ID_CONFLICT".into());
     }
@@ -905,9 +918,7 @@ fn clear_journal(app: &tauri::AppHandle, child: &str) -> Result<(), String> {
     let db = app.state::<crate::db::DbState>();
     let conn = db.conn.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
     schema(&conn)?;
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
+    let tx = crate::db::immediate_transaction(&conn).map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
     tx.execute(
         "DELETE FROM cafe_lan_receipts_v1 WHERE child_id=?1",
         [child],
@@ -1399,7 +1410,13 @@ trait RelayPorts: Sync {
         request: &Request,
         data: &mut Value,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
-    fn apply(&self, conn: &Connection, path: &str, canonical: &Value) -> Result<(), String>;
+    fn apply(
+        &self,
+        conn: &Connection,
+        path: &str,
+        canonical: &Value,
+        captured: &crate::terminal_helpers::TerminalScopeSnapshot,
+    ) -> Result<(), String>;
     fn applied(&self, frame: &Frame);
 }
 
@@ -1459,8 +1476,14 @@ impl RelayPorts for HttpsRelay<'_> {
         )
         .await
     }
-    fn apply(&self, conn: &Connection, path: &str, canonical: &Value) -> Result<(), String> {
-        crate::sync::apply_lan_canonical_response(conn, path, canonical)
+    fn apply(
+        &self,
+        conn: &Connection,
+        path: &str,
+        canonical: &Value,
+        captured: &crate::terminal_helpers::TerminalScopeSnapshot,
+    ) -> Result<(), String> {
+        crate::sync::apply_lan_canonical_response_scoped(conn, path, canonical, captured)
     }
     fn applied(&self, frame: &Frame) {
         let _ = self.app.emit(
@@ -1581,11 +1604,14 @@ async fn relay<P: RelayPorts>(
             let conn = db.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
             ports.pair_current(frame, secret)?;
             let canonical = lan_canonical(&durable["wire"]["data"]);
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
+            let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture_for_canonical(
+                &conn, &canonical,
+            )?;
+            let tx =
+                crate::db::immediate_transaction(&conn).map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
+            captured.revalidate(&tx)?;
             let path = format!("/api/{}", request.path.split('?').next().unwrap_or(""));
-            if let Err(error) = ports.apply(&tx, &path, &canonical) {
+            if let Err(error) = ports.apply(&tx, &path, &canonical, &captured) {
                 tx.rollback().map_err(|_| "LAN_DOMAIN_ROLLBACK_FAILED")?;
                 durable["ready"] = json!(false);
                 persist_response(&conn, frame, &hash, secret, &durable)?;
@@ -1669,14 +1695,22 @@ async fn relay_read<P: RelayPorts>(
         if wire.to_string().len() > MAX_PLAIN {
             return Err("LAN_RESPONSE_TOO_LARGE".into());
         }
+        if !crate::sync::lan_canonical_has_domain_rows(&wire["data"]) {
+            ports.pair_current(frame, secret)?;
+            return Ok(wire);
+        }
         {
             let conn = db.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
             ports.pair_current(frame, secret)?;
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
+            let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture_for_canonical(
+                &conn,
+                &wire["data"],
+            )?;
+            let tx =
+                crate::db::immediate_transaction(&conn).map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
+            captured.revalidate(&tx)?;
             let path = format!("/api/{}", request.path.split('?').next().unwrap_or(""));
-            if let Err(error) = ports.apply(&tx, &path, &lan_canonical(&wire["data"])) {
+            if let Err(error) = ports.apply(&tx, &path, &lan_canonical(&wire["data"]), &captured) {
                 tx.rollback().map_err(|_| "LAN_DOMAIN_ROLLBACK_FAILED")?;
                 return Err(error);
             }
@@ -1884,6 +1918,11 @@ async fn start_inner(app: tauri::AppHandle, state: &LanTransportState) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn scripted_connection() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE local_settings(setting_category TEXT,setting_key TEXT,setting_value TEXT)").unwrap();
+        conn
+    }
     fn frame() -> Frame {
         Frame {
             version: 1,
@@ -1913,6 +1952,7 @@ mod tests {
     }
     #[test]
     fn authenticated_roundtrip_and_tamper_rejection() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let secret = [7; 32];
         let mut f = frame();
         f.ciphertext = encrypt(&secret, &aad(&f, "request"), br#"{"method":"GET"}"#).unwrap();
@@ -1933,6 +1973,7 @@ mod tests {
     }
     #[test]
     fn mac_derivation_matches_protocol_vector() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         // Independently calculated with Node crypto HMAC-SHA256.
         assert_eq!(
             hex(hmac::sign(
@@ -1945,6 +1986,7 @@ mod tests {
     }
     #[test]
     fn native_android_crypto_format_matches_independent_node_vector() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let mut f = frame();
         f.ciphertext="v1:000102030405060708090a0b:63a384156961b62d5588c7dba70c4e873361e140913459eec436f2a8983baa3b".into();
         f.mac = "281b4173ce659dfac83d22faa4a048d3e9fdd780134c4fe524a51e1c011cafcd".into();
@@ -1958,6 +2000,7 @@ mod tests {
     }
     #[test]
     fn stable_identity_excludes_credentials_preserves_exact_body() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let mut r = request(
             "pos/payments",
             "POST",
@@ -1972,6 +2015,7 @@ mod tests {
     }
     #[test]
     fn allowlist_denies_secrets_arbitrary_paths_and_unkeyed_mutations() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for path in [
             "https://evil/pos/orders",
             "pos/../orders",
@@ -2017,6 +2061,7 @@ mod tests {
     }
     #[test]
     fn replay_authorization_includes_actual_action_and_payment_method() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let request = request(
             "pos/payments",
             "POST",
@@ -2032,6 +2077,7 @@ mod tests {
     }
     #[test]
     fn durable_receipt_replay_conflict_and_uncertain_retry() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = Connection::open_in_memory().unwrap();
         let mut f = frame();
         let payment = request(
@@ -2085,6 +2131,7 @@ mod tests {
     }
     #[test]
     fn cached_success_requires_fresh_snapshot_without_redispatching_money() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = Connection::open_in_memory().unwrap();
         let mut f = frame();
         begin_receipt(&conn, &f, "hash", "pos/payments").unwrap();
@@ -2112,6 +2159,7 @@ mod tests {
     }
     #[test]
     fn receipt_claim_rolls_back_without_leaving_a_receipt_or_usage() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = Connection::open_in_memory().unwrap();
         schema(&conn).unwrap();
         conn.execute_batch("CREATE TRIGGER deny_receipt BEFORE INSERT ON cafe_lan_receipts_v1 BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
@@ -2139,6 +2187,7 @@ mod tests {
     }
     #[test]
     fn reply_classes_follow_the_journal_contract() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let plain = json!({"success": false});
         for status in [200, 201, 204] {
             assert_eq!(reply_class(status, &plain), ReplyClass::Final);
@@ -2159,6 +2208,7 @@ mod tests {
     }
     #[test]
     fn outbound_payment_body_rejects_arrays_and_carries_the_header_key() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         assert_eq!(
             outbound_body("pos/payments", "[{\"amount\":1}]", Some("key")).unwrap_err(),
             "LAN_INVALID_REQUEST"
@@ -2175,7 +2225,8 @@ mod tests {
     }
     #[test]
     fn two_waiters_claim_one_dispatch_and_keep_uncertain_receipt() {
-        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let conn = Arc::new(Mutex::new(scripted_connection()));
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let workers: Vec<_> = (0..2)
             .map(|_| {
@@ -2215,6 +2266,7 @@ mod tests {
     }
     #[test]
     fn concurrent_payment_revision_fences_snapshot_even_when_parent_version_is_unchanged() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let original = json!({"id":"check","snapshot_revision":20,"order":{"version":5},"balance":{"paid_total":8}});
         let current = json!({"id":"check","snapshot_revision":21,"order":{"version":5},"balance":{"paid_total":16}});
         assert_eq!(
@@ -2226,6 +2278,7 @@ mod tests {
     }
     #[test]
     fn reset_fence_denies_restarting_receiver_in_the_same_process() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let state = LanTransportState::default();
         require_running_scope(&state).unwrap();
         state
@@ -2238,6 +2291,7 @@ mod tests {
     }
     #[tokio::test]
     async fn stop_drain_waits_for_all_inflight_tasks_before_database_reset() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let state = LanTransportState::default();
         let cancel = CancellationToken::new();
         let worker_cancel = cancel.clone();
@@ -2257,6 +2311,7 @@ mod tests {
     }
     #[test]
     fn crash_lan_new_dine_in_parent_discovers_canonical_check_without_workflow() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let order = "11111111-1111-4111-8111-111111111111";
         let session = "22222222-2222-4222-8222-222222222222";
         let mut orders = BTreeSet::new();
@@ -2291,6 +2346,7 @@ mod tests {
 
     #[tokio::test]
     async fn selected_get_snapshot_reuse_preserves_fences_and_mutation_refresh() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for mode in ["selected", "mutation", "partial", "subresource"] {
             for changed in ["none", "session", "order"] {
                 let order_id = "00000000-0000-4000-8000-000000000001";
@@ -2378,6 +2434,7 @@ mod tests {
 
     #[tokio::test]
     async fn independent_parent_hydration_fences_both_parallel_read_phases() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for changed in ["none", "session", "order"] {
             let ids = [
                 "00000000-0000-4000-8000-000000000001",
@@ -2465,6 +2522,7 @@ mod tests {
 
     #[tokio::test]
     async fn fragmented_ndjson_roundtrip_and_multiple_frame_denial() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let send = tokio::spawn(async move {
@@ -2556,7 +2614,13 @@ mod tests {
                 json!({"orders": [], "sessions": [], "tables": [], "payments": []});
             Ok(())
         }
-        fn apply(&self, _conn: &Connection, _path: &str, _canonical: &Value) -> Result<(), String> {
+        fn apply(
+            &self,
+            _conn: &Connection,
+            _path: &str,
+            _canonical: &Value,
+            _captured: &crate::terminal_helpers::TerminalScopeSnapshot,
+        ) -> Result<(), String> {
             self.record("apply");
             Ok(())
         }
@@ -2593,6 +2657,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_class_refusals_are_never_replayed_from_the_journal() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         for refusal in [
             (
                 429,
@@ -2604,7 +2669,7 @@ mod tests {
             ),
             (408, json!({"success": false, "error": "Request timeout"})),
         ] {
-            let db = Mutex::new(Connection::open_in_memory().unwrap());
+            let db = Mutex::new(scripted_connection());
             let cloud = ScriptedCloud::replying(vec![
                 refusal.clone(),
                 (200, json!({"success": true, "table": {"id": "table"}})),
@@ -2631,7 +2696,8 @@ mod tests {
 
     #[tokio::test]
     async fn deterministic_refusals_stay_journaled_unless_marked_retryable() {
-        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = Mutex::new(scripted_connection());
         let cloud = ScriptedCloud::replying(vec![(
             400,
             json!({"success": false, "error": "Validation failed"}),
@@ -2643,7 +2709,7 @@ mod tests {
             assert_eq!(reply["status"], 400);
         }
         assert_eq!(cloud.count("send"), 1);
-        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let db = Mutex::new(scripted_connection());
         let cloud = ScriptedCloud::replying(vec![
             (
                 422,
@@ -2663,9 +2729,10 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_retained_retry_refusal_is_dispatched_again() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         // A 1.4.123 main retained a 429 as final; after the upgrade that row
         // must stop answering the waiter's retries.
-        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let db = Mutex::new(scripted_connection());
         let request = table_edit();
         let hash = request_hash(&request);
         let seeded = delivery();
@@ -2706,8 +2773,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_keep_no_receipt_and_still_refresh_the_main() {
-        let db = Mutex::new(Connection::open_in_memory().unwrap());
+    async fn reads_keep_no_receipt_and_skip_empty_projection() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = Mutex::new(scripted_connection());
         let cloud = ScriptedCloud::default();
         let poll = request("pos/orders/sync?limit=100", "GET", None);
         for _ in 0..3 {
@@ -2717,11 +2785,14 @@ mod tests {
             assert_eq!(reply["success"], true);
         }
         assert_eq!(receipt_count(&db), 0);
-        assert_eq!(cloud.count("apply"), 3);
+        assert_eq!(cloud.count("send"), 3);
+        assert_eq!(cloud.count("hydrate"), 3);
+        assert_eq!(cloud.count("apply"), 0);
     }
 
     #[test]
     fn mutation_receipts_are_pruned_by_age_and_count_instead_of_refusing_the_waiter() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = Connection::open_in_memory().unwrap();
         schema(&conn).unwrap();
         let f = delivery();
@@ -2759,6 +2830,7 @@ mod tests {
 
     #[test]
     fn receipt_size_accounting_is_incremental() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let conn = Connection::open_in_memory().unwrap();
         let f = delivery();
         let child = f.scope.source_terminal_id.clone();
@@ -2796,7 +2868,8 @@ mod tests {
 
     #[tokio::test]
     async fn nonce_history_is_bounded_by_age() {
-        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = Mutex::new(scripted_connection());
         let cloud = ScriptedCloud::default();
         let read = request("pos/tables", "GET", None);
         let first = read_delivery();
@@ -2828,7 +2901,8 @@ mod tests {
 
     #[tokio::test]
     async fn replayed_frame_is_refused_before_any_cloud_call() {
-        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = Mutex::new(scripted_connection());
         let cloud = ScriptedCloud::default();
         let payment = request(
             "pos/payments",
@@ -2851,7 +2925,8 @@ mod tests {
 
     #[tokio::test]
     async fn stale_or_future_frames_are_refused_before_any_cloud_call() {
-        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = Mutex::new(scripted_connection());
         let cloud = ScriptedCloud::default();
         let now = now_ms();
         for skew in [-11 * 60 * 1000, 11 * 60 * 1000] {
@@ -2886,7 +2961,8 @@ mod tests {
 
     #[tokio::test]
     async fn relay_policy_refusal_falls_back_to_https_instead_of_answering() {
-        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = Mutex::new(scripted_connection());
         let cloud = ScriptedCloud::default();
         let payment = request(
             "pos/payments",
@@ -2917,6 +2993,7 @@ mod tests {
 
     #[test]
     fn allowlist_rejects_non_object_mutation_bodies() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let mut payment = request(
             "pos/payments",
             "POST",
@@ -2925,5 +3002,92 @@ mod tests {
         payment.idempotency_key = Some("x".into());
         assert_eq!(allowed(&payment).unwrap_err(), "LAN_INVALID_REQUEST");
         assert!(allowed(&request(TABLE, "PATCH", Some(json!("client_event_id")))).is_err());
+    }
+
+    #[test]
+    fn admission_receipt_replays_and_claims_skip_writer_and_recheck() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        use crate::admission_tests::{before_admission, no_write, writer};
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let frame = frame();
+        schema(&conn).unwrap();
+        assert!(matches!(
+            begin_receipt(&conn, &frame, "your-hash", "your-path").unwrap(),
+            Receipt::Dispatch
+        ));
+        let held = writer(db.db_path());
+        no_write(&conn, || {
+            assert!(matches!(
+                begin_receipt(&conn, &frame, "your-hash", "your-path").unwrap(),
+                Receipt::Busy
+            ))
+        });
+        no_write(&conn, || {
+            assert_eq!(
+                begin_receipt(&conn, &frame, "other", "your-path")
+                    .err()
+                    .as_deref(),
+                Some("LAN_REQUEST_ID_CONFLICT")
+            )
+        });
+        drop(held);
+        conn.execute(
+            "UPDATE cafe_lan_receipts_v1 SET response_ciphertext='your-cached'",
+            [],
+        )
+        .unwrap();
+        let held = writer(db.db_path());
+        no_write(&conn, || {
+            assert!(matches!(
+                begin_receipt(&conn, &frame, "your-hash", "your-path").unwrap(),
+                Receipt::Cached(_)
+            ))
+        });
+        drop(held);
+        conn.execute(
+            "UPDATE cafe_lan_receipts_v1 SET response_ciphertext=NULL,state='pending'",
+            [],
+        )
+        .unwrap();
+        let path = db.db_path().to_owned();
+        before_admission(move |_| {
+            Connection::open(path)
+                .unwrap()
+                .execute("UPDATE cafe_lan_receipts_v1 SET request_hash='changed'", [])
+                .unwrap();
+        });
+        let before = conn.total_changes();
+        assert_eq!(
+            begin_receipt(&conn, &frame, "your-hash", "your-path")
+                .err()
+                .as_deref(),
+            Some("LAN_REQUEST_ID_CONFLICT")
+        );
+        assert_eq!(conn.total_changes(), before);
+    }
+
+    #[tokio::test]
+    async fn admission_empty_relay_read_skips_writer() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = crate::tests::harness::TestDb::open();
+        let _held = crate::admission_tests::writer(db.db_path());
+        let before = db.state.conn.lock().unwrap().total_changes();
+        let cloud = ScriptedCloud::default();
+        let request = request("pos/table-sessions", "GET", None);
+        let at = std::time::Instant::now();
+        assert!(
+            relay_read(&cloud, &db.state.conn, &frame(), &[7; 32], &request)
+                .await
+                .unwrap()["success"]
+                .as_bool()
+                .unwrap()
+        );
+        assert!(at.elapsed() < std::time::Duration::from_millis(250));
+        let conn = db.state.conn.try_lock().unwrap();
+        assert_eq!(conn.total_changes(), before);
+        assert!(conn.is_autocommit());
+        assert_eq!(cloud.count("apply"), 0);
     }
 }

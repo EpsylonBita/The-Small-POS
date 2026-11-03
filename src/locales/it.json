@@ -348,6 +348,15 @@
     }
   },
   "common": {
+    "datePicker": {
+      "selectDate": "Scegli una data",
+      "selectTime": "Scegli un orario",
+      "previousMonth": "Mese precedente",
+      "nextMonth": "Mese successivo",
+      "hours": "Ore",
+      "minutes": "Minuti",
+      "today": "Oggi"
+    },
     "none": "Nessuno",
     "requiresOnline": "Questa azione richiede una connessione online.",
     "savedLocallyQueued": "Salvato localmente e messo in coda",
@@ -1161,6 +1170,10 @@
       "sweet": "Dolce",
       "all": "Tutti",
       "little": "Poco",
+      "normal": "Normale",
+      "selectedCount_one": "{{count}} ingrediente",
+      "selectedCount_other": "{{count}} ingredienti",
+      "jumpTo": "Vai a",
       "littleHint": "Aggiungi ingredienti in porzioni ridotte",
       "specialInstructions": "Istruzioni speciali",
       "specialInstructionsPlaceholder": "Eventuali istruzioni speciali per l'ordine (allergie, preferenze, ecc.)",
@@ -1281,7 +1294,8 @@
     "pagination": {
       "previous": "Precedente",
       "next": "Successivo",
-      "pageOf": "Pagina {{current}} di {{total}}"
+      "pageOf": "Pagina {{current}} di {{total}}",
+      "range": "{{start}}–{{end}} di {{total}}"
     },
     "deleteAddressSuccess": "Indirizzo eliminato",
     "deleteAddressQueued": "Indirizzo eliminato e messo in coda per la sincronizzazione",
@@ -3846,6 +3860,12 @@
       "staleMissing": "La coda ha ancora operazioni da gestire, ma non si sa quanto sia aggiornata la telemetria."
     },
     "healthModal": {
+      "remoteSupport": {
+        "title": "Assistenza remota: non disponibile",
+        "impact": "Le vendite continuano normalmente.",
+        "action": "Riavvia la cassa. Se il problema persiste, invia i dati diagnostici all’assistenza.",
+        "details": "Dettagli dell’assistenza remota"
+      },
       "syncDetails": "Dettagli della sincronizzazione",
       "record": "Riferimento",
       "error": "Errore",
@@ -4471,8 +4491,26 @@
       "editCurrencyUnavailable": "La valuta necessaria per questa modifica non è verificata. Conserva il carrello e chiedi di verificare le valute di ordine, pagamento e turno prima di riprovare. Non incassare di nuovo.",
       "editCurrencyMismatch": "Le valute di ordine, pagamento e turno di cassa non coincidono. Chiedi di verificarle prima di riprovare. Non incassare di nuovo.",
       "editCollectorUnavailable": "Non è stato possibile verificare il turno del cassiere. Verifica che il cassiere abbia iniziato il turno su questa cassa e riprova la modifica salvata. Non incassare di nuovo.",
+      "editNoDrawerOwnerOnShift": "Nessun cassiere o responsabile è in turno su questa cassa. Fate iniziare il turno a un cassiere e riprovate. Non è stato incassato denaro.",
+      "editHeldClosedRetry": "La correzione in sospeso è stata chiusa senza registrare denaro. Potete salvare di nuovo la modifica.",
       "editPaymentMismatch": "La differenza confermata non corrisponde alla modifica. Conserva il carrello e chiedi a un responsabile di riconciliare il pagamento in Stato del sistema. Non addebitare di nuovo.",
       "editLocalOperationFailed": "La cassa non ha potuto leggere o salvare la modifica localmente. Conserva il carrello e riprova. Se il problema persiste, esporta i dati di assistenza da Stato del sistema. Non incassare di nuovo.",
+      "editStorageBusy": "La cassa era occupata. Riprova la correzione salvata. Mantieni il carrello e non incassare di nuovo.",
+      "editStorageConstraint": "La correzione è in conflitto con i dati locali. Mantieni il carrello e chiedi a un responsabile di verificare la correzione in Stato del sistema. Non incassare di nuovo.",
+      "editStorageIo": "La cassa non riesce a scrivere nella memoria locale. Fai controllare lo spazio libero e i permessi di scrittura, poi riprova la correzione salvata. Non incassare di nuovo.",
+      "editOrderNotFound": "Questo ordine non è più disponibile su questa cassa. Mantieni la correzione, aggiorna l’elenco e riapri l’ordine. Non incassare di nuovo.",
+      "editGhostOrder": "Questo è un ordine di anteprima e non può registrare pagamenti. Apri l’ordine normale per correggerlo. Non incassare di nuovo.",
+      "editCollectorNotDrawerOwner": "Il denaro della correzione deve essere attribuito a un cassiere o responsabile in turno. Registra l’ingresso del responsabile del cassetto e riprova la correzione salvata. Non incassare di nuovo.",
+      "editInvalidDetails": "Alcuni dati di pagamento, rimborso o consegna non sono validi. Mantieni il carrello, controlla i dati e riprova la correzione salvata. Non incassare né rimborsare di nuovo.",
+      "editDriverSettlementUnavailable": "Il saldo non liquidato del fattorino per questo ordine non è disponibile. Mantieni la correzione e chiedi a un responsabile di verificare la liquidazione. Non incassare né rimborsare di nuovo.",
+      "editOriginalPaymentUnavailable": "Il pagamento originale non è disponibile su questa cassa. Mantieni la correzione, riconnettiti e aggiorna l’ordine prima di riprovare. Non rimborsare di nuovo.",
+      "editRefundOriginalUnavailable": "Il pagamento originale è stato annullato o messo da parte per verifica. Mantieni la correzione e fai verificare il pagamento in Stato del sistema. Non rimborsare di nuovo.",
+      "editRefundIdentityConflict": "Questo riferimento di rimborso appartiene già a un altro pagamento. Mantieni la correzione e chiedi una riconciliazione in Stato del sistema. Non rimborsare di nuovo.",
+      "editRefundBalanceChanged": "Il rimborso supera il saldo residuo del pagamento. Mantieni la correzione e aggiorna il calcolo prima di riprovare. Non rimborsare di nuovo.",
+      "editCancellationUnavailable": "Questo ordine non può essere annullato tramite questa correzione. Mantieni il carrello e fai controllare l’ordine e i pagamenti. Non rimborsare di nuovo.",
+      "editOriginalProviderRequired": "Questo rimborso richiede il gestore del pagamento originale. Mantieni la correzione e chiedi a un responsabile di seguire la sua procedura. Non registrare un altro rimborso in cassa.",
+      "editReconciliationRequired": "Una correzione precedente richiede una riconciliazione. Mantieni il carrello e fai verificare la correzione sospesa in Stato del sistema. Non incassare né rimborsare di nuovo.",
+      "editSettlementBusy": "È già in corso il salvataggio di un’altra correzione per questo ordine. Attendi il completamento, poi riprova la correzione salvata. Non incassare né rimborsare di nuovo.",
       "editScopeChanged": "La connessione della cassa o il negozio è cambiato. Ripristina la connessione e riprova la modifica salvata. Conserva il carrello e non incassare di nuovo.",
       "saveChanges": "Salva modifiche",
       "addCustomer": "Aggiungi cliente",
@@ -4486,6 +4524,14 @@
       "editNotApplied": "Questa correzione non è stata salvata, quindi la sua differenza non è stata registrata da nessuna parte. Se il denaro è già passato di mano, prepara di nuovo la correzione e registra quello stesso importo una sola volta; non incassarlo né restituirlo mai due volte. Altrimenti un responsabile può chiuderla senza registrare denaro.",
       "editRequote": "Prepara di nuovo la correzione",
       "editRequoteReady": "Controlla il carrello e salva di nuovo la correzione. Registra solo il denaro già ricevuto; non incassarlo né restituirlo due volte.",
+      "editDiscard": "Scarta correzione",
+      "editDiscardQuestion": "È stato consegnato del denaro per questa correzione?",
+      "editDiscardNo": "No / restituito",
+      "editDiscardYes": "Sì",
+      "editDiscardMoneyGuidance": "Salva di nuovo la correzione o chiedi a un responsabile di chiuderla.",
+      "editDiscardProviderCheck": "Il gestore della carta potrebbe avere un addebito in corso. Verifica con il gestore o chiedi a un responsabile di chiudere la correzione.",
+      "editDiscardCollect": "Incasso",
+      "editDiscardRefund": "Rimborso",
       "editCloseWithoutMoney": "Chiudi senza registrare denaro (responsabile)",
       "editCloseWithoutMoneyReason": "Correzione non salvata; chiusa da un responsabile senza registrare denaro",
       "editClosedWithoutMoney": "La correzione non salvata è stata chiusa. Non è stato registrato denaro; conta la cassa per confermare.",
@@ -4499,6 +4545,18 @@
       "editCanonicalChanged": "I dati dell’ordine devono essere aggiornati. Aggiorna l’ordine prima di confermare un incasso o un rimborso."
     },
     "payment": {
+      "refusals": {
+        "invalidRequest": "I dati del pagamento non sono validi. Controlla importo e metodo, poi riprova a salvare il pagamento. Non incassare di nuovo denaro già ricevuto.",
+        "orderNotFound": "L’ordine non è più disponibile su questa cassa. Aggiorna l’elenco e riaprilo prima di salvare il pagamento. Non incassare di nuovo.",
+        "ghostOrder": "Non è possibile registrare pagamenti per un ordine di anteprima. Apri l’ordine normale prima di registrare un pagamento.",
+        "collectorShiftRequired": "Per registrare questo pagamento serve un turno di cassa. Registra l’ingresso di un cassiere o responsabile e riprova a salvare. Non incassare di nuovo.",
+        "collectorNotDrawerOwner": "Il pagamento deve essere attribuito a un cassiere o responsabile in turno. Controlla chi è responsabile del cassetto, poi riprova a salvare. Non incassare di nuovo.",
+        "driverEarningRequired": "Non è stata trovata una liquidazione aperta del fattorino per questo ordine. Fai controllare la liquidazione prima di salvare il pagamento. Non incassare di nuovo.",
+        "storageBusy": "La cassa era occupata. Verifica se il pagamento o rimborso è stato salvato prima di riprovare. Non incassare né rimborsare di nuovo.",
+        "storageConstraint": "Il pagamento o rimborso non è stato salvato per un conflitto nei dati locali. Conserva la ricevuta e fai controllare Stato del sistema. Non incassare né rimborsare di nuovo.",
+        "storageIo": "La cassa non ha potuto scrivere il pagamento o rimborso localmente. Fai controllare lo spazio libero e i permessi di scrittura prima di riprovare. Non incassare né rimborsare di nuovo.",
+        "storageOther": "La cassa non ha potuto leggere o salvare il pagamento o rimborso localmente. Controlla lo stato e fai esportare i dati di assistenza da Stato del sistema se il problema persiste. Non incassare né rimborsare di nuovo."
+      },
       "title": "Pagamento",
       "originalTotal": "Totale originale:",
       "discount": "Sconto:",
@@ -4538,6 +4596,7 @@
       "loadingMethods": "Caricamento metodi di pagamento",
       "loadingMethodsHint": "Verifica configurazione pagamento del terminale...",
       "splitSimple": "Dividi",
+      "cancelOrder": "Annulla ordine",
       "enterCashReceived": "Contanti ricevuti",
       "insufficient": "Insufficiente",
       "completeCash": "Completa",
@@ -5008,6 +5067,7 @@
       "checkedInNow": "Già in turno",
       "checkedInNowHelper": "Questi dipendenti hanno già un turno attivo. Selezionane uno per gestire e chiudere il turno in corso.",
       "noCheckedInStaff": "Al momento nessun dipendente è in turno.",
+      "noOrdersYet": "Ancora nessun ordine in questo turno.",
       "readyToStart": "Pronto a iniziare",
       "readyToStartHelper": "Seleziona un dipendente e continua con la verifica del PIN per avviare un nuovo turno.",
       "noReadyStaff": "Tutti i dipendenti disponibili sono già in turno.",
@@ -5464,9 +5524,10 @@
       "unsavedAlreadyResolved": "Questo pagamento è già registrato come restituito.",
       "unsavedSavedAfterAll": "Questo pagamento è stato salvato comunque: non c'è nulla da restituire.",
       "unsavedResolveFailed": "Impossibile registrarlo: {{error}}",
-      "heldEditCloseReason": "Ordine annullato; correzione chiusa da un responsabile dai controlli dello Z senza registrare denaro",
+      "heldEditCloseReason": "Correzione chiusa da un responsabile dai controlli Z senza registrare denaro",
       "heldEditApprovalTitle": "Chiudi la correzione senza denaro",
       "heldEditApprovalSubtitle": "Controlla prima il POS della banca e il cassetto. Un membro dello staff con il diritto di annullare i pagamenti inserisce il proprio PIN. Non viene addebitato né restituito nulla.",
+      "discardedCorrections": "Correzioni scartate senza movimento di denaro",
       "heldEditClosed": "La correzione è stata chiusa. Nessun denaro è stato registrato.",
       "heldEditCloseFailed": "Non è stato possibile chiudere la correzione. Resta in sospeso; non è stato registrato nulla.",
       "unsavedSaved": "Pagamento salvato.",
@@ -5981,6 +6042,15 @@
       "noOrders": "Nessuno storico ordini trovato"
     },
     "refund": {
+      "refusals": {
+        "paymentVoided": "Questo pagamento è stato annullato e non può essere rimborsato. Controlla lo storico dei pagamenti dell’ordine prima di effettuare altri rimborsi.",
+        "paymentSetAside": "Questo pagamento è stato messo da parte per verifica e non può essere rimborsato qui. Fallo controllare in Stato del sistema prima di restituire denaro.",
+        "amountExceedsBalance": "Il rimborso richiesto supera il saldo residuo del pagamento. Aggiorna il pagamento e controlla i rimborsi precedenti prima di riprovare. Non rimborsare due volte.",
+        "paymentNotFound": "Il pagamento originale non è stato trovato su questa cassa. Riconnettiti e aggiorna i pagamenti dell’ordine prima di riprovare. Non rimborsare di nuovo.",
+        "invalidRequest": "I dati del rimborso non sono validi. Controlla importo, pagamento originale e motivo prima di riprovare. Non rimborsare di nuovo.",
+        "idempotencyConflict": "Questo riferimento di rimborso appartiene già a un altro pagamento. Fai controllare lo storico dei pagamenti prima di riprovare. Non rimborsare di nuovo.",
+        "driverEarningRequired": "Non è stata trovata una liquidazione aperta del fattorino per questo pagamento. Fai controllare la liquidazione prima di registrare il rimborso. Non rimborsare di nuovo."
+      },
       "title": "Storno / Rimborso",
       "subtitle": "Gestisci rettifiche pagamento",
       "orderTotal": "Totale ordine",
@@ -6422,6 +6492,7 @@
     "noAddressForDelivery": "Questo cliente non ha un indirizzo salvato. Aggiungi un indirizzo per continuare con un ordine in consegna."
   },
   "orderDashboard": {
+    "unpaidOrderLeftPending": "L'ordine {{orderNumber}} resta non pagato negli Ordini, in attesa di pagamento.",
     "delivery": "Consegna",
     "pickup": "Asporto",
     "dineIn": "Al tavolo",
@@ -7600,7 +7671,8 @@
       "unscheduled": "Non programmati"
     },
     "filters": {
-      "all": "Tutti i ruoli"
+      "all": "Tutti i ruoli",
+      "role": "Ruolo"
     },
     "actions": {
       "addShift": "Aggiungi turno",
@@ -9210,6 +9282,12 @@
     "contactSupport": "Se il problema persiste, contatta il supporto"
   },
   "splitPayment": {
+    "checkoutSaleHeld": "Un pagamento con carta di {{amount}} è già stato addebitato per questo ordine e non è ancora salvato. Salvalo come pagamento dell'ordine; non addebitare di nuovo la carta.",
+    "checkoutSaleUnknown": "Il terminale di pagamento non ha risposto per {{amount}}. Controlla l'ultima transazione del terminale prima di incassare un altro pagamento. Questo ordine non può essere lasciato finché la carta non è verificata.",
+    "checkoutSalePersonAdded": "È stata aggiunta una persona con {{amount}} per la carta già addebitata. Premi Carta su quella persona per salvarla.",
+    "checkoutSaleReadFailed": "La cassa non è riuscita a controllare i pagamenti con carta di questo ordine. Riprova.",
+    "saveCardPayment": "Salva pagamento con carta",
+    "checkAgain": "Controlla di nuovo",
     "title": "Pagamento diviso",
     "orderTotal": "Totale ordine",
     "byAmount": "Per importo",
@@ -9509,6 +9587,12 @@
       }
     },
     "recipes": {
+      "restoreLastKnownPrinterBrand": {
+        "title": "Il linguaggio della stampante non è stato riconosciuto",
+        "label": "Ripristina il linguaggio salvato della stampante",
+        "explanation": "La stampante non ha risposto al controllo del linguaggio. Ripristina l’ultimo linguaggio riconosciuto per mantenere leggibili le ricevute.",
+        "verification": "L’impostazione salvata verrà verificata di nuovo. Stampa una ricevuta di prova per controllare il risultato su carta."
+      },
       "checkoutPaymentOpenPayment": {
         "label": "Il pagamento deve essere corretto nell'ordine",
         "explanation": "Questo è un blocco di pagamento noto. La correzione sicura è riaprire la schermata di pagamento dell'ordine invece di creare automaticamente un pagamento.",
@@ -10549,5 +10633,17 @@
     "walkIn": "Senza prenotazione",
     "seatBooking": "Fai accomodare i prenotati",
     "timezoneUnavailable": "Il fuso orario del negozio non è disponibile. Aggiorna le impostazioni del terminale prima di modificare i turni."
+  },
+  "workCard": {
+    "sent": "Carta di lavoro: inviata alle {{time}}",
+    "pending": "Carta di lavoro: in attesa",
+    "dry_run": "Carta di lavoro: prova, non inviata",
+    "late": "Carta di lavoro: in ritardo, serve una motivazione del responsabile",
+    "missing_exit": "Carta di lavoro: uscita mancante",
+    "needs_action": "Carta di lavoro: NON inviata, avvisare il responsabile",
+    "offline": "Carta di lavoro: sarà inviata al ripristino della connessione",
+    "attention": "Carta di lavoro: {{count}} movimenti richiedono un intervento. Vedere admin → Pianificazione del personale → Registro ERGANI.",
+    "zHint": "Ogni persona deve terminare il turno con il proprio PIN affinché venga inviata l’uscita della carta di lavoro.",
+    "dismiss": "Nascondi per 1 ora"
   }
 }

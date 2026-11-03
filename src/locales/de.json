@@ -348,6 +348,15 @@
     }
   },
   "common": {
+    "datePicker": {
+      "selectDate": "Datum wählen",
+      "selectTime": "Uhrzeit wählen",
+      "previousMonth": "Vorheriger Monat",
+      "nextMonth": "Nächster Monat",
+      "hours": "Stunden",
+      "minutes": "Minuten",
+      "today": "Heute"
+    },
     "none": "Keine",
     "requiresOnline": "Diese Aktion erfordert eine Online-Verbindung.",
     "savedLocallyQueued": "Lokal gespeichert und in die Warteschlange gestellt",
@@ -1161,6 +1170,10 @@
       "sweet": "Süß",
       "all": "Alle",
       "little": "Wenig",
+      "normal": "Normal",
+      "selectedCount_one": "{{count}} Zutat",
+      "selectedCount_other": "{{count}} Zutaten",
+      "jumpTo": "Gehe zu",
       "littleHint": "Zutaten in kleineren Portionen hinzufügen",
       "specialInstructions": "Sonderwünsche",
       "specialInstructionsPlaceholder": "Sonderwünsche zur Bestellung (Allergien, Vorlieben usw.)",
@@ -1281,7 +1294,8 @@
     "pagination": {
       "previous": "Zurück",
       "next": "Weiter",
-      "pageOf": "Seite {{current}} von {{total}}"
+      "pageOf": "Seite {{current}} von {{total}}",
+      "range": "{{start}}–{{end}} von {{total}}"
     },
     "deleteAddressSuccess": "Adresse erfolgreich gelöscht",
     "deleteAddressQueued": "Adresse gelöscht und zur Synchronisierung vorgemerkt",
@@ -3846,6 +3860,12 @@
       "staleMissing": "Die Warteschlange hat noch relevante Arbeit, aber die Telemetrieaktualität ist nicht verfügbar."
     },
     "healthModal": {
+      "remoteSupport": {
+        "title": "Fernunterstützung: nicht verfügbar",
+        "impact": "Der Verkauf läuft wie gewohnt weiter.",
+        "action": "Starten Sie die Kasse neu. Falls das Problem weiterhin besteht, senden Sie die Diagnosedaten an den Support.",
+        "details": "Details zur Fernunterstützung"
+      },
       "syncDetails": "Sync-Details",
       "record": "Datensatz",
       "error": "Fehler",
@@ -4471,8 +4491,26 @@
       "editCurrencyUnavailable": "Die Währung für diese Änderung ist nicht bestätigt. Behalten Sie den Warenkorb und lassen Sie die Währungen von Bestellung, Zahlung und Schicht vor einem neuen Versuch prüfen. Kassieren Sie nicht erneut.",
       "editCurrencyMismatch": "Die Währungen von Bestellung, Zahlung und Kassenschicht stimmen nicht überein. Lassen Sie die Währungen vor einem neuen Versuch prüfen. Kassieren Sie nicht erneut.",
       "editCollectorUnavailable": "Die kassierende Schicht konnte nicht geprüft werden. Prüfen Sie, ob die Kassenkraft an dieser Kasse eingecheckt ist, und versuchen Sie die gespeicherte Änderung erneut. Kassieren Sie nicht erneut.",
+      "editNoDrawerOwnerOnShift": "An dieser Kasse ist kein Kassierer oder Manager im Dienst. Melden Sie einen Kassierer an und versuchen Sie es erneut. Es wurde kein Geld eingenommen.",
+      "editHeldClosedRetry": "Die ausstehende Korrektur wurde ohne Geldbuchung geschlossen. Sie können Ihre Änderung erneut speichern.",
       "editPaymentMismatch": "Der bestätigte Differenzbetrag passt nicht zur Änderung. Behalten Sie den Warenkorb und lassen Sie die Zahlung unter Systemzustand abgleichen. Kassieren Sie nicht erneut.",
       "editLocalOperationFailed": "Die Kasse konnte die Änderung lokal nicht lesen oder speichern. Behalten Sie den Warenkorb und versuchen Sie es erneut. Exportieren Sie bei erneutem Fehler die Supportdaten unter Systemzustand. Kassieren Sie nicht erneut.",
+      "editStorageBusy": "Die Kasse war beschäftigt. Versuchen Sie die gespeicherte Korrektur erneut. Behalten Sie den Warenkorb und kassieren Sie nicht erneut.",
+      "editStorageConstraint": "Die Korrektur widerspricht den lokalen Datensätzen. Behalten Sie den Warenkorb und bitten Sie eine Führungskraft, die Korrektur unter Systemzustand zu prüfen. Kassieren Sie nicht erneut.",
+      "editStorageIo": "Die Kasse konnte nicht lokal speichern. Lassen Sie freien Speicher und Schreibrechte prüfen und wiederholen Sie die gespeicherte Korrektur. Kassieren Sie nicht erneut.",
+      "editOrderNotFound": "Diese Bestellung ist auf dieser Kasse nicht mehr verfügbar. Behalten Sie die Korrektur, aktualisieren Sie die Liste und öffnen Sie die Bestellung erneut. Kassieren Sie nicht erneut.",
+      "editGhostOrder": "Dies ist eine Vorschaubestellung, für die keine Zahlungen erfasst werden können. Öffnen Sie die reguläre Bestellung zur Korrektur. Kassieren Sie nicht erneut.",
+      "editCollectorNotDrawerOwner": "Das Geld der Korrektur muss einem Kassierer oder einer Führungskraft im Dienst zugeordnet sein. Melden Sie den Kassenverantwortlichen an und wiederholen Sie die gespeicherte Korrektur. Kassieren Sie nicht erneut.",
+      "editInvalidDetails": "Einige Zahlungs-, Erstattungs- oder Lieferangaben sind ungültig. Behalten Sie den Warenkorb, prüfen Sie die Angaben und wiederholen Sie die gespeicherte Korrektur. Kassieren oder erstatten Sie nicht erneut.",
+      "editDriverSettlementUnavailable": "Die offene Fahrerabrechnung dieser Bestellung ist nicht verfügbar. Behalten Sie die Korrektur und lassen Sie die Lieferabrechnung prüfen. Kassieren oder erstatten Sie nicht erneut.",
+      "editOriginalPaymentUnavailable": "Die ursprüngliche Zahlung ist auf dieser Kasse nicht verfügbar. Behalten Sie die Korrektur, stellen Sie die Verbindung her und aktualisieren Sie die Bestellung. Erstatten Sie nicht erneut.",
+      "editRefundOriginalUnavailable": "Die ursprüngliche Zahlung wurde storniert oder zur Prüfung zurückgestellt. Behalten Sie die Korrektur und lassen Sie die Zahlung unter Systemzustand prüfen. Erstatten Sie nicht erneut.",
+      "editRefundIdentityConflict": "Diese Erstattungsreferenz gehört bereits zu einer anderen Zahlung. Behalten Sie die Korrektur und bitten Sie eine Führungskraft um Abgleich unter Systemzustand. Erstatten Sie nicht erneut.",
+      "editRefundBalanceChanged": "Die Erstattung übersteigt den verbleibenden Zahlungsbetrag. Behalten Sie die Korrektur und aktualisieren Sie deren Berechnung vor einem erneuten Versuch. Erstatten Sie nicht erneut.",
+      "editCancellationUnavailable": "Diese Bestellung kann über diese Korrektur nicht storniert werden. Behalten Sie den Warenkorb und lassen Sie Bestellung und Zahlungen prüfen. Erstatten Sie nicht erneut.",
+      "editOriginalProviderRequired": "Diese Erstattung erfordert den ursprünglichen Zahlungsanbieter. Behalten Sie die Korrektur und lassen Sie dessen Ablauf durch eine Führungskraft verwenden. Erfassen Sie keine weitere Erstattung an der Kasse.",
+      "editReconciliationRequired": "Eine frühere Korrektur muss abgeglichen werden. Behalten Sie den Warenkorb und lassen Sie die offene Korrektur unter Systemzustand prüfen. Kassieren oder erstatten Sie nicht erneut.",
+      "editSettlementBusy": "Für diese Bestellung wird bereits eine Korrektur gespeichert. Warten Sie deren Abschluss ab und wiederholen Sie dann die gespeicherte Korrektur. Kassieren oder erstatten Sie nicht erneut.",
       "editScopeChanged": "Die Kassenverbindung oder Filialzuordnung hat sich geändert. Stellen Sie die Verbindung wieder her und versuchen Sie die gespeicherte Änderung erneut. Behalten Sie den Warenkorb und kassieren Sie nicht erneut.",
       "saveChanges": "Änderungen speichern",
       "addCustomer": "Kunde hinzufügen",
@@ -4486,6 +4524,14 @@
       "editNotApplied": "Diese Korrektur wurde nicht gespeichert, ihre Differenz ist also nirgends erfasst. Falls bereits Geld geflossen ist, bereiten Sie die Korrektur erneut vor und erfassen Sie dasselbe Geld einmal; kassieren oder erstatten Sie es nie doppelt. Andernfalls kann eine Führungskraft sie ohne Geldbuchung schließen.",
       "editRequote": "Korrektur erneut vorbereiten",
       "editRequoteReady": "Prüfen Sie den Warenkorb und speichern Sie die Korrektur erneut. Erfassen Sie nur das bereits erhaltene Geld; kassieren oder erstatten Sie es nicht doppelt.",
+      "editDiscard": "Korrektur verwerfen",
+      "editDiscardQuestion": "Wurde für diese Korrektur Geld übergeben?",
+      "editDiscardNo": "Nein / zurückgegeben",
+      "editDiscardYes": "Ja",
+      "editDiscardMoneyGuidance": "Speichern Sie die Korrektur erneut oder bitten Sie eine verantwortliche Person, sie zu schließen.",
+      "editDiscardProviderCheck": "Beim Kartenanbieter könnte eine Belastung vorliegen. Prüfen Sie dies beim Anbieter oder bitten Sie eine verantwortliche Person, die Korrektur zu schließen.",
+      "editDiscardCollect": "Einzug",
+      "editDiscardRefund": "Erstattung",
       "editCloseWithoutMoney": "Ohne Geldbuchung schließen (Führungskraft)",
       "editCloseWithoutMoneyReason": "Korrektur nicht gespeichert; von einer Führungskraft ohne Geldbuchung geschlossen",
       "editClosedWithoutMoney": "Die nicht gespeicherte Korrektur wurde geschlossen. Es wurde kein Geld erfasst; zählen Sie die Kasse zur Bestätigung.",
@@ -4499,6 +4545,18 @@
       "editCanonicalChanged": "Die Bestelldaten müssen aktualisiert werden. Aktualisieren Sie die Bestellung, bevor Sie eine Zahlung oder Rückerstattung bestätigen."
     },
     "payment": {
+      "refusals": {
+        "invalidRequest": "Die Zahlungsangaben sind ungültig. Prüfen Sie Betrag und Zahlungsart und versuchen Sie erneut zu speichern. Kassieren Sie bereits erhaltenes Geld nicht erneut.",
+        "orderNotFound": "Die Bestellung ist auf dieser Kasse nicht mehr verfügbar. Aktualisieren Sie die Liste und öffnen Sie die Bestellung vor dem Speichern der Zahlung erneut. Kassieren Sie nicht erneut.",
+        "ghostOrder": "Für eine Vorschaubestellung können keine Zahlungen erfasst werden. Öffnen Sie die reguläre Bestellung, bevor Sie eine Zahlung erfassen.",
+        "collectorShiftRequired": "Für diese Zahlung ist eine Kassiererschicht erforderlich. Melden Sie einen Kassierer oder eine Führungskraft an und versuchen Sie erneut zu speichern. Kassieren Sie nicht erneut.",
+        "collectorNotDrawerOwner": "Die Zahlung muss einem Kassierer oder einer Führungskraft im Dienst zugeordnet sein. Prüfen Sie die Zuständigkeit für die Kassenschublade und speichern Sie erneut. Kassieren Sie nicht erneut.",
+        "driverEarningRequired": "Für diese Bestellung wurde keine offene Fahrerabrechnung gefunden. Lassen Sie die Lieferabrechnung vor dem Speichern der Zahlung prüfen. Kassieren Sie nicht erneut.",
+        "storageBusy": "Die Kasse war beschäftigt. Prüfen Sie vor einem erneuten Versuch, ob Zahlung oder Erstattung gespeichert wurden. Kassieren oder erstatten Sie nicht erneut.",
+        "storageConstraint": "Zahlung oder Erstattung konnten wegen widersprüchlicher lokaler Datensätze nicht gespeichert werden. Behalten Sie den Beleg und lassen Sie den Systemzustand prüfen. Kassieren oder erstatten Sie nicht erneut.",
+        "storageIo": "Die Kasse konnte Zahlung oder Erstattung nicht lokal schreiben. Lassen Sie vor einem erneuten Versuch freien Speicher und Schreibrechte prüfen. Kassieren oder erstatten Sie nicht erneut.",
+        "storageOther": "Die Kasse konnte Zahlung oder Erstattung nicht lokal lesen oder speichern. Prüfen Sie den Status und lassen Sie bei weiteren Fehlern Supportdaten unter Systemzustand exportieren. Kassieren oder erstatten Sie nicht erneut."
+      },
       "title": "Zahlung",
       "originalTotal": "Ursprünglicher Gesamtbetrag:",
       "discount": "Rabatt:",
@@ -4538,6 +4596,7 @@
       "loadingMethods": "Zahlungsmethoden werden geladen",
       "loadingMethodsHint": "Terminal-Zahlungskonfiguration wird geprüft...",
       "splitSimple": "Teilen",
+      "cancelOrder": "Bestellung stornieren",
       "enterCashReceived": "Erhaltenes Bargeld",
       "insufficient": "Unzureichend",
       "completeCash": "Abschließen",
@@ -5008,6 +5067,7 @@
       "checkedInNow": "Bereits eingecheckt",
       "checkedInNowHelper": "Bereits eingestempeltes Personal. Wählen Sie jemanden aus, um die aktive Schicht zu prüfen und zu beenden.",
       "noCheckedInStaff": "Zurzeit ist niemand eingecheckt.",
+      "noOrdersYet": "In dieser Schicht gibt es noch keine Bestellungen.",
       "readyToStart": "Bereit zum Start",
       "readyToStartHelper": "Wählen Sie einen Mitarbeiter und fahren Sie mit der PIN-Prüfung fort, um eine neue Schicht zu starten.",
       "noReadyStaff": "Alle verfügbaren Mitarbeiter sind bereits eingecheckt.",
@@ -5464,9 +5524,10 @@
       "unsavedAlreadyResolved": "Diese Zahlung wurde bereits als zurückgegeben erfasst.",
       "unsavedSavedAfterAll": "Diese Zahlung wurde doch gespeichert: Es gibt nichts zurückzugeben.",
       "unsavedResolveFailed": "Konnte nicht erfasst werden: {{error}}",
-      "heldEditCloseReason": "Bestellung storniert; Korrektur von einer Führungskraft in der Z-Prüfung ohne Geldbuchung geschlossen",
+      "heldEditCloseReason": "Korrektur bei der Z-Prüfung durch einen Manager ohne Geldbuchung geschlossen",
       "heldEditApprovalTitle": "Korrektur ohne Geld schließen",
       "heldEditApprovalSubtitle": "Prüfen Sie zuerst das Bankterminal und die Kassenlade. Eine Person mit dem Recht, Zahlungen zu stornieren, gibt ihre eigene PIN ein. Es wird nichts belastet oder zurückgegeben.",
+      "discardedCorrections": "Ohne Geldbewegung verworfene Korrekturen",
       "heldEditClosed": "Die Korrektur wurde geschlossen. Es wurde kein Geld gebucht.",
       "heldEditCloseFailed": "Die Korrektur konnte nicht geschlossen werden. Sie bleibt gehalten; es wurde nichts gebucht.",
       "unsavedSaved": "Zahlung gespeichert.",
@@ -5981,6 +6042,15 @@
       "noOrders": "Kein Bestellverlauf gefunden"
     },
     "refund": {
+      "refusals": {
+        "paymentVoided": "Diese Zahlung wurde storniert und kann nicht erstattet werden. Prüfen Sie vor jeder weiteren Erstattung den Zahlungsverlauf der Bestellung.",
+        "paymentSetAside": "Diese Zahlung wurde zur Prüfung zurückgestellt und kann hier nicht erstattet werden. Lassen Sie sie vor einer Rückzahlung unter Systemzustand prüfen.",
+        "amountExceedsBalance": "Die gewünschte Erstattung übersteigt den verbleibenden Zahlungsbetrag. Aktualisieren Sie die Zahlung und prüfen Sie frühere Erstattungen vor einem erneuten Versuch. Erstatten Sie nicht doppelt.",
+        "paymentNotFound": "Die ursprüngliche Zahlung wurde auf dieser Kasse nicht gefunden. Stellen Sie die Verbindung her und aktualisieren Sie die Zahlungen der Bestellung. Erstatten Sie nicht erneut.",
+        "invalidRequest": "Die Erstattungsangaben sind ungültig. Prüfen Sie vor einem erneuten Versuch Betrag, ursprüngliche Zahlung und Grund. Erstatten Sie nicht erneut.",
+        "idempotencyConflict": "Diese Erstattungsreferenz gehört bereits zu einer anderen Zahlung. Lassen Sie vor einem erneuten Versuch den Zahlungsverlauf prüfen. Erstatten Sie nicht erneut.",
+        "driverEarningRequired": "Für diese Zahlung wurde keine offene Fahrerabrechnung gefunden. Lassen Sie die Lieferabrechnung vor dem Erfassen der Erstattung prüfen. Erstatten Sie nicht erneut."
+      },
       "title": "Storno / Rückerstattung",
       "subtitle": "Zahlungsanpassungen verwalten",
       "orderTotal": "Bestellsumme",
@@ -6422,6 +6492,7 @@
     "noAddressForDelivery": "Dieser Kunde hat keine gespeicherte Adresse. Fügen Sie eine Adresse hinzu, um mit einer Lieferbestellung fortzufahren."
   },
   "orderDashboard": {
+    "unpaidOrderLeftPending": "Bestellung {{orderNumber}} bleibt unbezahlt in den Bestellungen und wartet auf Zahlung.",
     "delivery": "Lieferung",
     "pickup": "Abholung",
     "dineIn": "Vor Ort",
@@ -7600,7 +7671,8 @@
       "unscheduled": "Nicht eingeplant"
     },
     "filters": {
-      "all": "Alle Rollen"
+      "all": "Alle Rollen",
+      "role": "Rolle"
     },
     "actions": {
       "addShift": "Schicht hinzufügen",
@@ -9210,6 +9282,12 @@
     "contactSupport": "Wenn das Problem weiterhin besteht, wenden Sie sich an den Support"
   },
   "splitPayment": {
+    "checkoutSaleHeld": "Eine Kartenzahlung von {{amount}} wurde für diese Bestellung bereits belastet und ist noch nicht gespeichert. Speichern Sie sie als Zahlung der Bestellung; belasten Sie die Karte nicht erneut.",
+    "checkoutSaleUnknown": "Das Kartenterminal hat für {{amount}} nicht geantwortet. Prüfen Sie die letzte Transaktion des Terminals, bevor Sie eine weitere Zahlung annehmen. Diese Bestellung kann erst verlassen werden, wenn die Karte geprüft ist.",
+    "checkoutSalePersonAdded": "Für die bereits belastete Karte wurde eine Person mit {{amount}} hinzugefügt. Tippen Sie bei dieser Person auf Karte, um sie zu speichern.",
+    "checkoutSaleReadFailed": "Die Kasse konnte die Kartenzahlungen dieser Bestellung nicht prüfen. Versuchen Sie es erneut.",
+    "saveCardPayment": "Kartenzahlung speichern",
+    "checkAgain": "Erneut prüfen",
     "title": "Geteilte Zahlung",
     "orderTotal": "Bestellsumme",
     "byAmount": "Nach Betrag",
@@ -9509,6 +9587,12 @@
       }
     },
     "recipes": {
+      "restoreLastKnownPrinterBrand": {
+        "title": "Die Druckersprache wurde nicht erkannt",
+        "label": "Gespeicherte Druckersprache wiederherstellen",
+        "explanation": "Der Drucker hat auf die Sprachprüfung nicht geantwortet. Stellen Sie die zuletzt erkannte Sprache wieder her, damit Belege lesbar bleiben.",
+        "verification": "Die gespeicherte Einstellung wird erneut geprüft. Drucken Sie einen Testbeleg, um die Ausgabe auf Papier zu prüfen."
+      },
       "checkoutPaymentOpenPayment": {
         "label": "Zahlung muss in der Bestellung korrigiert werden",
         "explanation": "Dies ist ein bekannter Zahlungsblocker. Die sichere Lösung ist, den Zahlungsbildschirm der Bestellung zu öffnen, statt automatisch eine Zahlung zu erzeugen.",
@@ -10549,5 +10633,17 @@
     "walkIn": "Ohne Reservierung",
     "seatBooking": "Reservierte Gäste platzieren",
     "timezoneUnavailable": "Die Zeitzone des Geschäfts ist nicht verfügbar. Aktualisiere die Terminaleinstellungen, bevor du den Dienstplan änderst."
+  },
+  "workCard": {
+    "sent": "Arbeitskarte: gesendet {{time}}",
+    "pending": "Arbeitskarte: ausstehend",
+    "dry_run": "Arbeitskarte: Test, nicht gesendet",
+    "late": "Arbeitskarte: verspätet, die verantwortliche Person muss einen Grund angeben",
+    "missing_exit": "Arbeitskarte: Ende fehlt",
+    "needs_action": "Arbeitskarte: NICHT gesendet, bitte die verantwortliche Person informieren",
+    "offline": "Arbeitskarte: wird bei wiederhergestellter Verbindung gesendet",
+    "attention": "Arbeitskarte: {{count}} Buchungen erfordern eine Aktion. Siehe Admin → Personalplanung → ERGANI-Protokoll.",
+    "zHint": "Jede Person soll sich mit ihrer eigenen PIN abmelden, damit das Ende der Arbeitskarte gesendet werden kann.",
+    "dismiss": "Für 1 Stunde ausblenden"
   }
 }

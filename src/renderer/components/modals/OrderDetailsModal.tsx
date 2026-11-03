@@ -2,7 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "re
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Phone, FileText, History, Banknote, Smartphone, RotateCcw, Split, Copy, Edit3, Mail, Loader2 } from 'lucide-react';
+import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Phone, FileText, History, Smartphone, RotateCcw, Split, Copy, Edit3, Mail, Loader2 } from 'lucide-react';
 import { DeliveryScooterIcon, PickupHandBagIcon } from '../icons/OrderTypeGlyphs';
 import { toast } from 'react-hot-toast';
 import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
@@ -38,6 +38,7 @@ import {
 } from '../order/box-order-decision';
 import { isExternalDeliveryPlatform } from '../../../../../shared/platforms/order-platforms';
 import { isFullyRefundedCompletedTable } from '../../../../../shared/pos/orders/returned-table-check';
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 
 interface OrderDetailsModalProps {
   isOpen: boolean;
@@ -713,7 +714,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const getPaymentMethodIcon = (method: string): React.ReactNode => {
     switch (method?.toLowerCase()) {
       case 'card': return <CreditCard className="h-5 w-5 text-slate-400" />;
-      case 'cash': return <Banknote className="h-5 w-5 text-green-400" />;
+      case 'cash': return <CashHandIcon className="h-5 w-5 text-green-400" />;
       case 'split':
       case 'mixed': return <Split className="h-5 w-5 text-slate-400" />;
       case 'digital':
@@ -1533,10 +1534,10 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       <div className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 pt-16 pb-24 scroll-pb-24 scrollbar-hide">
         <button
           onClick={onClose}
-          className="absolute right-4 top-3 z-20 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-zinc-200/70 bg-white/80 text-zinc-700 shadow-xs transition-colors active:bg-white dark:border-white/10 dark:bg-white/5 dark:text-zinc-200 dark:active:bg-white/8"
+          className="liquid-glass-modal-close absolute right-4 top-3 z-20 shrink-0"
           aria-label={t('common.actions.close')}
         >
-          <X className="h-6 w-6" />
+          <X className="h-5 w-5" aria-hidden="true" />
         </button>
         {loading ? (
           <div className="flex items-center justify-center py-12">

@@ -85,6 +85,16 @@ const confirmWithReason = async (onConfirm: ReturnType<typeof vi.fn>) => {
 }
 
 describe('refund tender (R5)', () => {
+  it('shows and sends the native refund cents instead of subtracting float totals', async () => {
+    const onConfirm = vi.fn(async () => {})
+    render(<EditOrderRefundSettlementModal isOpen preview={preview('card', {
+      nextTotal: 5.7, paidTotal: 10, ledgerPaidTotal: 6, refundAmount: 0.1 + 0.2, requiredRefundCents: 30,
+    })} onConfirm={onConfirm} />)
+    expect((screen.getByRole('textbox', { name: 'Amount' }) as HTMLInputElement).value.replace(',', '.')).toBe('0.30')
+    const refunds = await confirmWithReason(onConfirm)
+    expect(refunds[0].amount).toBe(0.3)
+  })
+
   it('names an other tender as other, never cash and never nothing', async () => {
     const onConfirm = vi.fn(async () => {})
     render(<EditOrderRefundSettlementModal isOpen preview={preview('other')} onConfirm={onConfirm} />)

@@ -2,8 +2,21 @@ import type {
   HealthSupportContext,
   PrinterSupportContext,
   QueueFailureSupportSnapshot,
+  RemoteSupportUnavailable,
 } from './types';
 import type { DiagnosticsSystemHealth } from '../../lib';
+
+/** Older backends omit this field. Never display raw backend guidance. */
+export function readRemoteSupportUnavailable(health: unknown): RemoteSupportUnavailable | null {
+  if (!health || typeof health !== 'object' || !('remoteSupport' in health)) {
+    return null;
+  }
+  const entry = health.remoteSupport;
+  if (!entry || typeof entry !== 'object' || !('status' in entry) || entry.status !== 'unavailable') {
+    return null;
+  }
+  return { status: 'unavailable', code: 'SUPPORT_DATABASE_UNAVAILABLE' };
+}
 
 interface SyncStatusInput {
   isOnline: boolean;

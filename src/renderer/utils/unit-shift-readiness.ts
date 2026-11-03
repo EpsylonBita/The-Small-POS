@@ -501,3 +501,8 @@ export async function readReleasedPhoneTills(
     return new Set();
   }
 }
+
+/** Informational copy only; never part of the Z admission decision. */
+export function workCardOpenShiftsHintKey(enabled: boolean, hasOpenShifts: boolean): 'workCard.zHint' | null {
+  return enabled && hasOpenShifts ? 'workCard.zHint' : null
+}

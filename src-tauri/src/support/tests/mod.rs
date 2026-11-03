@@ -1,0 +1,26 @@
+mod approval_verify_tests;
+mod availability_tests;
+mod breakglass_preemption_tests;
+pub(crate) mod collector_privacy_scan_tests;
+mod command_approval_tests;
+mod consent_decline_tests;
+mod critical_op_tests;
+mod delivery_tests;
+mod device_apply_admission_tests;
+mod executor_state_tests;
+mod key_rotation_tests;
+mod latency_guard;
+mod network_identify_tests;
+mod network_scan_bounds_tests;
+mod protected_digest_tests;
+mod quarantine_invariant_tests;
+mod remedy_guard_parity_tests;
+mod replica_deadline_tests;
+mod replica_privacy_tests;
+mod restore_refusal_tests;
+mod route_contract_tests;
+mod snapshot_tests;
+mod terminal_cmd_tests;
+mod write_guard_tests;
+
+mod transaction_admission_tests;

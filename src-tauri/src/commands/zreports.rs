@@ -92,7 +92,11 @@ pub async fn zreport_generate(
     arg0: Option<serde_json::Value>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::ZClose,
+    );
     run_blocking_command("zreport_generate", move || {
+        let _support_critical = _support_critical;
         let db = app.state::<db::DbState>();
         let payload = parse_zreport_generate_payload(arg0);
 

@@ -141,18 +141,25 @@ test('MenuCart manual item form uses the yellow POS accent instead of amber/oran
   assert.doesNotMatch(form, /focus:ring-amber-|bg-amber-5/);
 });
 
-test('MenuCart uses the yellow POS accent for its quick-action icons', () => {
+test('MenuCart gives each quick-action icon its own colour, in both themes', () => {
   const menuCart = source(menuCartPath);
 
-  for (const icon of ['Ticket', 'Award', 'Percent']) {
+  // Founder 01/11/2026 («και διαφορετικα χρωματα στα 3 εικονιδια»): coupon emerald (as its applied line), points
+  // amber (as theirs), discount rose. Unavailable points keep their colour, faded, never a grey that reads as a
+  // fourth colour.
+  const expected: Record<string, RegExp> = {
+    Ticket: /text-emerald-700 focus:ring-emerald-400 dark:text-emerald-400/,
+    Award: /text-amber-800 focus:ring-amber-400 dark:text-amber-400[\s\S]*text-amber-800 opacity-40 dark:text-amber-400/,
+    Percent: /text-rose-600 focus:ring-rose-400 dark:text-rose-400/,
+  };
+  for (const [icon, colour] of Object.entries(expected)) {
     const iconIdx = menuCart.indexOf(`<${icon} className="h-8 w-8 shrink-0"`);
     const buttonIdx = menuCart.lastIndexOf('<button', iconIdx);
     assert.ok(iconIdx > 0 && buttonIdx > 0, `${icon} cart action should exist`);
 
     const buttonBlock = menuCart.slice(buttonIdx, iconIdx);
-    // Wave ΣΤ8b: dark amber ink on light (>= 3:1 on the cart surface), yellow only in dark.
-    assert.match(buttonBlock, /text-amber-800 focus:ring-yellow-400 dark:text-yellow-300|text-zinc-500 dark:text-zinc-400/, `${icon} reaches 3:1 in both themes`);
-    assert.doesNotMatch(buttonBlock, /(?<![:\w-])text-yellow-(?:500|600|700)\b|focus:ring-amber-/, `${icon} should not use light yellow ink`);
+    assert.match(buttonBlock, colour, `${icon} has its own colour in both themes`);
+    assert.doesNotMatch(buttonBlock, /text-zinc-|text-yellow-/, `${icon} is neither grey nor the selection yellow`);
   }
 });
 

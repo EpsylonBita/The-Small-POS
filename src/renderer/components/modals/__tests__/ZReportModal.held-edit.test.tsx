@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // Tomikro #00055 (28/10/2026): four refused card collections of a paid edit
 // stayed held after the order was cancelled, and every Z was blocked by
 // `edit_settlement_not_saved`. The editor that offers the manager's close can
-// never be reopened for a cancelled order, so the Z checks offer it for that
-// case only: the money action approval, then a fresh read of the report.
+// never be reopened for a cancelled order. Every held correction now has
+// this exit in Z, including live orders: approval, then a fresh report read.
 
 const mock = vi.hoisted(() => {
   const generateZReport = vi.fn();
@@ -162,7 +162,7 @@ const renderModal = async (lng: Lng) => {
   return i18n;
 };
 
-describe('ZReportModal held correction of a cancelled order', { timeout: 20_000 }, () => {
+describe('ZReportModal held corrections of live and cancelled orders', { timeout: 20_000 }, () => {
   beforeEach(() => {
     mock.generateZReport.mockReset();
     mock.applyEditSettlement.mockReset();
@@ -171,16 +171,65 @@ describe('ZReportModal held correction of a cancelled order', { timeout: 20_000 
 
   afterEach(() => cleanup());
 
-  it('offers the manager close only for the cancelled order, in the store language', async () => {
+  it.each(['no', 'yes'] as const)('cashier discard sends only an explicit no-money answer: %s', async answer => {
+    mock.generateZReport.mockResolvedValue(reportWith([heldEdit('order-55', '00055', false)]));
+    mock.applyEditSettlement.mockResolvedValue({ success: true, state: 'reconciled' });
+    const i18n = await renderModal('el');
+    fireEvent.click(await screen.findByTestId('discard-held-edit-order-55'));
+    expect(mock.applyEditSettlement).not.toHaveBeenCalled();
+    expect(await screen.findByText(i18n.t('modals.menu.editDiscardQuestion'))).toBeTruthy();
+    fireEvent.click(screen.getByTestId(`discard-edit-${answer}`));
+    if (answer === 'no') {
+      await waitFor(() => expect(mock.applyEditSettlement).toHaveBeenCalledExactlyOnceWith({
+        orderId: 'order-55', items: [], action: { type: 'none' },
+        reconcile: { decision: 'discard_by_cashier', scope: 'order', moneyChangedHands: false },
+      }));
+    } else {
+      expect(await screen.findByText(i18n.t('modals.menu.editDiscardMoneyGuidance'))).toBeTruthy();
+      expect(mock.applyEditSettlement).not.toHaveBeenCalled();
+    }
+    expect(mock.confirmPrivilegedAction).not.toHaveBeenCalled();
+  });
+
+  it('keeps the manager close and explains an admitted card-provider refusal', async () => {
+    mock.generateZReport.mockResolvedValue(reportWith([heldEdit('order-55', '00055', false)]));
+    mock.applyEditSettlement.mockRejectedValue(new Error('EDIT_DISCARD_PROVIDER_CHECK_REQUIRED'));
+    const i18n = await renderModal('sq');
+    fireEvent.click(await screen.findByTestId('discard-held-edit-order-55'));
+    fireEvent.click(await screen.findByTestId('discard-edit-no'));
+    expect(await screen.findByText(i18n.t('modals.menu.editDiscardProviderCheck'))).toBeTruthy();
+    expect(screen.getByTestId('close-held-edit-order-55')).toBeTruthy();
+    expect(mock.confirmPrivilegedAction).not.toHaveBeenCalled();
+  });
+
+  it('lists discarded corrections as information when there are no blockers', async () => {
+    const report = reportWith([]);
+    Object.assign(report.data, { discardedCorrections: [{ orderNumber: '00055', action: 'collect', method: 'card',
+      amountCents: 190, actorName: 'Maria', at: '2026-10-27T14:30:00Z' }] });
+    mock.generateZReport.mockResolvedValue(report);
+    const i18n = await renderModal('el');
+    const section = await screen.findByTestId('z-discarded-corrections');
+    expect(section).toHaveTextContent(i18n.t('modals.zReport.discardedCorrections'));
+    expect(section).toHaveTextContent('00055');
+    expect(section).toHaveTextContent('Maria');
+    expect(section).toHaveTextContent('1.90');
+    expect(section).toHaveTextContent(i18n.t('modals.menu.editDiscardCollect'));
+    expect(screen.queryByTestId('close-held-edit-order-55')).toBeNull();
+  });
+
+  it('offers the manager close for live and cancelled orders, in the store language', async () => {
     mock.generateZReport.mockResolvedValue(
-      reportWith([heldEdit('order-55', '00055', true), heldEdit('order-live', '00060', false)]),
+      reportWith([heldEdit('order-55', '00055', true), heldEdit('order-live', '00060', false),
+        { ...heldEdit('order-open', '00061', false), reasonVariant: 'order_open' }]),
     );
     const i18n = await renderModal('el');
 
     const close = await screen.findByTestId('close-held-edit-order-55');
     expect(close.textContent).toContain(i18n.t('paymentIntegrity.heldEditCloseAction'));
-    expect(screen.queryByTestId('close-held-edit-order-live')).toBeNull();
+    expect(screen.getByTestId('close-held-edit-order-live').textContent).toContain(i18n.t('paymentIntegrity.heldEditCloseAction'));
+    expect(screen.getByTestId('close-held-edit-order-open')).toBeTruthy();
     const page = document.body.textContent ?? '';
+    expect(page).toContain(i18n.t('modals.zReport.heldEditApprovalSubtitle'));
     expect(page).toContain(i18n.t('paymentIntegrity.reasonCodes.edit_settlement_not_saved__order_cancelled'));
     expect(page).toContain(i18n.t('paymentIntegrity.fixCodes.edit_settlement_not_saved'));
     expect(page).not.toContain('native English');
@@ -188,7 +237,7 @@ describe('ZReportModal held correction of a cancelled order', { timeout: 20_000 
 
   it('closes every held correction of that order without money and reads the report again', async () => {
     mock.generateZReport
-      .mockResolvedValueOnce(reportWith([heldEdit('order-55', '00055', true)]))
+      .mockResolvedValueOnce(reportWith([heldEdit('order-55', '00055', false)]))
       .mockResolvedValue(reportWith([]));
     mock.applyEditSettlement.mockResolvedValue({
       success: true,

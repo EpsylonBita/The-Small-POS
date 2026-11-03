@@ -472,6 +472,7 @@ pub async fn capture_advance(
     let reason = optional_string(&arg0, "reason");
     let staff_id = optional_string(&arg0, "staffId");
 
+    let lifecycle = files::lock_lifecycle_async(app_data_dir(&app)?, capture_id.clone()).await?;
     {
         let conn = lock(&db)?;
 
@@ -508,9 +509,11 @@ pub async fn capture_advance(
         // document.
         let dir = app_data_dir(&app)?;
         let id = capture_id.clone();
-        let removed = tokio::task::spawn_blocking(move || files::remove_capture_files(&dir, &id))
-            .await
-            .map_err(|e| format!("capture discard task failed: {e}"))?;
+        let removed = tokio::task::spawn_blocking(move || {
+            files::remove_capture_files_guarded(&lifecycle, &dir, &id)
+        })
+        .await
+        .map_err(|e| format!("capture discard task failed: {e}"))?;
         if let Err(error) = removed {
             tracing::warn!("capture {capture_id} rows discarded but files remain: {error}");
         }
@@ -596,6 +599,7 @@ pub async fn capture_remove_page(
     let capture_id = required_string(&arg0, "captureId")?;
     let page_index = required_index(&arg0, "pageIndex")?;
 
+    let lifecycle = files::lock_lifecycle_async(app_data_dir(&app)?, capture_id.clone()).await?;
     let (remaining, removed_path) = {
         let conn = lock(&db)?;
         let document = store::get_document(&conn, &capture_id)?
@@ -618,7 +622,11 @@ pub async fn capture_remove_page(
         let dir = files::capture_dir(&app_data_dir(&app)?, &capture_id)?;
         let path = PathBuf::from(path);
         if path.parent() == Some(dir.as_path()) {
-            let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                let _lifecycle = lifecycle;
+                std::fs::remove_file(path)
+            })
+            .await;
         }
     }
 

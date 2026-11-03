@@ -3,7 +3,6 @@ import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import { Clock, User, Filter, RefreshCw, WifiOff, Sparkles } from 'lucide-react';
-import { useTheme } from '../../../contexts/theme-context';
 import { useSystemClock } from '../../../hooks/useSystemClock';
 import { getBridge, isBrowser } from '../../../../lib';
 import { posApiGet, posApiPatch, posApiPost } from '../../../utils/api-helpers';
@@ -43,13 +42,9 @@ const humanizeTaskType = (type: string): string =>
 
 export const HousekeepingView: React.FC = memo(() => {
   const { t } = useTranslation();
-  const { resolvedTheme } = useTheme();
   const now = useSystemClock();
-  const isDark = resolvedTheme === 'dark';
   const today = toLocalDateString(now);
   const bridge = getBridge();
-  const lightGlassSurface = 'bg-white/72 border-zinc-300/80';
-  const lightControlSurface = 'bg-white/90 text-gray-950 border-zinc-300 shadow-xs shadow-black/5';
 
   // Resolve identity + current rooms so rooms sitting in `cleaning` status surface
   // as visible fallback rows even before a housekeeping_tasks row exists for them.
@@ -85,12 +80,23 @@ export const HousekeepingView: React.FC = memo(() => {
     tasksRef.current = tasks;
   }, [tasks]);
 
-  const priorityColors: Record<Priority, { bg: string; text: string }> = {
-    urgent: { bg: '#7f1d1d', text: '#fecaca' },
-    high: { bg: '#7c2d12', text: '#fed7aa' },
-    normal: { bg: '#78350f', text: '#fde68a' },
-    low: { bg: '#14532d', text: '#bbf7d0' },
+  // Founder 01/11: the priority is the card's colour — its word and the card's inward glow: normal neutral (no
+  // glow), low yellow, high red, urgent bordeaux, in every status (chips without wrappers).
+  const priorityText: Record<Priority, string> = {
+    urgent: 'font-bold text-rose-800 dark:text-rose-400',
+    high: 'font-semibold text-(--pos-s-bad)',
+    normal: 'font-semibold text-(--pos-s-fg)',
+    low: 'font-semibold text-yellow-700 dark:text-yellow-300',
   };
+  // Founder 01/11: «βάλε τα χρώματα από πίσω από τις κάρτες» — the priority colour glows behind the raised card.
+  const priorityGlow: Record<Priority, string> = {
+    urgent: 'pos-glow-wine',
+    high: 'pos-glow-bad',
+    normal: '',
+    low: 'pos-glow-yellow',
+  };
+  // Founder 01/11: the filter dropdowns and each task's assignee dropdown are raised kit buttons, not outlined fields.
+  const kitFilterClass = 'pos-select';
 
   const columns: Array<{ status: TaskStatus; label: string }> = [
     { status: 'pending', label: t('housekeepingView.status.pending', { defaultValue: 'Pending' }) },
@@ -449,7 +455,7 @@ export const HousekeepingView: React.FC = memo(() => {
 
   if (isLoading) {
     return (
-      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex items-center justify-center text-(--pos-s-muted)">
         <RefreshCw className="w-5 h-5 animate-spin mr-2" />
         {t('housekeepingView.loading', { defaultValue: 'Loading housekeeping tasks...' })}
       </motion.div>
@@ -458,14 +464,14 @@ export const HousekeepingView: React.FC = memo(() => {
 
   if (error) {
     return (
-      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex flex-col items-center justify-center text-(--pos-s-fg)">
         <WifiOff className="w-10 h-10 mb-3" />
         <p className="font-semibold mb-2">{t('housekeepingView.errorTitle', { defaultValue: 'Unable to load housekeeping tasks' })}</p>
-        <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{error}</p>
+        <p className="text-sm text-(--pos-s-muted)">{error}</p>
         <button
           type="button"
           onClick={() => fetchTasks()}
-          className={`mt-4 px-4 py-2 rounded-xl border font-medium transition-transform active:scale-95 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700 active:bg-(--pos-s-surface-2)'}`}
+          className="pos-solid-btn pos-solid-btn--sm mt-4"
         >
           {t('common.retry', { defaultValue: 'Retry' })}
         </button>
@@ -478,33 +484,33 @@ export const HousekeepingView: React.FC = memo(() => {
       <motion.section
         variants={pageMotionItem}
         data-vertical-hero="housekeeping"
-        className={`mb-4 rounded-3xl border p-4 backdrop-blur-xl ${isDark ? 'bg-zinc-950/70 border-white/10 shadow-[0_18px_46px_rgba(0,0,0,0.35)]' : 'bg-white/74 border-(--pos-s-border)'}`}
+        className="pos-card mb-4 p-4"
       >
         <div className="mb-4 min-w-0">
-          <h1 className={`truncate text-3xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
+          <h1 className="truncate text-3xl font-bold tracking-tight text-(--pos-s-fg)">
             {t('navigation.menu.housekeeping', { defaultValue: 'Housekeeping' })}
           </h1>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <motion.div variants={pageMotionContainer} className="flex gap-3 flex-wrap">
-            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border backdrop-blur-md ${isDark ? 'bg-zinc-900/60 border-white/10' : lightGlassSurface}`}>
-              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-700'}`}>
+            <motion.div variants={pageMotionItem} className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2">
+              <div className="text-sm text-(--pos-s-muted)">
                 {t('housekeepingView.stats.totalTasks', { defaultValue: 'Total Tasks' })}
               </div>
-              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{filteredTasks.filter((task) => task.status !== 'cancelled').length}</div>
+              <div className="text-xl font-bold text-(--pos-s-fg)">{filteredTasks.filter((task) => task.status !== 'cancelled').length}</div>
             </motion.div>
-            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border backdrop-blur-md ${isDark ? 'bg-zinc-900/60 border-white/10' : lightGlassSurface}`}>
-              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-700'}`}>
+            <motion.div variants={pageMotionItem} className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2">
+              <div className="text-sm text-(--pos-s-muted)">
                 {t('housekeepingView.stats.completedToday', { defaultValue: 'Completed Today' })}
               </div>
-              <div className="text-xl font-bold text-emerald-500">{completedToday}</div>
+              <div className="text-xl font-bold text-(--pos-s-ok)">{completedToday}</div>
             </motion.div>
-            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border backdrop-blur-md ${isDark ? 'bg-zinc-900/60 border-white/10' : lightGlassSurface}`}>
-              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-700'}`}>
+            <motion.div variants={pageMotionItem} className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2">
+              <div className="text-sm text-(--pos-s-muted)">
                 {t('housekeepingView.stats.avgTime', { defaultValue: 'Avg Time' })}
               </div>
-              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{avgCompletionTime} {t('common.minutes', 'min')}</div>
+              <div className="text-xl font-bold text-(--pos-s-fg)">{avgCompletionTime} {t('common.minutes', 'min')}</div>
             </motion.div>
           </motion.div>
           <button
@@ -512,7 +518,7 @@ export const HousekeepingView: React.FC = memo(() => {
             onClick={handleRefresh}
             disabled={isRefreshing}
             aria-label={t('common.refresh', { defaultValue: 'Refresh' })}
-            className={`inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition-transform active:scale-95 disabled:opacity-60 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300 active:bg-(--pos-s-surface-2)'}`}
+            className="pos-icon-btn"
           >
             <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
@@ -520,11 +526,11 @@ export const HousekeepingView: React.FC = memo(() => {
       </motion.section>
 
       <motion.div variants={pageMotionItem} className="flex gap-2 mb-4 flex-wrap items-center">
-        <Filter className={`w-4 h-4 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
+        <Filter className="h-4 w-4 text-(--pos-s-muted)" aria-hidden="true" />
         <select
           value={floorFilter}
           onChange={(e) => setFloorFilter(e.target.value)}
-          className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-900/60 text-zinc-100 border-white/10' : lightControlSurface}`}
+          className={kitFilterClass}
         >
           <option value="all">{t('housekeepingView.filter.allFloors', { defaultValue: 'All Floors' })}</option>
           {floors.map((floor) => (
@@ -536,7 +542,7 @@ export const HousekeepingView: React.FC = memo(() => {
         <select
           value={taskTypeFilter}
           onChange={(e) => setTaskTypeFilter(e.target.value)}
-          className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-900/60 text-zinc-100 border-white/10' : lightControlSurface}`}
+          className={kitFilterClass}
         >
           <option value="all">{t('housekeepingView.filter.allTypes', { defaultValue: 'All Types' })}</option>
           {taskTypes.map((type) => (
@@ -546,7 +552,7 @@ export const HousekeepingView: React.FC = memo(() => {
         <select
           value={priorityFilter}
           onChange={(e) => setPriorityFilter(e.target.value)}
-          className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-900/60 text-zinc-100 border-white/10' : lightControlSurface}`}
+          className={kitFilterClass}
         >
           <option value="all">{t('housekeepingView.filter.allPriorities', { defaultValue: 'All Priorities' })}</option>
           <option value="urgent">{t('housekeepingView.priority.urgent', { defaultValue: 'Urgent' })}</option>
@@ -557,7 +563,7 @@ export const HousekeepingView: React.FC = memo(() => {
         <select
           value={staffFilter}
           onChange={(e) => setStaffFilter(e.target.value)}
-          className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-900/60 text-zinc-100 border-white/10' : lightControlSurface}`}
+          className={kitFilterClass}
         >
           <option value="all">{t('housekeepingView.filter.allStaff', { defaultValue: 'All Staff' })}</option>
           <option value="unassigned">{t('housekeepingView.filter.unassigned', { defaultValue: 'Unassigned' })}</option>
@@ -572,12 +578,12 @@ export const HousekeepingView: React.FC = memo(() => {
           variants={pageMotionItem}
           className="flex-1 flex items-center justify-center px-6"
         >
-          <div className={`flex flex-col items-center justify-center text-center max-w-md rounded-3xl border px-8 py-10 backdrop-blur-md ${isDark ? 'bg-zinc-900/60 border-white/10' : lightGlassSurface}`}>
-            <Sparkles className="w-12 h-12 mb-3 text-amber-700 dark:text-amber-400" />
-            <p className={`text-lg font-semibold mb-1 ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>
+          <div className="flex max-w-md flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-400 px-8 py-10 text-center dark:border-zinc-600">
+            <Sparkles className="mb-3 h-12 w-12 text-(--pos-s-muted)" aria-hidden="true" />
+            <p className="mb-1 text-lg font-semibold text-(--pos-s-fg)">
               {t('housekeepingView.empty.title', { defaultValue: 'No housekeeping tasks' })}
             </p>
-            <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-700'}`}>
+            <p className="text-sm text-(--pos-s-muted)">
               {t('housekeepingView.empty.description', { defaultValue: 'Housekeeping tasks appear here automatically when rooms are checked out or set to cleaning.' })}
             </p>
             <button
@@ -585,7 +591,7 @@ export const HousekeepingView: React.FC = memo(() => {
               onClick={handleRefresh}
               disabled={isRefreshing}
               aria-label={t('common.refresh', { defaultValue: 'Refresh' })}
-              className={`mt-5 inline-flex items-center gap-2 px-4 py-2 rounded-xl border font-medium transition-transform active:scale-95 disabled:opacity-60 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700 active:bg-(--pos-s-surface-2)'}`}
+              className="pos-solid-btn pos-solid-btn--sm mt-5"
             >
               <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
               {t('common.refresh', { defaultValue: 'Refresh' })}
@@ -593,45 +599,40 @@ export const HousekeepingView: React.FC = memo(() => {
           </div>
         </motion.div>
       ) : (
-      <motion.div variants={pageMotionContainer} className="flex-1 overflow-y-auto scrollbar-hide space-y-5 pb-4">
+      <motion.div variants={pageMotionContainer} className="pos-scroll-room flex flex-1 flex-col gap-5 overflow-y-auto scrollbar-hide pb-8">
         {columns.map((column) => {
           const columnTasks = filteredTasks.filter((task) => task.status === column.status);
           if (columnTasks.length === 0) return null;
           return (
-            <motion.section key={column.status} variants={pageMotionItem} data-housekeeping-section={column.status} className="space-y-3">
-              <div className={`flex items-center gap-2 px-4 py-2.5 rounded-2xl border backdrop-blur-md ${isDark ? 'bg-zinc-900/60 border-white/10' : lightGlassSurface}`}>
-                <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{column.label}</span>
-                <span className={`ml-auto px-2.5 py-0.5 rounded-full text-sm font-semibold ${isDark ? 'bg-white/10 text-zinc-100' : 'bg-zinc-200 text-zinc-800'}`}>
-                  {columnTasks.length}
-                </span>
+            <motion.section key={column.status} variants={pageMotionItem} data-housekeeping-section={column.status} className="flex flex-col gap-3">
+              <div className="flex items-baseline gap-2 border-b border-(--pos-s-border) px-1 pb-2">
+                <h2 className="text-lg font-semibold text-(--pos-s-fg)">{column.label}</h2>
+                <span className="text-base font-semibold text-(--pos-s-muted)">{columnTasks.length}</span>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
                 {columnTasks.map((task) => {
-                  const priorityColor = priorityColors[task.priority] || priorityColors.normal;
+                  const priorityClass = priorityText[task.priority] || priorityText.normal;
                   const isUpdating = updatingTaskId === task.id;
                   const availableStaff = staff.length > 0 ? staff : [];
                   return (
-                    <motion.div key={task.id} variants={pageMotionItem} className={`p-3 rounded-2xl border backdrop-blur-md ${isDark ? 'bg-zinc-900/50 border-white/10' : lightGlassSurface}`}>
+                    <motion.div key={task.id} variants={pageMotionItem} className={`pos-card p-4 ${priorityGlow[task.priority] ?? ''}`} data-housekeeping-glow={task.priority}>
                       <div className="flex items-center justify-between mb-2 gap-2">
-                        <span className={`font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                        <span className="text-lg font-bold text-(--pos-s-fg)">
                           {t('housekeepingView.room', { defaultValue: 'Room' })} {task.room_number || task.room_id || '-'}
                         </span>
-                        <span
-                          className="px-2 py-0.5 rounded-sm text-xs"
-                          style={{ backgroundColor: priorityColor.bg, color: priorityColor.text }}
-                        >
+                        <span className={`text-sm ${priorityClass}`} data-housekeeping-priority={task.priority}>
                           {t(`housekeepingView.priority.${task.priority}`, { defaultValue: task.priority })}
                         </span>
                       </div>
 
-                      <div className={`text-sm capitalize ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+                      <div className="text-sm capitalize text-(--pos-s-fg)">
                         {resolveTaskTypeLabel(task.task_type)}
                       </div>
 
-                      <div className={`flex items-center gap-2 mt-2 text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                        <User className="w-3 h-3" />
+                      <div className="mt-2 flex items-center gap-2 text-sm text-(--pos-s-muted)">
+                        <User className="h-4 w-4" aria-hidden="true" />
                         <span>{task.assigned_staff_name || t('housekeepingView.unassigned', { defaultValue: 'Unassigned' })}</span>
-                        <Clock className="w-3 h-3 ml-2" />
+                        <Clock className="ml-2 h-4 w-4" aria-hidden="true" />
                         <span>{task.floor ? `${t('housekeepingView.filter.floor', { defaultValue: 'Floor' })} ${task.floor}` : '-'}</span>
                       </div>
 
@@ -640,8 +641,8 @@ export const HousekeepingView: React.FC = memo(() => {
                         // no backing housekeeping_tasks record, so task-only controls
                         // (assign/start/complete/verify) are omitted to avoid hitting
                         // the task APIs with a synthetic id. A localized note explains.
-                        <div className="mt-2 space-y-2">
-                          <div className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                        <div className="mt-2 flex flex-col gap-2">
+                          <div className="text-sm text-(--pos-s-muted)">
                             {t('housekeepingView.fallbackHint', {
                               defaultValue: 'Shown from a room in cleaning status. Actions become available once the housekeeping task is created.',
                             })}
@@ -650,7 +651,7 @@ export const HousekeepingView: React.FC = memo(() => {
                             type="button"
                             disabled={isUpdating}
                             onClick={() => handleCreateTask(task)}
-                            className={`w-full py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 active:bg-(--pos-s-surface-2)'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
+                            className="pos-solid-btn pos-solid-btn--sm w-full"
                           >
                             {t('housekeepingView.action.createTask', { defaultValue: 'Create task' })}
                           </button>
@@ -662,7 +663,7 @@ export const HousekeepingView: React.FC = memo(() => {
                               disabled={isUpdating}
                               value={task.assigned_staff_id || ''}
                               onChange={(e) => handleAssignStaff(task.id, e.target.value || null)}
-                              className={`w-full px-2 py-2 rounded-2xl border text-xs ${isDark ? 'bg-zinc-950/60 text-zinc-100 border-white/10' : lightControlSurface}`}
+                              className={`${kitFilterClass} block w-full`}
                             >
                               <option value="">{t('housekeepingView.assign.none', { defaultValue: 'Unassigned' })}</option>
                               {availableStaff.map((member) => (
@@ -676,7 +677,7 @@ export const HousekeepingView: React.FC = memo(() => {
                               type="button"
                               disabled={isUpdating}
                               onClick={() => handleStatusChange(task.id, 'in_progress')}
-                              className={`w-full mt-2 py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 active:bg-(--pos-s-surface-2)'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
+                              className="pos-solid-btn pos-solid-btn--sm mt-2 w-full"
                             >
                               {t('housekeepingView.action.start', { defaultValue: 'Start' })}
                             </button>
@@ -687,7 +688,7 @@ export const HousekeepingView: React.FC = memo(() => {
                               type="button"
                               disabled={isUpdating}
                               onClick={() => handleStatusChange(task.id, 'completed')}
-                              className={`w-full mt-2 py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500' : 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:bg-yellow-500'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
+                              className="pos-solid-btn pos-solid-btn--sm pos-solid-btn--primary mt-2 w-full"
                             >
                               {t('housekeepingView.action.complete', { defaultValue: 'Complete' })}
                             </button>
@@ -698,7 +699,7 @@ export const HousekeepingView: React.FC = memo(() => {
                               type="button"
                               disabled={isUpdating}
                               onClick={() => handleStatusChange(task.id, 'verified')}
-                              className={`w-full mt-2 py-2 text-xs font-medium rounded-2xl border transition-transform active:scale-95 ${isDark ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 active:bg-(--pos-s-surface-2)'} disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:active:scale-100 disabled:cursor-not-allowed`}
+                              className="pos-solid-btn pos-solid-btn--sm mt-2 w-full"
                             >
                               {t('housekeepingView.action.verify', { defaultValue: 'Verify' })}
                             </button>

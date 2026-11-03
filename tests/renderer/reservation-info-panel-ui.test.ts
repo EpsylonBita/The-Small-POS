@@ -22,7 +22,7 @@ test('ReservationInfoPanel uses rounded translucent glass panel and cards', () =
 test('ReservationInfoPanel is touch-first with labelled close and semantic actions', () => {
   const source = readFileSync(sourcePath, 'utf8');
 
-  assert.match(source, /const closeButtonClass = `inline-flex h-10 w-10 items-center justify-center rounded-2xl/);
+  assert.match(source, /className="liquid-glass-modal-close[^"]*"/);
   assert.match(source, /aria-label=\{t\('common\.actions\.close', \{ defaultValue: 'Close' \}\)\}/);
   assert.match(source, /onClick=\{onClose\}/);
   assert.match(source, /onClick=\{handleSeatGuest\}/);

@@ -41,6 +41,7 @@ import {
 } from '../../../utils/staff-shift-duration';
 import { branchWallTime, branchWallTimeToIso } from '../../../utils/branch-time';
 import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
+import { KitDateField } from '../../../components/ui/KitDateField';
 
 interface StaffMember {
   id: string;
@@ -275,6 +276,7 @@ export const StaffScheduleView: React.FC = memo(() => {
   const previewTitleId = useId();
   const createDialogRef = useRef<HTMLDivElement>(null);
   const createTitleId = useId();
+  const roleFilterId = useId();
 
   const isDark = resolvedTheme === 'dark';
   const bridge = getBridge();
@@ -683,6 +685,10 @@ export const StaffScheduleView: React.FC = memo(() => {
     return () => document.removeEventListener('keydown', handleEscape);
   }, [previewWeekOpen, cashierPortalProps.inert]);
 
+  const isPresetActive = (preset: typeof TIME_PRESETS[number]) =>
+    createStartHour === preset.startHour && createStartMinute === preset.startMinute &&
+    createEndHour === preset.endHour && createEndMinute === preset.endMinute;
+
   const applyTimePreset = (preset: typeof TIME_PRESETS[number]) => {
     if (createStartDate) {
       setCreateEndDate(createStartDate);
@@ -1022,34 +1028,16 @@ export const StaffScheduleView: React.FC = memo(() => {
     };
   }, [createStartDate, createStartHour, createStartMinute, createEndDate, createEndHour, createEndMinute, t, timeZone]);
 
-  const panelClass = isDark
-    ? 'bg-zinc-950/95 border-zinc-800 text-zinc-100'
-    : 'bg-white border-slate-200 text-slate-950 shadow-xs';
-  const softPanelClass = isDark
-    ? 'bg-zinc-900/70 border-zinc-800'
-    : 'bg-slate-50 border-slate-200';
-  // Frosted-glass shell for the local modals (Preview Week / Create Shift) - distinct
-  // from panelClass (used by the solid on-page sections) so only the dialogs go glass.
-  const modalPanelClass = isDark
-    ? 'bg-black/60 border-white/10 ring-1 ring-white/15 text-zinc-100 backdrop-blur-2xl shadow-2xl shadow-black/50'
-    : 'bg-white/60 border-white/70 ring-1 ring-white/60 text-slate-950 backdrop-blur-2xl shadow-2xl shadow-black/30';
-  const mutedTextClass = isDark ? 'text-zinc-400' : 'text-slate-600';
-  const inputClass = `w-full rounded-xl border px-3 py-3 text-base outline-hidden transition-colors focus:border-yellow-400 focus:ring-2 focus:ring-(--pos-s-fg) ${
-    isDark
-      ? 'bg-zinc-900 border-zinc-700 text-zinc-100'
-      : 'bg-white border-slate-300 text-slate-950'
-  }`;
-  const iconButtonClass = `inline-flex h-11 w-11 items-center justify-center rounded-xl border transition-colors ${
-    isDark
-      ? 'bg-zinc-900 border-zinc-700 text-zinc-100 active:bg-zinc-800'
-      : 'bg-white border-slate-300 text-slate-800 active:bg-slate-100'
-  }`;
-  const primaryButtonClass = 'inline-flex items-center justify-center gap-2 rounded-xl bg-yellow-400 px-4 py-3 text-sm font-semibold text-black transition-colors active:bg-yellow-300 disabled:bg-(--pos-s-yellow) disabled:text-black/60';
-  const secondaryButtonClass = `inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-3 text-sm font-semibold transition-colors disabled:opacity-60 ${
-    isDark
-      ? 'bg-zinc-900 border-zinc-700 text-zinc-100 active:bg-zinc-800'
-      : 'bg-white border-slate-300 text-slate-800 active:bg-slate-100'
-  }`;
+  // Founder 01/11: the page in the kit — kit cards, fields, icon buttons and buttons; the dialogs use the shared
+  // glass shell (their kit cards frost inside it).
+  const panelClass = 'pos-card';
+  const softPanelClass = 'border-(--pos-s-border) bg-(--pos-s-surface-2)';
+  const modalPanelClass = 'liquid-glass-modal-shell text-(--pos-s-fg)';
+  const mutedTextClass = 'text-(--pos-s-muted)';
+  const inputClass = 'min-h-[48px] w-full rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) px-3 text-base font-semibold text-(--pos-s-fg) outline-hidden transition-colors placeholder:font-normal placeholder:text-zinc-400 focus:border-(--pos-s-yellow) dark:placeholder:text-zinc-500';
+  const iconButtonClass = 'pos-icon-btn';
+  const primaryButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';
+  const secondaryButtonClass = 'pos-solid-btn pos-solid-btn--md';
 
   if (!timeZone) return <p role="status" className="p-6">{t('verticalReadinessDesk.timezoneUnavailable')}</p>;
 
@@ -1076,7 +1064,7 @@ export const StaffScheduleView: React.FC = memo(() => {
           <p className={`text-sm ${isDark ? 'text-red-300' : 'text-red-700'}`}>{error}</p>
           <button
             onClick={fetchStaffData}
-            className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-red-600 active:bg-red-500 text-white transition-transform active:scale-95"
+            className="pos-solid-btn pos-solid-btn--md"
           >
             <RefreshCw className="w-4 h-4" />
             {t('common.actions.retry', 'Retry')}
@@ -1128,10 +1116,9 @@ export const StaffScheduleView: React.FC = memo(() => {
               >
                 <ChevronLeft className="h-5 w-5" />
               </button>
-              <div className={`inline-flex h-11 items-center gap-2 rounded-xl border px-4 text-sm font-semibold ${
-                isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-slate-300'
-              }`}>
-                <Calendar className="h-4 w-4 text-yellow-700 dark:text-yellow-400" />
+              {/* The week is a readout, not a button: it sits in the kit well between the raised arrows. */}
+              <div className="inline-flex h-11 items-center gap-2 rounded-xl bg-(--pos-s-surface-2) px-4 text-sm font-semibold text-(--pos-s-fg) shadow-(--pos-s-well)">
+                <Calendar className="h-4 w-4 text-(--pos-s-muted)" aria-hidden="true" />
                 {weekLabel}
               </div>
               <button
@@ -1193,72 +1180,56 @@ export const StaffScheduleView: React.FC = memo(() => {
 
           <motion.div variants={pageMotionContainer} className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
             <motion.div variants={pageMotionItem} className={`rounded-2xl border p-3 ${softPanelClass}`}>
-              <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.totalStaff', 'Total Staff')}</p>
+              <p className={`text-sm ${mutedTextClass}`}>{t('staffSchedule.stats.totalStaff', 'Total Staff')}</p>
               <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
-                <Users className="h-5 w-5 text-yellow-700 dark:text-yellow-400" />
+                <Users className="h-5 w-5 text-(--pos-s-muted)" aria-hidden="true" />
                 {filteredStaff.length}
               </p>
             </motion.div>
             <motion.div variants={pageMotionItem} className={`rounded-2xl border p-3 ${softPanelClass}`}>
-              <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.scheduledThisWeek', 'Scheduled This Week')}</p>
-              <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
-                <UserCheck className="h-5 w-5 text-emerald-500" />
+              <p className={`text-sm ${mutedTextClass}`}>{t('staffSchedule.stats.scheduledThisWeek', 'Scheduled This Week')}</p>
+              <p className={`mt-1 inline-flex items-center gap-2 text-2xl font-bold ${scheduledStaffCount > 0 ? 'text-(--pos-s-ok)' : ''}`}>
+                <UserCheck className="h-5 w-5 text-(--pos-s-muted)" aria-hidden="true" />
                 {scheduledStaffCount}
               </p>
             </motion.div>
             <motion.div variants={pageMotionItem} className={`rounded-2xl border p-3 ${softPanelClass}`}>
-              <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.todayShifts', 'Today Shifts')}</p>
+              <p className={`text-sm ${mutedTextClass}`}>{t('staffSchedule.stats.todayShifts', 'Today Shifts')}</p>
               <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
-                <Clock className="h-5 w-5 text-amber-500" />
+                <Clock className="h-5 w-5 text-(--pos-s-muted)" aria-hidden="true" />
                 {todayShiftsCount}
               </p>
             </motion.div>
             <motion.div variants={pageMotionItem} className={`rounded-2xl border p-3 ${softPanelClass}`}>
-              <p className={`text-xs ${mutedTextClass}`}>{t('staffSchedule.stats.unscheduled', 'Unscheduled')}</p>
-              <p className="mt-1 inline-flex items-center gap-2 text-2xl font-bold">
-                <Briefcase className="h-5 w-5 text-fuchsia-500" />
+              <p className={`text-sm ${mutedTextClass}`}>{t('staffSchedule.stats.unscheduled', 'Unscheduled')}</p>
+              <p className={`mt-1 inline-flex items-center gap-2 text-2xl font-bold ${unscheduledStaff.length > 0 ? 'text-(--pos-s-warn)' : ''}`}>
+                <Briefcase className="h-5 w-5 text-(--pos-s-muted)" aria-hidden="true" />
                 {unscheduledStaff.length}
               </p>
             </motion.div>
           </motion.div>
 
-          <motion.div variants={pageMotionContainer} className="mt-4 flex max-w-full flex-wrap gap-2 pb-1">
-            <motion.button
-              variants={pageMotionItem}
-              type="button"
-              onClick={() => setRoleFilter('all')}
-              className={`rounded-xl border px-4 py-2 text-center text-sm font-semibold leading-tight transition-colors ${
-                roleFilter === 'all'
-                  ? 'bg-yellow-400 border-yellow-400 text-black'
-                  : isDark
-                    ? 'bg-zinc-900 border-zinc-700 text-zinc-300 active:bg-zinc-800'
-                    : 'bg-white border-slate-300 text-slate-700 active:bg-slate-100'
-              }`}
+          {/* Founder 01/11: one dropdown instead of a wall of role buttons (each role label still i18n). */}
+          <motion.div variants={pageMotionItem} className="mt-4 flex items-center gap-2">
+            <label htmlFor={roleFilterId} className={`text-sm font-semibold ${mutedTextClass}`}>
+              {t('staffSchedule.filters.role', 'Role')}
+            </label>
+            <select
+              id={roleFilterId}
+              value={roleFilter}
+              onChange={event => setRoleFilter(event.target.value)}
+              className="pos-select"
             >
-              {t('staffSchedule.filters.all', 'All roles')}
-            </motion.button>
-            {availableRoles.map(role => (
-              <motion.button
-                variants={pageMotionItem}
-                key={role}
-                type="button"
-                onClick={() => setRoleFilter(role)}
-                className={`rounded-xl border px-4 py-2 text-center text-sm font-semibold leading-tight transition-colors ${
-                  roleFilter === role
-                    ? 'bg-yellow-400 border-yellow-400 text-black'
-                    : isDark
-                      ? 'bg-zinc-900 border-zinc-700 text-zinc-300 active:bg-zinc-800'
-                      : 'bg-white border-slate-300 text-slate-700 active:bg-slate-100'
-                }`}
-              >
-                {getRoleChipLabel(role)}
-              </motion.button>
-            ))}
+              <option value="all">{t('staffSchedule.filters.all', 'All roles')}</option>
+              {availableRoles.map(role => (
+                <option key={role} value={role}>{getRoleChipLabel(role)}</option>
+              ))}
+            </select>
           </motion.div>
         </motion.section>
 
-        <motion.div variants={pageMotionItem} className="min-h-0 flex-1 overflow-y-auto scrollbar-hide">
-          <motion.div variants={pageMotionContainer} className="space-y-4 pb-1">
+        <motion.div variants={pageMotionItem} className="pos-scroll-room min-h-0 flex-1 overflow-y-auto scrollbar-hide pb-6">
+          <motion.div variants={pageMotionContainer} className="flex flex-col gap-4 pb-1">
             <motion.section variants={pageMotionItem} className={`rounded-2xl border p-3 md:p-4 ${panelClass}`}>
               <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
                 <div>
@@ -1278,93 +1249,73 @@ export const StaffScheduleView: React.FC = memo(() => {
                       variants={pageMotionItem}
                       key={dayKey}
                       className={`flex min-h-64 overflow-hidden flex-col rounded-2xl border transition-colors ${
-                        today
-                          ? isDark
-                            ? 'bg-(--pos-s-surface-2) border-yellow-500'
-                            : 'bg-(--pos-s-surface-2) border-(--pos-s-border)'
-                          : softPanelClass
+                        today ? 'border-2 border-(--pos-s-sel-bg) bg-(--pos-s-surface)' : softPanelClass
                       }`}
                     >
-                      <div className={`border-b px-3 py-3 ${today ? (isDark ? 'border-(--pos-s-yellow)' : 'border-(--pos-s-yellow)') : (isDark ? 'border-zinc-800' : 'border-slate-200')}`}>
+                      <div className="border-b border-(--pos-s-border) px-3 py-3">
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
                               <p className="text-base font-bold">{getDayLabel(day)}</p>
                               {today && (
-                                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${
-                                  isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-yellow) text-yellow-800 dark:text-yellow-200' : 'bg-(--pos-s-surface-2) border-(--pos-s-yellow) text-yellow-800'
-                                }`}>
-                                  {t('staffSchedule.today', 'Today')}
+                                <span className="text-sm font-semibold text-(--pos-s-fg)">
+                                  · {t('staffSchedule.today', 'Today')}
                                 </span>
                               )}
                             </div>
-                            <p className={`text-xs ${mutedTextClass}`}>
+                            <p className={`text-sm ${mutedTextClass}`}>
                               {formatDate(day, { day: '2-digit', month: 'short' })}
                             </p>
                           </div>
                           <div className="flex shrink-0 items-center gap-1.5">
-                            <span className={`inline-flex h-7 min-w-7 items-center justify-center rounded-full px-1.5 text-xs font-semibold ${
-                              dayShifts.length > 0
-                                ? isDark ? 'bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200' : 'bg-(--pos-s-surface-2) text-emerald-700'
-                                : isDark ? 'bg-zinc-800 text-zinc-400' : 'bg-slate-200 text-slate-600'
-                            }`}>
-                              {dayShifts.length}
-                            </span>
+                            {dayShifts.length > 0 && (
+                              <span className="text-base font-semibold text-(--pos-s-muted)">{dayShifts.length}</span>
+                            )}
                             <button
                               type="button"
                               onClick={() => openCreateModal(day)}
                               aria-label={t('staffSchedule.addShiftForDay', 'Add shift for this day')}
-                              className={`inline-flex h-9 w-9 items-center justify-center rounded-xl border transition-colors ${
-                                isDark
-                                  ? 'bg-zinc-900 border-zinc-700 active:bg-zinc-800'
-                                  : 'bg-white border-slate-300 active:bg-slate-100'
-                              }`}
+                              className="pos-icon-btn"
                             >
-                              <Plus className="h-4 w-4" />
+                              <Plus className="h-5 w-5" />
                             </button>
                           </div>
                         </div>
                       </div>
 
-                      <div className="flex-1 space-y-2 overflow-y-auto scrollbar-hide p-3">
+                      <div className="flex flex-1 flex-col gap-2 overflow-y-auto scrollbar-hide p-3">
                         {dayShifts.length === 0 ? (
+                          // An empty day is a quiet tap area (founder 01/11: each fact once — the «+» above says it).
                           <button
                             type="button"
                             onClick={() => openCreateModal(day)}
-                            className={`flex h-full min-h-28 w-full flex-col items-center justify-center rounded-2xl border border-dashed px-3 py-6 text-center text-sm transition-colors ${
-                              isDark
-                                ? 'border-zinc-700 text-zinc-400 active:border-yellow-500 active:text-yellow-200'
-                                : 'border-slate-300 text-slate-600 active:border-yellow-300 active:text-yellow-700'
-                            }`}
+                            aria-label={t('staffSchedule.addShiftForDay', 'Add shift for this day')}
+                            className="flex h-full min-h-28 w-full items-center justify-center rounded-xl text-(--pos-s-muted) transition-colors active:bg-(--pos-s-surface)"
                           >
-                            <Plus className="mb-2 h-5 w-5" />
-                            <span className="font-medium">{t('staffSchedule.noShifts', 'No shifts')}</span>
-                            <span className="mt-1 text-xs">{t('staffSchedule.tapToAddShift', 'Tap to add one')}</span>
+                            <Plus className="h-5 w-5 opacity-50" aria-hidden="true" />
                           </button>
                         ) : (
                           dayShifts.map(shift => (
                             <motion.div
                               variants={pageMotionItem}
                               key={shift.id}
-                              className={`rounded-xl border-l-4 border px-3 py-2 ${
-                                isDark ? 'bg-black/30 border-zinc-800' : 'bg-white border-slate-200'
-                              }`}
+                              className="rounded-xl border border-l-4 border-(--pos-s-border) bg-(--pos-s-surface) px-3 py-2"
                               style={{ borderLeftColor: shift.roleColor }}
                             >
                               <p className="text-sm font-semibold leading-tight">{shift.staffName}</p>
                               {shift.pendingSync && <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">{t('staffSchedule.savedLocallyQueued', 'Saved locally and queued')}</p>}
-                              {['scheduled', 'cancelled'].includes(shift.status) && <div className="mt-2 flex gap-2">
-                                <button type="button" className="min-h-10 rounded-xl border px-3" onClick={() => openEditModal(shift)} aria-label={t('staffSchedule.workflow.edit', 'Edit shift')}><Pencil className="h-4 w-4" /></button>
-                                <button type="button" className="min-h-10 rounded-xl border px-3 text-red-600 dark:text-red-300" onClick={() => openEditModal(shift, true)} aria-label={t('staffSchedule.workflow.delete', 'Delete shift')}><Trash2 className="h-4 w-4" /></button>
-                              </div>}
                               <p className={`mt-1 inline-flex items-center gap-1 text-xs capitalize ${mutedTextClass}`}>
                                 <Briefcase className="h-3 w-3" />
                                 {shift.roleLabel}
                               </p>
-                              <p className={`mt-1 inline-flex items-center gap-1 text-base font-bold ${isDark ? 'text-zinc-100' : 'text-slate-950'}`}>
+                              <p className="mt-1 inline-flex items-center gap-1 text-base font-bold text-(--pos-s-fg)">
                                 <Clock className="h-4 w-4" />
                                 {formatTimeRange(shift.start, shift.end, timeZone)}
                               </p>
+                              {['scheduled', 'cancelled'].includes(shift.status) && <div className="mt-2 flex gap-2">
+                                <button type="button" className="pos-icon-btn" onClick={() => openEditModal(shift)} aria-label={t('staffSchedule.workflow.edit', 'Edit shift')}><Pencil className="h-4 w-4" /></button>
+                                <button type="button" className="pos-icon-btn pos-icon-btn--danger" onClick={() => openEditModal(shift, true)} aria-label={t('staffSchedule.workflow.delete', 'Delete shift')}><Trash2 className="h-4 w-4" /></button>
+                              </div>}
                             </motion.div>
                           ))
                         )}
@@ -1379,12 +1330,11 @@ export const StaffScheduleView: React.FC = memo(() => {
               <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h3 className="text-base font-semibold">
-                    {t('staffSchedule.unscheduled', 'Not Scheduled This Week')} ({unscheduledStaff.length})
+                    {t('staffSchedule.unscheduled', 'Not Scheduled This Week')}
                   </h3>
-                  <p className={`text-sm ${mutedTextClass}`}>{t('staffSchedule.unscheduledHint', 'Tap a name to create their next shift quickly.')}</p>
                 </div>
               </div>
-              <motion.div variants={pageMotionContainer} className="mt-3 flex gap-2 overflow-x-auto scrollbar-hide pb-1">
+              <motion.div variants={pageMotionContainer} className="pos-scroll-row mt-3 gap-2">
                 {unscheduledStaff.length === 0 ? (
                   <span className={`text-sm ${mutedTextClass}`}>{t('staffSchedule.everyoneScheduled', 'Everyone has at least one shift this week.')}</span>
                 ) : (
@@ -1394,12 +1344,10 @@ export const StaffScheduleView: React.FC = memo(() => {
                       key={member.id}
                       type="button"
                       onClick={() => openCreateModal(defaultCreateDate, member.id)}
-                      className={`inline-flex shrink-0 items-center gap-2 rounded-full border px-3 py-2 text-sm transition-colors ${
-                        isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-white border-slate-300 text-slate-700 active:bg-slate-100'
-                      }`}
+                      className="pos-solid-btn pos-solid-btn--sm shrink-0"
                       aria-label={`${t('staffSchedule.addShiftForStaff', 'Add shift for this staff member')}: ${member.name}`}
                     >
-                      <Plus className="h-3.5 w-3.5" />
+                      <Plus className="h-4 w-4" aria-hidden="true" />
                       {member.name}
                     </motion.button>
                   ))
@@ -1438,9 +1386,9 @@ export const StaffScheduleView: React.FC = memo(() => {
                 type="button"
                 onClick={() => setPreviewWeekOpen(false)}
                 aria-label={t('staffSchedule.actions.close', 'Close')}
-                className={iconButtonClass}
+                className="liquid-glass-modal-close"
               >
-                <X className="h-4 w-4" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
@@ -1547,12 +1495,12 @@ export const StaffScheduleView: React.FC = memo(() => {
             role="dialog"
             aria-modal="true"
             aria-labelledby={createTitleId}
-            className={`relative flex h-[calc(100vh-3.5rem)] max-h-[calc(100vh-3.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border ${modalPanelClass}`}
+            className={`relative flex max-h-[calc(100vh-3.5rem)] w-full max-w-3xl flex-col overflow-hidden ${modalPanelClass}`}
           >
-            <div className={`flex items-start justify-between gap-3 shrink-0 border-b ${isDark ? 'border-zinc-800' : 'border-gray-200'} p-5 md:p-6`}>
+            <div className="flex items-start justify-between gap-3 shrink-0 border-b border-(--modal-glass-line) p-5 md:p-6">
               <div>
                 <h3 id={createTitleId} className="text-2xl font-semibold">{t(confirmDelete ? 'staffSchedule.workflow.delete' : editingShiftId ? 'staffSchedule.workflow.edit' : 'staffSchedule.addShift', confirmDelete ? 'Delete shift' : editingShiftId ? 'Edit shift' : 'Add Shift')}</h3>
-                <p className={`text-sm mt-1 ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
+                <p className="mt-1 text-sm text-(--pos-s-muted)">
                   {formatDate(createModalDate, { weekday: 'long', day: '2-digit', month: 'short' })}
                 </p>
               </div>
@@ -1560,22 +1508,22 @@ export const StaffScheduleView: React.FC = memo(() => {
                 type="button"
                 onClick={closeCreateModal}
                 aria-label={t('staffSchedule.actions.close', 'Close')}
-                className={iconButtonClass}
+                className="liquid-glass-modal-close"
               >
-                <X className="w-4 h-4" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
-            <fieldset disabled={confirmDelete || creatingShift} className="flex-1 min-h-0 overflow-y-auto scrollbar-hide space-y-4 p-5 md:p-6">
-              {confirmDelete && <p role="alert" className="rounded-xl border border-red-400 p-3 text-red-700 dark:text-red-300">{t('staffSchedule.workflow.deleteConfirm', 'Delete this planned shift? Review the staff member and times below before confirming.')}</p>}
+            <fieldset disabled={confirmDelete || creatingShift} className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto scrollbar-hide p-5 md:p-6">
+              {confirmDelete && <p role="alert" className="pos-notice pos-notice--bad">{t('staffSchedule.workflow.deleteConfirm', 'Delete this planned shift? Review the staff member and times below before confirming.')}</p>}
               <label className="block">
-                <span className={`text-sm font-medium ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
+                <span className="mb-1 block text-sm font-semibold text-(--pos-s-fg)">
                   {t('staffSchedule.fields.staff', 'Staff')}
                 </span>
                 <select
                   value={createStaffId}
                   onChange={e => setCreateStaffId(e.target.value)}
-                  className={`mt-1 ${inputClass}`}
+                  className={`block ${inputClass}`}
                 >
                   <option value="">{t('staffSchedule.selectStaff', 'Select staff')}</option>
                   {filteredStaff.map(member => (
@@ -1592,9 +1540,8 @@ export const StaffScheduleView: React.FC = memo(() => {
                     key={preset.key}
                     type="button"
                     onClick={() => applyTimePreset(preset)}
-                    className={`rounded-xl border px-3 py-2 text-sm font-medium transition-colors ${
-                      isDark ? 'bg-zinc-900 border-zinc-700 active:bg-zinc-800' : 'bg-white border-slate-300 active:bg-slate-100'
-                    }`}
+                    aria-pressed={isPresetActive(preset)}
+                    className={`pos-choice${isPresetActive(preset) ? ' is-selected' : ''}`}
                   >
                     {t(`staffSchedule.presets.${preset.key}`, preset.key)}
                   </button>
@@ -1602,13 +1549,13 @@ export const StaffScheduleView: React.FC = memo(() => {
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <div className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
-                  <p className={`text-sm font-medium mb-3 ${isDark ? 'text-zinc-200' : 'text-gray-800'}`}>
+                <div className="pos-card p-4">
+                  <p className="mb-3 text-sm font-semibold text-(--pos-s-fg)">
                     {t('staffSchedule.fields.startDateTime', 'Start (date & time)')}
                   </p>
-                  <div className="space-y-3">
-                    <input
-                      type="date"
+                  <div className="flex flex-col gap-3">
+                    <KitDateField
+                      type="date" required
                       value={createStartDate}
                       onChange={e => setCreateStartDate(e.target.value)}
                       className={inputClass}
@@ -1621,7 +1568,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                       >
                         {HOURS.map(hour => <option key={`start-hour-${hour}`} value={hour}>{hour}</option>)}
                       </select>
-                      <span className={`text-xl font-bold ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>:</span>
+                      <span className="text-xl font-bold text-(--pos-s-muted)">:</span>
                       <select
                         value={createStartMinute}
                         onChange={e => setCreateStartMinute(e.target.value)}
@@ -1633,13 +1580,13 @@ export const StaffScheduleView: React.FC = memo(() => {
                   </div>
                 </div>
 
-                <div className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
-                  <p className={`text-sm font-medium mb-3 ${isDark ? 'text-zinc-200' : 'text-gray-800'}`}>
+                <div className="pos-card p-4">
+                  <p className="mb-3 text-sm font-semibold text-(--pos-s-fg)">
                     {t('staffSchedule.fields.endDateTime', 'End (date & time)')}
                   </p>
-                  <div className="space-y-3">
-                    <input
-                      type="date"
+                  <div className="flex flex-col gap-3">
+                    <KitDateField
+                      type="date" required
                       value={createEndDate}
                       onChange={e => setCreateEndDate(e.target.value)}
                       className={inputClass}
@@ -1652,7 +1599,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                       >
                         {HOURS.map(hour => <option key={`end-hour-${hour}`} value={hour}>{hour}</option>)}
                       </select>
-                      <span className={`text-xl font-bold ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>:</span>
+                      <span className="text-xl font-bold text-(--pos-s-muted)">:</span>
                       <select
                         value={createEndMinute}
                         onChange={e => setCreateEndMinute(e.target.value)}
@@ -1680,9 +1627,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                         }
                         setCreateEndDate(toDateInputValue(endDay));
                       }}
-                      className={`w-full px-3 py-2 rounded-2xl border text-sm ${
-                        isDark ? 'bg-zinc-950 border-zinc-700 active:bg-zinc-800 text-zinc-300' : 'bg-white border-gray-300 active:bg-gray-100 text-gray-700'
-                      }`}
+                      className="pos-solid-btn pos-solid-btn--sm w-full"
                     >
                       {t('staffSchedule.nextDayShortcut', 'Set end date to next day')}
                     </button>
@@ -1690,20 +1635,17 @@ export const StaffScheduleView: React.FC = memo(() => {
                 </div>
               </div>
 
-              <div className={`rounded-xl border px-3 py-2 ${
-                shiftPreview.valid
-                  ? isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-emerald-800 dark:text-emerald-200' : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-emerald-700'
-                  : isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-amber-800 dark:text-amber-200' : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-amber-700'
-              }`}>
-                <p className="text-sm font-medium">{shiftPreview.valid ? t('staffSchedule.preview', 'Preview') : t('staffSchedule.validationLabel', 'Validation')}</p>
-                <p className="text-sm mt-0.5">{shiftPreview.message}</p>
+              {/* The preview is a plain fact (neutral); a problem is a kit warn notice. */}
+              <div className={shiftPreview.valid ? 'pos-frost rounded-xl border px-3 py-2' : 'pos-notice pos-notice--warn pos-notice--stack'}>
+                <p className="text-sm font-semibold text-(--pos-s-muted)">{shiftPreview.valid ? t('staffSchedule.preview', 'Preview') : t('staffSchedule.validationLabel', 'Validation')}</p>
+                <p className="mt-0.5 text-base font-semibold text-(--pos-s-fg)">{shiftPreview.message}</p>
               </div>
-              <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-600'}`}>
+              <p className="text-sm text-(--pos-s-muted)">
                 {t('staffSchedule.overnightHint', 'For overnight shifts, choose the next day as end date.')}
               </p>
 
               <label className="block">
-                <span className={`text-sm font-medium ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
+                <span className="mb-1 block text-sm font-semibold text-(--pos-s-fg)">
                   {t('staffSchedule.fields.notes', 'Notes')}
                 </span>
                 <textarea
@@ -1711,19 +1653,17 @@ export const StaffScheduleView: React.FC = memo(() => {
                   onChange={e => setCreateNotes(e.target.value)}
                   rows={3}
                   placeholder={t('staffSchedule.fields.notesPlaceholder', 'Optional notes...')}
-                  className={`mt-1 resize-none ${inputClass}`}
+                  className={`block resize-none py-2.5 ${inputClass}`}
                 />
               </label>
             </fieldset>
 
-            <div className={`flex items-center justify-end gap-3 shrink-0 border-t ${isDark ? 'border-zinc-800' : 'border-gray-200'} p-5 md:p-6`}>
+            <div className="flex items-center justify-end gap-3 shrink-0 border-t border-(--modal-glass-line) p-5 md:p-6">
               <button
                 type="button"
                 onClick={closeCreateModal}
                 disabled={creatingShift}
-                className={`px-5 py-3 rounded-xl border text-base ${
-                  isDark ? 'bg-zinc-900 border-zinc-700 active:bg-zinc-800' : 'bg-gray-100 border-gray-300 active:bg-gray-200'
-                }`}
+                className={secondaryButtonClass}
               >
                 {t('common.actions.cancel', 'Cancel')}
               </button>

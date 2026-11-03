@@ -106,7 +106,7 @@ export function TableReleaseOwedModal({
                 type="button"
                 disabled={busy}
                 onClick={onCollect}
-                className="flex min-h-[48px] items-center gap-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-left font-semibold transition active:bg-(--pos-s-surface-2) disabled:opacity-60"
+                className="pos-raised flex min-h-[48px] items-center gap-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-left font-semibold transition active:bg-(--pos-s-surface-2) disabled:opacity-60"
               >
                 <HandCoins className="h-5 w-5 shrink-0 text-emerald-500" />
                 <span>{t('tableRelease.collect', { defaultValue: 'Collect the payment' })}</span>
@@ -116,7 +116,7 @@ export function TableReleaseOwedModal({
               type="button"
               disabled={busy}
               onClick={onKeepOpenTab}
-              className="flex min-h-[48px] flex-col items-start gap-1 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-left transition active:bg-(--pos-s-surface-2) disabled:opacity-60"
+              className="pos-raised flex min-h-[48px] flex-col items-start gap-1 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-left transition active:bg-(--pos-s-surface-2) disabled:opacity-60"
             >
               <span className="flex items-center gap-3 font-semibold">
                 <Receipt className="h-5 w-5 shrink-0 text-amber-500" />
@@ -149,7 +149,7 @@ export function TableReleaseOwedModal({
                 type="button"
                 disabled={busy}
                 onClick={() => onRequestCancel ? onRequestCancel() : setAskingReason(true)}
-                className="flex min-h-[48px] items-center gap-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-left font-semibold transition active:bg-(--pos-s-surface-2) disabled:opacity-60"
+                className="pos-raised flex min-h-[48px] items-center gap-3 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-left font-semibold transition active:bg-(--pos-s-surface-2) disabled:opacity-60"
               >
                 <Ban className="h-5 w-5 shrink-0 text-red-500" />
                 <span>{t('tableRelease.cancelOrder', { defaultValue: 'Cancel the order' })}</span>

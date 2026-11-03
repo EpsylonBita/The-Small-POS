@@ -93,6 +93,7 @@ export const deriveEditSettlementFinancials = (
 };
 
 export interface EditSettlementRefundPreviewLike {
+  requiredRefundCents?: number;
   refundAmount?: unknown;
   ledgerPaidTotal?: unknown;
   paidTotal?: unknown;
@@ -105,8 +106,16 @@ const finiteOrNull = (value: unknown): number | null => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+export const resolveEditSettlementCollectAmount = (
+  preview: { requiredCollectCents?: number; nextTotal: number; paidTotal: number },
+): number => {
+  const cents = preview.requiredCollectCents
+    ?? Math.round((Number(preview.nextTotal || 0) - Number(preview.paidTotal || 0)) * 100);
+  return Math.max(0, cents) / 100;
+};
+
 /**
- * The refund a paid-order edit asks for: the native preview's `refundAmount`,
+ * The refund a paid-order edit asks for: the native preview's cents (or legacy `refundAmount`),
  * i.e. what the LOCAL payment rows hold beyond the new total.
  *
  * Review of the 29/09/2026 fixes: the prompt used `paidTotal - nextTotal`,
@@ -118,6 +127,9 @@ const finiteOrNull = (value: unknown): number | null => {
 export const resolveEditSettlementRefundAmount = (
   preview: EditSettlementRefundPreviewLike,
 ): number => {
+  if (preview.requiredRefundCents !== undefined) {
+    return Math.max(0, preview.requiredRefundCents) / 100;
+  }
   const nativeAmount = finiteOrNull(preview.refundAmount);
   if (nativeAmount !== null) {
     return roundMoney(Math.max(0, nativeAmount));

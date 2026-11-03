@@ -47,6 +47,9 @@ async function hydrateStartupSupabaseContext(): Promise<void> {
       organizationId,
       branchId,
     });
+    // Use the publishable key the server handed this till, when it has one.
+    const { applyRuntimeSupabaseKey } = await import('./renderer/services/supabase-runtime-key');
+    applyRuntimeSupabaseKey(config);
 
     try {
       localStorage.removeItem('terminal_id');
@@ -70,6 +73,10 @@ try {
   // release). Visual only; the click fires as before.
   const { installTouchPressFeedback } = await import('./renderer/utils/press-feedback');
   installTouchPressFeedback();
+
+  // Sideways rows fade at an edge with more to show and follow a mouse drag (founder 01/11).
+  const { installScrollRows } = await import('./renderer/utils/scroll-rows');
+  installScrollRows();
 
   // Founder 31/10 («το βίντεο να μπαίνει μόλις τρέχει η εφαρμογή»): the start-up intro clip starts now, before
   // the app loads, in its own root so the loading, sign-in and till screens can change underneath it. Only on

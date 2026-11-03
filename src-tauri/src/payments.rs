@@ -181,7 +181,7 @@ fn load_shift_role_status_and_staff(
         },
     )
     .optional()
-    .map_err(|e| format!("load shift role/status for payment repair: {e}"))
+    .map_err(crate::edit_settlement_recovery::storage_error)
 }
 
 fn blocker_is_resolvable_from_z_report(
@@ -633,6 +633,55 @@ fn build_payment_items_json(items: &[PaymentItemInput]) -> Option<Value> {
     ))
 }
 
+/// The keys a manual card keeps on its payment for the admin's read-time review
+/// (founder 01/11/2026, «Ναι, και offline»; Android `manualCardAdmissionMetadata`).
+const MANUAL_CARD_ADMISSION_KEYS: [&str; 3] =
+    ["payment_origin", "admission_basis", "admission_checked_at"];
+
+/// A manual card's admission: how the till admitted it (`live`, or `cached`:
+/// the last known server answer, offline) and when that answer was read, with
+/// its origin. None for any other payment, or without a well-formed admission.
+/// Only these keys are kept from the renderer: the row's metadata is read by
+/// the platform-settlement and review predicates, which a renderer value must
+/// never reach.
+pub(crate) fn manual_card_admission_metadata(input: &PaymentRecordInput) -> Option<Value> {
+    if input.method != "card" || input.payment_origin != "manual" {
+        return None;
+    }
+    let supplied = input.metadata.as_ref()?.as_object()?;
+    let basis = supplied
+        .get("admission_basis")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|basis| matches!(*basis, "live" | "cached"))?;
+    let checked_at = supplied
+        .get("admission_checked_at")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|at| chrono::DateTime::parse_from_rfc3339(at).is_ok())?;
+    Some(serde_json::json!({
+        "payment_origin": "manual",
+        "admission_basis": basis,
+        "admission_checked_at": checked_at,
+    }))
+}
+
+/// The admission a manual card row kept, for a sync payload rebuilt from the row.
+fn stored_manual_card_admission(raw: Option<&str>) -> Option<Value> {
+    let stored = serde_json::from_str::<Value>(raw?).ok()?;
+    stored.get("admission_basis").and_then(Value::as_str)?;
+    let kept: serde_json::Map<String, Value> = MANUAL_CARD_ADMISSION_KEYS
+        .iter()
+        .filter_map(|key| {
+            stored
+                .get(*key)
+                .filter(|value| value.is_string())
+                .map(|value| (key.to_string(), value.clone()))
+        })
+        .collect();
+    Some(Value::Object(kept))
+}
+
 fn normalize_local_payment_origin(requested: &str, method: &str) -> String {
     match requested.trim().to_ascii_lowercase().as_str() {
         "terminal" if method == "card" => "terminal".to_string(),
@@ -800,8 +849,8 @@ pub(crate) fn build_applied_canonical_payment_record_input(
 pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecordInput, String> {
     let order_id = str_field(payload, "orderId")
         .or_else(|| str_field(payload, "order_id"))
-        .ok_or("Missing orderId")?;
-    let raw_method = str_field(payload, "method").ok_or("Missing method")?;
+        .ok_or("PAYMENT_INVALID_REQUEST")?;
+    let raw_method = str_field(payload, "method").ok_or("PAYMENT_INVALID_REQUEST")?;
     let method = match raw_method.trim().to_ascii_lowercase().as_str() {
         "cash" => "cash".to_string(),
         "card" => "card".to_string(),
@@ -809,14 +858,12 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         "other" => "other".to_string(),
         "room_charge" | "room-charge" => "room_charge".to_string(),
         _ => {
-            return Err(format!(
-                "Invalid method: {raw_method}. Must be cash, card, room_charge, or other"
-            ));
+            return Err("PAYMENT_INVALID_REQUEST".into());
         }
     };
-    let amount = num_field(payload, "amount").ok_or("Missing amount")?;
+    let amount = num_field(payload, "amount").ok_or("PAYMENT_INVALID_REQUEST")?;
     if amount <= 0.0 {
-        return Err("Amount must be positive".into());
+        return Err("PAYMENT_INVALID_REQUEST".into());
     }
     let tip_amount = num_field(payload, "tipAmount")
         .or_else(|| num_field(payload, "tip_amount"))
@@ -828,7 +875,7 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
     if !payload_collects_outstanding_balance(payload)
         && Cents::round_half_even(tip_amount).as_i64() > Cents::round_half_even(amount).as_i64()
     {
-        return Err("Tip amount cannot exceed the gross payment amount".into());
+        return Err("PAYMENT_INVALID_REQUEST".into());
     }
     let requested_tip_recipient_role = str_field(payload, "tipRecipientRole")
         .or_else(|| str_field(payload, "tip_recipient_role"))
@@ -836,9 +883,7 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         .filter(|value| !value.is_empty());
     if let Some(role) = requested_tip_recipient_role.as_deref() {
         if !matches!(role, "waiter" | "cashier" | "driver" | "staff") {
-            return Err(format!(
-                "Invalid tip recipient role: {role}. Must be waiter, cashier, driver, or staff"
-            ));
+            return Err("PAYMENT_INVALID_REQUEST".into());
         }
     }
 
@@ -1187,7 +1232,7 @@ pub(crate) fn load_order_tip_inside_total_cents(
     )
     .optional()
     .map(|cents| cents.unwrap_or(0))
-    .map_err(|e| format!("load the tip inside the total of {order_id}: {e}"))
+    .map_err(crate::edit_settlement_recovery::storage_error)
 }
 
 /// How much of the order's own tip ([`load_order_tip_inside_total_cents`]) no
@@ -1581,7 +1626,7 @@ fn load_order_label_cents(conn: &Connection, order_id: &str) -> Result<(i64, i64
             params![order_id],
             |row| row.get(0),
         )
-        .map_err(|e| format!("load order total for payment balance snapshot {order_id}: {e}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
     Ok((order_total_cents, load_label_covered_cents(conn, order_id)?))
 }
 
@@ -1624,7 +1669,7 @@ pub(crate) fn load_order_payment_balance_snapshot(
             params![order_id],
             |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
-        .map_err(|e| format!("load order total for payment balance snapshot {order_id}: {e}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
     let net_paid = load_principal_paid_for_order(conn, order_id)?;
     let completed_payment_count = conn
         .query_row(
@@ -1635,7 +1680,7 @@ pub(crate) fn load_order_payment_balance_snapshot(
             params![order_id],
             |row| row.get::<_, i64>(0),
         )
-        .map_err(|error| format!("load completed payment count for order {order_id}: {error}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
     let order_total_cents = Cents::round_half_even(order_total).as_i64();
     let ledger_generation =
         load_completed_payment_ledger_generation(conn, order_id, order_total_cents)?;
@@ -1671,7 +1716,7 @@ fn load_completed_payment_ledger_generation(
              ORDER BY op.id ASC"
                 .replace("$COUNTED", &counted_financial_payment_sql(conn, "op")?),
         )
-        .map_err(|error| format!("prepare payment-ledger generation for {order_id}: {error}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
     let rows = statement
         .query_map(params![order_id], |row| {
             Ok((
@@ -1684,7 +1729,7 @@ fn load_completed_payment_ledger_generation(
                 row.get::<_, i64>(6)?,
             ))
         })
-        .map_err(|error| format!("query payment-ledger generation for {order_id}: {error}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
 
     let mut digest = Sha256::new();
     // Keep the original zero-tip generation stable for already held receipts.
@@ -1694,10 +1739,8 @@ fn load_completed_payment_ledger_generation(
     digest.update(order_total_cents.to_le_bytes());
     let mut receipts_carry_tips = false;
     for row in rows {
-        let (payment_id, method, gross_cents, reference, origin, refunded_cents, tip_cents) = row
-            .map_err(
-            |error| format!("read completed payment for ledger generation {order_id}: {error}"),
-        )?;
+        let (payment_id, method, gross_cents, reference, origin, refunded_cents, tip_cents) =
+            row.map_err(crate::edit_settlement_recovery::storage_error)?;
         receipts_carry_tips |= tip_cents > 0;
         // A gift row fingerprints its effective reversal, so a newly proven
         // return floor invalidates a held settlement; other rows hash as before.
@@ -1717,7 +1760,7 @@ fn load_completed_payment_ledger_generation(
             origin,
             reversed_cents,
         ))
-        .map_err(|error| format!("encode payment-ledger generation: {error}"))?;
+        .map_err(|_| "EDIT_INVALID_REQUEST".to_string())?;
         digest.update((encoded.len() as u64).to_le_bytes());
         digest.update(encoded);
         if tip_cents > 0 {
@@ -1864,10 +1907,10 @@ pub(crate) fn derive_payment_method(
                AND TRIM(COALESCE(method, '')) != ''",
             status = financial_payment_status_sql(conn, "order_payments")?
         ))
-        .map_err(|e| format!("prepare derive_payment_method: {e}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
     let methods: Vec<String> = stmt
         .query_map(params![order_id], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("query derive_payment_method: {e}"))?
+        .map_err(crate::edit_settlement_recovery::storage_error)?
         .filter_map(Result::ok)
         .collect();
 
@@ -1933,7 +1976,7 @@ pub(crate) fn recompute_order_payment_state(
          WHERE id = ?4",
         params![new_payment_status, payment_id, now, order_id],
     )
-    .map_err(|e| format!("update order payment: {e}"))?;
+    .map_err(crate::edit_settlement_recovery::storage_error)?;
 
     Ok(())
 }
@@ -2500,7 +2543,7 @@ fn resolve_local_payment_currency_and_collector(
         let original: Option<(String, Option<String>, String, i64, String)> = conn.query_row(
             "SELECT currency, order_id, transaction_type, amount, device_id FROM ecr_transactions WHERE id = ?1 AND status = 'approved' LIMIT 1",
             params![reference], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
-        ).optional().map_err(|error| format!("read approved payment currency: {error}"))?;
+        ).optional().map_err(crate::edit_settlement_recovery::storage_error)?;
         if let Some((currency, original_order, kind, cents, device)) = original {
             let client_request_id: Option<String> = conn
                 .query_row(
@@ -2509,7 +2552,7 @@ fn resolve_local_payment_currency_and_collector(
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(|error| error.to_string())?
+                .map_err(crate::edit_settlement_recovery::storage_error)?
                 .flatten();
             let same_order = original_order.as_deref().is_some_and(|original| {
                 original == input.order_id
@@ -2552,7 +2595,7 @@ fn resolve_local_payment_currency_and_collector(
         let original: Option<(String, String, i64, i64, String, Option<String>)> = conn.query_row(
             "SELECT order_id, method, COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER)), COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0), currency, transaction_ref FROM order_payments WHERE idempotency_key = ?1 AND status = 'completed' LIMIT 1",
             params![key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
-        ).optional().map_err(|error| format!("read original payment currency: {error}"))?;
+        ).optional().map_err(crate::edit_settlement_recovery::storage_error)?;
         if let Some((order, method, amount, tip, currency, reference)) = original {
             if order != input.order_id
                 || method != input.method
@@ -2580,7 +2623,7 @@ fn resolve_local_payment_currency_and_collector(
          AND transaction_type = 'fiscal_receipt' AND status IN ('pending','processing','timeout','approved')
          ORDER BY created_at DESC LIMIT 1",
         params![input.order_id], |row| row.get(0),
-    ).optional().map_err(|error| format!("read original fiscal currency: {error}"))?;
+    ).optional().map_err(crate::edit_settlement_recovery::storage_error)?;
     if let Some(currency) = fiscal_currency {
         return normalize_currency_code(&currency)
             .ok_or_else(|| "PAYMENT_CURRENCY_UNAVAILABLE".to_string());
@@ -2606,7 +2649,10 @@ fn resolve_local_payment_currency_and_collector(
             params![input.order_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .map_err(|error| format!("read fresh payment operating scope: {error}"))?;
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => "PAYMENT_ORDER_NOT_FOUND".to_string(),
+            other => crate::edit_settlement_recovery::storage_error(other),
+        })?;
     let order_currency =
         crate::shifts::recorded_operating_currency(conn, "orders", &input.order_id)?;
     let ledger_currency = resolve_order_payment_currency(conn, &input.order_id)?;
@@ -2673,7 +2719,7 @@ fn resolve_local_payment_currency_and_collector(
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()
-            .map_err(|_| "EDIT_LOCAL_OPERATION_FAILED")?
+            .map_err(crate::edit_settlement_recovery::storage_error)?
             .ok_or("EDIT_PAYMENT_COLLECTOR_UNAVAILABLE")?;
         if status != "active" || !matches!(role.as_str(), "cashier" | "manager") {
             return Err("SHIFT_CURRENCY_UNAVAILABLE".into());
@@ -2701,7 +2747,7 @@ fn resolve_local_payment_currency_and_collector(
                 params![payment_shift],
                 |row| row.get(0),
             )
-            .map_err(|_| "EDIT_LOCAL_OPERATION_FAILED")?;
+            .map_err(crate::edit_settlement_recovery::storage_error)?;
         if !known {
             return Err("EDIT_PAYMENT_COLLECTOR_UNAVAILABLE".into());
         }
@@ -2726,7 +2772,7 @@ pub(crate) fn prepare_local_payment_currency(
     let mut collecting_cashier = None;
     let currency =
         resolve_local_payment_currency_and_collector(conn, &input, &mut collecting_cashier)?;
-    let fields = payload.as_object_mut().ok_or("Invalid payment payload")?;
+    let fields = payload.as_object_mut().ok_or("PAYMENT_INVALID_REQUEST")?;
     fields.insert("currency".to_string(), Value::String(currency));
     if let Some((shift, staff)) = collecting_cashier {
         // Freeze the validated collector before fiscal/card dispatch. Recovery
@@ -2844,7 +2890,7 @@ pub(crate) fn record_payment_in_connection(
             "SELECT id, order_id, method, COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER)), currency, status, metadata FROM order_payments WHERE idempotency_key = ?1",
             params![input.idempotency_key],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
-        ).optional().map_err(|e| format!("TWINT replay lookup: {e}"))?;
+        ).optional().map_err(crate::edit_settlement_recovery::storage_error)?;
         if let Some((id, order, method, cents, currency, status, prior_metadata)) = prior {
             if order != input.order_id
                 || method != "twint"
@@ -2942,13 +2988,13 @@ pub(crate) fn record_payment_in_connection(
                 ))
             },
         )
-        .map_err(|_| format!("Order not found: {}", input.order_id))?;
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => "PAYMENT_ORDER_NOT_FOUND".to_string(),
+            other => crate::edit_settlement_recovery::storage_error(other),
+        })?;
 
     if is_ghost {
-        return Err(format!(
-            "Cannot record payment for ghost order: {}",
-            input.order_id
-        ));
+        return Err("PAYMENT_GHOST_ORDER".into());
     }
 
     // Store collectability is decided by the platform's own disposition, NOT
@@ -2985,12 +3031,8 @@ pub(crate) fn record_payment_in_connection(
         input.method.trim().to_ascii_lowercase().as_str(),
         "cash" | "card" | "twint"
     ) {
-        if let Some(kind) = platform_settlement_kind(conn, &input.order_id) {
-            return Err(format!(
-                "{PLATFORM_HELD_COLLECTION_ERROR}: order {} is settled by the platform ({}). The money is not in this till — it arrives by bank settlement.",
-                input.order_id,
-                kind.slug()
-            ));
+        if let Some(_kind) = platform_settlement_kind(conn, &input.order_id) {
+            return Err(PLATFORM_HELD_COLLECTION_ERROR.into());
         }
         // Shared rule R4 (round 3 review, 01/10/2026; Android
         // `assertOrderIsStoreCollectable`): the server already refused a till
@@ -3007,10 +3049,7 @@ pub(crate) fn record_payment_in_connection(
             .eq_ignore_ascii_case("sync_reconstructed")
             && order_has_platform_held_set_aside(conn, &input.order_id)
         {
-            return Err(format!(
-                "{PLATFORM_HELD_COLLECTION_ERROR}: order {} is settled by the platform (the server refused a till payment on it). The money is not in this till — it arrives by bank settlement.",
-                input.order_id
-            ));
+            return Err(PLATFORM_HELD_COLLECTION_ERROR.into());
         }
     }
 
@@ -3087,18 +3126,14 @@ pub(crate) fn record_payment_in_connection(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(|value| value.to_string())
-                .ok_or("Cashier-collected payments require a cashier shift context")?;
+                .ok_or("PAYMENT_COLLECTOR_SHIFT_REQUIRED")?;
             let Some((role_type, shift_staff_id, _)) =
                 load_shift_role_status_and_staff(conn, &shift_id)?
             else {
-                return Err(format!(
-                    "Requested cashier shift {shift_id} does not exist for this payment"
-                ));
+                return Err("EDIT_PAYMENT_COLLECTOR_UNAVAILABLE".into());
             };
             if role_type != "cashier" && role_type != "manager" {
-                return Err(format!(
-                    "Requested shift {shift_id} is not a cashier or manager drawer"
-                ));
+                return Err("PAYMENT_COLLECTOR_NOT_DRAWER_OWNER".into());
             }
             let staff_id = input
                 .requested_staff_id
@@ -3113,9 +3148,7 @@ pub(crate) fn record_payment_in_connection(
         } else if keep_delivery_unassigned {
             (None, None)
         } else if cashier_collected_delivery_cash {
-            return Err(
-                "Cashier-collected delivery payments require a cashier shift context".to_string(),
-            );
+            return Err("PAYMENT_COLLECTOR_SHIFT_REQUIRED".to_string());
         } else {
             order_ownership::resolve_order_owner(
                 conn,
@@ -3178,7 +3211,7 @@ pub(crate) fn record_payment_in_connection(
                 input.order_id
             ],
         )
-        .map_err(|e| format!("update order ownership for payment: {e}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
     }
 
     // W4c dual-write: every monetary REAL column gets its `_cents` sibling
@@ -3217,7 +3250,7 @@ pub(crate) fn record_payment_in_connection(
             } else if input.method == "twint" {
                 input.metadata.as_ref().map(Value::to_string)
             } else {
-                None
+                manual_card_admission_metadata(input).map(|metadata| metadata.to_string())
             },
         ),
     };
@@ -3271,7 +3304,7 @@ pub(crate) fn record_payment_in_connection(
             payment_metadata,
         ],
     )
-    .map_err(|e| format!("insert payment: {e}"))?;
+    .map_err(crate::edit_settlement_recovery::storage_error)?;
 
     for item in &input.items {
         let item_id = Uuid::new_v4().to_string();
@@ -3292,7 +3325,7 @@ pub(crate) fn record_payment_in_connection(
                 item.order_item_id,
             ],
         )
-        .map_err(|e| format!("insert payment item: {e}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_error)?;
     }
 
     if options.set_aside.is_some() {
@@ -3338,11 +3371,9 @@ pub(crate) fn record_payment_in_connection(
                        AND COALESCE(is_transferred, 0) = 0",
                         params![input.amount, amount_cents, updated_at, input.order_id],
                     )
-                    .map_err(|e| format!("update driver cash earnings: {e}"))?;
+                    .map_err(crate::edit_settlement_recovery::storage_error)?;
                 if updated == 0 {
-                    return Err(
-                        "Driver cash payment requires an active unsettled driver earning".into(),
-                    );
+                    return Err("PAYMENT_DRIVER_EARNING_REQUIRED".into());
                 }
             }
             "card" => {
@@ -3362,11 +3393,9 @@ pub(crate) fn record_payment_in_connection(
                        AND COALESCE(is_transferred, 0) = 0",
                         params![input.amount, amount_cents, updated_at, input.order_id],
                     )
-                    .map_err(|e| format!("update driver card earnings: {e}"))?;
+                    .map_err(crate::edit_settlement_recovery::storage_error)?;
                 if updated == 0 {
-                    return Err(
-                        "Driver card payment requires an active unsettled driver earning".into(),
-                    );
+                    return Err("PAYMENT_DRIVER_EARNING_REQUIRED".into());
                 }
             }
             _ => {}
@@ -3385,7 +3414,7 @@ pub(crate) fn record_payment_in_connection(
                      WHERE staff_shift_id = ?4",
                     params![input.amount, amount_cents, updated_at, sid],
                 )
-                .map_err(|e| format!("update drawer cash_sales: {e}"))?;
+                .map_err(crate::edit_settlement_recovery::storage_error)?;
             } else if input.method == "card" {
                 // W4c dual-write: mirror total_card_sales onto cents.
                 conn.execute(
@@ -3396,7 +3425,7 @@ pub(crate) fn record_payment_in_connection(
                      WHERE staff_shift_id = ?4",
                     params![input.amount, amount_cents, updated_at, sid],
                 )
-                .map_err(|e| format!("update drawer card_sales: {e}"))?;
+                .map_err(crate::edit_settlement_recovery::storage_error)?;
             }
         }
     }
@@ -3410,6 +3439,9 @@ pub(crate) fn record_payment_in_connection(
         // W4d-i: additive cents emission alongside legacy float keys.
         // Admin-dashboard still reads the float keys; cents keys are
         // forward-compat for the wire-format cutover follow-up.
+        // A manual card sends the admission its row kept, nothing else.
+        let queued_metadata =
+            manual_card_admission_metadata(input).or_else(|| input.metadata.clone());
         let sync_payload = serde_json::json!({
             "paymentId": payment_id,
             "orderId": input.order_id,
@@ -3426,7 +3458,7 @@ pub(crate) fn record_payment_in_connection(
             "tipRecipientStaffShiftId": tip_recipient_staff_shift_id,
             "tip_recipient_staff_shift_id": tip_recipient_staff_shift_id,
             "currency": input.currency,
-            "metadata": input.metadata,
+            "metadata": queued_metadata,
             "cashReceived": input.cash_received,
             "cash_received_cents": input.cash_received
                 .map(|v| Cents::round_half_even(v).as_i64()),
@@ -3458,7 +3490,7 @@ pub(crate) fn record_payment_in_connection(
             None,
             &updated_at,
         )
-        .map_err(|e| format!("enqueue canonical payment sync: {e}"))?;
+        .map_err(crate::edit_settlement_recovery::storage_message)?;
         // Wave 5 Session 7 PR 0: removed the defensive
         // `DELETE FROM parity_sync_queue WHERE table_name = 'payments'`
         // that used to sit here — with the producer cutover it would
@@ -4601,11 +4633,23 @@ pub(crate) fn build_payment_sync_payload_for_payment(
     let items = load_payment_items_for_payment(conn, payment_id)?;
     let settlement_adjustments =
         load_edit_settlement_refund_proof_for_payment(conn, payment_id, order_id.as_str())?;
+    let manual_card_admission = if method == "card" && payment_origin == "manual" {
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT metadata FROM order_payments WHERE id = ?1",
+                params![payment_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("load manual card admission: {e}"))?;
+        stored_manual_card_admission(raw.as_deref())
+    } else {
+        None
+    };
     // W4d-i: additive cents emission alongside legacy float keys.
     // Admin-dashboard's Zod schema currently requires `amount` (float);
     // adding `amount_cents` (integer) lets a follow-up admin update
     // switch to cents preference. 4d-cleanup later removes the float keys.
-    Ok(serde_json::json!({
+    let mut payload = serde_json::json!({
         "paymentId": payment_id,
         "payment_id": payment_id,
         "local_payment_id": payment_id,
@@ -4647,8 +4691,11 @@ pub(crate) fn build_payment_sync_payload_for_payment(
         } else {
             Value::Array(settlement_adjustments)
         },
-    })
-    .to_string())
+    });
+    if let Some(admission) = manual_card_admission {
+        payload["metadata"] = admission;
+    }
+    Ok(payload.to_string())
 }
 
 pub(crate) fn refresh_payment_sync_queue_entry(
@@ -4795,11 +4842,12 @@ fn enqueue_order_payment_snapshot_sync(
     payment_status: &str,
     payment_method: &str,
 ) -> Result<(), String> {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "orderId": order_id,
         "paymentStatus": payment_status,
         "paymentMethod": payment_method,
     });
+    crate::order_ownership::add_order_organization(conn, order_id, &mut payload);
     crate::sync_queue::enqueue_payload_item(
         conn,
         "orders",
@@ -4975,7 +5023,7 @@ pub(crate) fn update_payment_method_for_payment_with_actor(
         _ => return Err("Payment method edits only support cash or card".into()),
     };
 
-    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, order_id_raw).ok_or("Order not found")?;
     if ecommerce_holds_payment(&conn, &order_id)? {
         return Err(
@@ -5075,8 +5123,7 @@ pub(crate) fn update_payment_method_for_payment_with_actor(
         // carrier of the edit intent. The local derived value stays at
         // `None` (→ "pending") until a remote payment row lands.
         let now = Utc::now().to_rfc3339();
-        let tx = conn
-            .transaction()
+        let tx = crate::db::immediate_transaction(&conn)
             .map_err(|e| format!("begin payment snapshot fallback transaction: {e}"))?;
         tx.execute(
             "UPDATE orders
@@ -5125,9 +5172,27 @@ pub(crate) fn update_payment_method_for_payment_with_actor(
 
     ensure_manual_payment_method_edit(&conn, &order_id, &payment_id)?;
     if current_method == next_method {
+        let has_earning: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM driver_earnings WHERE order_id=?1)",
+                [&order_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !has_earning && !payment_sync_queue_needs_retry(&conn, &payment_id)? {
+            let payment_status: String = conn
+                .query_row(
+                    "SELECT COALESCE(payment_status,'pending') FROM orders WHERE id=?1",
+                    [&order_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            return Ok(
+                serde_json::json!({"success":true,"data":{"orderId":order_id,"paymentId":payment_id,"paymentMethod":current_method,"paymentStatus":payment_status,"retriedSync":false}}),
+            );
+        }
         let now = Utc::now().to_rfc3339();
-        let tx = conn
-            .transaction()
+        let tx = crate::db::immediate_transaction(&conn)
             .map_err(|e| format!("begin same-method payment edit transaction: {e}"))?;
         refresh_driver_earning_for_payment_method_edit(&tx, &order_id, &now)?;
         let retried_sync = if payment_sync_queue_needs_retry(&tx, &payment_id)? {
@@ -5159,8 +5224,7 @@ pub(crate) fn update_payment_method_for_payment_with_actor(
     }
 
     let now = Utc::now().to_rfc3339();
-    let tx = conn
-        .transaction()
+    let tx = crate::db::immediate_transaction(&conn)
         .map_err(|e| format!("begin payment method update transaction: {e}"))?;
     tx.execute(
         "UPDATE order_payments
@@ -6681,6 +6745,111 @@ mod tests {
             &serde_json::json!({"orderId":"tip-order","method":"cash","amount":2,"tipAmount":3})
         )
         .is_err());
+    }
+
+    /// Founder 01/11/2026 («Ναι, και offline»): a manual card keeps how it was
+    /// admitted and when, on its row, its queued payload, a payload rebuilt from
+    /// the row and the metadata of the body sent to the server, as Android's do.
+    /// Nothing else the renderer put in its metadata is kept.
+    #[test]
+    fn manual_card_admission_survives_to_the_sync_payload() {
+        let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO orders (currency, branch_id, id,items,total_amount,total_amount_cents,status,order_type,payment_status,sync_status,created_at,updated_at) VALUES ('EUR', 'b1', 'manual-card-order','[]',12,1200,'completed','takeaway','pending','pending','now','now')", []).unwrap();
+        }
+        let recorded = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "manual-card-order", "method": "card", "amount": 12,
+                "paymentOrigin": "manual", "idempotencyKey": "manual-card-offline",
+                "metadata": {
+                    "admission_basis": "cached",
+                    "admission_checked_at": "2026-11-01T09:00:00.000Z",
+                    "payment_origin": "platform_settlement",
+                    "terminal_processed": true,
+                },
+            }),
+        )
+        .unwrap();
+        let payment_id = recorded["paymentId"].as_str().unwrap().to_string();
+        let expected = serde_json::json!({
+            "payment_origin": "manual",
+            "admission_basis": "cached",
+            "admission_checked_at": "2026-11-01T09:00:00.000Z",
+        });
+
+        let conn = db.conn.lock().unwrap();
+        let (origin, stored): (String, String) = conn
+            .query_row(
+                "SELECT payment_origin, metadata FROM order_payments WHERE id=?1",
+                params![payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(origin, "manual");
+        assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), expected);
+
+        let queued: Value = serde_json::from_str(
+            &conn
+                .query_row(
+                    "SELECT data FROM parity_sync_queue WHERE table_name='payments' AND record_id=?1",
+                    params![payment_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(queued["metadata"], expected);
+        let rebuilt: Value = serde_json::from_str(
+            &build_payment_sync_payload_for_payment(&conn, &payment_id).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt["metadata"], expected);
+
+        // The metadata of the body POSTed to /api/pos/payments.
+        for data in [&queued, &rebuilt] {
+            let body = crate::sync::merge_recorded_payment_sync_metadata(
+                data,
+                serde_json::json!({
+                    "terminal_id": "terminal-1",
+                    "local_payment_id": payment_id,
+                    "payment_origin": data["paymentOrigin"],
+                }),
+            );
+            assert_eq!(body["payment_origin"], "manual");
+            assert_eq!(body["admission_basis"], "cached");
+            assert_eq!(body["admission_checked_at"], "2026-11-01T09:00:00.000Z");
+            assert!(body.get("terminal_processed").is_none());
+        }
+    }
+
+    #[test]
+    fn a_card_without_a_well_formed_admission_keeps_no_metadata() {
+        let input = |method: &str, origin: &str, metadata: Value| {
+            build_payment_record_input(&serde_json::json!({
+                "orderId": "o", "method": method, "amount": 5, "paymentOrigin": origin,
+                "transactionRef": "ref", "metadata": metadata,
+            }))
+            .unwrap()
+        };
+        let admission = serde_json::json!({"admission_basis":"live","admission_checked_at":"2026-11-01T09:00:00Z"});
+        assert!(
+            manual_card_admission_metadata(&input("card", "manual", admission.clone())).is_some()
+        );
+        assert!(
+            manual_card_admission_metadata(&input("card", "terminal", admission.clone())).is_none()
+        );
+        assert!(manual_card_admission_metadata(&input("cash", "manual", admission)).is_none());
+        for metadata in [
+            serde_json::json!({}),
+            serde_json::json!({"admission_basis":"guess","admission_checked_at":"2026-11-01T09:00:00Z"}),
+            serde_json::json!({"admission_basis":"cached","admission_checked_at":"yesterday"}),
+            serde_json::json!({"admission_basis":"cached"}),
+        ] {
+            assert!(manual_card_admission_metadata(&input("card", "manual", metadata)).is_none());
+        }
     }
 
     fn twint_manual_fixture() -> (DbState, Value) {
@@ -9206,6 +9375,7 @@ mod tests {
 
     #[test]
     fn test_update_payment_method_requeues_payment_sync_and_updates_snapshot() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
@@ -9354,6 +9524,7 @@ mod tests {
 
     #[test]
     fn test_update_payment_method_rejects_multiple_completed_payments_with_stable_code() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
@@ -9426,6 +9597,7 @@ mod tests {
 
     #[test]
     fn test_update_payment_method_targets_one_completed_split_payment() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
@@ -9562,6 +9734,7 @@ mod tests {
 
     #[test]
     fn test_update_payment_method_falls_back_to_order_snapshot_when_payment_row_missing() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         // W4e Step 0: dual-populate (18.5 → 1850).
@@ -9640,6 +9813,7 @@ mod tests {
 
     #[test]
     fn test_update_payment_method_same_method_requeues_failed_payment_sync() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
@@ -9755,9 +9929,19 @@ mod tests {
 
     #[test]
     fn test_update_payment_method_same_method_noop_when_sync_is_healthy() {
-        let db = test_db();
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let fixture = crate::tests::harness::TestDb::open();
+        let db = &fixture.state;
         configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "restaurant", "store_currency_available", "true").unwrap();
+        db::set_setting(
+            &conn,
+            "restaurant",
+            "store_currency_source",
+            "branch_country",
+        )
+        .unwrap();
         // W4e Step 0: dual-populate (6.25 → 625).
         conn.execute(
             "INSERT INTO orders (currency, branch_id,
@@ -9819,8 +10003,13 @@ mod tests {
         .expect("mark payment sync metadata synced");
         drop(conn);
 
+        let _writer = crate::admission_tests::writer(fixture.db_path());
+        let before = db.conn.lock().unwrap().total_changes();
+        let at = std::time::Instant::now();
         let result =
             update_payment_method(&db, "ord-method-noop", "cash").expect("same-method no-op");
+        assert!(at.elapsed() < std::time::Duration::from_millis(250));
+        assert_eq!(db.conn.try_lock().unwrap().total_changes(), before);
         assert_eq!(result["data"]["retriedSync"], false);
         assert_eq!(result["data"]["paymentMethod"], "cash");
 

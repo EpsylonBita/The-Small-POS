@@ -9,6 +9,7 @@ import { useTheme } from '../../contexts/theme-context';
 import { OrderStatusControls } from './OrderStatusControls';
 import TableOrderIcon from '../icons/TableOrderIcon';
 import { DeliveryScooterIcon, PickupHandBagIcon } from '../icons/OrderTypeGlyphs';
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 import type { Order, OrderStatus } from '../../types/orders';
 import toast from 'react-hot-toast';
 import { PluginIcon, isExternalPlatform } from '../../utils/plugin-icons';
@@ -18,8 +19,7 @@ import {
   normalizeOrderCustomerName,
   normalizeOrderTypeForDisplay,
 } from '../../utils/orderDisplay';
-import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../../utils/orderNumberUtils';
-import { resolveFoodDeliveryShortCode } from '../../utils/foodDeliveryMetadata';
+import { formatGridOrderNumber } from '../../utils/gridOrderNumber';
 import { formatCurrency } from '../../utils/format';
 import { openExternalUrl } from '../../utils/external-url';
 import {
@@ -47,9 +47,6 @@ interface OrderCardProps {
   /** Local kitchen handoff stage from this terminal's KDS. Display only: never the canonical status. */
   kitchenStage?: LocalPreparationPhase;
 }
-
-const KIOSK_ORDER_NUMBER_PATTERN = /^#?[A-Za-z]+-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-\d+$/;
-const KIOSK_SHORT_ORDER_NUMBER_PATTERN = /^#?K[A-Za-z]*-\d+$/i;
 
 function readFiniteNumber(value: unknown): number | null {
   if (typeof value === 'number') {
@@ -126,64 +123,8 @@ export const OrderCard = memo<OrderCardProps>(({
   };
 
   // Format the stable order number from the order itself
-  const formatOrderNumber = () => {
-    // Platform orders headline the rider-facing 4-digit short code (efood's
-    // «#4545»), never the long external order id embedded in order_number.
-    const platformShortCode = resolveFoodDeliveryShortCode(order);
-    if (platformShortCode) {
-      return `#${platformShortCode}`;
-    }
-    const orderNum = getVisibleOrderNumber(order);
-    if (orderNum) {
-      const trimmedOrderNum = orderNum.trim();
-      const isHashedFallbackNumber = /^#?[A-Za-z]+-\d{8}-[a-f0-9]{32}$/i.test(trimmedOrderNum);
-      if (isHashedFallbackNumber) {
-        const compactFallbackNumber = formatCompactOrderNumberForDisplay(
-          trimmedOrderNum,
-          order.created_at || order.createdAt,
-        );
-        // The fallback already reads «ORD #0ZF4…»: never prefix a second # («#ORD #…», founder 31/10).
-        return compactFallbackNumber.includes('#')
-          ? compactFallbackNumber
-          : `#${compactFallbackNumber}`;
-      }
-
-      if (
-        KIOSK_ORDER_NUMBER_PATTERN.test(trimmedOrderNum) ||
-        KIOSK_SHORT_ORDER_NUMBER_PATTERN.test(trimmedOrderNum)
-      ) {
-        return formatCompactOrderNumberForDisplay(
-          trimmedOrderNum,
-          order.created_at || order.createdAt,
-        );
-      }
-
-      // Satellite display code (e.g. M1-0042, minted by a waiter phone):
-      // the terminal marker IS the point — never strip it down to #0042.
-      if (/^[A-Za-z0-9]{1,4}-\d{1,6}$/.test(trimmedOrderNum)) {
-        return `#${trimmedOrderNum.toUpperCase()}`;
-      }
-
-      // If it's already formatted like "POS-20251212-0001", extract the last part
-      if (orderNum.includes('-')) {
-        const parts = orderNum.split('-');
-        const lastPart = parts[parts.length - 1];
-        // If the last part is numeric, format it as #XX
-        if (/^\d+$/.test(lastPart)) {
-          return `#${lastPart.padStart(2, '0')}`;
-        }
-      }
-      // If it's just a number, format it
-      if (/^\d+$/.test(orderNum)) {
-        return `#${orderNum.padStart(2, '0')}`;
-      }
-      // Otherwise return as-is with # prefix
-      return orderNum.startsWith('#') ? orderNum : `#${orderNum}`;
-    }
-    // Fallback to ID-based number if no order_number exists
-    const shortId = order.id?.slice(-4) || '00';
-    return `#${shortId}`;
-  };
+  // The same rule names this order in every other window (utils/gridOrderNumber.ts).
+  const formatOrderNumber = () => formatGridOrderNumber(order);
 
   const getLeftEdgeColor = (createdAt: string) => {
     const minutes = getElapsedMinutes(createdAt);
@@ -228,24 +169,16 @@ export const OrderCard = memo<OrderCardProps>(({
 
     if (method === 'twint') return <img src={twintLogo} alt="TWINT" className="h-5 w-auto rounded-sm" />;
     if (method === 'cash') {
+      // Founder 01/11/2026: the till's one cash icon, his hand with notes, in place of the banknote.
       return (
-        <svg
-          width={iconSize}
-          height={iconSize}
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="#16a34a"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
+        <span
           role="img"
           aria-label={t('modals.editPaymentMethod.methods.cash', { defaultValue: 'Cash' })}
+          className="inline-flex"
+          style={{ color: '#16a34a', width: iconSize, height: iconSize }}
         >
-          <title>{t('modals.editPaymentMethod.methods.cash', { defaultValue: 'Cash' })}</title>
-          <rect x="2" y="6" width="20" height="12" rx="2" />
-          <circle cx="12" cy="12" r="2.5" />
-          <path d="M6 12h.01M18 12h.01" />
-        </svg>
+          <CashHandIcon className="h-full w-full" />
+        </span>
       );
     }
 

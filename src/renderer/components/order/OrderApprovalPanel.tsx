@@ -4,7 +4,7 @@ import toast from 'react-hot-toast';
 import type { Order } from '../../types/orders';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { normalizeOrderTypeForDisplay, resolveOrderDisplayTitle } from '../../utils/orderDisplay';
-import { Package, User, MapPin, CreditCard, Clock, Printer, X, Check, XCircle, Banknote, Tag, Ban } from 'lucide-react';
+import { Package, User, MapPin, CreditCard, Clock, Printer, X, Check, XCircle, Tag, Ban } from 'lucide-react';
 import { getBridge } from '../../../lib';
 import { calculateSubtotalFromItems } from './order-math';
 import { readPrintedVatAmount } from '../../utils/printedVat';
@@ -29,6 +29,7 @@ import { INCOMING_ORDER_APPROVAL_MARKER_ATTR } from '../../services/incomingOrde
 import { observeQueuedPrintJob, printQueueReasonText } from '../printing/PrintQueuePanel';
 import { usePrepTimePicker } from '../../hooks/usePrepTimePicker';
 import { useOrderStore } from '../../hooks/useOrderStore';
+import { CashHandIcon } from '../icons/PaymentMethodIcons';
 
 interface OrderApprovalPanelProps {
   order: Order;
@@ -1059,7 +1060,7 @@ export function OrderApprovalPanel({
         header={(
           <div
             {...approvalMarker}
-            className="shrink-0 border-b liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6"
+            className="shrink-0 border-b liquid-glass-modal-border px-5 py-4 sm:px-6"
           >
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
@@ -1074,10 +1075,12 @@ export function OrderApprovalPanel({
                     {paymentMethodLabel}
                   </span>
                   {orderPlatform && (
-                    <span
-                      className="rounded-full px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-white"
-                      style={{ backgroundColor: getPluginColor(orderPlatform) }}
-                    >
+                    <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-(--pos-s-fg)">
+                      <span
+                        aria-hidden="true"
+                        className="h-2.5 w-2.5 shrink-0 rounded-full"
+                        style={{ backgroundColor: getPluginColor(orderPlatform) }}
+                      />
                       {getPluginName(orderPlatform)}
                       {externalOrderId ? ` · ${externalOrderId}` : ''}
                     </span>
@@ -1119,17 +1122,17 @@ export function OrderApprovalPanel({
                   type="button"
                   onClick={onClose}
                   disabled={!canClose}
-                  className="liquid-glass-modal-button min-h-0 min-w-0 shrink-0 p-2 disabled:opacity-50"
+                  className="liquid-glass-modal-close shrink-0"
                   aria-label={t('common.actions.close')}
                 >
-                  <X className="h-5 w-5" />
+                  <X className="h-5 w-5" aria-hidden="true" />
                 </button>
               ) : null}
             </div>
           </div>
         )}
         footer={(
-          <div className="shrink-0 space-y-3 border-t liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6">
+          <div className="shrink-0 space-y-3 border-t liquid-glass-modal-border px-5 py-4 sm:px-6">
             {isBoxDecisionClosedHere ? (
               <>
                 <div
@@ -1163,7 +1166,7 @@ export function OrderApprovalPanel({
                     void handleCloseBoxOrder();
                   }}
                   disabled={isClosingOrder}
-                  className="pos-solid-btn pos-solid-btn--md pos-solid-btn--danger min-h-13 w-full gap-2"
+                  className="pos-solid-btn pos-solid-btn--md pos-solid-btn--danger pos-raised--tint [--pos-tint:#ef4444] min-h-13 w-full gap-2"
                 >
                   <Ban className="h-4 w-4" />
                   {isClosingOrder
@@ -1182,7 +1185,7 @@ export function OrderApprovalPanel({
                     {pickupWindowLabel ? (
                       <p
                         data-testid="order-approval-pickup-window"
-                        className="text-xs font-semibold text-amber-500 dark:text-amber-300"
+                        className="text-xs font-semibold text-(--pos-s-warn)"
                       >
                         {pickupWindowLabel}
                       </p>
@@ -1199,11 +1202,9 @@ export function OrderApprovalPanel({
                         onClick={() => setPickedTime(time)}
                         disabled={disabled}
                         data-testid={`order-approval-prep-${time}`}
-                        className={`min-h-11 rounded-lg px-2 text-sm font-bold transition ${
-                          estimatedTime === time
-                            ? 'border border-amber-400 bg-amber-400 text-black shadow-lg'
-                            : 'liquid-glass-modal-button'
-                        } ${disabled ? 'cursor-not-allowed opacity-35' : ''}`}
+                        className={`pos-choice min-h-11 flex-col px-2 text-sm font-bold ${
+                          estimatedTime === time ? 'is-selected' : ''
+                        }`}
                         aria-pressed={estimatedTime === time}
                       >
                         {time}{t('common.units.minutesShort', { defaultValue: 'm' })}
@@ -1221,7 +1222,7 @@ export function OrderApprovalPanel({
                     type="button"
                     onClick={handleApprove}
                     disabled={isApproving || isDeclining || isCheckingDecline}
-                    className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary min-h-13 gap-2"
+                    className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary pos-raised--tint [--pos-tint:var(--pos-s-yellow)] min-h-13 gap-2"
                   >
                     <Check className="h-4 w-4" />
                     {isApproving ? t('orderApprovalPanel.approving', { defaultValue: 'Approving...' }) : t('orderApprovalPanel.approveButton', { defaultValue: 'Approve' })}
@@ -1232,7 +1233,7 @@ export function OrderApprovalPanel({
                       void openDeclineModal();
                     }}
                     disabled={isApproving || isDeclining || isCheckingDecline}
-                    className="pos-solid-btn pos-solid-btn--md pos-solid-btn--danger min-h-13 gap-2"
+                    className="pos-solid-btn pos-solid-btn--md pos-solid-btn--danger pos-raised--tint [--pos-tint:#ef4444] min-h-13 gap-2"
                   >
                     <XCircle className="h-4 w-4" />
                     {t('orderApprovalPanel.declineButton', { defaultValue: 'Decline' })}
@@ -1245,7 +1246,7 @@ export function OrderApprovalPanel({
                   type="button"
                   onClick={handlePrint}
                   disabled={isPrinting}
-                  className="liquid-glass-modal-button w-full gap-2"
+                  className="pos-solid-btn pos-solid-btn--md w-full gap-2"
                 >
                   <Printer className="h-4 w-4" />
                   {isPrinting ? t('orderApprovalPanel.printing', { defaultValue: 'Printing...' }) : t('orderApprovalPanel.printReceipt', { defaultValue: 'Print receipt' })}
@@ -1266,7 +1267,7 @@ export function OrderApprovalPanel({
           <div className="grid gap-3 md:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
             <section className="liquid-glass-modal-card p-4">
               <div className="flex items-center gap-3">
-                <User className="h-5 w-5 shrink-0 text-purple-400" />
+                <User className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
                 <div className="min-w-0">
                   <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
                     {t('orderApprovalPanel.name', { defaultValue: 'Customer' })}
@@ -1292,7 +1293,7 @@ export function OrderApprovalPanel({
             }`}>
               <div className="flex items-center gap-3">
                 {requestedPaymentMethod === 'cash' ? (
-                  <Banknote className="h-5 w-5 shrink-0 text-green-400" />
+                  <CashHandIcon className="h-5 w-5 shrink-0 text-green-400" />
                 ) : (
                   <CreditCard className={`h-5 w-5 shrink-0 ${
                     requestedPaymentMethod === 'card' || requestedPaymentMethod === 'online'
@@ -1318,9 +1319,7 @@ export function OrderApprovalPanel({
           {orderType === 'delivery' && (deliveryAddress || deliveryCity || deliveryPostalCode || deliveryFloor || nameOnRinger || deliveryNotes) && (
             <section className="liquid-glass-modal-card p-4">
               <div className="flex items-start gap-3">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300">
-                  <MapPin className="h-5 w-5" />
-                </div>
+                <MapPin className="mt-0.5 h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
                 <div className="min-w-0 flex-1">
                   <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
                     {t('orderApprovalPanel.address', { defaultValue: 'Address' })}
@@ -1354,18 +1353,18 @@ export function OrderApprovalPanel({
 
             {isLoadingItems ? (
               <div className="flex items-center justify-center py-10">
-                <div className="h-9 w-9 animate-spin rounded-full border-b-2 border-blue-500" />
+                <div className="h-9 w-9 animate-spin rounded-full border-b-2 border-(--pos-s-sel-bg)" />
               </div>
             ) : normalizedItems.length > 0 ? (
               <div className="max-h-[34vh] overflow-y-auto custom-scrollbar">
                 {normalizedItems.map((item: { name: string; quantity: number; price: number; total_price: number; special_instructions?: string; customizations?: any[]; categoryName?: string | null; categoryPath?: string | null }, idx: number) => (
                   <div
                     key={idx}
-                    className="border-b border-white/10 px-4 py-3 last:border-b-0"
+                    className="border-b border-(--pos-s-border) px-4 py-3 last:border-b-0"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex min-w-0 flex-1 items-start gap-3">
-                        <div className="shrink-0 text-sm font-bold text-orange-400">
+                        <div className="shrink-0 text-sm font-bold text-(--pos-s-fg)">
                           {item.quantity}x
                         </div>
                         <div className="min-w-0 flex-1">

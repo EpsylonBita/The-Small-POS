@@ -11,7 +11,6 @@ import { posApiGet } from '../../../utils/api-helpers';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
-import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useAcquiredModules } from '../../../hooks/useAcquiredModules';
 import { useSystemClock } from '../../../hooks/useSystemClock';
@@ -27,6 +26,8 @@ import { formatCurrency, formatDate, formatTime } from '../../../utils/format';
 import { addLocalDays, parseLocalDateString, startOfLocalDay, toLocalDateString } from '../../../utils/date';
 import {
   Calendar,
+  CheckCircle2,
+  UserCheck,
   Users,
   Phone,
   Clock,
@@ -57,33 +58,42 @@ import {
 } from '../../../services/terminal-credentials';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../../../lib';
 import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
+import { KitDateField } from '../../../components/ui/KitDateField';
 
 type QuickFilter = 'today' | 'tomorrow' | 'week' | 'custom';
 type ViewMode = 'timeline' | 'list';
 type ReservationTab = 'tables' | 'rooms' | 'services';
 
-// Status colors and labels
-const statusColors: Record<ReservationStatus, string> = {
-  confirmed: 'yellow',
-  pending: 'yellow',
-  seated: 'green',
-  completed: 'gray',
-  no_show: 'red',
-  cancelled: 'gray',
+// Founder 01/11: a status is a coloured word (no pill, no coloured stripe). Waiting = warn, under way = ok,
+// a problem = bad, a closed booking = muted, a confirmed one = plain words. Same mapping as the Android till.
+const statusTextClass: Record<ReservationStatus, string> = {
+  confirmed: 'text-(--pos-s-fg)',
+  pending: 'text-(--pos-s-warn)',
+  seated: 'text-(--pos-s-ok)',
+  completed: 'text-(--pos-s-muted)',
+  no_show: 'text-(--pos-s-bad)',
+  cancelled: 'text-(--pos-s-muted)',
 };
 
-const appointmentStatusColors: Record<AppointmentStatus, string> = {
-  scheduled: 'yellow',
-  confirmed: 'green',
-  in_progress: 'yellow',
-  completed: 'gray',
-  cancelled: 'red',
-  no_show: 'red',
+const appointmentStatusTextClass: Record<AppointmentStatus, string> = {
+  scheduled: 'text-(--pos-s-warn)',
+  confirmed: 'text-(--pos-s-fg)',
+  in_progress: 'text-(--pos-s-ok)',
+  completed: 'text-(--pos-s-muted)',
+  cancelled: 'text-(--pos-s-muted)',
+  no_show: 'text-(--pos-s-bad)',
+};
+
+// The forward step of a booking (Confirm / Seat / Complete / Check in) is the yellow primary of its card; No Show
+// and Cancel are neutral kit buttons with red words.
+const quickActionClass = (variant: string): string => {
+  if (variant === 'primary' || variant === 'success') return 'pos-solid-btn pos-solid-btn--sm pos-solid-btn--primary';
+  if (variant === 'danger') return 'pos-solid-btn pos-solid-btn--sm pos-solid-btn--danger';
+  return 'pos-solid-btn pos-solid-btn--sm';
 };
 
 export const ReservationsView: React.FC = memo(() => {
   const { t } = useTranslation();
-  const { resolvedTheme } = useTheme();
   const { organizationId } = useModules();
   const now = useSystemClock();
   const bridge = getBridge();
@@ -185,16 +195,26 @@ export const ReservationsView: React.FC = memo(() => {
   const createDialogRef = useRef<HTMLDivElement>(null);
   const createTitleId = useId();
 
-  const isDark = resolvedTheme === 'dark';
+  // Founder 01/11: the page and its windows in the kit — a pos-card hero, kit options and buttons, the shared
+  // glass shell for every window, and ONE kit field look for every input, select and KitDateField.
   // Shared class for the visible field labels in the create-reservation modal so
   // prefilled controls (party size, duration, date/time) are never left as a bare
   // value with only a placeholder for context.
-  const fieldLabelClass = `text-sm font-medium ${isDark ? 'text-gray-300' : 'text-gray-800'}`;
+  const fieldLabelClass = 'text-sm font-semibold text-(--pos-s-fg)';
+  // The kit field (solid kit surface, kit border, yellow focus). The toolbar uses it at its own width.
+  const kitFieldLook = 'min-h-[48px] rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) px-3 text-base font-semibold text-(--pos-s-fg) outline-hidden transition-colors placeholder:font-normal placeholder:text-zinc-400 focus:border-(--pos-s-yellow) dark:placeholder:text-zinc-500';
   // Shared input/select class for the create + service-booking modal controls.
-  // Translucent neutral surface so fields stay readable on the blurry-glass modal shell.
-  const modalInputClass = `px-3 py-2 rounded-xl border ${isDark ? 'bg-gray-950/55 text-white border-white/10' : 'bg-white/55 text-gray-950 border-white/60 shadow-xs shadow-black/5'}`;
-  const modalPanelClass = `relative z-10 w-full max-w-2xl mx-4 rounded-[26px] backdrop-blur-2xl shadow-[0_30px_90px_rgba(0,0,0,0.5)] border ring-1 p-5 ${isDark ? 'bg-gray-950/55 border-white/10 ring-white/10' : 'bg-white/28 border-white/65 ring-white/35'}`;
-  const modalScrimClass = `absolute inset-0 backdrop-blur-xl ${isDark ? 'bg-black/55' : 'bg-black/30'}`;
+  const modalInputClass = `w-full ${kitFieldLook}`;
+  // The shared glass window: shell + backdrop, a header and a footer separated by the glass line, a scrolling body.
+  const modalPanelClass = 'liquid-glass-modal-shell relative flex w-full max-w-2xl flex-col text-(--pos-s-fg)';
+  const modalScrimClass = 'liquid-glass-modal-backdrop';
+  const modalHeaderClass = 'flex shrink-0 items-start justify-between gap-3 border-b border-(--modal-glass-line) p-5';
+  const modalBodyClass = 'min-h-0 flex-1 overflow-y-auto scrollbar-hide p-5';
+  const modalFooterClass = 'flex shrink-0 items-center justify-end gap-3 border-t border-(--modal-glass-line) p-5';
+  const primaryButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';
+  const secondaryButtonClass = 'pos-solid-btn pos-solid-btn--md';
+  // Stat tiles and inner fact tiles: the neutral kit tile.
+  const tileClass = 'rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3';
   const createPartySize = Number(createForm.partySize);
   const isCreateReservationReady =
     Boolean(createForm.customerName.trim()) &&
@@ -804,7 +824,7 @@ export const ReservationsView: React.FC = memo(() => {
 
   if (!branchId || !effectiveOrgId) {
     return (
-      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex items-center justify-center text-(--pos-s-muted)">
         {t('reservationsView.noBranch', { defaultValue: 'Please select a branch to view reservations' })}
       </motion.div>
     );
@@ -813,9 +833,9 @@ export const ReservationsView: React.FC = memo(() => {
   // Show message if neither module is acquired
   if (availableReservationTabs.length === 0) {
     return (
-      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-        <Calendar className="w-16 h-16 mb-4 opacity-50" />
-        <p className="text-lg font-medium mb-2">
+      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex flex-col items-center justify-center text-(--pos-s-muted)">
+        <Calendar className="w-16 h-16 mb-4 text-(--pos-s-muted)" aria-hidden="true" />
+        <p className="text-lg font-semibold mb-2 text-(--pos-s-fg)">
           {t('reservationsView.noModules', { defaultValue: 'No reservation modules available' })}
         </p>
         <p className="text-sm text-center max-w-md">
@@ -825,240 +845,230 @@ export const ReservationsView: React.FC = memo(() => {
     );
   }
 
+  // Founder 01/11: each stat tile is a neutral icon, a muted label and a big number; only a number that states
+  // something is coloured (pending > 0 warn, seated/staying > 0 ok), a zero stays neutral.
+  const statTiles = [
+    { key: 'total', label: t('reservationsView.stats.total', { defaultValue: 'Total' }), value: visibleStats.total, icon: Calendar, toneClass: '' },
+    { key: 'pending', label: t('reservationsView.stats.pending', { defaultValue: 'Pending' }), value: visibleStats.pending, icon: Clock, toneClass: visibleStats.pending > 0 ? 'text-(--pos-s-warn)' : '' },
+    { key: 'confirmed', label: t('reservationsView.stats.confirmed', { defaultValue: 'Confirmed' }), value: visibleStats.confirmed, icon: CheckCircle2, toneClass: '' },
+    { key: 'seated', label: activeTab === 'rooms' ? t('roomWorkflow.staying') : t('reservationsView.stats.seated', { defaultValue: 'Seated' }), value: visibleStats.seated, icon: UserCheck, toneClass: visibleStats.seated > 0 ? 'text-(--pos-s-ok)' : '' },
+    { key: 'guests', label: t('reservationsView.stats.guests', { defaultValue: 'Guests' }), value: visibleStats.totalGuests, icon: Users, toneClass: '' },
+  ];
+
   return (
-    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex flex-col p-4">
+    <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex flex-col p-4 text-(--pos-s-fg)">
+      {/* Founder 01/11: the hero pattern — title + one muted line on the left, the actions on the right (the
+          refresh icon button and the one yellow primary), the stat tiles under it, then the toolbar of kit options. */}
       <motion.section
         variants={pageMotionItem}
         data-vertical-hero="reservations"
-        className={`mb-4 rounded-3xl border p-4 backdrop-blur-xl ${isDark ? 'border-white/10 bg-zinc-950/70 shadow-[0_18px_46px_rgba(0,0,0,0.35)]' : 'border-(--pos-s-border) bg-white/74'}`}
+        className="pos-card mb-4 p-4"
       >
-      <div className="mb-4 min-w-0">
-        <h1 className={`truncate text-3xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
-          {t('navigation.menu.reservations', { defaultValue: 'Reservations' })}
-        </h1>
-      </div>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <h1 className="truncate text-3xl font-bold tracking-tight text-(--pos-s-fg)">
+              {t('navigation.menu.reservations', { defaultValue: 'Reservations' })}
+            </h1>
+            {/* The one muted line names which reservations the page shows. */}
+            <p className="mt-1 flex items-center gap-2 text-sm text-(--pos-s-muted)">
+              {activeTab === 'tables' ? (
+                <>
+                  <TableOrderIcon className="w-4 h-4 shrink-0 text-(--pos-s-muted)" />
+                  <span className="truncate">{t('reservationsView.headers.tables', { defaultValue: 'Table Reservations' })}</span>
+                </>
+              ) : activeTab === 'rooms' ? (
+                <>
+                  <BedDouble className="w-4 h-4 shrink-0 text-(--pos-s-muted)" />
+                  <span className="truncate">{t('reservationsView.headers.rooms', { defaultValue: 'Room Reservations' })}</span>
+                </>
+              ) : (
+                <>
+                  <Scissors className="w-4 h-4 shrink-0 text-(--pos-s-muted)" />
+                  <span className="truncate">{t('reservationsView.headers.services', { defaultValue: 'Service Reservations' })}</span>
+                </>
+              )}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (activeTab === 'services') {
+                  void refetchAppointments();
+                } else {
+                  void refetch();
+                }
+              }}
+              className="pos-icon-btn"
+              aria-label={t('reservationsView.refresh', { defaultValue: 'Refresh' })}
+            >
+              <RefreshCw className={`w-5 h-5 shrink-0 ${isActiveLoading ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (activeTab === 'services') {
+                  openServiceModal();
+                  return;
+                }
+                setCreateForm((prev) => ({
+                  ...prev,
+                  reservationDate: toLocalDateString(selectedDate),
+                  checkInDate: toLocalDateString(selectedDate),
+                  checkOutDate: toLocalDateString(addLocalDays(selectedDate, 1)),
+                }));
+                setShowCreateModal(true);
+              }}
+              disabled={activeTab === 'services' && !hasServiceReservations}
+              className={primaryButtonClass}
+              aria-label={activeTab === 'services' && !hasServiceReservations
+                ? t('reservationsView.createServiceInAppointments', { defaultValue: 'Create service bookings from Appointments' })
+                : activeTab === 'services'
+                  ? t('reservationsView.createServiceTitle', { defaultValue: 'Create Service Booking' })
+                  : t('reservationsView.createTitle', { defaultValue: 'Create Reservation' })}
+            >
+              <Plus className="w-4 h-4 shrink-0" />
+              {t('reservationsView.create', { defaultValue: 'Create' })}
+            </button>
+          </div>
+        </div>
 
-      {/* Tabs - only show if both modules are available */}
-      {availableReservationTabs.length > 1 && (
-        <motion.div variants={pageMotionContainer} className={`flex gap-1 mb-4 p-1 rounded-2xl ${isDark ? 'bg-gray-800/85' : 'bg-gray-100/90'}`}>
-          {availableReservationTabs.map((tab) => {
-            const Icon = tab === 'rooms' ? BedDouble : tab === 'services' ? Scissors : TableOrderIcon;
-            // Selected tab = explicit yellow/black accent (survives the global blue/purple/pink→grey remap).
-            const activeClass = 'bg-yellow-400 text-black shadow-lg';
-            const count =
-              tab === 'rooms'
-                ? reservations.filter((r) => r.roomId).length
-                : tab === 'services'
-                  ? appointments.length
-                  : reservations.filter((r) => !r.roomId).length;
+        <motion.div variants={pageMotionContainer} className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+          {statTiles.map((tile) => {
+            const Icon = tile.icon;
             return (
-              <motion.button
-                variants={pageMotionItem}
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`flex-1 inline-flex items-center justify-center text-center gap-2 px-4 py-3 rounded-xl font-medium transition-all active:scale-95 ${
-                  activeTab === tab
-                    ? activeClass
-                    : isDark
-                      ? 'text-gray-400'
-                      : 'text-gray-600'
-                }`}
-              >
-                <Icon className="w-5 h-5 shrink-0" />
-                {tab === 'rooms'
-                  ? t('reservationsView.tabs.rooms', { defaultValue: 'Rooms' })
-                  : tab === 'services'
-                    ? t('reservationsView.tabs.services', { defaultValue: 'Services' })
-                    : t('reservationsView.tabs.tables', { defaultValue: 'Tables' })}
-                <span className={`ml-1 px-2 py-0.5 rounded-full text-xs ${
-                  activeTab === tab ? 'bg-black/10 text-black' : isDark ? 'bg-gray-700' : 'bg-gray-200'
-                }`}>
-                  {count}
-                </span>
-              </motion.button>
+              <motion.div variants={pageMotionItem} key={tile.key} className={tileClass}>
+                <p className="truncate text-sm text-(--pos-s-muted)">{tile.label}</p>
+                <p className={`mt-1 inline-flex items-center gap-2 text-2xl font-bold ${tile.toneClass}`}>
+                  <Icon className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
+                  {tile.value}
+                </p>
+              </motion.div>
             );
           })}
         </motion.div>
-      )}
 
-      {/* Single module header - show which type of reservations we're viewing */}
-      {availableReservationTabs.length === 1 && (
-        <motion.div variants={pageMotionItem} className={`flex items-center gap-2 mb-4 ${isDark ? 'text-white' : 'text-gray-900'}`}>
-          {activeTab === 'tables' ? (
-            <>
-              <TableOrderIcon className={`w-6 h-6 shrink-0 ${isDark ? 'text-yellow-400' : 'text-yellow-600'}`} />
-              <h2 className="text-xl font-semibold">{t('reservationsView.headers.tables', { defaultValue: 'Table Reservations' })}</h2>
-            </>
-          ) : activeTab === 'rooms' ? (
-            <>
-              <BedDouble className={`w-6 h-6 shrink-0 ${isDark ? 'text-yellow-400' : 'text-yellow-600'}`} />
-              <h2 className="text-xl font-semibold">{t('reservationsView.headers.rooms', { defaultValue: 'Room Reservations' })}</h2>
-            </>
-          ) : (
-            <>
-              <Scissors className={`w-6 h-6 shrink-0 ${isDark ? 'text-yellow-400' : 'text-yellow-600'}`} />
-              <h2 className="text-xl font-semibold">{t('reservationsView.headers.services', { defaultValue: 'Service Reservations' })}</h2>
-            </>
+        {/* Toolbar: the module switch (only when more than one module is acquired) and the search field. */}
+        <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          {availableReservationTabs.length > 1 && (
+            <motion.div variants={pageMotionContainer} className="pos-scroll-row gap-2">
+              {availableReservationTabs.map((tab) => {
+                const Icon = tab === 'rooms' ? BedDouble : tab === 'services' ? Scissors : TableOrderIcon;
+                const count =
+                  tab === 'rooms'
+                    ? reservations.filter((r) => r.roomId).length
+                    : tab === 'services'
+                      ? appointments.length
+                      : reservations.filter((r) => !r.roomId).length;
+                return (
+                  <motion.button
+                    variants={pageMotionItem}
+                    key={tab}
+                    type="button"
+                    onClick={() => setActiveTab(tab)}
+                    aria-pressed={activeTab === tab}
+                    className={`pos-choice${activeTab === tab ? ' is-selected' : ''}`}
+                  >
+                    <Icon className="w-5 h-5 shrink-0" />
+                    {tab === 'rooms'
+                      ? t('reservationsView.tabs.rooms', { defaultValue: 'Rooms' })
+                      : tab === 'services'
+                        ? t('reservationsView.tabs.services', { defaultValue: 'Services' })
+                        : t('reservationsView.tabs.tables', { defaultValue: 'Tables' })}
+                    {/* The count is plain words, no pill. */}
+                    <span className="tabular-nums">{count}</span>
+                  </motion.button>
+                );
+              })}
+            </motion.div>
           )}
-        </motion.div>
-      )}
-
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <motion.div variants={pageMotionContainer} className="flex flex-wrap gap-3">
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-              {t('reservationsView.stats.total', { defaultValue: 'Total' })}
-            </div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.total}</div>
-          </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
-            <div className={`text-sm text-yellow-700 dark:text-yellow-500`}>
-              {t('reservationsView.stats.pending', { defaultValue: 'Pending' })}
-            </div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.pending}</div>
-          </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
-              {t('reservationsView.stats.confirmed', { defaultValue: 'Confirmed' })}
-            </div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.confirmed}</div>
-          </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
-            <div className={`text-sm text-green-700 dark:text-green-500`}>
-              {activeTab === 'rooms' ? t('roomWorkflow.staying') : t('reservationsView.stats.seated', { defaultValue: 'Seated' })}
-            </div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.seated}</div>
-          </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
-              {t('reservationsView.stats.guests', { defaultValue: 'Guests' })}
-            </div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.totalGuests}</div>
-          </motion.div>
-        </motion.div>
-        <div className="flex flex-wrap justify-end gap-2">
-          <button
-            onClick={() => {
-              if (activeTab === 'services') {
-                openServiceModal();
-                return;
-              }
-              setCreateForm((prev) => ({
-                ...prev,
-                reservationDate: toLocalDateString(selectedDate),
-                checkInDate: toLocalDateString(selectedDate),
-                checkOutDate: toLocalDateString(addLocalDays(selectedDate, 1)),
-              }));
-              setShowCreateModal(true);
-            }}
-            disabled={activeTab === 'services' && !hasServiceReservations}
-            className={`inline-flex items-center justify-center text-center gap-2 min-h-[40px] px-3 py-2 rounded-xl transition-transform active:scale-95 ${
-              activeTab === 'services' && !hasServiceReservations
-                ? isDark ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-gray-200 text-gray-600 cursor-not-allowed'
-                : 'bg-yellow-400 text-black'
-            }`}
-            aria-label={activeTab === 'services' && !hasServiceReservations
-              ? t('reservationsView.createServiceInAppointments', { defaultValue: 'Create service bookings from Appointments' })
-              : activeTab === 'services'
-                ? t('reservationsView.createServiceTitle', { defaultValue: 'Create Service Booking' })
-                : t('reservationsView.createTitle', { defaultValue: 'Create Reservation' })}
-          >
-            <Plus className="w-4 h-4 shrink-0" />
-            {t('reservationsView.create', { defaultValue: 'Create' })}
-          </button>
-          <button
-            onClick={() => {
-              if (activeTab === 'services') {
-                void refetchAppointments();
-              } else {
-                void refetch();
-              }
-            }}
-            className={`inline-flex items-center justify-center shrink-0 min-w-[40px] min-h-[40px] p-2 rounded-xl transition-transform active:scale-95 ${isDark ? 'bg-gray-800 text-gray-200' : 'bg-gray-100 text-gray-700'}`}
-            aria-label={t('reservationsView.refresh', { defaultValue: 'Refresh' })}
-          >
-            <RefreshCw className={`w-5 h-5 shrink-0 ${isActiveLoading ? 'animate-spin' : ''}`} />
-          </button>
-          <div className="relative">
-            <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
+          <div className="relative min-w-0 lg:ml-auto lg:w-80">
+            <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-(--pos-s-muted)" aria-hidden="true" />
             <input
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder={t('reservationsView.searchPlaceholder', { defaultValue: 'Search...' })}
-              className={`pl-10 pr-4 py-2 rounded-xl ${isDark ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'} border ${isDark ? 'border-gray-700' : 'border-gray-200'}`}
+              className={`w-full pl-10 ${kitFieldLook}`}
             />
           </div>
         </div>
-      </div>
+
+        {/* Toolbar: the period (kit options), the day (arrows + the kit date field) and the view (kit options). */}
+        <motion.div variants={pageMotionItem} className="mt-3 flex flex-wrap items-center justify-between gap-3">
+          <motion.div variants={pageMotionContainer} className="pos-scroll-row gap-2">
+            {(['today', 'tomorrow', 'week'] as const).map(filter => (
+              <motion.button
+                variants={pageMotionItem}
+                key={filter}
+                type="button"
+                onClick={() => handleQuickFilter(filter)}
+                aria-pressed={quickFilter === filter}
+                className={`pos-choice${quickFilter === filter ? ' is-selected' : ''}`}
+              >
+                {t(`reservationsView.filter.${filter}`, { defaultValue: filter.charAt(0).toUpperCase() + filter.slice(1) })}
+              </motion.button>
+            ))}
+          </motion.div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => navigateDate('prev')}
+              aria-label={t('reservationsView.dateNavigation.previous', { defaultValue: 'Previous Day' })}
+              className="pos-icon-btn"
+            >
+              <ChevronLeft className="w-5 h-5 shrink-0" />
+            </button>
+            <KitDateField
+              type="date" required
+              value={toLocalDateString(selectedDate)}
+              onChange={(e) => {
+                const parsed = parseLocalDateString(e.target.value);
+                if (Number.isNaN(parsed.getTime())) return;
+                setSelectedDate(parsed);
+                setQuickFilter('custom');
+              }}
+              className={`w-44 ${kitFieldLook}`}
+            />
+            <button
+              type="button"
+              onClick={() => navigateDate('next')}
+              aria-label={t('reservationsView.dateNavigation.next', { defaultValue: 'Next Day' })}
+              className="pos-icon-btn"
+            >
+              <ChevronRight className="w-5 h-5 shrink-0" />
+            </button>
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setViewMode('list')}
+              aria-pressed={viewMode === 'list'}
+              className={`pos-choice${viewMode === 'list' ? ' is-selected' : ''}`}
+            >
+              <List className="w-4 h-4 shrink-0" />
+              {t('reservationsView.view.list', { defaultValue: 'List' })}
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('timeline')}
+              aria-pressed={viewMode === 'timeline'}
+              className={`pos-choice${viewMode === 'timeline' ? ' is-selected' : ''}`}
+            >
+              <LayoutGrid className="w-4 h-4 shrink-0" />
+              {t('reservationsView.view.timeline', { defaultValue: 'Timeline' })}
+            </button>
+          </div>
+        </motion.div>
       </motion.section>
 
-      {/* Filters Row */}
-      <motion.div variants={pageMotionItem} className="flex items-center justify-between mb-4">
-        {/* Quick Filters */}
-        <motion.div variants={pageMotionContainer} className="flex gap-2">
-          {(['today', 'tomorrow', 'week'] as const).map(filter => (
-            <motion.button
-              variants={pageMotionItem}
-              key={filter}
-              onClick={() => handleQuickFilter(filter)}
-              className={`inline-flex items-center justify-center text-center min-h-[36px] px-3 py-1.5 rounded-xl text-sm transition-transform active:scale-95 ${
-                quickFilter === filter
-                  ? 'bg-yellow-400 text-black'
-                  : isDark ? 'bg-gray-800 text-gray-300' : 'bg-gray-100 text-gray-600'
-              }`}
-            >
-              {t(`reservationsView.filter.${filter}`, { defaultValue: filter.charAt(0).toUpperCase() + filter.slice(1) })}
-            </motion.button>
-          ))}
-        </motion.div>
-
-        {/* Date Navigation */}
-        <div className="flex items-center gap-2">
-          <button onClick={() => navigateDate('prev')} className={`inline-flex items-center justify-center shrink-0 min-w-[40px] min-h-[40px] p-2 rounded-xl transition-transform active:scale-95 ${isDark ? 'bg-gray-800 text-gray-200' : 'bg-gray-100 text-gray-700'}`}>
-            <ChevronLeft className="w-5 h-5 shrink-0" />
-          </button>
-          <input
-            type="date"
-            value={toLocalDateString(selectedDate)}
-            onChange={(e) => {
-              const parsed = parseLocalDateString(e.target.value);
-              if (Number.isNaN(parsed.getTime())) return;
-              setSelectedDate(parsed);
-              setQuickFilter('custom');
-            }}
-            className={`px-3 py-2 rounded-xl ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
-          />
-          <button onClick={() => navigateDate('next')} className={`inline-flex items-center justify-center shrink-0 min-w-[40px] min-h-[40px] p-2 rounded-xl transition-transform active:scale-95 ${isDark ? 'bg-gray-800 text-gray-200' : 'bg-gray-100 text-gray-700'}`}>
-            <ChevronRight className="w-5 h-5 shrink-0" />
-          </button>
-        </div>
-
-        {/* View Toggle */}
-        <div className={`flex rounded-xl overflow-hidden ${isDark ? 'bg-gray-800' : 'bg-gray-100'}`}>
-          <button
-            onClick={() => setViewMode('list')}
-            className={`px-3 py-2 inline-flex items-center justify-center text-center gap-1 transition-transform active:scale-95 ${viewMode === 'list' ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
-          >
-            <List className="w-4 h-4 shrink-0" />
-            {t('reservationsView.view.list', { defaultValue: 'List' })}
-          </button>
-          <button
-            onClick={() => setViewMode('timeline')}
-            className={`px-3 py-2 inline-flex items-center justify-center text-center gap-1 transition-transform active:scale-95 ${viewMode === 'timeline' ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
-          >
-            <LayoutGrid className="w-4 h-4 shrink-0" />
-            {t('reservationsView.view.timeline', { defaultValue: 'Timeline' })}
-          </button>
-        </div>
-      </motion.div>
-
-      {/* Pending Alert */}
+      {/* Pending Alert: a kit warn notice */}
       {visibleStats.pending > 0 && (
-        <motion.div variants={pageMotionItem} className={`mb-4 p-3 rounded-2xl flex items-center gap-2 ${isDark ? 'bg-(--pos-s-warn-bg) border border-(--pos-s-warn)' : 'bg-(--pos-s-warn-bg) border border-(--pos-s-warn)'}`}>
-          <AlertTriangle className="w-5 h-5 shrink-0 text-(--pos-s-warn)" />
-          <span className="text-yellow-600 font-medium">
+        <motion.div variants={pageMotionItem} className="pos-notice pos-notice--warn mb-4 items-center">
+          <AlertTriangle className="pos-notice__icon w-5 h-5 shrink-0" aria-hidden="true" />
+          <span className="font-semibold text-(--pos-s-fg)">
             {visibleStats.pending} {t('reservationsView.pendingAlert', { defaultValue: 'reservation(s) pending confirmation' })}
           </span>
         </motion.div>
@@ -1066,157 +1076,143 @@ export const ReservationsView: React.FC = memo(() => {
 
       {/* Loading State */}
       {isActiveLoading && (activeTab === 'services' ? appointments.length === 0 : reservations.length === 0) && (
-        <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+        <motion.div variants={pageMotionItem} className="flex-1 flex items-center justify-center text-(--pos-s-muted)">
           <RefreshCw className="w-6 h-6 animate-spin mr-2" />
           {t('reservationsView.loading', { defaultValue: 'Loading reservations...' })}
         </motion.div>
       )}
 
-      {/* Content */}
+      {/* Content: kit cards in a responsive grid; the scroll column keeps room for their shadows. */}
       {!isActiveLoading && (
-        <motion.div variants={pageMotionItem} className="flex-1 overflow-y-auto">
+        <motion.div variants={pageMotionItem} className="pos-scroll-room flex-1 overflow-y-auto scrollbar-hide pb-6">
           {activeTab === 'services' ? (
-            <motion.div variants={pageMotionContainer} className="space-y-2">
+            <motion.div variants={pageMotionContainer} className="grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3">
               {appointments.map((appointment) => (
                 <motion.div
                   variants={pageMotionItem}
                   key={appointment.id}
-                  className={`p-4 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}
-                  style={{ borderLeft: `4px solid var(--${appointmentStatusColors[appointment.status]}-500, #6b7280)` }}
+                  className="pos-card flex flex-col gap-3 p-4"
                 >
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-2">
-                        <span className={`font-medium text-lg ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                          {appointment.customerName || t('reservationsView.walkInCustomer', { defaultValue: 'Walk-in customer' })}
-                        </span>
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium bg-${appointmentStatusColors[appointment.status]}-500/10 text-${appointmentStatusColors[appointment.status]}-500`}>
-                          {appointmentStatusLabels[appointment.status]}
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-4 text-sm">
-                        <span className="flex items-center gap-1">
-                          <Clock className="w-4 h-4" />
-                          {formatTime(appointment.startTime, { hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Scissors className="w-4 h-4" />
-                          {appointment.serviceName || appointment.services?.[0]?.serviceName || t('reservationsView.service', { defaultValue: 'Service' })}
-                        </span>
-                        {appointment.staffName && (
-                          <span className="flex items-center gap-1">
-                            <Users className="w-4 h-4" />
-                            {appointment.staffName}
-                          </span>
-                        )}
-                        {appointment.customerPhone && (
-                          <span className="flex items-center gap-1">
-                            <Phone className="w-4 h-4" />
-                            {appointment.customerPhone}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex gap-2">
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="min-w-0 truncate text-lg font-semibold text-(--pos-s-fg)">
+                      {appointment.customerName || t('reservationsView.walkInCustomer', { defaultValue: 'Walk-in customer' })}
+                    </span>
+                    <span className={`shrink-0 text-sm font-semibold ${appointmentStatusTextClass[appointment.status]}`}>
+                      {appointmentStatusLabels[appointment.status]}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-(--pos-s-muted)">
+                    <span className="flex items-center gap-1">
+                      <Clock className="w-4 h-4" />
+                      {formatTime(appointment.startTime, { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <Scissors className="w-4 h-4" />
+                      {appointment.serviceName || appointment.services?.[0]?.serviceName || t('reservationsView.service', { defaultValue: 'Service' })}
+                    </span>
+                    {appointment.staffName && (
+                      <span className="flex items-center gap-1">
+                        <Users className="w-4 h-4" />
+                        {appointment.staffName}
+                      </span>
+                    )}
+                    {appointment.customerPhone && (
+                      <span className="flex items-center gap-1">
+                        <Phone className="w-4 h-4" />
+                        {appointment.customerPhone}
+                      </span>
+                    )}
+                  </div>
+                  {getAppointmentQuickActions(appointment).length > 0 && (
+                    <div className="flex flex-wrap gap-2">
                       {getAppointmentQuickActions(appointment).map((action) => (
                         <button
                           key={action.status}
+                          type="button"
                           onClick={() => void updateAppointmentStatus(appointment.id, action.status)}
-                          className={`inline-flex items-center justify-center text-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-transform active:scale-95 ${
-                            action.variant === 'primary' ? 'bg-yellow-400 text-black' :
-                            action.variant === 'success' ? 'bg-(--pos-s-yellow) text-black' :
-                            action.variant === 'danger' ? 'bg-red-600 text-white' :
-                            isDark ? 'bg-gray-700 text-white' : 'bg-gray-200 text-gray-800'
-                          }`}
+                          className={quickActionClass(action.variant)}
                         >
                           {action.label}
                         </button>
                       ))}
                     </div>
-                  </div>
+                  )}
                 </motion.div>
               ))}
             </motion.div>
           ) : viewMode === 'list' ? (
             /* List View */
-            <motion.div variants={pageMotionContainer} className="space-y-2">
+            <motion.div variants={pageMotionContainer} className="grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3">
               {filteredReservations.map(res => (
                 <motion.div
                   variants={pageMotionItem}
                   key={res.id}
-                  className={`p-4 rounded-2xl cursor-pointer transition-transform active:scale-[0.99] ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}
-                  style={{ borderLeft: `4px solid var(--${statusColors[res.status]}-500, #6b7280)` }}
+                  className="pos-card flex cursor-pointer flex-col gap-3 p-4 transition-transform active:scale-[0.99]"
                   onClick={() => openReservationDetails(res.id)}
                 >
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-2">
-                        <span className={`font-medium text-lg ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                          {res.customerName}
-                        </span>
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium bg-${statusColors[res.status]}-500/10 text-${statusColors[res.status]}-500`}>
-                          {statusLabels[res.status]}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-4 text-sm">
-                        <span className="flex items-center gap-1">
-                          <Clock className="w-4 h-4" />
-                          {formatTime(reservationWallDateTime(res), { hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Users className="w-4 h-4" />
-                          {res.partySize} {t('reservationsView.guests', { defaultValue: 'guests' })}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Phone className="w-4 h-4" />
-                          {res.customerPhone}
-                        </span>
-                        {res.tableId && (
-                          <span className="flex items-center gap-1">
-                            <Calendar className="w-4 h-4" />
-                            {t('reservationsView.table', { defaultValue: 'Table' })} {resolveTableLabel(res.tableId, res.tableNumber)}
-                          </span>
-                        )}
-                        {res.roomId && (
-                          <span className="flex items-center gap-1">
-                            <BedDouble className="w-4 h-4" />
-                            {t('reservationsView.room', { defaultValue: 'Room' })} {res.roomNumber || res.roomId.slice(-4)}
-                          </span>
-                        )}
-                        {res.checkInDate && res.checkOutDate && (
-                          <span className="flex items-center gap-1">
-                            <Calendar className="w-4 h-4" />
-                            {formatDate(res.checkInDate)} - {formatDate(res.checkOutDate)}
-                          </span>
-                        )}
-                      </div>
-                      {res.specialRequests && (
-                        <div className={`mt-2 text-sm ${isDark ? 'text-yellow-400' : 'text-yellow-600'}`}>
-                          <AlertTriangle className="w-3 h-3 inline mr-1" />
-                          {res.specialRequests}
-                        </div>
-                      )}
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="min-w-0 truncate text-lg font-semibold text-(--pos-s-fg)">
+                      {res.customerName}
+                    </span>
+                    <span className={`shrink-0 text-sm font-semibold ${statusTextClass[res.status]}`}>
+                      {statusLabels[res.status]}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-(--pos-s-muted)">
+                    <span className="flex items-center gap-1">
+                      <Clock className="w-4 h-4" />
+                      {formatTime(reservationWallDateTime(res), { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <Users className="w-4 h-4" />
+                      {res.partySize} {t('reservationsView.guests', { defaultValue: 'guests' })}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <Phone className="w-4 h-4" />
+                      {res.customerPhone}
+                    </span>
+                    {res.tableId && (
+                      <span className="flex items-center gap-1">
+                        <Calendar className="w-4 h-4" />
+                        {t('reservationsView.table', { defaultValue: 'Table' })} {resolveTableLabel(res.tableId, res.tableNumber)}
+                      </span>
+                    )}
+                    {res.roomId && (
+                      <span className="flex items-center gap-1">
+                        <BedDouble className="w-4 h-4" />
+                        {t('reservationsView.room', { defaultValue: 'Room' })} {res.roomNumber || res.roomId.slice(-4)}
+                      </span>
+                    )}
+                    {res.checkInDate && res.checkOutDate && (
+                      <span className="flex items-center gap-1">
+                        <Calendar className="w-4 h-4" />
+                        {formatDate(res.checkInDate)} - {formatDate(res.checkOutDate)}
+                      </span>
+                    )}
+                  </div>
+                  {res.specialRequests && (
+                    <div className={`flex items-start gap-2 text-sm text-(--pos-s-fg) ${tileClass}`}>
+                      <AlertTriangle className="mt-0.5 w-4 h-4 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
+                      <span className="min-w-0 wrap-break-word">{res.specialRequests}</span>
                     </div>
-                    <div className="flex gap-2">
+                  )}
+                  {getQuickActions(res).length > 0 && (
+                    <div className="flex flex-wrap gap-2">
                       {getQuickActions(res).map(action => (
                         <button
                           key={action.status}
+                          type="button"
                           onClick={(event) => {
                             event.stopPropagation();
                             void handleStatusChange(res.id, action.status);
                           }}
-                          className={`inline-flex items-center justify-center text-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-transform active:scale-95 ${
-                            action.variant === 'primary' ? 'bg-yellow-400 text-black' :
-                            action.variant === 'success' ? 'bg-(--pos-s-yellow) text-black' :
-                            action.variant === 'danger' ? 'bg-red-600 text-white' :
-                            isDark ? 'bg-gray-700 text-white' : 'bg-gray-200 text-gray-800'
-                          }`}
+                          className={quickActionClass(action.variant)}
                         >
                           {action.label}
                         </button>
                       ))}
                     </div>
-                  </div>
+                  )}
                 </motion.div>
               ))}
             </motion.div>
@@ -1227,28 +1223,27 @@ export const ReservationsView: React.FC = memo(() => {
                 const hourReservations = reservationsByHour[hour] || [];
                 return (
                   <React.Fragment key={hour}>
-                    <div className={`text-sm font-medium py-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                    <div className="text-sm font-semibold py-2 text-(--pos-s-muted)">
                       {hour}:00
                     </div>
-                    <div className={`min-h-[60px] p-2 rounded-2xl ${isDark ? 'bg-gray-800/50' : 'bg-gray-50'}`}>
+                    <div className={`min-h-[60px] ${tileClass} p-2`}>
                       <div className="flex flex-wrap gap-2">
                         {hourReservations.map(res => (
                         <motion.div
                           variants={pageMotionItem}
                           key={res.id}
-                          className={`px-3 py-2 rounded-xl cursor-pointer transition-transform active:scale-[0.98] ${isDark ? 'bg-gray-700' : 'bg-white shadow-xs'}`}
-                          style={{ borderLeft: `4px solid var(--${statusColors[res.status]}-500, #6b7280)` }}
+                          className="pos-card cursor-pointer px-3 py-2 transition-transform active:scale-[0.98]"
                           onClick={() => openReservationDetails(res.id)}
                         >
                             <div className="flex items-center gap-2">
-                              <span className={`font-medium text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                              <span className="font-semibold text-sm text-(--pos-s-fg)">
                                 {res.customerName}
                               </span>
-                              <span className={`text-xs px-2 py-0.5 rounded-sm bg-${statusColors[res.status]}-500/10 text-${statusColors[res.status]}-500`}>
+                              <span className={`text-xs font-semibold ${statusTextClass[res.status]}`}>
                                 {statusLabels[res.status]}
                               </span>
                             </div>
-                            <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                            <div className="text-xs mt-1 text-(--pos-s-muted)">
                               {res.tableId
                                 ? `${t('reservationsView.table', { defaultValue: 'Table' })} ${resolveTableLabel(res.tableId, res.tableNumber)}`
                                 : res.roomId
@@ -1256,25 +1251,23 @@ export const ReservationsView: React.FC = memo(() => {
                                   : t('reservationsView.noTable', { defaultValue: 'No table' })
                               } • {res.partySize} {t('reservationsView.guests', { defaultValue: 'guests' })}
                             </div>
-                            <div className="flex gap-1 mt-2">
-                              {getQuickActions(res).slice(0, 2).map(action => (
-                                <button
-                                  key={action.status}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    void handleStatusChange(res.id, action.status);
-                                  }}
-                                  className={`inline-flex items-center justify-center text-center px-2 py-1 rounded-2xl text-xs font-medium transition-transform active:scale-95 ${
-                                    action.variant === 'primary' ? 'bg-yellow-400 text-black' :
-                                    action.variant === 'success' ? 'bg-(--pos-s-yellow) text-black' :
-                                    action.variant === 'danger' ? 'bg-red-600 text-white' :
-                                    isDark ? 'bg-gray-600 text-white' : 'bg-gray-200 text-gray-800'
-                                  }`}
-                                >
-                                  {action.label}
-                                </button>
-                              ))}
-                            </div>
+                            {getQuickActions(res).length > 0 && (
+                              <div className="flex flex-wrap gap-2 mt-2">
+                                {getQuickActions(res).slice(0, 2).map(action => (
+                                  <button
+                                    key={action.status}
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void handleStatusChange(res.id, action.status);
+                                    }}
+                                    className={quickActionClass(action.variant)}
+                                  >
+                                    {action.label}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
                           </motion.div>
                         ))}
                       </div>
@@ -1285,12 +1278,13 @@ export const ReservationsView: React.FC = memo(() => {
             </motion.div>
           )}
 
+          {/* Empty state: a neutral icon (no wrapper box), one title, one muted line. */}
           {(activeTab === 'services' ? appointments.length === 0 : filteredReservations.length === 0) && !isActiveLoading && (
-            <motion.div variants={pageMotionItem} className={`text-center py-12 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+            <motion.div variants={pageMotionItem} className="text-center py-12 text-(--pos-s-muted)">
               {activeTab === 'services'
-                ? <Scissors className="w-12 h-12 mx-auto mb-4 opacity-50" />
-                : <Calendar className="w-12 h-12 mx-auto mb-4 opacity-50" />}
-              <p className="text-lg font-medium mb-2">
+                ? <Scissors className="w-12 h-12 mx-auto mb-4 text-(--pos-s-muted)" aria-hidden="true" />
+                : <Calendar className="w-12 h-12 mx-auto mb-4 text-(--pos-s-muted)" aria-hidden="true" />}
+              <p className="text-lg font-semibold mb-2 text-(--pos-s-fg)">
                 {t('reservationsView.noReservations', { defaultValue: 'No reservations found' })}
               </p>
               <p className="text-sm">
@@ -1302,8 +1296,8 @@ export const ReservationsView: React.FC = memo(() => {
       )}
 
       {showCreateModal && renderModalPortal(
-        <div className="fixed inset-0 z-1200 flex items-center justify-center">
-          <div className={modalScrimClass} onClick={() => setShowCreateModal(false)} />
+        <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
+          <div className={modalScrimClass} onClick={() => setShowCreateModal(false)} aria-hidden="true" />
           <div
             ref={createDialogRef}
             role="dialog"
@@ -1311,18 +1305,21 @@ export const ReservationsView: React.FC = memo(() => {
             aria-labelledby={createTitleId}
             className={modalPanelClass}
           >
-            <div className="flex items-center justify-between mb-4">
-              <h3 id={createTitleId} className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+            <div className={modalHeaderClass}>
+              <h3 id={createTitleId} className="text-2xl font-semibold text-(--pos-s-fg)">
                 {t('reservationsView.createTitle', { defaultValue: 'Create Reservation' })}
               </h3>
               <button
+                type="button"
                 onClick={() => setShowCreateModal(false)}
-                className={`inline-flex items-center justify-center shrink-0 p-1.5 rounded-full transition-transform active:scale-95 ${isDark ? 'bg-white/5 text-gray-300' : 'bg-black/5 text-gray-600'}`}
+                aria-label={t('common.actions.close', 'Close')}
+                className="liquid-glass-modal-close"
               >
-                <X className="w-4 h-4 shrink-0" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
+            <div className={modalBodyClass}>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <label className="flex flex-col gap-1">
                 <span className={fieldLabelClass}>{t('reservationsView.form.customerName', { defaultValue: 'Customer name' })}</span>
@@ -1366,19 +1363,19 @@ export const ReservationsView: React.FC = memo(() => {
               </label>
               {activeTab !== 'rooms' && <label className="flex flex-col gap-1">
                 <span className={fieldLabelClass}>{t('reservationsView.form.reservationDate', { defaultValue: 'Reservation date' })}</span>
-                <input
+                <KitDateField
                   value={createForm.reservationDate}
                   onChange={(event) => setCreateForm((prev) => ({ ...prev, reservationDate: event.target.value }))}
-                  type="date"
+                  type="date" required
                   className={modalInputClass}
                 />
               </label>}
               <label className="flex flex-col gap-1">
                 <span className={fieldLabelClass}>{t('reservationsView.form.reservationTime', { defaultValue: 'Reservation time' })}</span>
-                <input
+                <KitDateField
                   value={createForm.reservationTime}
                   onChange={(event) => setCreateForm((prev) => ({ ...prev, reservationTime: event.target.value }))}
-                  type="time"
+                  type="time" required
                   className={modalInputClass}
                 />
               </label>
@@ -1433,24 +1430,24 @@ export const ReservationsView: React.FC = memo(() => {
                   </label>
                   <label className="flex flex-col gap-1">
                     <span className={fieldLabelClass}>{t('reservationsView.form.checkInDate', { defaultValue: 'Check-in date' })}</span>
-                    <input
+                    <KitDateField
                       value={createForm.checkInDate}
                       onChange={(event) => setCreateForm((prev) => ({
                         ...prev,
                         checkInDate: event.target.value,
                         reservationDate: event.target.value,
                       }))}
-                      type="date"
+                      type="date" required
                       aria-label={t('reservationsView.form.checkInDate', { defaultValue: 'Check-in date' })}
                       className={modalInputClass}
                     />
                   </label>
                   <label className="flex flex-col gap-1">
                     <span className={fieldLabelClass}>{t('reservationsView.form.checkOutDate', { defaultValue: 'Check-out date' })}</span>
-                    <input
+                    <KitDateField
                       value={createForm.checkOutDate}
                       onChange={(event) => setCreateForm((prev) => ({ ...prev, checkOutDate: event.target.value }))}
-                      type="date"
+                      type="date" required
                       aria-label={t('reservationsView.form.checkOutDate', { defaultValue: 'Check-out date' })}
                       className={modalInputClass}
                     />
@@ -1475,11 +1472,12 @@ export const ReservationsView: React.FC = memo(() => {
                 onChange={(event) => setCreateForm((prev) => ({ ...prev, notes: event.target.value }))}
                 placeholder={t('reservationsView.form.notes', { defaultValue: 'Notes (optional)' })}
                 rows={3}
-                className={`w-full ${modalInputClass}`}
+                className={`resize-none py-2.5 ${modalInputClass}`}
               />
             </label>
 
-            {activeTab === 'rooms' && <p className="my-3 rounded-xl border border-current/20 p-3 text-sm" aria-live="polite">
+            {/* The stay cost is a plain fact in a frost section (the money keeps its words). */}
+            {activeTab === 'rooms' && <p className="pos-frost mt-3 rounded-xl border px-3 py-2 text-sm font-semibold text-(--pos-s-fg)" aria-live="polite">
               {roomStayNights(createForm.checkInDate, createForm.checkOutDate) > 0
                 ? t('roomWorkflow.costPreview', {
                     nights: roomStayNights(createForm.checkInDate, createForm.checkOutDate),
@@ -1487,17 +1485,21 @@ export const ReservationsView: React.FC = memo(() => {
                     total: formatCurrency(roomStayNights(createForm.checkInDate, createForm.checkOutDate) * (rooms.find((room) => room.id === createForm.roomId)?.ratePerNight || 0)),
                   }) : t('roomWorkflow.invalidDates')}
             </p>}
-            <div className="mt-4 flex justify-end gap-2">
+            </div>
+
+            <div className={modalFooterClass}>
               <button
+                type="button"
                 onClick={() => setShowCreateModal(false)}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border ${isDark ? 'bg-(--pos-s-surface-2) text-(--pos-s-fg) border-(--pos-s-border) active:bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2) text-(--pos-s-fg) border-(--pos-s-border) active:bg-(--pos-s-surface-2)'}`}
+                className={secondaryButtonClass}
               >
                 {t('common.cancel', { defaultValue: 'Cancel' })}
               </button>
               <button
+                type="button"
                 onClick={() => void handleCreateReservation()}
                 disabled={isCreating || !isCreateReservationReady}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border disabled:active:scale-100 disabled:cursor-not-allowed ${isDark ? 'bg-(--pos-s-yellow) text-black border-(--pos-s-yellow) active:bg-yellow-500 disabled:bg-white/5 disabled:text-gray-500 disabled:border-white/10' : 'bg-(--pos-s-yellow) text-black border-(--pos-s-yellow) active:bg-yellow-500 disabled:bg-gray-200/70 disabled:text-gray-500 disabled:border-gray-300/80'}`}
+                className={primaryButtonClass}
               >
                 {isCreating
                   ? t('common.creating', { defaultValue: 'Creating...' })
@@ -1509,8 +1511,8 @@ export const ReservationsView: React.FC = memo(() => {
       )}
 
       {showServiceModal && renderModalPortal(
-        <div className="fixed inset-0 z-1200 flex items-center justify-center">
-          <div className={modalScrimClass} onClick={closeServiceModal} />
+        <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
+          <div className={modalScrimClass} onClick={closeServiceModal} aria-hidden="true" />
           <div
             ref={serviceDialogRef}
             role="dialog"
@@ -1518,19 +1520,21 @@ export const ReservationsView: React.FC = memo(() => {
             aria-labelledby={serviceTitleId}
             className={modalPanelClass}
           >
-            <div className="flex items-center justify-between mb-4">
-              <h3 id={serviceTitleId} className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+            <div className={modalHeaderClass}>
+              <h3 id={serviceTitleId} className="text-2xl font-semibold text-(--pos-s-fg)">
                 {t('reservationsView.createServiceTitle', { defaultValue: 'Create Service Booking' })}
               </h3>
               <button
+                type="button"
                 onClick={closeServiceModal}
                 aria-label={t('common.close', { defaultValue: 'Close' })}
-                className={`inline-flex items-center justify-center shrink-0 p-1.5 rounded-full transition-transform active:scale-95 ${isDark ? 'bg-white/5 text-gray-300' : 'bg-black/5 text-gray-600'}`}
+                className="liquid-glass-modal-close"
               >
-                <X className="w-4 h-4 shrink-0" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
+            <div className={modalBodyClass}>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <label className="flex flex-col gap-1">
                 <span className={fieldLabelClass}>{t('reservationsView.form.customerName', { defaultValue: 'Customer name' })}</span>
@@ -1580,20 +1584,20 @@ export const ReservationsView: React.FC = memo(() => {
               </label>
               <label className="flex flex-col gap-1">
                 <span className={fieldLabelClass}>{t('reservationsView.form.reservationDate', { defaultValue: 'Reservation date' })}</span>
-                <input
+                <KitDateField
                   value={serviceForm.date}
                   onChange={(event) => setServiceForm((prev) => ({ ...prev, date: event.target.value }))}
-                  type="date"
+                  type="date" required
                   aria-label={t('reservationsView.form.reservationDate', { defaultValue: 'Reservation date' })}
                   className={modalInputClass}
                 />
               </label>
               <label className="flex flex-col gap-1">
                 <span className={fieldLabelClass}>{t('reservationsView.form.reservationTime', { defaultValue: 'Reservation time' })}</span>
-                <input
+                <KitDateField
                   value={serviceForm.time}
                   onChange={(event) => setServiceForm((prev) => ({ ...prev, time: event.target.value }))}
-                  type="time"
+                  type="time" required
                   aria-label={t('reservationsView.form.reservationTime', { defaultValue: 'Reservation time' })}
                   className={modalInputClass}
                 />
@@ -1607,21 +1611,24 @@ export const ReservationsView: React.FC = memo(() => {
                 onChange={(event) => setServiceForm((prev) => ({ ...prev, notes: event.target.value }))}
                 placeholder={t('reservationsView.form.notes', { defaultValue: 'Notes (optional)' })}
                 rows={3}
-                className={`w-full ${modalInputClass}`}
+                className={`resize-none py-2.5 ${modalInputClass}`}
               />
             </label>
+            </div>
 
-            <div className="mt-4 flex justify-end gap-2">
+            <div className={modalFooterClass}>
               <button
+                type="button"
                 onClick={closeServiceModal}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border ${isDark ? 'bg-(--pos-s-surface-2) text-(--pos-s-fg) border-(--pos-s-border) active:bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2) text-(--pos-s-fg) border-(--pos-s-border) active:bg-(--pos-s-surface-2)'}`}
+                className={secondaryButtonClass}
               >
                 {t('common.cancel', { defaultValue: 'Cancel' })}
               </button>
               <button
+                type="button"
                 onClick={() => void handleCreateServiceBooking()}
                 disabled={isCreatingService}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border disabled:opacity-60 ${isDark ? 'bg-(--pos-s-yellow) text-black border-(--pos-s-yellow) active:bg-yellow-500' : 'bg-(--pos-s-yellow) text-black border-(--pos-s-yellow) active:bg-yellow-500'}`}
+                className={primaryButtonClass}
               >
                 {isCreatingService
                   ? t('common.creating', { defaultValue: 'Creating...' })
@@ -1633,23 +1640,26 @@ export const ReservationsView: React.FC = memo(() => {
       )}
 
       {(selectedReservation || isDetailsLoading) && renderModalPortal(
-        <div className="fixed inset-0 z-1200 flex justify-end">
-          <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={() => setSelectedReservation(null)} />
-          <div className={`relative h-full w-full max-w-xl p-4 overflow-y-auto rounded-l-[26px] backdrop-blur-2xl shadow-2xl ${isDark ? 'bg-gray-900/85 border-l border-white/10' : 'bg-white/85 border-l border-white/60'}`}>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+        <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
+          <div className={modalScrimClass} onClick={() => setSelectedReservation(null)} aria-hidden="true" />
+          <div className="liquid-glass-modal-shell relative flex w-full max-w-xl flex-col text-(--pos-s-fg)">
+            <div className={modalHeaderClass}>
+              <h3 className="text-2xl font-semibold text-(--pos-s-fg)">
                 {t('reservationsView.detailTitle', { defaultValue: 'Reservation Details' })}
               </h3>
               <button
+                type="button"
                 onClick={() => setSelectedReservation(null)}
-                className={`inline-flex items-center justify-center shrink-0 p-1.5 rounded-full transition-transform active:scale-95 ${isDark ? 'bg-white/5 text-gray-300' : 'bg-black/5 text-gray-600'}`}
+                aria-label={t('common.actions.close', 'Close')}
+                className="liquid-glass-modal-close"
               >
-                <X className="w-4 h-4 shrink-0" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
+            <div className={modalBodyClass}>
             {isDetailsLoading && (
-              <div className={`flex items-center ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+              <div className="flex items-center text-(--pos-s-muted)">
                 <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
                 {t('common.loading', { defaultValue: 'Loading...' })}
               </div>
@@ -1657,58 +1667,54 @@ export const ReservationsView: React.FC = memo(() => {
 
             {!isDetailsLoading && selectedReservation && (
               <div className="space-y-4">
-                <div className={`p-3 rounded-2xl ${isDark ? 'bg-gray-800/70' : 'bg-gray-50/80'}`}>
-                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                <div className="pos-frost rounded-xl border p-3">
+                  <div className="text-sm text-(--pos-s-muted)">
                     {t('reservationsView.customer', { defaultValue: 'Customer' })}
                   </div>
-                  <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedReservation.customerName}</div>
-                  <div className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>{selectedReservation.customerPhone}</div>
+                  <div className="font-semibold text-(--pos-s-fg)">{selectedReservation.customerName}</div>
+                  <div className="text-sm text-(--pos-s-fg)">{selectedReservation.customerPhone}</div>
                   {selectedReservation.customerEmail && (
-                    <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{selectedReservation.customerEmail}</div>
+                    <div className="text-sm text-(--pos-s-muted)">{selectedReservation.customerEmail}</div>
                   )}
                 </div>
 
-                <div className={`p-3 rounded-2xl ${isDark ? 'bg-gray-800/70' : 'bg-gray-50/80'}`}>
-                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                <div className="pos-frost rounded-xl border p-3">
+                  <div className="text-sm text-(--pos-s-muted)">
                     {t('reservationsView.when', { defaultValue: 'Date & Time' })}
                   </div>
-                  <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                  <div className="font-semibold text-(--pos-s-fg)">
                     {/* Display the branch's recorded wall time, independently of this PC's timezone. */}
                     {formatDate(reservationWallDateTime(selectedReservation))} {formatTime(reservationWallDateTime(selectedReservation), { hour: '2-digit', minute: '2-digit' })}
                   </div>
-                  <div className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+                  <div className="text-sm text-(--pos-s-fg)">
                     {selectedReservation.partySize} {t('reservationsView.guests', { defaultValue: 'guests' })}
                   </div>
                 </div>
 
                 {selectedReservation.specialRequests && (
-                  <div className={`p-3 rounded-2xl ${isDark ? 'bg-gray-800/70' : 'bg-gray-50/80'}`}>
-                    <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                  <div className="pos-frost rounded-xl border p-3">
+                    <div className="text-sm text-(--pos-s-muted)">
                       {t('reservationsView.specialRequests', { defaultValue: 'Special Requests' })}
                     </div>
-                    <div className={`${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedReservation.specialRequests}</div>
+                    <div className="text-(--pos-s-fg)">{selectedReservation.specialRequests}</div>
                   </div>
                 )}
 
                 <div className="space-y-2">
-                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                  <div className="text-sm text-(--pos-s-muted)">
                     {t('reservationsView.quickActions', { defaultValue: 'Quick Actions' })}
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {selectedReservation.roomId && ['pending', 'confirmed'].includes(selectedReservation.status) && <button type="button" className="rounded-xl bg-yellow-400 px-3 py-2 text-black" onClick={() => {
+                    {selectedReservation.roomId && ['pending', 'confirmed'].includes(selectedReservation.status) && <button type="button" className="pos-solid-btn pos-solid-btn--sm" onClick={() => {
                       if (!rooms.some((room) => room.id === selectedReservation.roomId)) { toast.error(t('roomsView.toasts.roomNotFound')); return; }
                       setRoomWorkflow({ reservation: selectedReservation, mode: 'edit' }); setSelectedReservation(null);
                     }}>{t('roomWorkflow.editBooking')}</button>}
                     {getQuickActions(selectedReservation).map((action) => (
                       <button
                         key={action.status}
+                        type="button"
                         onClick={() => void handleStatusChange(selectedReservation.id, action.status)}
-                        className={`inline-flex items-center justify-center text-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium transition-transform active:scale-95 ${
-                          action.variant === 'primary' ? 'bg-yellow-400 text-black' :
-                          action.variant === 'success' ? 'bg-(--pos-s-yellow) text-black' :
-                          action.variant === 'danger' ? 'bg-red-600 text-white' :
-                          isDark ? 'bg-gray-700 text-white' : 'bg-gray-200 text-gray-800'
-                        }`}
+                        className={quickActionClass(action.variant)}
                       >
                         {action.label}
                       </button>
@@ -1717,8 +1723,8 @@ export const ReservationsView: React.FC = memo(() => {
                 </div>
 
                 {!selectedReservation.roomId && (
-                <div className={`p-3 rounded-2xl ${isDark ? 'bg-gray-800/70' : 'bg-gray-50/80'}`}>
-                  <div className={`text-sm mb-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                <div className="pos-frost rounded-xl border p-3">
+                  <div className="text-sm mb-2 text-(--pos-s-muted)">
                     {t('reservationsView.assignTable', { defaultValue: 'Assign Table' })}
                   </div>
                   <div className="flex gap-2">
@@ -1726,7 +1732,7 @@ export const ReservationsView: React.FC = memo(() => {
                       value={tableAssignmentId}
                       onChange={(event) => setTableAssignmentId(event.target.value)}
                       aria-label={t('reservationsView.assignTable', { defaultValue: 'Assign Table' })}
-                      className={`flex-1 ${modalInputClass}`}
+                      className={`min-w-0 flex-1 ${kitFieldLook}`}
                     >
                       <option value="">{t('reservationsView.selectTable', { defaultValue: 'Select a table' })}</option>
                       {tables.map((table) => (
@@ -1736,9 +1742,10 @@ export const ReservationsView: React.FC = memo(() => {
                       ))}
                     </select>
                     <button
+                      type="button"
                       disabled={isAssigningTable || !tableAssignmentId.trim()}
                       onClick={() => void handleAssignTable()}
-                      className="inline-flex items-center justify-center text-center gap-2 min-h-[40px] px-3 py-2 rounded-xl bg-yellow-400 text-black transition-transform active:scale-95 disabled:opacity-60"
+                      className={secondaryButtonClass}
                     >
                       {isAssigningTable
                         ? t('common.saving', { defaultValue: 'Saving...' })
@@ -1749,6 +1756,7 @@ export const ReservationsView: React.FC = memo(() => {
                 )}
               </div>
             )}
+            </div>
           </div>
         </div>
       )}

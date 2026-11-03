@@ -665,29 +665,37 @@ pub(crate) fn purge_caller_id_admin_cache(db: &db::DbState) -> Result<usize, Str
 
 /// Removes every customer answer an earlier build saved in this cache (see
 /// [`is_customer_admin_route`]). Runs at startup, like the Caller ID purge.
+fn cached_admin_keys(
+    conn: &rusqlite::Connection,
+    matches: fn(&str) -> bool,
+) -> Result<Vec<String>, String> {
+    let mut statement = conn.prepare("SELECT setting_key FROM local_settings WHERE setting_category='local' AND setting_key LIKE ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([format!("{ADMIN_API_CACHE_PREFIX}%")], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .filter(|key| {
+            key.strip_prefix(ADMIN_API_CACHE_PREFIX)
+                .is_some_and(matches)
+        })
+        .collect())
+}
+
 pub(crate) fn purge_customer_admin_cache(db: &db::DbState) -> Result<usize, String> {
-    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let transaction = conn
-        .transaction()
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // The statement is dropped before admission; never upgrade a probe snapshot.
+    if cached_admin_keys(&conn, is_customer_admin_route)?.is_empty() {
+        return Ok(0);
+    }
+    let transaction = crate::db::immediate_transaction(&conn)
         .map_err(|e| format!("begin saved customer API cache purge: {e}"))?;
-    let keys = {
-        let mut statement = transaction
-            .prepare(
-                "SELECT setting_key
-                 FROM local_settings
-                 WHERE setting_category = 'local'
-                   AND setting_key LIKE ?1",
-            )
-            .map_err(|e| format!("scan saved customer API cache: {e}"))?;
-        let rows = statement
-            .query_map([format!("{ADMIN_API_CACHE_PREFIX}%")], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| format!("query saved customer API cache: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("read saved customer API cache: {e}"))?;
-        rows
-    };
+    let keys = cached_admin_keys(&transaction, is_customer_admin_route)?;
     let mut removed = 0usize;
     for key in keys {
         let Some(path) = key.strip_prefix(ADMIN_API_CACHE_PREFIX) else {
@@ -713,28 +721,14 @@ pub(crate) fn purge_customer_admin_cache(db: &db::DbState) -> Result<usize, Stri
 }
 
 pub(crate) fn purge_repair_admin_cache(db: &db::DbState) -> Result<usize, String> {
-    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let transaction = conn
-        .transaction()
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // The statement is dropped before admission; never upgrade a probe snapshot.
+    if cached_admin_keys(&conn, is_repair_admin_route)?.is_empty() {
+        return Ok(0);
+    }
+    let transaction = crate::db::immediate_transaction(&conn)
         .map_err(|e| format!("begin legacy repair API cache purge: {e}"))?;
-    let keys = {
-        let mut statement = transaction
-            .prepare(
-                "SELECT setting_key
-                 FROM local_settings
-                 WHERE setting_category = 'local'
-                   AND setting_key LIKE ?1",
-            )
-            .map_err(|e| format!("scan legacy repair API cache: {e}"))?;
-        let rows = statement
-            .query_map([format!("{ADMIN_API_CACHE_PREFIX}%")], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| format!("query legacy repair API cache: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("read legacy repair API cache: {e}"))?;
-        rows
-    };
+    let keys = cached_admin_keys(&transaction, is_repair_admin_route)?;
     let mut removed = 0usize;
     for key in keys {
         let Some(path) = key.strip_prefix(ADMIN_API_CACHE_PREFIX) else {

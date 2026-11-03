@@ -1513,6 +1513,11 @@ export interface DiagnosticsSystemHealth {
     profileCount: number;
     defaultProfile: string | null;
     recentJobs: DiagnosticsRecentPrintJob[];
+    /** Native eligibility projection; null means unavailable, never healthy. */
+    brandRecovery?: Array<{
+      code: 'printer.brand_probe_unanswered'; printerId: string;
+      configuredPrinterRef: { id: string; configuration_revision: number }; observedAt: string;
+    }> | null;
     /**
      * Every print job still waiting to print (`pending`, or `printing` and not
      * finished), over the whole queue (not the five-job `recentJobs` window),

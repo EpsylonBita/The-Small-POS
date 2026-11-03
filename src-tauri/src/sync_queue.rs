@@ -1250,11 +1250,24 @@ fn gift_close_bound_predicate(alias: &str) -> String {
 /// maintenance runs it over the whole queue, so it was O(queued rows x local
 /// orders): about 10 s at 20,000 rows and 4,000 orders, while holding the
 /// database (measured 13/10/2026, `queue_capacity_cost_at_the_cap`).
+///
+/// The leading EXISTS does not depend on the queue row, so SQLite evaluates
+/// it once per statement, through v107's `idx_orders_repair_settlement`. On
+/// a till that holds no repair settlement, which is every till without the
+/// repairs module, it is false and no row pays for the key lookups
+/// (02/11/2026: Health counted 5,000 queued rows in 11–35 ms per count).
 fn semantic_repair_financial_queue_owner_predicate(alias: &str) -> String {
     let order_context = semantic_sql_value("repair_owner.order_context");
+    let any_settlement_context = semantic_sql_value("repair_settlement_guard.order_context");
     let table = semantic_sql_value(&format!("{alias}.table_name"));
     format!(
         "(
+           EXISTS (
+               SELECT 1
+               FROM orders repair_settlement_guard
+               WHERE {any_settlement_context} = 'repair_settlement'
+           )
+           AND (
              ({table} = 'orders'
               AND (
                    EXISTS (
@@ -1292,6 +1305,7 @@ fn semantic_repair_financial_queue_owner_predicate(alias: &str) -> String {
                      WHERE repair_adjustment.id = {alias}.record_id
                        AND {order_context} = 'repair_settlement'
                  ))
+           )
          )"
     )
 }
@@ -1805,6 +1819,27 @@ pub fn create_tables(conn: &Connection) -> Result<(), String> {
 pub(crate) const PARITY_QUEUE_TABLE_RECORD_INDEX_SQL: &str =
     "CREATE INDEX IF NOT EXISTS idx_parity_sq_table_record
          ON parity_sync_queue (table_name, record_id, created_at);";
+
+/// The queue rows [`quarantine_reserved_repair_lookalikes`] parks (migration
+/// v107). Its WHERE clause is [`reserved_repair_lookalike_predicate`]'s, term
+/// for term: SQLite uses a partial index only when the query repeats its
+/// terms. The quarantine runs on every enqueue and used to scan the whole
+/// queue, 11 ms at 5,000 rows (02/11/2026); it now reads this index, which
+/// is empty on a healthy till.
+pub(crate) const PARITY_QUEUE_REPAIR_LOOKALIKE_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_parity_sync_queue_repair_lookalike
+         ON parity_sync_queue (status)
+      WHERE ((lower(trim(COALESCE(module_type, ''), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))) = 'repairs'
+              OR lower(trim(COALESCE(table_name, ''), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))) IN ('repairs', 'repair_attachments'))
+             AND NOT (COALESCE(module_type, '') = 'repairs' AND table_name IN ('repairs', 'repair_attachments')));";
+
+/// The local repair-settlement orders (migration v107), for the
+/// once-per-statement guard of [`semantic_repair_financial_queue_owner_predicate`].
+/// Its WHERE clause is that guard's term.
+pub(crate) const ORDERS_REPAIR_SETTLEMENT_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_orders_repair_settlement
+         ON orders (id)
+      WHERE lower(trim(COALESCE(order_context, ''), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))) = 'repair_settlement';";
 
 /// The capacity COUNT; its WHERE clause is the `idx_parity_sync_queue_active`
 /// predicate, character for character.
@@ -5210,6 +5245,21 @@ fn retry_failed_customer_address_default_conflict_items_limited(
     conn: &Connection,
     limit: usize,
 ) -> Result<RetryItemsResult, String> {
+    retry_customer_address_default_conflict_items_targeted(conn, limit, None)
+}
+
+pub(crate) fn schedule_customer_address_default_retry(
+    conn: &Connection,
+    target: &str,
+) -> Result<RetryItemsResult, String> {
+    retry_customer_address_default_conflict_items_targeted(conn, 1, Some(target))
+}
+
+fn retry_customer_address_default_conflict_items_targeted(
+    conn: &Connection,
+    limit: usize,
+    target: Option<&str>,
+) -> Result<RetryItemsResult, String> {
     if limit == 0 {
         return Ok(RetryItemsResult { retried: 0 });
     }
@@ -5231,7 +5281,7 @@ fn retry_failed_customer_address_default_conflict_items_limited(
                 'next_retry_at', next_retry_at, 'last_attempt', last_attempt,
                 'retry_delay_ms', retry_delay_ms)
              FROM parity_sync_queue WHERE table_name = 'customer_addresses'
-               AND {generic_owner} AND module_type = 'customers' AND organization_id = ?1
+               AND {generic_owner} AND (?2 IS NULL OR id=?2) AND module_type = 'customers' AND organization_id = ?1
                AND json_valid(data) AND json_type(data) = 'object'
                AND coalesce(json_extract(data, '$.is_default'), json_extract(data, '$.isDefault')) = 1
                AND NOT EXISTS (SELECT 1 FROM json_each(data) WHERE key IN
@@ -5243,7 +5293,7 @@ fn retry_failed_customer_address_default_conflict_items_limited(
         );
         let mut stmt = conn.prepare(&select_sql).map_err(|e| e.to_string())?;
         let candidates = stmt
-            .query_map([&organization_id], |row| {
+            .query_map(params![organization_id, target], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -5289,6 +5339,7 @@ fn retry_failed_customer_address_default_conflict_items_limited(
             let payload = serde_json::json!({"outcome": "pending", "queueId": queue_id,
                 "attempt": guard.attempts + 1, "snapshotKind": "retry_bookkeeping",
                 "snapshotKey": format!("preimage:{audit_id}")});
+            let payload = crate::incident_reporting::recipe_audit_scope(conn, payload);
             conn.execute("INSERT INTO recovery_action_log
                 (id, action_id, issue_code, recipe_id, recipe_version, entity_type, entity_id,
                  success, message, payload_json)
@@ -6718,61 +6769,51 @@ pub(crate) fn list_closeout_exempt_queue_items(
     Ok((total, items))
 }
 
+/// The renderer's queue counts in one pass over the queue (02/11/2026). The
+/// owner filter costs a few key lookups per row, and Health used to run it
+/// eight times, once per count: 11–35 ms each at 5,000 queued rows. Same
+/// rows, same counts.
 pub(crate) fn renderer_get_status(conn: &Connection) -> Result<QueueStatus, String> {
     let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
-    let predicate = format!(
-        "{generic_owner}
-         AND {ownership_exclusion}"
+    let sql = format!(
+        "SELECT COUNT(*),
+                COUNT(CASE WHEN status = 'pending' THEN 1 END),
+                COUNT(CASE WHEN status = 'processing' THEN 1 END),
+                COUNT(CASE WHEN status = 'failed' THEN 1 END),
+                COUNT(CASE WHEN status = 'conflict' THEN 1 END),
+                COUNT(CASE WHEN status = 'failed' AND error_message = ?1 THEN 1 END),
+                COUNT(CASE WHEN status = 'failed'
+                            AND attempts >= ?2
+                            AND COALESCE(error_message, '') <> ?1 THEN 1 END),
+                CASE
+                    WHEN MIN(julianday(created_at)) IS NULL THEN NULL
+                    ELSE CAST(MAX(
+                        0,
+                        (julianday('now') - MIN(julianday(created_at))) * 86400000
+                    ) AS INTEGER)
+                END
+         FROM parity_sync_queue
+         WHERE {generic_owner}
+           AND {ownership_exclusion}"
     );
-    let count = |status: Option<&str>| -> Result<i64, String> {
-        let sql = match status {
-            Some(_) => {
-                format!("SELECT COUNT(*) FROM parity_sync_queue WHERE {predicate} AND status = ?1")
-            }
-            None => format!("SELECT COUNT(*) FROM parity_sync_queue WHERE {predicate}"),
-        };
-        if let Some(status) = status {
-            conn.query_row(&sql, [status], |row| row.get(0))
-        } else {
-            conn.query_row(&sql, [], |row| row.get(0))
-        }
-        .map_err(|e| format!("sync_queue renderer status count: {e}"))
-    };
-    let oldest_item_age = oldest_queue_item_age_ms(conn, Some(&predicate))?;
-    Ok(QueueStatus {
-        total: count(None)?,
-        pending: count(Some("pending"))?,
-        in_progress: count(Some("processing"))?,
-        failed: count(Some("failed"))?,
-        conflicts: count(Some("conflict"))?,
-        quarantined: {
-            let sql = format!(
-                "SELECT COUNT(*) FROM parity_sync_queue
-                 WHERE {predicate}
-                   AND status = 'failed'
-                   AND error_message = ?1"
-            );
-            conn.query_row(&sql, [REPAIR_RESERVED_OWNER_QUARANTINED], |row| row.get(0))
-                .map_err(|e| format!("sync_queue renderer status quarantined: {e}"))?
+    conn.query_row(
+        &sql,
+        params![REPAIR_RESERVED_OWNER_QUARANTINED, MAX_RETRY_ATTEMPTS],
+        |row| {
+            Ok(QueueStatus {
+                total: row.get(0)?,
+                pending: row.get(1)?,
+                in_progress: row.get(2)?,
+                failed: row.get(3)?,
+                conflicts: row.get(4)?,
+                quarantined: row.get(5)?,
+                dead_lettered: row.get(6)?,
+                oldest_item_age: row.get(7)?,
+            })
         },
-        dead_lettered: {
-            let sql = format!(
-                "SELECT COUNT(*) FROM parity_sync_queue
-                 WHERE {predicate}
-                   AND status = 'failed'
-                   AND attempts >= ?1
-                   AND COALESCE(error_message, '') <> ?2"
-            );
-            conn.query_row(
-                &sql,
-                params![MAX_RETRY_ATTEMPTS, REPAIR_RESERVED_OWNER_QUARANTINED],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("sync_queue renderer status dead_lettered: {e}"))?
-        },
-        oldest_item_age,
-    })
+    )
+    .map_err(|e| format!("sync_queue renderer status: {e}"))
 }
 
 fn sync_telemetry_scope(conn: &Connection) -> SyncTelemetryScope {
@@ -19532,7 +19573,7 @@ fn is_known_server_wins_conflict(status: u16, response_body: &str, item: &SyncQu
 use rusqlite::OptionalExtension;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use rusqlite::params;
     use serde_json::json;
@@ -20313,7 +20354,7 @@ mod tests {
             .is_none());
     }
 
-    fn seed_terminal_context(conn: &Connection) {
+    pub(crate) fn seed_terminal_context(conn: &Connection) {
         crate::db::set_setting(conn, "terminal", "terminal_id", TEST_TERMINAL_ID)
             .expect("store terminal id");
         crate::db::set_setting(conn, "terminal", "branch_id", TEST_BRANCH_ID)
@@ -22619,7 +22660,7 @@ mod tests {
         );
     }
 
-    fn seed_failed_customer_address_default_conflict_row(
+    pub(crate) fn seed_failed_customer_address_default_conflict_row(
         conn: &Connection,
         record_id: &str,
         error_message: &str,
@@ -22645,6 +22686,38 @@ mod tests {
         )
         .expect("seed failed customer address default-conflict parity row");
         queue_id
+    }
+
+    pub(crate) fn complete_automatic_address_retry_for_test(conn: &Connection) {
+        seed_terminal_context(conn);
+        let id = seed_failed_customer_address_default_conflict_row(
+            conn,
+            "your-private-address",
+            "CUSTOMER_ADDRESS_DEFAULT_CONFLICT",
+        );
+        assert_eq!(
+            retry_failed_customer_address_default_conflict_items_limited(conn, 1)
+                .unwrap()
+                .retried,
+            1
+        );
+        let item = dequeue(conn).unwrap().unwrap();
+        assert_eq!(item.id, id);
+        assert!(with_live_generic_claim(conn, &item, |conn| {
+            record_customer_address_default_recovery_outcome(conn, &id, "resolved")?;
+            mark_success(conn, &id, item.claim_generation)
+        })
+        .unwrap()
+        .is_some());
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM parity_sync_queue WHERE id=?1",
+                [&id],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -22683,6 +22756,52 @@ mod tests {
         let guard = read_customer_address_default_recovery_guard(&conn, queue_id.as_str());
         assert_eq!(guard.attempts, 1);
         assert!(guard.last_probe_at.is_some());
+    }
+
+    #[test]
+    fn schedule_customer_address_default_retry_requeues_only_the_named_item() {
+        // Support's targeted remedy (task 13.6) reuses the owner with its
+        // matcher, guard and bookkeeping, but touches exactly one queue row.
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let target = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-target",
+            "HTTP 409: CUSTOMER_ADDRESS_DEFAULT_CONFLICT",
+        );
+        let other = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-other",
+            "HTTP 409: CUSTOMER_ADDRESS_DEFAULT_CONFLICT",
+        );
+        let result = schedule_customer_address_default_retry(&conn, target.as_str())
+            .expect("targeted retry");
+        assert_eq!(result.retried, 1);
+        let status = |id: &str| -> String {
+            conn.query_row(
+                "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(status(target.as_str()), "pending");
+        assert_eq!(status(other.as_str()), "failed");
+        assert_eq!(
+            read_customer_address_default_recovery_guard(&conn, target.as_str()).attempts,
+            1
+        );
+        assert_eq!(
+            read_customer_address_default_recovery_guard(&conn, other.as_str()).attempts,
+            0
+        );
+        // An unknown or ineligible id schedules nothing.
+        assert_eq!(
+            schedule_customer_address_default_retry(&conn, "your-unknown-id")
+                .unwrap()
+                .retried,
+            0
+        );
     }
 
     #[test]
@@ -43771,3 +43890,7 @@ mod health_make_due_tests {
 #[cfg(test)]
 #[path = "edit_canonical_drift_tests.rs"]
 pub(crate) mod edit_canonical_drift_tests;
+
+#[cfg(test)]
+#[path = "sync_queue_scaling_tests.rs"]
+mod scaling_tests;

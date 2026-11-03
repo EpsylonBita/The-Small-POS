@@ -1,5 +1,6 @@
 'use client'
 
+import { X } from 'lucide-react';
 import React from 'react'
 import ReactDOM from 'react-dom'
 import { cn } from '../../utils/cn'
@@ -474,12 +475,10 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
             </h2>
             <button
               onClick={onClose}
-              className="liquid-glass-modal-button p-2 min-h-0 min-w-0"
+              className="liquid-glass-modal-close"
               aria-label={t('common.actions.close')}
             >
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              <X className="h-5 w-5" aria-hidden="true" />
             </button>
           </div>
         )}

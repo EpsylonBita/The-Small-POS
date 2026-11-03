@@ -187,9 +187,18 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         return false;
       }
 
-      let result = await bridge.shifts.getActiveByTerminal(branchId, terminalId);
-      // Handle wrapped IPC response - extract data from { success, data } format
-      let s = result?.data ?? result;
+      const drawerShift = (reply: any) => {
+        const shift = reply?.data ?? reply;
+        return reply?.success !== false && shift?.status === 'active' &&
+          ['cashier', 'manager'].includes(shift.role_type) ? shift : null;
+      };
+      let s: any = null;
+      try { s = drawerShift(await bridge.shifts.getActiveCashierByTerminal(branchId, terminalId)); } catch { }
+      if (!s) {
+        try { s = drawerShift(await bridge.shifts.getActiveCashierByTerminalLoose(terminalId)); } catch { }
+      }
+      const result = s || await bridge.shifts.getActiveByTerminal(branchId, terminalId);
+      s = result?.data ?? result;
 
       if (!s || (result?.success === false)) {
         // Loose fallback: try by terminal only (handles branchId mismatches between local and admin)

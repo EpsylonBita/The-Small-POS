@@ -156,10 +156,10 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
           </div>
           <button
             onClick={onClose}
-            className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${actionClass}`}
+            className="liquid-glass-modal-close shrink-0"
             aria-label={t('common.close', 'Close')}
           >
-            <X className="h-5 w-5" />
+            <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
 

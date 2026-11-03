@@ -699,10 +699,12 @@ fn ingest_document(
     hash: &str,
 ) -> Result<IngestDecision, String> {
     let capture_id = uuid::Uuid::new_v4().to_string();
+    let lifecycle = files::lock_lifecycle(app_data_dir, &capture_id)?;
     let is_pdf = mime == "application/pdf";
 
     let original_path = if is_pdf {
-        Some(files::write_original_blocking(
+        Some(files::write_original_blocking_guarded(
+            &lifecycle,
             app_data_dir,
             &capture_id,
             bytes,
@@ -713,7 +715,8 @@ fn ingest_document(
     let page = if is_pdf {
         None
     } else {
-        Some(files::write_page_blocking(
+        Some(files::write_page_blocking_guarded(
+            &lifecycle,
             app_data_dir,
             &capture_id,
             0,
@@ -722,8 +725,11 @@ fn ingest_document(
         )?)
     };
 
-    let tx = conn
-        .unchecked_transaction()
+    let validated = page
+        .as_ref()
+        .map(|page| store::validate_written_page(&lifecycle, &capture_id, page))
+        .transpose()?;
+    let tx = crate::db::immediate_transaction(&conn)
         .map_err(|e| format!("begin capture ingest: {e}"))?;
 
     store::create_document(
@@ -740,8 +746,8 @@ fn ingest_document(
         },
     )?;
 
-    if let Some(page) = page.as_ref() {
-        store::record_page(&tx, &capture_id, page)?;
+    if let Some(page) = validated.as_ref() {
+        store::record_validated_page(&tx, &capture_id, page)?;
         // An image arrives complete: the document is finished the moment it is
         // copied in, so it goes straight onto the worker's queue.
         store::set_status(&tx, &capture_id, CaptureStatus::Waiting, None)?;
@@ -917,6 +923,7 @@ pub async fn capture_attach_rendered_pages(
         });
     }
 
+    let lifecycle = files::lock_lifecycle_async(app_data_dir.clone(), capture_id.clone()).await?;
     let mut ordered = pages;
     ordered.sort_by_key(|page| page.page_index);
 
@@ -928,7 +935,8 @@ pub async fn capture_attach_rendered_pages(
         // Pages are re-indexed densely: the renderer's page numbering is a
         // detail, document order is what the store and the server contract on.
         written.push(
-            files::write_page(
+            files::write_page_guarded(
+                lifecycle.clone(),
                 app_data_dir.clone(),
                 capture_id.clone(),
                 index,
@@ -939,25 +947,14 @@ pub async fn capture_attach_rendered_pages(
         );
     }
 
+    let validated = written
+        .iter()
+        .map(|page| store::validate_written_page(&lifecycle, &capture_id, page))
+        .collect::<Result<Vec<_>, _>>()?;
     let page_count = written.len();
     {
         let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| format!("begin attach pages: {e}"))?;
-        for page in &written {
-            store::record_page(&tx, &capture_id, page)?;
-        }
-        store::set_status(&tx, &capture_id, CaptureStatus::Waiting, None)?;
-        store::record_event(
-            &tx,
-            Some(&capture_id),
-            "pages_rendered",
-            None,
-            Some(&serde_json::json!({ "page_count": page_count })),
-        )?;
-        tx.commit()
-            .map_err(|e| format!("commit attach pages: {e}"))?;
+        record_rendered_pages(&conn, &capture_id, &validated)?;
     }
 
     Ok(AttachRenderedPagesResult {
@@ -966,6 +963,32 @@ pub async fn capture_attach_rendered_pages(
         page_count,
         status: CaptureStatus::Waiting.as_str().to_string(),
     })
+}
+
+/// Files were validated while holding the caller's lifecycle fence. This
+/// helper performs only SQLite work, with a fresh document-state recheck.
+pub(crate) fn record_rendered_pages(
+    conn: &Connection,
+    capture_id: &str,
+    validated: &[store::ValidatedPage<'_>],
+) -> Result<(), String> {
+    let page_count = validated.len();
+    let tx =
+        crate::db::immediate_transaction(&conn).map_err(|e| format!("begin attach pages: {e}"))?;
+    for page in validated {
+        store::record_validated_page(&tx, capture_id, page)?;
+    }
+    store::set_status(&tx, capture_id, CaptureStatus::Waiting, None)?;
+    store::record_event(
+        &tx,
+        Some(capture_id),
+        "pages_rendered",
+        None,
+        Some(&serde_json::json!({ "page_count": page_count })),
+    )?;
+    tx.commit()
+        .map_err(|e| format!("commit attach pages: {e}"))?;
+    Ok(())
 }
 
 fn finish_needs_attention(conn: &Connection, capture_id: &str, reason: &str) -> Result<(), String> {
@@ -1690,3 +1713,7 @@ mod tests {
         assert!(load_watched_folder_sources(&conn).is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "../admission_tests/watcher.rs"]
+mod admission_regression_tests;

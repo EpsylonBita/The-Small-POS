@@ -595,6 +595,9 @@ pub async fn payment_record(
     db: tauri::State<'_, db::DbState>,
     mgr: tauri::State<'_, crate::ecr::DeviceManager>,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Checkout,
+    );
     let mut payload = arg0.ok_or("Missing payment payload")?;
     let collect_outstanding = payments::payload_collects_outstanding_balance(&payload);
     if collect_outstanding {
@@ -1254,6 +1257,9 @@ pub async fn payment_save_unsaved(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Checkout,
+    );
     save_unsaved_payments_with_delays(
         &db,
         arg0,
@@ -1486,7 +1492,11 @@ pub async fn payment_void(
     arg0: Option<serde_json::Value>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Checkout,
+    );
     run_blocking_command("payment_void", move || {
+        let _support_critical = _support_critical;
         let db = app.state::<db::DbState>();
         let payload = parse_payment_void_payload(arg0)?;
         payments::void_payment(
@@ -1630,6 +1640,9 @@ pub async fn refund_payment(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Checkout,
+    );
     let payload = arg0.ok_or("Missing refund payload")?;
     let payment_id = parse_payment_id_payload(Some(payload.clone()))?;
     refresh_refund_payment_if_online(&db, &payment_id).await?;
@@ -1641,6 +1654,9 @@ pub async fn refund_void_payment(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
+    let _support_critical = crate::support::critical_op::begin_critical(
+        crate::support::critical_op::CriticalKind::Checkout,
+    );
     let payload = parse_refund_void_payload(arg0)?;
     refresh_refund_payment_if_online(&db, &payload.payment_id).await?;
     refunds::void_payment_with_adjustment(

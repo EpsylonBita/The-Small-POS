@@ -26,8 +26,12 @@ const mock = vi.hoisted(() => {
     orders: { getById: vi.fn(async () => ({ id: 'order-1', plugin: 'pos' })) },
   };
   const toast = Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() });
-  return { bridge, recordPayment, listUnsavedPayments, saveUnsavedPayments, processPayment, toast };
+  return { bridge, recordPayment, listUnsavedPayments, saveUnsavedPayments, processPayment, toast, supportIpc: vi.fn().mockResolvedValue({}) };
 });
+
+vi.mock('../../../../lib/ipc-adapter', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../../lib/ipc-adapter')>(), supportIpc: mock.supportIpc,
+}));
 
 vi.mock('../../../../lib', () => ({
   getBridge: () => mock.bridge,
@@ -123,6 +127,7 @@ const collectButton = (i18n: typeof i18next, method: 'cash' | 'card') =>
 
 describe('SinglePaymentCollectionModal: a card charged but not saved', () => {
   beforeEach(() => {
+    mock.supportIpc.mockClear();
     mock.recordPayment.mockReset();
     mock.listUnsavedPayments.mockReset();
     mock.saveUnsavedPayments.mockReset();
@@ -147,6 +152,8 @@ describe('SinglePaymentCollectionModal: a card charged but not saved', () => {
     });
     const onPaymentCollected = vi.fn();
     const { i18n, onClose } = await renderModal('el', 'card', { onPaymentCollected });
+    const token = mock.supportIpc.mock.calls[0][1].token;
+    expect(mock.supportIpc).toHaveBeenCalledWith('support_payment_open', { token });
 
     await act(async () => {
       fireEvent.click(collectButton(i18n, 'card'));
@@ -161,6 +168,9 @@ describe('SinglePaymentCollectionModal: a card charged but not saved', () => {
     expect(await screen.findByTestId('unsaved-charged-payment-banner')).toBeTruthy();
     expect(onPaymentCollected).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+    expect(mock.supportIpc).toHaveBeenCalledWith('support_payment_closed', { token });
+    const opens = mock.supportIpc.mock.calls.filter(([command]) => command === 'support_payment_open');
+    expect(opens[opens.length - 1]?.[1].token).not.toBe(token);
 
     // The collection stays closed to a second charge.
     expect((collectButton(i18n, 'card') as HTMLButtonElement).disabled).toBe(true);

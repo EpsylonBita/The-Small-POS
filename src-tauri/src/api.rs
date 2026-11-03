@@ -56,7 +56,7 @@ pub(crate) fn pos_capabilities_for(method: &str, path: &str) -> Option<&'static 
     }
 }
 
-/// Shared reqwest::Client — holds a connection pool, TLS session cache,
+/// Shared reqwest::Client â€” holds a connection pool, TLS session cache,
 /// and DNS cache. Previously a fresh Client was built on every call to
 /// `fetch_from_admin` and `test_connectivity`, which defeated keep-alive,
 /// forced a TLS handshake per request, and could leak file descriptors
@@ -64,7 +64,7 @@ pub(crate) fn pos_capabilities_for(method: &str, path: &str) -> Option<&'static 
 /// but referencing the singleton directly avoids even that overhead. Each
 /// caller sets its own timeout via `RequestBuilder::timeout()` rather
 /// than the client-level default.
-/// Wave 9 H2: the shared HTTP client's builder can fail — rarely (typically
+/// Wave 9 H2: the shared HTTP client's builder can fail â€” rarely (typically
 /// only when the system TLS certificate store is unavailable on the very
 /// first call), but a `.expect()` here used to panic the entire process
 /// inside a Tauri command, which is uniformly worse than any API error.
@@ -116,6 +116,30 @@ fn shared_client() -> Result<&'static Client, String> {
         })
         .as_ref()
         .map_err(|e| e.clone())
+}
+
+// Support never follows redirects, including same-origin ones. A redirect is
+// an unavailable support service, never authority to forward terminal headers.
+fn support_client() -> Result<&'static Client, String> {
+    static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(2))
+                .build()
+                .map_err(|_| "SUPPORT_TRANSPORT_UNAVAILABLE".to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+fn client_for_admin_path(path: &str) -> Result<&'static Client, String> {
+    if path.starts_with("/api/pos/support/") || path == "/api/pos/support" {
+        support_client()
+    } else {
+        shared_client()
+    }
 }
 
 fn pos_request(client: &Client, method: Method, url: &str) -> reqwest::RequestBuilder {
@@ -408,7 +432,7 @@ impl AdminFetchError {
 
     /// The request never left this till: its connection could not be opened.
     /// A timeout or a lost reply after sending is a transport failure that
-    /// is NOT this; the server may have acted on it (Ω11 loyalty redemption).
+    /// is NOT this; the server may have acted on it (Î©11 loyalty redemption).
     pub fn is_connect_failure(&self) -> bool {
         self.kind == AdminFetchErrorKind::Transport && self.connect_failed
     }
@@ -819,7 +843,7 @@ pub async fn fetch_from_admin_detailed(
 /// Exists for the rare request whose server-side work is *expected* to outlast
 /// [`DEFAULT_TIMEOUT`]. The OCR recognition call was the proof: the admin
 /// side finishes cold starts in ~a minute, but the client gave up at exactly
-/// 30s every time — the capture then re-queued and repeated the same doomed
+/// 30s every time â€” the capture then re-queued and repeated the same doomed
 /// request forever, so the server did the work and nobody ever received it.
 pub async fn fetch_from_admin_detailed_with_timeout(
     admin_url: &str,
@@ -919,9 +943,9 @@ async fn fetch_from_admin_with_retry_after(
 
     // Wave 9 H2: propagate client-init failures via the function's
     // `Result<_, String>` return type instead of panicking.
-    let client = shared_client()?;
+    let client = client_for_admin_path(path)?;
 
-    // Include terminal_id header — required by verifyPosAuth on the admin side.
+    // Include terminal_id header â€” required by verifyPosAuth on the admin side.
     let terminal_id = resolve_terminal_id(api_key)?;
 
     let mut req = pos_request(client, http_method, &full_url)
@@ -1034,7 +1058,7 @@ pub(crate) async fn post_admin_json_with_staff_session_reply(
 /// Header names [`fetch_raw_from_admin_detailed`] owns outright.
 ///
 /// A caller-supplied header must never be able to restate terminal identity,
-/// the API key, or the framing of the request it is riding in — otherwise a
+/// the API key, or the framing of the request it is riding in â€” otherwise a
 /// bug (or a value that reached a caller from the renderer) could swap the
 /// authenticated terminal out from under the keyring credentials this module
 /// just resolved.
@@ -1051,13 +1075,13 @@ const RESERVED_RAW_HEADERS: &[&str] = &[
 /// Perform an authenticated request whose body is **raw bytes** with a
 /// caller-set `Content-Type`.
 ///
-/// Spec: `.claude/specs/invoice-scan-capture/design.md` — decision **D11**.
+/// Spec: `.claude/specs/invoice-scan-capture/design.md` â€” decision **D11**.
 /// Requirement R17.4.
 ///
 /// This is the sibling of [`fetch_from_admin_detailed`] for the one shape that
 /// function cannot carry: a page of a captured invoice. `fetch_from_admin_detailed`
 /// takes a JSON `serde_json::Value` body, and the vendored `reqwest` is compiled
-/// **without** the `multipart` feature (and stays that way — no new cargo
+/// **without** the `multipart` feature (and stays that way â€” no new cargo
 /// features), so `POST /api/pos/suppliers/import/attachments` is reached with a
 /// single raw `application/octet-stream` page per request instead.
 ///
@@ -1476,5 +1500,38 @@ mod tests {
             AdminFetchError::transport("offline").app_error_field("customer"),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod support_transport_tests {
+    use super::*;
+    #[tokio::test]
+    async fn every_support_route_uses_a_dedicated_client_with_redirects_disabled() {
+        let support = support_client().unwrap();
+        // Inspect the built reqwest client, without connecting to any service.
+        // reqwest's pinned Debug exposes the policy it actually installed.
+        assert!(format!("{support:?}").contains("Policy(None)"));
+        for path in [
+            "/api/pos/support/session",
+            "/api/pos/support/heartbeat",
+            "/api/pos/support/consent/accept",
+        ] {
+            assert!(std::ptr::eq(client_for_admin_path(path).unwrap(), support));
+        }
+        assert!(!std::ptr::eq(support, shared_client().unwrap()));
+    }
+    #[tokio::test]
+    async fn ordinary_app_requests_keep_the_original_client() {
+        for path in [
+            "/api/pos/orders",
+            "/api/pos/payments",
+            "/api/pos/modules/enabled",
+        ] {
+            assert!(std::ptr::eq(
+                client_for_admin_path(path).unwrap(),
+                shared_client().unwrap()
+            ));
+        }
     }
 }

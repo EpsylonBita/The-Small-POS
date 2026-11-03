@@ -104,7 +104,7 @@ export function WaiterServiceRequestManager({ enabled }: { enabled: boolean }) {
           {signInFailed && <p role="alert">{t('waiterService.signInFailed')}</p>}</div>}
         {current && !retained && !loginRequired && <div className="flex justify-between gap-4">
           <button data-testid="waiter-service-reject" disabled={inbox.busy} onClick={() => { void inbox.choose(current.id,'rejected') }} className="rounded-lg bg-red-700 px-5 py-3 text-white">{t('waiterService.reject')}</button>
-          <button data-testid="waiter-service-accept" disabled={inbox.busy} onClick={() => { void inbox.choose(current.id,'accepted') }} className="rounded-lg bg-(--pos-s-yellow) px-5 py-3 text-black">{t('waiterService.accept')}</button>
+          <button data-testid="waiter-service-accept" disabled={inbox.busy} onClick={() => { void inbox.choose(current.id,'accepted') }} className="pos-raised pos-raised--yellow rounded-lg bg-(--pos-s-yellow) px-5 py-3 text-black">{t('waiterService.accept')}</button>
         </div>}
         {(inbox.stale || retained) && <button onClick={() => { void inbox.retry() }} className="rounded-lg border px-4 py-2">{t('common.retry')}</button>}
       </div>
