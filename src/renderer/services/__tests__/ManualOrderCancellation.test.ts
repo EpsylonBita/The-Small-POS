@@ -65,6 +65,17 @@ it('names the platform, mirrored-receipt and saved-attempt refusals', () => {
 });
 
 
+// Founder's dev till, 04/11/2026: a closed check whose money the server still
+// holds while this till has no receipt of it is refused as not recorded, with
+// its way forward, never as a changed payment that a retry could clear.
+it('passes the till\'s not-recorded refusal through and never calls it a changed payment', async () => {
+  const invoke = vi.fn().mockRejectedValue('ORDER_PAYMENT_NOT_RECORDED');
+  const error = await prepareManualOrderCancellation({ invoke }, 'order').catch((failure: unknown) => failure);
+  expect(error).toBe('ORDER_PAYMENT_NOT_RECORDED');
+  expect(manualCancellationFailureKey(error)).toBe('orderDashboard.cancelRefusedNotRecorded');
+  expect(manualCancellationFailureKey(new Error('CANCELLATION_PAYMENT_CHANGED'))).toBe('modals.orderCancellation.paymentChanged');
+});
+
 it('accepts a reason-only cancellation plan when all ordinary money was returned', async () => {
   const invoke = vi.fn().mockResolvedValue({ success: true, orderId: 'order', requiresReturn: false,
     requiresHandback: false, amountCents: 0, currency: null, generation: 'returned-1' });

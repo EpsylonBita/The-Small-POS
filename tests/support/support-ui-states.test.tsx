@@ -69,5 +69,10 @@ register('one shared session owner mounts the banner and direct Health action', 
   assert.equal(app.split('<SupportSessionProvider>').length - 1, 1);
   assert.match(app, /<SupportSessionProvider>(?:(?!<\/SupportSessionProvider>).)*<AppContent \/>(?:(?!<\/SupportSessionProvider>).)*<\/SupportSessionProvider>/);
   assert.ok(app.includes('<SupportBanner />'));
-  assert.match(health, /overflow-y-auto px-5 py-5 sm:px-6">\s*<SupportConnectAction \/>/);
+  // Founder, 04/11/2026: «Σύνδεση υποστήριξης», its code and «Τέλος» sit inside «Ενέργειες υποστήριξης»,
+  // which opens by itself while support is live; nothing support-related above «Χρειάζεται έλεγχο».
+  assert.doesNotMatch(health, /overflow-y-auto px-5 py-5 sm:px-6">\s*<SupportConnectAction \/>/);
+  assert.match(health, /<details className=\{cn\('pos-frost[^']*', liquidGlassModalTone\('neutral'\)\)\}\s+open=\{supportActionsOpen\}[\s\S]*?<summary[^>]*>\{t\('sync\.healthModal\.sections\.supportActions'\)\}<\/summary>\s*<div[^>]*>\s*<SupportConnectAction \/>/);
+  assert.equal(health.split('<SupportConnectAction />').length - 1, 1);
+  assert.match(health, /useEffect\(\(\) => \{\s*if \(supportLive\) \{ setSupportActionsOpen\(true\); \}/);
 });

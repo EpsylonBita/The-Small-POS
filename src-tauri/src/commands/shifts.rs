@@ -848,6 +848,18 @@ pub async fn shift_close(
         if !success {
             return Ok(result);
         }
+        // A checked-out person no longer acts for remote support (1.4.143).
+        if let Some(shift_id) = requested_shift_id.as_deref() {
+            if let Ok(conn) = db.conn.lock() {
+                if let Ok(staff_id) = conn.query_row(
+                    "SELECT staff_id FROM staff_shifts WHERE id = ?1",
+                    [shift_id],
+                    |row| row.get::<_, String>(0),
+                ) {
+                    crate::hosted_staff_sessions::forget(&staff_id);
+                }
+            }
+        }
         // A gift-bound close is only captured locally, pending financial
         // confirmation: no generic auto-print and no ordinary sync handling.
         if is_gift_financial_close(&result) {

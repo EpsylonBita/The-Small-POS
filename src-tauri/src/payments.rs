@@ -3531,14 +3531,6 @@ pub(crate) enum PlatformSettlementKind {
 }
 
 impl PlatformSettlementKind {
-    /// Short name for operator-facing messages.
-    pub(crate) fn slug(self) -> &'static str {
-        match self {
-            PlatformSettlementKind::PrepaidOnline => "prepaid online",
-            PlatformSettlementKind::PlatformCollectedCod => "platform-rider COD",
-        }
-    }
-
     /// Order-specific reference: sync forwards transaction_ref as the server's
     /// org-wide `external_transaction_id`, so a constant here would 409 every
     /// settlement after the first. The Z-report classifier matches on the

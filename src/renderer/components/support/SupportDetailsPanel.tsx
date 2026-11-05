@@ -20,10 +20,17 @@ const QuarantineSchema = z.object({ groups: z.array(z.object({
   restore_state: z.enum(['quarantined', 'restored', 'expired']), restorable: z.boolean(),
 }).refine(group => group.tables.every(table => group.row_counts[table] !== undefined))) });
 type RestoreSelection = { kind: 'snapshot' | 'group'; id: string };
-export function SupportDetailsPanel() {
+/**
+ * «Αναίρεση αλλαγών υποστήριξης»: support device changes to undo, snapshots to restore
+ * and quarantined rows to bring back. It lists them when the support section opens
+ * (`active`), and shows only when one of them can be acted on. A normal till shows
+ * nothing here (founder, 04/11/2026).
+ */
+export function SupportDetailsPanel({ active = true }: { active?: boolean }) {
   const { t } = useTranslation(), session = useSupportSession();
   const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
-  const [expanded, setExpanded] = useState(false), [failed, setFailed] = useState(false), [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false), [busy, setBusy] = useState(false);
+  const expanded = active;
   const [applies, setApplies] = useState<z.infer<typeof AppliesSchema>['applies']>([]);
   const [snapshots, setSnapshots] = useState<z.infer<typeof SnapshotsSchema>['snapshots']>([]);
   const [groups, setGroups] = useState<z.infer<typeof QuarantineSchema>['groups']>([]);
@@ -74,10 +81,19 @@ export function SupportDetailsPanel() {
     } catch { setFailed(true); }
     finally { setConfirm(null); inFlight.current = false; setBusy(false); }
   };
+  const undoable = applies.filter(apply => apply.undo_available);
+  const restorable = snapshots.some((snapshot, index) => index === 0 && snapshot.integrity_ok && snapshot.restorable);
+  const quarantined = groups.some(group => group.restore_state === 'quarantined' && group.restorable);
   if (!session?.snapshot?.can_connect) { return null; }
-  return <section data-testid="support-details-panel" className="space-y-3 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface) p-3 text-(--pos-s-fg)">
-    <button type="button" className={supportButtonClass} aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{t('support.onsite.technicalDetails')}</button>
-    {expanded && applies.map(apply => <div key={apply.id} className="flex flex-wrap items-center gap-3">
+  // Shown when something can be acted on, or when a list could not be read (never shown as empty).
+  // Hidden, it renders nothing, not even the closed confirmation modal: the Health view must
+  // render outside the app's i18n provider too. Only an action still in flight keeps the modal.
+  if (undoable.length === 0 && !restorable && !quarantined && !confirm && !failed && !recoveryFailed) {
+    return busy ? confirmationModal : null;
+  }
+  return <section data-testid="support-details-panel" className="space-y-3 text-(--pos-s-fg)">
+    <h4 className="text-sm font-bold">{t('support.restore.changesTitle')}</h4>
+    {applies.map(apply => <div key={apply.id} className="flex flex-wrap items-center gap-3">
       <span className="break-all">{apply.device_id}</span>
       {apply.undo_available && <button type="button" className={supportButtonClass} disabled={busy || session.snapshot?.critical_op_active} onClick={() => {
         if (inFlight.current) { return; }
@@ -97,21 +113,21 @@ export function SupportDetailsPanel() {
         }).catch(() => setFailed(true)).finally(() => { inFlight.current = false; setBusy(false); });
       }}>{t('support.deviceApply.undo')}</button>}
     </div>)}
-    {expanded && snapshots.length > 0 && <h3 className="font-semibold">{t('support.restore.snapshots')}</h3>}
-    {expanded && snapshots.map((snapshot, index) => <div key={snapshot.snapshot_id} data-testid={`support-snapshot-${snapshot.snapshot_id}`} className="space-y-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
+    {snapshots.length > 0 && <h5 className="font-semibold">{t('support.restore.snapshots')}</h5>}
+    {snapshots.map((snapshot, index) => <div key={snapshot.snapshot_id} data-testid={`support-snapshot-${snapshot.snapshot_id}`} className="space-y-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
       <p><time dateTime={snapshot.taken_at}>{snapshot.taken_at}</time>{' · '}{t(`support.restore.reasons.${snapshot.reason}`)}</p>
       {snapshot.changed_since.map(row => <p key={row.table}>{`${row.table}: ${row.count}${row.resynced_from_server ? ` · ${t('support.restore.resynced')}` : ''}`}</p>)}
       {index === 0 && snapshot.integrity_ok && snapshot.restorable && <button type="button" className={supportButtonClass} disabled={busy || !recoveryReady || session.snapshot?.critical_op_active}
         onClick={() => setConfirm({ kind: 'snapshot', id: snapshot.snapshot_id })}>{t('support.restore.action')}</button>}
     </div>)}
-    {expanded && groups.length > 0 && <h3 className="font-semibold">{t('support.restore.quarantine')}</h3>}
-    {expanded && groups.map(group => <div key={group.group_id} data-testid={`support-quarantine-${group.group_id}`} className="space-y-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
+    {groups.length > 0 && <h5 className="font-semibold">{t('support.restore.quarantine')}</h5>}
+    {groups.map(group => <div key={group.group_id} data-testid={`support-quarantine-${group.group_id}`} className="space-y-2 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
       <p><time dateTime={group.created_at}>{group.created_at}</time>{' · '}{t('support.restore.reasons.pre_quarantine')}</p>
       {group.tables.map(table => <p key={table}>{`${table}: ${group.row_counts[table]}`}</p>)}
       {group.restore_state === 'quarantined' && group.restorable && <button type="button" className={supportButtonClass} disabled={busy || !recoveryReady || session.snapshot?.critical_op_active}
         onClick={() => setConfirm({ kind: 'group', id: group.group_id })}>{t('support.restore.action')}</button>}
     </div>)}
-    {expanded && confirm && <div role="group" aria-label={t('support.restore.confirm')} className="space-y-3 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
+    {confirm && <div role="group" aria-label={t('support.restore.confirm')} className="space-y-3 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
       <p>{t('support.restore.confirm')}</p>
       {confirm.kind === 'snapshot' && <p>{t('support.restore.preparing')}</p>}
       <div className="flex flex-wrap gap-2">

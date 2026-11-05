@@ -214,6 +214,16 @@ pub(crate) fn is_staff_pin_vault_key(key: &str) -> bool {
         .starts_with("staff_pin_vault_")
 }
 
+/// Hosted staff sessions recorded at a server check-in: only
+/// `hosted_staff_sessions.rs` reads or writes them, through the
+/// `hosted_staff_session_*` functions below. A session id is a header value
+/// that acts for that person, so no generic settings read may return it.
+pub(crate) fn is_hosted_staff_session_key(key: &str) -> bool {
+    key.trim()
+        .to_ascii_lowercase()
+        .starts_with(crate::hosted_staff_sessions::KEY_PREFIX)
+}
+
 fn lan_pair_store_mutex() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     &LOCK
@@ -362,7 +372,11 @@ pub(crate) fn delete_lan_pair_credential(key: &str) -> Result<(), String> {
 /// a fake see the existing real-OS-keyring behaviour (namespaced to
 /// `the-small-pos-test`).
 pub fn get_credential(key: &str) -> Option<String> {
-    if is_lan_pair_private_key(key) || is_staff_pin_vault_key(key) || is_rotation_slot(key) {
+    if is_lan_pair_private_key(key)
+        || is_staff_pin_vault_key(key)
+        || is_hosted_staff_session_key(key)
+        || is_rotation_slot(key)
+    {
         return None;
     }
     match get_credential_strict(key) {
@@ -611,6 +625,9 @@ pub fn set_credential(key: &str, value: &str) -> Result<(), String> {
     if is_staff_pin_vault_key(key) {
         return Err("STAFF_PIN_VAULT_NATIVE_ONLY".to_string());
     }
+    if is_hosted_staff_session_key(key) {
+        return Err("HOSTED_STAFF_SESSION_NATIVE_ONLY".to_string());
+    }
     if is_terminal_binding_key(key) {
         return Err("TERMINAL_CREDENTIAL_OWNER_REQUIRED".to_string());
     }
@@ -736,6 +753,9 @@ pub fn delete_credential(key: &str) -> Result<(), String> {
     if is_staff_pin_vault_key(key) {
         return Err("STAFF_PIN_VAULT_NATIVE_ONLY".to_string());
     }
+    if is_hosted_staff_session_key(key) {
+        return Err("HOSTED_STAFF_SESSION_NATIVE_ONLY".to_string());
+    }
     if is_terminal_binding_key(key) {
         return Err("TERMINAL_CREDENTIAL_OWNER_REQUIRED".to_string());
     }
@@ -786,6 +806,31 @@ pub(crate) fn staff_pin_vault_write(key: &str, value: &str) -> Result<(), String
 pub(crate) fn staff_pin_vault_delete(key: &str) -> Result<(), String> {
     if !is_staff_pin_vault_key(key) {
         return Err("STAFF_PIN_VAULT_KEY_REQUIRED".to_string());
+    }
+    delete_credential_uncoordinated(key)
+}
+
+/// Native-only read of one hosted staff session. Only an actual missing entry
+/// is `Ok(None)`.
+pub(crate) fn hosted_staff_session_read(key: &str) -> Result<Option<Zeroizing<String>>, String> {
+    if !is_hosted_staff_session_key(key) {
+        return Err("HOSTED_STAFF_SESSION_KEY_REQUIRED".to_string());
+    }
+    get_credential_strict(key)
+}
+
+/// Native-only write of one hosted staff session.
+pub(crate) fn hosted_staff_session_write(key: &str, value: &str) -> Result<(), String> {
+    if !is_hosted_staff_session_key(key) {
+        return Err("HOSTED_STAFF_SESSION_KEY_REQUIRED".to_string());
+    }
+    set_credential_uncoordinated(key, value)
+}
+
+/// Native-only delete of one hosted staff session (missing is success).
+pub(crate) fn hosted_staff_session_delete(key: &str) -> Result<(), String> {
+    if !is_hosted_staff_session_key(key) {
+        return Err("HOSTED_STAFF_SESSION_KEY_REQUIRED".to_string());
     }
     delete_credential_uncoordinated(key)
 }

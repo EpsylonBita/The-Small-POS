@@ -4,14 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SupportDetailsPanel } from '../SupportDetailsPanel';
 import { readFileSync } from 'node:fs';
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), authorize: vi.fn(), critical: false, canConnect: true }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), authorize: vi.fn(), critical: false, canConnect: true, modal: null as unknown }));
 vi.mock('../../../../lib', () => ({ getBridge: () => ({ invoke: mocks.invoke }) }));
 vi.mock('../../../hooks/useSupportSession', () => ({ useSupportSession: () => ({ snapshot: { can_connect: mocks.canConnect, critical_op_active: mocks.critical } }) }));
-vi.mock('../../../hooks/usePrivilegedActionConfirmation', () => ({ usePrivilegedActionConfirmation: () => ({ runWithPrivilegedConfirmation: mocks.authorize, confirmationModal: null }) }));
+vi.mock('../../../hooks/usePrivilegedActionConfirmation', () => ({ usePrivilegedActionConfirmation: () => ({ runWithPrivilegedConfirmation: mocks.authorize, confirmationModal: mocks.modal }) }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 const apply = { id: 'your-apply', session_id: 'your-session', device_id: 'your-printer', state: 'pending', undo_available: true };
 beforeEach(() => {
-  mocks.canConnect = true; mocks.critical = false;
+  mocks.canConnect = true; mocks.critical = false; mocks.modal = null;
   mocks.invoke.mockImplementation(async (command, input) => {
     if (command === 'support_list_snapshots') { return { snapshots: [] }; }
     if (command === 'support_list_quarantine') { return { groups: [] }; }
@@ -23,10 +23,33 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); });
 it('mounts inside the rendered Health support details instead of an unused legacy section', () => {
   const source = readFileSync('src/renderer/components/SyncStatusIndicator.tsx', 'utf8');
   const [legacy, rendered] = source.split('const renderDetailModal =');
-  expect(legacy).not.toContain('<SupportDetailsPanel />'); expect(rendered).toContain('<SupportDetailsPanel />');
+  expect(legacy).not.toContain('<SupportDetailsPanel'); expect(rendered).toContain('<SupportDetailsPanel active={supportActionsOpen} />');
+});
+// Founder, 04/11/2026: «δεν καταλαβαίνω γιατί υπάρχει αυτή η μπάρα». The list shows only what can be
+// undone or restored, under a title that says so, read as the support section opens.
+it('shows nothing on a normal till: no bar, no toggle', async () => {
+  mocks.invoke.mockImplementation(async (command: string) => command === 'support_list_snapshots' ? { snapshots: [] }
+    : command === 'support_list_quarantine' ? { groups: [] } : { applies: [{ ...apply, undo_available: false }] });
+  // Hidden, it renders nothing, not even the closed confirmation modal, which needs the app's
+  // i18n provider (#416 CI: the Health view's tests render without it).
+  mocks.modal = <div data-testid="confirmation-modal" />;
+  const { rerender } = render(<SupportDetailsPanel />);
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('support_list_quarantine'));
+  expect(screen.queryByTestId('support-details-panel')).toBeNull();
+  expect(screen.queryByText('support.onsite.technicalDetails')).toBeNull();
+  expect(screen.queryByTestId('confirmation-modal')).toBeNull();
+  mocks.canConnect = false; rerender(<SupportDetailsPanel />);
+  expect(screen.queryByTestId('confirmation-modal')).toBeNull();
+});
+it('lists an undoable support change under its own title as the section opens, and waits while it is closed', async () => {
+  const { rerender } = render(<SupportDetailsPanel active={false} />);
+  expect(mocks.invoke).not.toHaveBeenCalled();
+  rerender(<SupportDetailsPanel active />);
+  expect(await screen.findByText('support.restore.changesTitle')).toBeVisible();
+  expect(screen.getByText('support.deviceApply.undo')).toBeVisible();
 });
 describe.each(['light', 'dark'])('device Undo in %s', theme => {
-  async function open() { document.documentElement.className = theme; const result = render(<SupportDetailsPanel />); fireEvent.click(screen.getByText('support.onsite.technicalDetails')); await screen.findByText('support.deviceApply.undo'); return result; }
+  async function open() { document.documentElement.className = theme; const result = render(<SupportDetailsPanel />); await screen.findByText('support.deviceApply.undo'); return result; }
   it('shows undo inside details and uses the existing system-control app guard and store-PIN notice', async () => {
     await open(); fireEvent.click(screen.getByText('support.deviceApply.undo'));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('support_undo_device_apply', { action: 'undo', apply_id: apply.id, session_id: apply.session_id }));
@@ -54,7 +77,7 @@ it('rechecks checkout and session state when privileged confirmation completes',
   let action: (() => Promise<unknown>) | undefined;
   mocks.authorize.mockImplementation((request: { action(): Promise<unknown> }) => { action = request.action; return Promise.resolve({ success: true }); });
   const view = render(<SupportDetailsPanel />);
-  fireEvent.click(screen.getByText('support.onsite.technicalDetails'));
+ 
   fireEvent.click(await screen.findByText('support.deviceApply.undo'));
   mocks.critical = true; view.rerender(<SupportDetailsPanel />);
   await expect(action?.()).rejects.toThrow('Undo no longer authorized');

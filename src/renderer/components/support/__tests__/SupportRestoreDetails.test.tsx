@@ -26,7 +26,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 async function open() {
-  const view = render(<SupportDetailsPanel />); fireEvent.click(screen.getByText('support.onsite.technicalDetails'));
+  const view = render(<SupportDetailsPanel />);
   await screen.findByTestId('support-snapshot-your-newest'); return view;
 }
 function choose(kind: 'snapshot' | 'quarantine' = 'snapshot') {
@@ -87,7 +87,7 @@ it('does not offer details to staff without support-connect', () => {
 });
 it('rejects malformed list data rather than presenting unknown counts as zero', async () => {
   mocks.invoke.mockImplementation(command => command === 'support_list_quarantine' ? Promise.resolve({ groups: [{ ...groups[0], row_counts: {} }] }) : ipc(command));
-  render(<SupportDetailsPanel />); fireEvent.click(screen.getByText('support.onsite.technicalDetails')); await screen.findByRole('alert');
+  render(<SupportDetailsPanel />); await screen.findByRole('alert');
   expect(screen.queryByText('support.restore.action')).toBeNull();
 });
 it('retains a recovery-list failure when an independent device list succeeds later', async () => {
@@ -97,7 +97,7 @@ it('retains a recovery-list failure when an independent device list succeeds lat
     if (command === 'support_list_snapshots') { return Promise.reject(new Error('IPC failed')); }
     return ipc(command);
   });
-  render(<SupportDetailsPanel />); fireEvent.click(screen.getByText('support.onsite.technicalDetails')); await screen.findByRole('alert');
+  render(<SupportDetailsPanel />); await screen.findByRole('alert');
   await act(async () => finish?.({ applies: [] })); expect(screen.getByRole('alert')).toBeVisible(); expect(screen.queryByText('support.restore.action')).toBeNull();
 });
 it('rechecks the critical state after the store authorization wait before invoking restore', async () => {

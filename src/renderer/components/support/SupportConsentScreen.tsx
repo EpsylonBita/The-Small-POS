@@ -1,18 +1,24 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ConsentFetchRes } from '../../../../../shared/pos/support/consent';
+import { supportActorMayAccept, type SupportActor } from '../../hooks/useSupportSession';
+import { supportActorLabel } from './SupportActorPicker';
 
-export function SupportConsentScreen({ consent, staffRole, busy, onAccept, onDecline }: {
-  consent: ConsentFetchRes; staffRole: string | null; busy: boolean;
+/** «Συμφωνώ» stays as published (consent text v1.0 quotes it); the acting person is named above it. */
+export function SupportConsentScreen({ consent, actor, busy, onAccept, onDecline, onChangeActor }: {
+  consent: ConsentFetchRes; actor: SupportActor | null; busy: boolean;
   onAccept(text: NonNullable<ConsentFetchRes['text']>): void;
   onDecline(): void;
+  /** Present when several people on shift can act; reopens the picker. */
+  onChangeActor?(): void;
 }) {
   const { t } = useTranslation();
   const titleId = useId();
   const body = useRef<HTMLDivElement>(null);
   const [shownText, setShownText] = useState<string | null>(null);
   const identity = consent.text ? `${consent.text.text_id}:${consent.text.version}:${consent.text.body_sha256}` : null;
-  const eligible = staffRole !== null && consent.accepting_base_roles.includes(staffRole);
+  const eligible = actor !== null && supportActorMayAccept(actor, consent.accepting_base_roles);
+  const acceptingAs = actor ? t('support.consent.acceptingAs', { name: supportActorLabel(t, actor) }) : null;
   const reason = ({ missing: 'required', outdated: 'outdated', withdrawn: 'withdrawn',
     text_unavailable: 'textUnavailable', valid: 'accepted', exempt: 'accepted' } as const)[consent.state];
   const checkRead = useCallback(() => {
@@ -43,6 +49,12 @@ export function SupportConsentScreen({ consent, staffRole, busy, onAccept, onDec
         {consent.text.body}
       </div>
     </>}
+    {acceptingAs && (onChangeActor
+      ? <button type="button" onClick={onChangeActor} disabled={busy} data-testid="support-consent-actor"
+        className="min-h-[48px] min-w-[48px] rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 text-left font-semibold active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 disabled:opacity-60">
+        {acceptingAs}
+      </button>
+      : <p data-testid="support-consent-actor" className="font-semibold">{acceptingAs}</p>)}
     {!eligible && <div><p>{t('support.consent.onlyOwnerAdmin')}</p><p>{t('support.consent.storeAdminAlternative')}</p></div>}
     <div className="flex flex-wrap gap-3">
       {eligible && consent.text && consent.state !== 'text_unavailable' && <button type="button" disabled={busy || shownText !== identity}

@@ -33,6 +33,11 @@ pub struct Core {
     pub clock: ServerClock,
     pub session: Option<NativeSession>,
     pub code: Option<CodePending>,
+    /// The server answered a code request with 409 `SESSION_LIMIT_REACHED`: it already
+    /// holds a session for this till that the till no longer knows (e.g. after a restart).
+    /// While set, the session lane polls without a code and adopts that session, so
+    /// «Κλείσιμο» on the «already open» notice really keeps waiting (Codex review of #416).
+    pub awaiting_open: bool,
     pub schedule: Schedule,
     pub epoch: u64,
     pub ended_until: Option<Instant>,
@@ -121,6 +126,7 @@ impl Core {
             clock: ServerClock::default(),
             session: None,
             code: None,
+            awaiting_open: false,
             schedule: Schedule::default(),
             epoch: 0,
             ended_until: None,
@@ -235,6 +241,7 @@ impl Core {
     pub fn end(&mut self, reason: &str, notify: bool) -> Result<(), String> {
         let now = self.now();
         self.epoch += 1;
+        self.awaiting_open = false;
         let session = self.session.take();
         self.ended_until = Some(
             Instant::now() + Duration::from_millis(contracts::cap("transport", "endedLabelMs")),
@@ -273,6 +280,13 @@ impl Core {
         super::tools::end_session();
         self.clock.clear();
         Ok(())
+    }
+    /// Re-arms discovery after a 409: the next session poll adopts what the server holds.
+    pub fn await_open(&mut self) {
+        if self.session.is_none() {
+            self.awaiting_open = true;
+            self.schedule = Schedule::default();
+        }
     }
     pub fn cancel_code(&mut self) -> Result<(), String> {
         let now = self.now();
@@ -346,6 +360,7 @@ impl Core {
         };
         self.executor.db.conn.execute("INSERT INTO support_session_state(session_id,status,tier_ceiling,max_expires_at,absolute_cap_at,last_server_time,updated_at) VALUES (?1,'pending_ack',?2,?3,?4,?5,?5) ON CONFLICT(session_id) DO NOTHING",params![info.session_id,info.tier_ceiling,info.max_expires_at,info.absolute_cap_at,server_time]).map_err(|_|"INTERNAL_ERROR")?;
         self.code = None;
+        self.awaiting_open = false;
         self.session = Some(NativeSession { info, admission: a });
         self.ended_until = None;
         self.end_reason = None;
@@ -559,6 +574,10 @@ pub fn initialize(db: SupportDb) -> Result<(), String> {
         }))
         .map_err(|_| "support already initialized".into())
 }
+#[cfg(not(test))]
+pub fn initialized() -> bool {
+    RUNTIME.get().is_some()
+}
 pub fn runtime(app: &tauri::AppHandle) -> Result<Arc<Runtime>, String> {
     let runtime = RUNTIME.get().cloned().ok_or("FEATURE_DISABLED")?;
     if !runtime.started.swap(true, Ordering::AcqRel) {
@@ -583,24 +602,284 @@ pub fn withdraw_banner() {
         rt.banner_ready.store(false, Ordering::Release);
     }
 }
-fn checked_staff(app: &tauri::AppHandle) -> Result<Value, String> {
-    let auth = app.state::<crate::auth::AuthState>();
-    if !crate::auth::has_permission(&auth, Some("pos.support.connect")) {
-        return Err("POLICY_REFUSED".into());
-    }
-    let staff = crate::auth::get_session_json(&auth);
-    let id = staff["databaseStaffId"].as_str().ok_or("POLICY_REFUSED")?;
-    uuid::Uuid::parse_str(id).map_err(|_| "POLICY_REFUSED")?;
-    Ok(staff)
+/// A staff member who can act for remote support on this till (1.4.143): on
+/// shift here, with the hosted session of their own server check-in and the
+/// `pos.support.connect` permission. The till's PIN login is a pseudo user
+/// ("admin-user"/"staff-user") and never acts for support.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SupportActor {
+    pub staff_id: String,
+    pub name: String,
+    pub base_role: String,
+    /// Every base role this person holds here, the primary first. Consent
+    /// eligibility reads all of them, as the server does.
+    pub base_roles: Vec<String>,
+    session_id: String,
 }
+impl SupportActor {
+    /// The shapes `transport` binds consent requests to.
+    pub(crate) fn staff(&self) -> Value {
+        json!({"databaseStaffId": self.staff_id})
+    }
+    pub(crate) fn persisted(&self) -> Value {
+        json!({"staffId": self.staff_id, "sessionId": self.session_id})
+    }
+    #[cfg(test)]
+    pub(crate) fn for_test(staff_id: &str, session_id: &str) -> Self {
+        Self {
+            staff_id: staff_id.into(),
+            name: String::new(),
+            base_role: "cashier".into(),
+            base_roles: vec!["cashier".into()],
+            session_id: session_id.into(),
+        }
+    }
+    fn public(&self) -> Value {
+        json!({
+            "staff_id": self.staff_id,
+            "name": self.name,
+            "base_role": self.base_role,
+            "base_roles": self.base_roles,
+        })
+    }
+}
+#[derive(Debug)]
+pub(crate) struct ActorRoster {
+    /// `ready`, `staff_required` (nobody on shift here) or `sign_in_again`
+    /// (on shift, but no usable session from a server check-in).
+    pub state: &'static str,
+    pub actors: Vec<SupportActor>,
+    /// On shift here without a usable session for this till: each may renew
+    /// it with their own PIN (`support_staff_renew`).
+    pub renewable: Vec<RenewableStaff>,
+}
+/// Someone on shift on this till whose hosted session is missing or expired.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RenewableStaff {
+    pub staff_id: String,
+    pub name: String,
+}
+impl ActorRoster {
+    fn public(&self) -> Value {
+        json!({
+            "state": self.state,
+            "actors": self.actors.iter().map(SupportActor::public).collect::<Vec<_>>(),
+            "renewable": self
+                .renewable
+                .iter()
+                .map(|person| json!({"staff_id": person.staff_id, "name": person.name}))
+                .collect::<Vec<_>>(),
+        })
+    }
+    fn ready(self) -> Result<Self, String> {
+        match self.state {
+            "staff_required" => Err("SUPPORT_STAFF_REQUIRED".into()),
+            "sign_in_again" => Err("SUPPORT_SIGN_IN_AGAIN".into()),
+            _ => Ok(self),
+        }
+    }
+    /// The person the till chose, or the only one; several need a choice.
+    pub(crate) fn actor(self, chosen: Option<&str>) -> Result<SupportActor, String> {
+        let mut actors = self.ready()?.actors;
+        match chosen.map(|id| uuid::Uuid::parse_str(id.trim()).map(|id| id.to_string())) {
+            Some(Ok(id)) => actors
+                .into_iter()
+                .find(|actor| actor.staff_id == id)
+                .ok_or_else(|| "SUPPORT_STAFF_REQUIRED".into()),
+            Some(Err(_)) => Err("SUPPORT_STAFF_REQUIRED".into()),
+            None if actors.len() == 1 => Ok(actors.remove(0)),
+            None => Err("SUPPORT_STAFF_CHOICE_REQUIRED".into()),
+        }
+    }
+}
+/// Everyone with an active shift on this terminal, newest check-in first, who
+/// has a usable hosted session for this terminal.
+pub(crate) fn actors_on_shift(
+    conn: &rusqlite::Connection,
+    terminal_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ActorRoster, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT staff_id, COALESCE(MAX(staff_name), ''), MAX(check_in_time) AS latest
+             FROM staff_shifts WHERE status = 'active' AND terminal_id = ?1
+             GROUP BY staff_id ORDER BY latest DESC",
+        )
+        .map_err(|_| "INTERNAL_ERROR")?;
+    let rows = statement
+        .query_map([terminal_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|_| "INTERNAL_ERROR")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| "INTERNAL_ERROR")?;
+    let (mut on_shift, mut actors, mut renewable) = (false, Vec::new(), Vec::new());
+    for (staff_id, name) in rows {
+        let Ok(parsed) = uuid::Uuid::parse_str(staff_id.trim()) else {
+            continue;
+        };
+        on_shift = true;
+        let hosted = crate::hosted_staff_sessions::usable(&staff_id, now)
+            .filter(|hosted| hosted.terminal_id == terminal_id);
+        let Some(hosted) = hosted else {
+            renewable.push(RenewableStaff {
+                staff_id: parsed.to_string(),
+                name: name.trim().to_string(),
+            });
+            continue;
+        };
+        // A current session without `pos.support.connect`: renewing it with
+        // the same permissions would change nothing.
+        if hosted.support_connect {
+            let base_roles = if hosted.base_roles.is_empty() {
+                vec![hosted.role_name.clone()]
+            } else {
+                hosted.base_roles
+            };
+            actors.push(SupportActor {
+                staff_id: hosted.staff_id,
+                name: name.trim().to_string(),
+                base_role: hosted.role_name,
+                base_roles,
+                session_id: hosted.session_id,
+            });
+        }
+    }
+    let state = if !actors.is_empty() {
+        "ready"
+    } else if on_shift {
+        "sign_in_again"
+    } else {
+        "staff_required"
+    };
+    Ok(ActorRoster {
+        state,
+        actors,
+        renewable,
+    })
+}
+/// A read of this till's own database that never waits behind a checkout.
+fn actor_roster(app: &tauri::AppHandle) -> Result<ActorRoster, String> {
+    actor_roster_here(app).map(|(roster, _)| roster)
+}
+fn actor_roster_here(
+    app: &tauri::AppHandle,
+) -> Result<(ActorRoster, super::guards::Scope), String> {
+    let permit = critical_op::global()
+        .try_begin_support(false, None)
+        .map_err(str::to_string)?;
+    let path = app.state::<crate::db::DbState>().db_path.clone();
+    let conn =
+        super::replica::read_connection(&path, &permit, Instant::now() + Duration::from_secs(1))?;
+    let scope = super::identity::local(&conn)?;
+    let roster = actors_on_shift(&conn, &scope.terminal_id, chrono::Utc::now())?;
+    Ok((roster, scope))
+}
+fn chosen_staff(arg0: Option<&Value>) -> Option<String> {
+    arg0.and_then(|value| value.get("staff_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+/// Who on this till can act for support, without session ids.
 #[tauri::command]
-pub async fn support_consent_fetch(app: tauri::AppHandle) -> Result<Value, String> {
+pub async fn support_actors(app: tauri::AppHandle) -> Result<Value, String> {
+    crate::database_lock::run_blocking_command("support_actors", move || {
+        actor_roster(&app).map(|roster| roster.public())
+    })
+    .await
+}
+/// The branch to check this person in at, when the roster lists them as
+/// renewable here; anyone else never reaches the server.
+pub(crate) fn renewal_branch(
+    roster: &ActorRoster,
+    scope: super::guards::Scope,
+    staff_id: &str,
+) -> Result<String, String> {
+    if roster
+        .renewable
+        .iter()
+        .any(|person| person.staff_id == staff_id)
+    {
+        Ok(scope.branch_id)
+    } else {
+        Err("SUPPORT_STAFF_REQUIRED".to_string())
+    }
+}
+/// What a renewal answers the renderer: never a session id.
+pub(crate) fn renew_outcome(answer: &Value) -> Value {
+    let outcome = match (answer["success"].as_bool(), answer["source"].as_str()) {
+        (Some(true), Some("server")) => "renewed",
+        // The server could not be reached: the till checked the PIN itself,
+        // which issues no hosted session.
+        (Some(true), _) => "offline",
+        _ if answer["reasonCode"] == "check_in_unavailable" => "offline",
+        _ => "refused",
+    };
+    json!({ "outcome": outcome })
+}
+/// Renews the hosted session of someone already on shift on this till, with
+/// their own PIN (Codex review of #411). It is the server check-in alone:
+/// it records the new session and opens, closes or charges nothing, so no
+/// checkout, sale or shift flow is involved. Only a person the roster lists
+/// as renewable here is sent to the server.
+#[tauri::command]
+pub async fn support_staff_renew(
+    arg0: Option<Value>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    let staff_id = chosen_staff(arg0.as_ref())
+        .and_then(|id| uuid::Uuid::parse_str(id.trim()).ok())
+        .map(|id| id.to_string())
+        .ok_or("SUPPORT_STAFF_REQUIRED")?;
+    let pin = zeroize::Zeroizing::new(
+        arg0.as_ref()
+            .and_then(|value| value.get("pin"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+    );
+    if pin.is_empty() {
+        return Err("PIN_REQUIRED".into());
+    }
     let native = app.clone();
-    crate::database_lock::run_blocking_command("support_consent_fetch", move || {
-        checked_staff(&native)
+    let wanted = staff_id.clone();
+    let branch_id = crate::database_lock::run_blocking_command("support_staff_renew", move || {
+        let (roster, scope) = actor_roster_here(&native)?;
+        renewal_branch(&roster, scope, &wanted)
     })
     .await?;
-    transport::request(&app, "/api/pos/support/consent", "GET", None).await
+    let request = json!({"staffId": staff_id, "branchId": branch_id, "pin": pin.as_str()});
+    let db = app.state::<crate::db::DbState>();
+    let answer = crate::auth::verify_staff_check_in_pin(Some(request), &db).await?;
+    Ok(renew_outcome(&answer))
+}
+/// The consent text is shown in the till's UI language at that moment. Only a locale of the
+/// shared contract is forwarded; anything else asks for the store's default, as before.
+pub(crate) fn consent_fetch_path(arg0: Option<&Value>) -> String {
+    let supported = |value: &str| {
+        contracts::shared()
+            .other
+            .get("i18n")
+            .and_then(|i18n| i18n["locales"].as_array())
+            .is_some_and(|locales| locales.iter().any(|locale| locale.as_str() == Some(value)))
+    };
+    match arg0.and_then(|value| value["locale"].as_str()) {
+        Some(locale) if supported(locale) => format!("/api/pos/support/consent?locale={locale}"),
+        _ => "/api/pos/support/consent".to_string(),
+    }
+}
+#[tauri::command]
+pub async fn support_consent_fetch(
+    arg0: Option<Value>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    let native = app.clone();
+    crate::database_lock::run_blocking_command("support_consent_fetch", move || {
+        actor_roster(&native)?.ready().map(|_| ())
+    })
+    .await?;
+    transport::request(&app, &consent_fetch_path(arg0.as_ref()), "GET", None).await
 }
 #[cfg(test)]
 use super::transport::consent_accept_request;
@@ -612,11 +891,12 @@ pub async fn support_consent_accept(
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
     let native = app.clone();
-    let staff = crate::database_lock::run_blocking_command("support_consent_accept", move || {
-        checked_staff(&native)
+    let chosen = chosen_staff(arg0.as_ref());
+    let actor = crate::database_lock::run_blocking_command("support_consent_accept", move || {
+        actor_roster(&native)?.actor(chosen.as_deref())
     })
     .await?;
-    transport::consent_accept(&app, arg0, staff).await
+    transport::consent_accept(&app, arg0, actor).await
 }
 #[tauri::command]
 pub async fn support_consent_decline(
@@ -624,6 +904,14 @@ pub async fn support_consent_decline(
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
     let rt = runtime(&app)?;
+    // The text's two fields are the notice; the chosen person only binds it.
+    let chosen = chosen_staff(arg0.as_ref());
+    let arg0 = arg0.map(|mut value| {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("staff_id");
+        }
+        value
+    });
     crate::database_lock::run_blocking_command("support_consent_decline", move || {
         let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
         let now = chrono::Utc::now().timestamp_millis();
@@ -647,11 +935,11 @@ pub async fn support_consent_decline(
         // Audit durability precedes this best-effort notice. Missing text or
         // checked-in identity leaves the decline local; it never blocks closing.
         let notice = (|| {
-            let staff = checked_staff(&app)?;
+            let actor = actor_roster(&app)?.actor(chosen.as_deref())?;
             transport::queue_consent_decline(
                 &core.executor.db,
                 arg0.as_ref().ok_or("INVALID_INPUT")?,
-                &staff,
+                &actor,
                 now,
             )
         })();
@@ -698,18 +986,19 @@ pub async fn support_request_code(
 ) -> Result<Value, String> {
     let rt = runtime(&app)?;
     let identity_app = app.clone();
-    let terminal_id =
+    let chosen = chosen_staff(arg0.as_ref());
+    let (terminal_id, actor) =
         crate::database_lock::run_blocking_command("support_request_code", move || {
-            local_terminal(&identity_app)
+            let actor = actor_roster(&identity_app)?.actor(chosen.as_deref())?;
+            Ok::<_, String>((local_terminal(&identity_app)?, actor))
         })
         .await?;
     rt.core.lock().map_err(|_| "INTERNAL_ERROR")?.terminal_id = Some(terminal_id);
-    let auth = app.state::<crate::auth::AuthState>();
-    if !crate::auth::has_permission(&auth, Some("pos.support.connect")) {
-        return Err("POLICY_REFUSED".into());
-    }
-    let staff = arg0.as_ref().and_then(|v| v.get("staff_ref")).cloned();
-    let body = issue_code_body(env!("CARGO_PKG_VERSION"), staff);
+    // The server re-checks this person's permission; the renderer names no one.
+    let body = issue_code_body(
+        env!("CARGO_PKG_VERSION"),
+        Some(json!({"staff_id": actor.staff_id})),
+    );
     let epoch = {
         let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
         if core.session.is_some() {
@@ -718,7 +1007,20 @@ pub async fn support_request_code(
         core.epoch
     };
     let response =
-        transport::request(&app, "/api/pos/support/sessions", "POST", Some(body)).await?;
+        match transport::request(&app, "/api/pos/support/sessions", "POST", Some(body)).await {
+            Ok(response) => response,
+            Err(code) => {
+                // The server already holds a session for this till: wait for it (and adopt
+                // it), rather than leaving «keep waiting» with nothing polling.
+                if code == "SESSION_LIMIT_REACHED" {
+                    let mut core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
+                    if core.epoch == epoch {
+                        core.await_open();
+                    }
+                }
+                return Err(code);
+            }
+        };
     let value = response.clone();
     crate::database_lock::run_blocking_command("support_request_code",move || {
         let mut core=rt.core.lock().map_err(|_|"INTERNAL_ERROR")?;
@@ -763,6 +1065,68 @@ pub async fn support_end(app: tauri::AppHandle) -> Result<Value, String> {
     })
     .await
 }
+/// What the server still holds open for this terminal, as the till's usual
+/// notices: a session gets `end` (reason `till_end`), a waiting code
+/// `cancel_code`. Nothing else is ever ended.
+pub(crate) fn server_open_notices(
+    open: &transport::SessionFetch,
+    now: i64,
+) -> Vec<(&'static str, Value)> {
+    match open.state.as_str() {
+        "pending_ack" | "active" => open
+            .session
+            .as_ref()
+            .map(|s| vec![("end", end_body(&s.session_id, "till_end", now, None))])
+            .unwrap_or_default(),
+        "code_pending" => open
+            .code
+            .as_ref()
+            .and_then(|c| c["code_id"].as_str())
+            .map(|id| vec![("cancel_code", json!({ "code_id": id }))])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+/// «Τερματισμός σύνδεσης»: ends the support connection this till has open or
+/// waiting, so staff can ask for a new code (founder, 04/11/2026). It ends the
+/// till's own code or session first, at once and even offline, as End does.
+/// Then it asks the server what it still holds for this terminal. That covers a
+/// session the till no longer knows, e.g. after a restart or once its code was
+/// used. It ends that through the same terminal-authenticated `end` and
+/// `sessions/cancel` routes, which record `till_end` in the usual audit.
+#[tauri::command]
+pub async fn support_end_open(app: tauri::AppHandle) -> Result<Value, String> {
+    let ended = support_end(app.clone()).await?;
+    let rt = runtime(&app)?;
+    let open = transport::request(&app, "/api/pos/support/session", "GET", None)
+        .await
+        .ok()
+        .and_then(|value| serde_json::from_value::<transport::SessionFetch>(value).ok());
+    let Some(open) = open else {
+        return Ok(
+            json!({"ended":true,"write_outcome":ended["write_outcome"],"server":"unreachable"}),
+        );
+    };
+    let owned = rt.clone();
+    let queued = crate::database_lock::run_blocking_command("support_end_open", move || {
+        let core = owned.core.lock().map_err(|_| "INTERNAL_ERROR")?;
+        let now = core.now();
+        let notices = server_open_notices(&open, now);
+        for (kind, body) in &notices {
+            queue_notice(&core.executor.db, kind, body.clone(), now)?;
+        }
+        Ok::<_, String>(!notices.is_empty())
+    })
+    .await?;
+    let server = if !queued {
+        "none"
+    } else if transport::deliver_notices(&app, &rt).await.is_ok() {
+        "ended"
+    } else {
+        "queued"
+    };
+    Ok(json!({"ended":true,"write_outcome":ended["write_outcome"],"server":server}))
+}
 #[tauri::command]
 pub async fn support_banner_state(
     arg0: Option<Value>,
@@ -776,9 +1140,9 @@ pub async fn support_banner_state(
         if !rt.banner_ready.load(Ordering::Acquire) {
             critical_op::global().cancel_support();
         }
-        let auth = app.state::<crate::auth::AuthState>();
-        let user = crate::auth::get_session_json(&auth);
-        let can_connect = crate::auth::has_permission(&auth, Some("pos.support.connect"));
+        // Who may act is resolved when someone presses connect (support_actors);
+        // the PIN login is a pseudo user and grants nothing here.
+        let can_connect = true;
         let mut value = rt
             .core
             .lock()
@@ -796,11 +1160,7 @@ pub async fn support_banner_state(
             .unwrap_or(Value::Null);
         value["critical_op_active"] = json!(critical_op::global().active());
         value["restore_lease_held"] = json!(critical_op::global().restoring());
-        value["staff"] = if can_connect {
-            json!({"staff_id":user["staffId"],"base_role":user["role"]["name"]})
-        } else {
-            Value::Null
-        };
+        value["staff"] = Value::Null;
         Ok(value)
     })
     .await
@@ -854,14 +1214,15 @@ async fn resume_after_restore(app: &tauri::AppHandle, rt: &Arc<Runtime>) -> Resu
     .await
 }
 #[tauri::command]
-pub async fn support_extend(app: tauri::AppHandle) -> Result<Value, String> {
+pub async fn support_extend(arg0: Option<Value>, app: tauri::AppHandle) -> Result<Value, String> {
     let rt = runtime(&app)?;
     let owned = rt.clone();
     let native = app.clone();
+    let chosen = chosen_staff(arg0.as_ref());
     let (id, body, epoch) = crate::database_lock::run_blocking_command(
         "support_extend",
         move || -> Result<_, String> {
-            let user = checked_staff(&native)?;
+            let actor = actor_roster(&native)?.actor(chosen.as_deref())?;
             if !super::dispatch::window_visible(&native)
                 || !owned.banner_ready.load(Ordering::Acquire)
             {
@@ -880,7 +1241,7 @@ pub async fn support_extend(app: tauri::AppHandle) -> Result<Value, String> {
             }
             Ok((
                 id.clone(),
-                json!({"session_id":id,"staff_ref":{"staff_id":user["databaseStaffId"]}}),
+                json!({"session_id":id,"staff_ref":{"staff_id":actor.staff_id}}),
                 core.epoch,
             ))
         },
@@ -920,6 +1281,24 @@ pub async fn support_doorbell(arg0: Option<Value>, app: tauri::AppHandle) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn consent_fetch_forwards_only_a_contract_locale() {
+        for locale in ["el", "en", "de", "fr", "it", "sq"] {
+            assert_eq!(
+                consent_fetch_path(Some(&json!({ "locale": locale }))),
+                format!("/api/pos/support/consent?locale={locale}")
+            );
+        }
+        for arg in [
+            None,
+            Some(json!({})),
+            Some(json!({ "locale": "pt" })),
+            Some(json!({ "locale": "fr&organization_id=x" })),
+            Some(json!({ "locale": 7 })),
+        ] {
+            assert_eq!(consent_fetch_path(arg.as_ref()), "/api/pos/support/consent");
+        }
+    }
     #[test]
     fn restore_resume_requires_same_active_server_session_and_never_extends_expiry() {
         let _keyring = crate::tests::fake_keyring::install_empty();
@@ -1339,5 +1718,58 @@ mod tests {
         assert!(core.approval_context().unwrap().server_now.is_none());
         drop(core);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ending_the_open_connection_names_only_what_the_server_holds_for_this_till() {
+        // 04/11/2026: «Τερματισμός σύνδεσης» must end a session the till no longer
+        // knows (its code was used), so a new code can be asked for.
+        let fetch =
+            |value: Value| serde_json::from_value::<transport::SessionFetch>(value).unwrap();
+        let session = json!({"session_id":"30000000-0000-4000-a000-000000000003","operator_display_name":"Support operator",
+            "tier_ceiling":2,"max_expires_at":"2099-01-01T00:00:00.000Z","absolute_cap_at":"2099-01-01T00:00:00.000Z",
+            "idle_timeout_s":900,"ack_deadline_at":"2099-01-01T00:00:00.000Z",
+            "doorbell_topic":"support:session:30000000-0000-4000-a000-000000000003","resume_allowed":false});
+        let now = clock::parse("2026-11-04T13:05:00.000Z").unwrap();
+        for state in ["pending_ack", "active"] {
+            let notices = server_open_notices(
+                &fetch(
+                    json!({"state":state,"session":session,"server_time":"2026-11-04T13:05:00.000Z"}),
+                ),
+                now,
+            );
+            assert_eq!(
+                notices,
+                vec![(
+                    "end",
+                    json!({"session_id":"30000000-0000-4000-a000-000000000003","reason":"till_end",
+                "ended_at_till":"2026-11-04T13:05:00.000Z","write_outcome":null})
+                )]
+            );
+        }
+        let waiting = fetch(
+            json!({"state":"code_pending","code":{"code_id":"40000000-0000-4000-a000-000000000004","expires_at":"2099-01-01T00:00:00.000Z"},
+            "server_time":"2026-11-04T13:05:00.000Z"}),
+        );
+        assert_eq!(
+            server_open_notices(&waiting, now),
+            vec![(
+                "cancel_code",
+                json!({"code_id":"40000000-0000-4000-a000-000000000004"})
+            )]
+        );
+        for state in ["none", "ended"] {
+            assert!(server_open_notices(
+                &fetch(json!({"state":state,"server_time":"2026-11-04T13:05:00.000Z"})),
+                now
+            )
+            .is_empty());
+        }
+        // A session state without its session names nothing.
+        assert!(server_open_notices(
+            &fetch(json!({"state":"active","server_time":"2026-11-04T13:05:00.000Z"})),
+            now
+        )
+        .is_empty());
     }
 }

@@ -134,7 +134,8 @@ export function SupportInteractionHost() {
       pending.current.resolve('declined'); pending.current = null; setRequest(null); setBusy(false);
     }
   }, [session?.snapshot?.session_id, session?.snapshot?.state]);
-  const canConfirm = Boolean(session?.snapshot?.can_connect && session.snapshot.staff);
+  // Native checks the till's own support-connect right; the banner snapshot no longer names staff.
+  const canConfirm = Boolean(session?.snapshot?.can_connect);
   const deferred = isCritical() || otherDialog || !canConfirm;
   const decide = async (decision: OnsiteDecision) => {
     const active = pending.current;
@@ -147,8 +148,7 @@ export function SupportInteractionHost() {
         if (decision !== 'timeout' && (isCritical() || !current.current.session?.snapshot?.can_connect || current.current.session.snapshot.session_id !== active.request.session_id)) {
           throw new Error('On-site decision no longer authorized');
         }
-        return getBridge().invoke('support_onsite_decision', { request_id: active.request.request_id, session_id: active.request.session_id, decision,
-          staff_ref: { staff_id: current.current.session?.snapshot?.staff?.staff_id } });
+        return getBridge().invoke('support_onsite_decision', { request_id: active.request.request_id, session_id: active.request.session_id, decision });
       };
       let deviceApply = false;
       try {

@@ -146,8 +146,9 @@ pub fn init(app_data_dir: &Path) -> Result<DbState, String> {
 
     info!("Database initialized (schema v{CURRENT_SCHEMA_VERSION})");
 
-    if crate::support::db::initialize(app_data_dir).is_err() {
-        warn!("Support state unavailable; remote support disabled");
+    // Later opens in the same process return Ok, so only a real failure warns.
+    if let Err(error) = crate::support::db::initialize(app_data_dir) {
+        warn!(%error, "Support state unavailable; remote support disabled");
     }
 
     Ok(DbState {

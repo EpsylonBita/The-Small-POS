@@ -348,7 +348,9 @@
     "qr": "Scan to open the support connection page",
     "timeLeft": "Time remaining",
     "loading": "Requesting a code…",
-    "newCode": "Request a new code"
+    "newCode": "Request a new code",
+    "alreadyOpen": "A support connection is already open or waiting. End it to request a new code.",
+    "endExisting": "End connection"
   },
   "banner": {
     "activity": "Checking the till",
@@ -407,7 +409,8 @@
       "pre_quarantine_restore": "Restore quarantined rows",
       "pre_command": "Terminal command",
       "pre_restore": "Restore snapshot"
-    }
+    },
+    "changesTitle": "Undo support changes"
   },
   "deviceApply": {
     "undo": "Undo"
@@ -426,12 +429,27 @@
     "required": "The store’s consent is needed before support can connect.",
     "agree": "I agree",
     "decline": "No",
-    "onlyOwnerAdmin": "Only the store owner or an administrator can give consent.",
+    "onlyOwnerAdmin": "Only the store owner, an administrator, a manager, an assistant manager, a supervisor or a cashier can give consent.",
     "accepted": "Consent recorded.",
     "withdrawn": "The store withdrew consent. Support is unavailable.",
     "outdated": "The consent text changed. New consent is needed.",
     "textUnavailable": "The consent text is not yet available in the store’s language.",
     "version": "Text version",
-    "storeAdminAlternative": "The owner or an administrator can also accept in the store admin."
+    "storeAdminAlternative": "The owner or an administrator can also accept in the store admin.",
+    "acceptingAs": "Consent given by: {{name}}"
+  },
+  "staff": {
+    "required": "A cashier or manager needs to be on shift at this till. Check in and try again.",
+    "signInAgain": "The staff sign-in for support has expired. Confirm with your PIN to continue. Your shift stays open.",
+    "pickConsent": "Who is accepting?",
+    "pickRequest": "Who is asking for support?",
+    "renewTitle": "Who is confirming with their PIN?",
+    "renewPin": "PIN for {{name}}",
+    "renew": "Confirm",
+    "renewSomeoneElse": "Someone else",
+    "renewRefused": "The PIN was not accepted. Try again.",
+    "renewOffline": "The server could not be reached, so the sign-in was not renewed. Try again when the till is online.",
+    "renewKeepsShift": "This only renews your check-in on this till. Support never sees the PIN. The shift stays open and nothing is charged.",
+    "onShift": "Staff member on shift"
   }
 }

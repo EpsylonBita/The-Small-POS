@@ -1077,6 +1077,8 @@ pub(crate) fn is_sensitive_setting_path(category: &str, setting_key: &str) -> bo
             .trim()
             .to_ascii_lowercase()
             .contains("cafe_lan_pairs_v1")
+        || crate::storage::is_hosted_staff_session_key(category)
+        || crate::storage::is_hosted_staff_session_key(setting_key)
     {
         return true;
     }

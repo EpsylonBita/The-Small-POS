@@ -348,7 +348,9 @@
     "qr": "Scannen, um die Supportverbindung zu öffnen",
     "timeLeft": "Verbleibende Zeit",
     "loading": "Code wird angefordert…",
-    "newCode": "Neuen Code anfordern"
+    "newCode": "Neuen Code anfordern",
+    "alreadyOpen": "Eine Supportverbindung ist bereits offen oder wartet. Beenden Sie sie, um einen neuen Code anzufordern.",
+    "endExisting": "Verbindung beenden"
   },
   "banner": {
     "activity": "Kasse wird geprüft",
@@ -407,7 +409,8 @@
       "pre_quarantine_restore": "Datensätze aus Quarantäne wiederherstellen",
       "pre_command": "Terminalbefehl",
       "pre_restore": "Sicherung wiederherstellen"
-    }
+    },
+    "changesTitle": "Support-Änderungen rückgängig machen"
   },
   "deviceApply": {
     "undo": "Rückgängig"
@@ -426,12 +429,27 @@
     "required": "Bevor sich der Support verbindet, ist die Einwilligung des Geschäfts erforderlich.",
     "agree": "Ich stimme zu",
     "decline": "Nein",
-    "onlyOwnerAdmin": "Nur der Inhaber oder ein Administrator des Geschäfts kann einwilligen.",
+    "onlyOwnerAdmin": "Nur der Inhaber, ein Administrator, ein Manager, ein stellvertretender Manager, ein Schichtleiter oder ein Kassierer des Geschäfts kann einwilligen.",
     "accepted": "Die Einwilligung wurde erfasst.",
     "withdrawn": "Das Geschäft hat seine Einwilligung widerrufen. Support ist nicht verfügbar.",
     "outdated": "Der Einwilligungstext hat sich geändert. Eine neue Einwilligung ist erforderlich.",
     "textUnavailable": "Der Einwilligungstext ist in der Sprache des Geschäfts noch nicht verfügbar.",
     "version": "Textversion",
-    "storeAdminAlternative": "Der Inhaber oder ein Administrator kann auch in der Geschäftsverwaltung zustimmen."
+    "storeAdminAlternative": "Der Inhaber oder ein Administrator kann auch in der Geschäftsverwaltung zustimmen.",
+    "acceptingAs": "Einwilligung durch: {{name}}"
+  },
+  "staff": {
+    "required": "An dieser Kasse muss ein Kassierer oder Manager in der Schicht sein. Führen Sie den Check-in durch und versuchen Sie es erneut.",
+    "signInAgain": "Die Anmeldung des Mitarbeiters für den Support ist abgelaufen. Bestätigen Sie mit Ihrer PIN, um fortzufahren. Ihre Schicht bleibt offen.",
+    "pickConsent": "Wer stimmt zu?",
+    "pickRequest": "Wer fordert den Support an?",
+    "renewTitle": "Wer bestätigt mit seiner PIN?",
+    "renewPin": "PIN für {{name}}",
+    "renew": "Bestätigen",
+    "renewSomeoneElse": "Jemand anderes",
+    "renewRefused": "Die PIN wurde nicht akzeptiert. Versuchen Sie es erneut.",
+    "renewOffline": "Der Server war nicht erreichbar, daher wurde die Anmeldung nicht erneuert. Versuchen Sie es erneut, wenn die Kasse online ist.",
+    "renewKeepsShift": "Erneuert wird nur Ihr Check-in an dieser Kasse. Der Support sieht die PIN nie. Die Schicht bleibt offen, und es wird nichts abgerechnet.",
+    "onShift": "Mitarbeiter in der Schicht"
   }
 }

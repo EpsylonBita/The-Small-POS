@@ -348,7 +348,9 @@
     "qr": "Scannez pour ouvrir la page de connexion de l’assistance",
     "timeLeft": "Temps restant",
     "loading": "Demande de code…",
-    "newCode": "Demander un nouveau code"
+    "newCode": "Demander un nouveau code",
+    "alreadyOpen": "Une connexion de l’assistance est déjà ouverte ou en attente. Terminez-la pour demander un nouveau code.",
+    "endExisting": "Mettre fin à la connexion"
   },
   "banner": {
     "activity": "Vérification de la caisse",
@@ -407,7 +409,8 @@
       "pre_quarantine_restore": "Restaurer les données en quarantaine",
       "pre_command": "Commande du terminal",
       "pre_restore": "Restaurer la sauvegarde"
-    }
+    },
+    "changesTitle": "Annuler les modifications de l’assistance"
   },
   "deviceApply": {
     "undo": "Annuler la modification"
@@ -426,12 +429,27 @@
     "required": "Le consentement du magasin est nécessaire avant de connecter l’assistance.",
     "agree": "J’accepte",
     "decline": "Non",
-    "onlyOwnerAdmin": "Seul le propriétaire ou un administrateur du magasin peut donner son consentement.",
+    "onlyOwnerAdmin": "Seul le propriétaire, un administrateur, un gérant, un gérant adjoint, un chef d’équipe ou un caissier du magasin peut donner son consentement.",
     "accepted": "Le consentement a été enregistré.",
     "withdrawn": "Le magasin a retiré son consentement. L’assistance n’est pas disponible.",
     "outdated": "Le texte du consentement a changé. Un nouveau consentement est nécessaire.",
     "textUnavailable": "Le texte du consentement n’est pas encore disponible dans la langue du magasin.",
     "version": "Version du texte",
-    "storeAdminAlternative": "Le propriétaire ou un administrateur peut aussi accepter dans l’administration du magasin."
+    "storeAdminAlternative": "Le propriétaire ou un administrateur peut aussi accepter dans l’administration du magasin.",
+    "acceptingAs": "Consentement donné par : {{name}}"
+  },
+  "staff": {
+    "required": "Un caissier ou un responsable doit être en service sur cette caisse. Prenez votre service et réessayez.",
+    "signInAgain": "La connexion de l’employé pour l’assistance a expiré. Confirmez avec votre code PIN pour continuer. Votre service reste ouvert.",
+    "pickConsent": "Qui donne son accord ?",
+    "pickRequest": "Qui demande l’assistance ?",
+    "renewTitle": "Qui confirme avec son code PIN ?",
+    "renewPin": "Code PIN pour {{name}}",
+    "renew": "Confirmer",
+    "renewSomeoneElse": "Une autre personne",
+    "renewRefused": "Le code PIN n’a pas été accepté. Réessayez.",
+    "renewOffline": "Le serveur est injoignable : la connexion n’a pas été renouvelée. Réessayez quand la caisse sera en ligne.",
+    "renewKeepsShift": "Seul votre pointage sur cette caisse est renouvelé. L’assistance ne voit jamais le code PIN. Le service reste ouvert et rien n’est encaissé.",
+    "onShift": "Employé en service"
   }
 }

@@ -3427,9 +3427,10 @@ export const CHANNEL_MAP: Record<string, string> = {
 
 export type SupportIpcCommand =
   | "support_banner_state" | "support_request_code" | "support_cancel_code"
-  | "support_end" | "support_extend" | "support_doorbell"
+  | "support_end" | "support_end_open" | "support_extend" | "support_doorbell"
   | "support_payment_open" | "support_payment_closed"
-  | "support_consent_fetch" | "support_consent_accept" | "support_consent_decline";
+  | "support_consent_fetch" | "support_consent_accept" | "support_consent_decline"
+  | "support_actors" | "support_staff_renew";
 
 /** Native support owns policy, identity, transport and offline notices; arg0 is the IPC payload. */
 export function supportIpc(command: SupportIpcCommand, payload?: Record<string, unknown>): Promise<unknown> {

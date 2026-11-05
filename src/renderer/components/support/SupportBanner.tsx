@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { SUPPORT_GREEK_REFERENCE } from '../../../../../shared/pos/support/i18n-keys';
 import { supportIpc } from '../../../lib/ipc-adapter';
 import { useSupportSession, type SupportBannerSnapshot } from '../../hooks/useSupportSession';
+import { SupportActorPicker, SupportRenewSignIn, SupportStaffNotice } from './SupportActorPicker';
 import { supportCountdown } from './SupportCodeScreen';
 
 // Native sends a command kind; use shipped labels rather than showing a tool ID.
@@ -98,6 +99,9 @@ export function SupportBanner() {
     };
   }, [state]);
   if (!state || !session?.snapshot) { return null; }
+  // +30 minutes may need to know who asks when several people are on shift.
+  const view = session.view;
+  const extendStep = session.actorPurpose === 'extend' && (view === 'pick' || view === 'staff_required' || view === 'sign_in_again') ? view : null;
   // A body portal keeps End above checkout/Health portals. Reserve the same band
   // in the shell and modal viewports so it never covers their controls.
   return createPortal(<div ref={host} data-support-banner-host data-cashier-recovery="true"
@@ -106,5 +110,14 @@ export function SupportBanner() {
       [data-liquid-glass-modal-viewport] { top: calc(var(--app-window-frame-height, 0px) + var(--pos-support-banner-height, 0px)) !important; }`}</style>
     <SupportBannerView snapshot={state === 'waiting' && session.code ? { ...session.snapshot, remaining_ms: session.remainingMs } : session.snapshot}
       onEnd={() => { void session.end(); }} onExtend={() => { void session.extend(); }} />
+    {extendStep && <div data-testid="support-extend-step" className="border-b border-(--pos-s-border) bg-(--pos-s-surface) p-3">
+      {extendStep === 'pick'
+        ? <SupportActorPicker purpose="extend" actors={session.actors} busy={session.busy}
+          onChoose={staffId => { void session.choose(staffId); }} onCancel={() => { session.dismiss(); }} />
+        : <>
+          <SupportStaffNotice view={extendStep} onClose={() => { session.dismiss(); }} />
+          {extendStep === 'sign_in_again' && <SupportRenewSignIn people={session.renewable} busy={session.busy} onRenew={session.renew} />}
+        </>}
+    </div>}
   </div>, document.body);
 }

@@ -1364,7 +1364,6 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "TIPS BY STAFF" => "ΦΙΛΟΔΩΡΗΜΑΤΑ ΑΝΑ ΥΠΑΛΛΗΛΟ",
             "Discarded corrections without money" => "Διορθώσεις που απορρίφθηκαν χωρίς χρήματα",
             "Collection" => "Είσπραξη",
-            "Refund" => "Επιστροφή",
             "Mobile" => "Κινητό",
             "Handover" => "Παράδοση",
             "Handed over" => "Παραδόθηκε",
@@ -1551,7 +1550,6 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "TIPS BY STAFF" => "TRINKGELD PRO MITARBEITER",
             "Discarded corrections without money" => "Ohne Geldbewegung verworfene Korrekturen",
             "Collection" => "Einzug",
-            "Refund" => "Erstattung",
             "Mobile" => "Handy",
             "Handover" => "Übergabe",
             "Handed over" => "Übergeben",
@@ -1739,7 +1737,6 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "TIPS BY STAFF" => "POURBOIRES PAR EMPLOYÉ",
             "Discarded corrections without money" => "Corrections abandonnées sans mouvement d’argent",
             "Collection" => "Encaissement",
-            "Refund" => "Remboursement",
             "Mobile" => "Telephone",
             "Handover" => "Remise",
             "Handed over" => "Remis",
@@ -1924,7 +1921,6 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "TIPS BY STAFF" => "MANCE PER DIPENDENTE",
             "Discarded corrections without money" => "Correzioni scartate senza movimento di denaro",
             "Collection" => "Incasso",
-            "Refund" => "Rimborso",
             "Mobile" => "Telefono",
             "Handover" => "Consegna",
             "Handed over" => "Consegnato",
@@ -2115,7 +2111,6 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "TIPS BY STAFF" => "BAKSHISHE SIPAS STAFIT",
             "Discarded corrections without money" => "Korrigjime të hedhura poshtë pa lëvizje parash",
             "Collection" => "Arkëtim",
-            "Refund" => "Rimbursim",
             "Mobile" => "Telefoni",
             "Handover" => "Dorëzimi",
             "Handed over" => "U dorëzua",
@@ -15717,6 +15712,18 @@ mod tests {
         assert_eq!(translate_order_type("sq", "delivery"), "DËRGESË");
         // An unknown key still falls back to the key itself, never to blank.
         assert_eq!(receipt_label("sq", "Not A Real Label"), "Not A Real Label");
+    }
+
+    #[test]
+    fn receipt_label_refund_keeps_one_translation_per_language() {
+        // Each table once carried a second, unreachable "Refund" arm in its
+        // Z-report block; only the first arm ever printed.
+        assert_eq!(receipt_label("el", "Refund"), "Επιστροφή");
+        assert_eq!(receipt_label("de", "Refund"), "Erstattung");
+        assert_eq!(receipt_label("fr", "Refund"), "Remboursement");
+        assert_eq!(receipt_label("it", "Refund"), "Rimborso");
+        assert_eq!(receipt_label("sq", "Refund"), "Rimbursim");
+        assert_eq!(receipt_label("en", "Refund"), "Refund");
     }
 
     #[test]

@@ -111,7 +111,8 @@ vi.mock('../../hooks/useOrderStore', async () => {
 vi.mock('../../services/SubscriptionManager', () => ({ subscriptionManager: { subscribe: state.subscribe } }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async (_name: string, handler: any) => { state.intent = handler; return () => { state.intent = undefined; }; }) }));
 vi.mock('framer-motion', () => ({ motion: { div: ({ children, initial, animate, exit, ...props }: any) => <div {...props}>{children}</div> }, AnimatePresence: ({ children }: any) => children }));
-import KitchenDisplayPage, { KitchenDisplayProvider } from '../KitchenDisplayPage';
+import KitchenDisplayPage from '../KitchenDisplayPage';
+import { KitchenDisplayProvider } from '../KitchenDisplayOwner';
 import { clearAllKdsLocalDrafts, clearKdsLocalDraft, publishKdsLocalDraft } from '../../services/KdsLocalDraftStore';
 import { localPreparationStore } from '../../services/KdsLocalPhaseStore';
 import { LocalPreparationScopeSync } from '../../hooks/useLocalPreparation';

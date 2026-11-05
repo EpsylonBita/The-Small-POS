@@ -24,6 +24,7 @@ import { FinancialSyncPanel } from './FinancialSyncPanel';
 import { HealthSupportEntryPoint } from './support/HealthSupportEntryPoint';
 import { SupportConnectAction } from './support/SupportConnectAction';
 import { SupportDetailsPanel } from './support/SupportDetailsPanel';
+import { supportSessionLive, useSupportSession } from '../hooks/useSupportSession';
 import { registerSupportHealthObservation } from '../services/support/SupportMatcherBridge';
 import { RecoveryCenterPanel } from './recovery/RecoveryCenterPanel';
 import type { SyncRecoveryOpenContext } from './recovery/SyncRecoveryModal';
@@ -1040,6 +1041,15 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const [justRefreshed, setJustRefreshed] = useState(false);
   const [retryingBlockedOrder, setRetryingBlockedOrder] = useState(false);
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
+  // «Σύνδεση υποστήριξης», its code, notices and «Τέλος» live in «Ενέργειες υποστήριξης»
+  // (founder, 04/11/2026). A code, notice or live session opens that section by itself.
+  const supportSession = useSupportSession();
+  const supportLive = Boolean(supportSession && (supportSession.view !== 'closed' || supportSession.code
+    || supportSessionLive(supportSession.snapshot)));
+  const [supportActionsOpen, setSupportActionsOpen] = useState(supportLive);
+  useEffect(() => {
+    if (supportLive) { setSupportActionsOpen(true); }
+  }, [supportLive]);
 
   // --- System health state (eager on modal open) ---
   const [systemHealth, setSystemHealth] =
@@ -3387,7 +3397,6 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             </div>
 
             <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6">
-              <SupportConnectAction />
               {healthAvailability === 'unavailable' && (
                 <section
                   className={cn('pos-frost mb-5 rounded-3xl border p-5', liquidGlassModalTone('danger'))}
@@ -3551,10 +3560,11 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 </section>
               )}
 
-              <details className={cn('pos-frost mt-4 rounded-2xl border', liquidGlassModalTone('neutral'))}>
+              <details className={cn('pos-frost mt-4 rounded-2xl border', liquidGlassModalTone('neutral'))}
+                open={supportActionsOpen} onToggle={event => setSupportActionsOpen(event.currentTarget.open)} data-testid="health-support-actions">
                 <summary className="min-h-touch cursor-pointer px-4 py-3 text-sm font-bold">{t('sync.healthModal.sections.supportActions')}</summary>
                 <div className="space-y-4 border-t border-(--modal-glass-line) p-4">
-                  <SupportDetailsPanel />
+                  <SupportConnectAction />
                   <ul className="list-inside list-disc space-y-2 text-sm">{localizedHealthSummary.recommendedActions.map(action => <li key={action}>{action}</li>)}</ul>
                   {visibleSyncFailures.length > 0 && <h4 className="text-sm font-bold">{t('sync.healthModal.syncDetails', {defaultValue: 'Sync details'})}</h4>}
                   {visibleSyncFailures.map(failure => <div key={failure.id} className="rounded-xl border border-slate-300 p-3 text-sm dark:border-white/15"><strong>{failure.title} · {statusLabel(failure.status)}</strong><p className="mt-1">{t('sync.healthModal.failure.safeError')}</p>{failure.recordId && <p className="mt-2 break-all text-xs">{t('sync.healthModal.failure.recordValue', {id: failure.recordId})}</p>}{failure.nextRetryAt && <p className="mt-2 text-xs">{t('sync.healthModal.failure.nextRetryValue', {value: formatHealthDateTime(failure.nextRetryAt)})}</p>}</div>)}
@@ -3582,6 +3592,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   <p className="text-sm text-(--pos-s-muted)">{t('sync.healthModal.support.safeLocal')}</p>
                   {incidentReport?.success && <p role="status">{t(!incidentReport.bundleStored ? 'sync.healthModal.support.reportReceived' : incidentReport.alertSent || incidentReport.alertStatus === 'throttled' ? 'sync.healthModal.support.received' : 'sync.healthModal.support.notificationFailed')}</p>}
                   {incidentReport?.error && <p role="alert">{t('sync.healthModal.support.sendFailed')}</p>}
+                  <SupportDetailsPanel active={supportActionsOpen} />
                   {exportPath && <button onClick={handleOpenExportDir} className="pos-raised inline-flex min-h-touch items-center gap-2 self-start rounded-xl border px-4 text-(--pos-s-fg)"><FolderOpen className="h-4 w-4" />{t('sync.healthModal.actions.openFolder')}</button>}
                   <button onClick={() => setAdvancedExpanded(value => !value)} aria-expanded={advancedExpanded} aria-controls={healthAdvancedId} className="pos-raised inline-flex min-h-touch items-center gap-2 self-start rounded-xl border px-4 text-(--pos-s-fg)"><ChevronDown className="h-4 w-4" />{advancedExpanded ? t('sync.healthModal.actions.closeAdvanced') : t('sync.healthModal.actions.openAdvanced')}</button>
 

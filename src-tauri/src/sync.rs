@@ -13756,7 +13756,8 @@ fn apply_lan_canonical_response_inner(
             }
         }
     }
-    crate::table_manual_cancellation::mirror_scoped(conn, response, captured)?;
+    let returned_elsewhere =
+        crate::table_manual_cancellation::mirror_scoped(conn, response, captured)?;
     let mut local_parents = std::collections::BTreeMap::new();
     for (remote_id, (order, version)) in &parents {
         let existing = resolve_local_order_id(conn, order);
@@ -13830,7 +13831,17 @@ fn apply_lan_canonical_response_inner(
         .pointer("/workflow/manual_cancellation/payments")
         .and_then(Value::as_array)
     {
-        payments.extend(rows.iter().cloned());
+        // A receipt this till never held, admitted by the cancellation's
+        // preflight as returned in full on other tills, is not mirrored: its
+        // row carries no refund adjustments, so it would count as money held
+        // here (Codex P1 on #417, 04/11/2026).
+        payments.extend(
+            rows.iter()
+                .filter(|row| {
+                    !str_any(row, &["id"]).is_some_and(|id| returned_elsewhere.contains(&id))
+                })
+                .cloned(),
+        );
     }
     if let Some(payment) = response
         .get("payment")

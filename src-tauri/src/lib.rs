@@ -56,6 +56,7 @@ pub mod fiscal; // pub so integration tests (tests/*.rs) can exercise enqueue_fo
 mod gift_financial_closing;
 mod gift_financial_opening;
 mod hardware_manager;
+mod hosted_staff_sessions;
 mod hotel_folio;
 mod idempotency;
 mod incident_reporting;
@@ -1542,12 +1543,15 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 table_attempt_recovery::table_attempt_recovery_discard_edit,
             // App lifecycle
             support::session::support_request_code,
+            support::session::support_actors,
+            support::session::support_staff_renew,
             support::session::support_consent_fetch,
             support::session::support_consent_accept,
             support::session::support_consent_decline,
             support::session::support_cancel_code,
             support::session::support_banner_state,
             support::session::support_end,
+            support::session::support_end_open,
             support::session::support_extend,
             support::session::support_doorbell,
             support::onsite::support_onsite_decision,

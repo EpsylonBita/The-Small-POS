@@ -348,7 +348,9 @@
     "qr": "Scansiona per aprire la pagina di connessione dell’assistenza",
     "timeLeft": "Tempo rimanente",
     "loading": "Richiesta del codice…",
-    "newCode": "Richiedi un nuovo codice"
+    "newCode": "Richiedi un nuovo codice",
+    "alreadyOpen": "Una connessione dell’assistenza è già aperta o in attesa. Terminala per richiedere un nuovo codice.",
+    "endExisting": "Termina connessione"
   },
   "banner": {
     "activity": "Verifica della cassa",
@@ -407,7 +409,8 @@
       "pre_quarantine_restore": "Ripristina i dati in quarantena",
       "pre_command": "Comando del terminale",
       "pre_restore": "Ripristina la copia"
-    }
+    },
+    "changesTitle": "Annulla le modifiche dell’assistenza"
   },
   "deviceApply": {
     "undo": "Annulla modifica"
@@ -426,12 +429,27 @@
     "required": "È necessario il consenso del negozio prima di connettere l’assistenza.",
     "agree": "Acconsento",
     "decline": "No",
-    "onlyOwnerAdmin": "Solo il proprietario o un amministratore del negozio può dare il consenso.",
+    "onlyOwnerAdmin": "Solo il proprietario, un amministratore, un responsabile, un vice responsabile, un capoturno o un cassiere del negozio può dare il consenso.",
     "accepted": "Il consenso è stato registrato.",
     "withdrawn": "Il negozio ha revocato il consenso. L’assistenza non è disponibile.",
     "outdated": "Il testo del consenso è cambiato. È necessario un nuovo consenso.",
     "textUnavailable": "Il testo del consenso non è ancora disponibile nella lingua del negozio.",
     "version": "Versione del testo",
-    "storeAdminAlternative": "Il proprietario o un amministratore può accettare anche nell’amministrazione del negozio."
+    "storeAdminAlternative": "Il proprietario o un amministratore può accettare anche nell’amministrazione del negozio.",
+    "acceptingAs": "Consenso dato da: {{name}}"
+  },
+  "staff": {
+    "required": "Su questa cassa deve essere in turno un cassiere o un responsabile. Inizia il turno e riprova.",
+    "signInAgain": "L’accesso del personale per l’assistenza è scaduto. Conferma con il tuo PIN per continuare. Il tuo turno resta aperto.",
+    "pickConsent": "Chi accetta?",
+    "pickRequest": "Chi chiede l’assistenza?",
+    "renewTitle": "Chi conferma con il proprio PIN?",
+    "renewPin": "PIN per {{name}}",
+    "renew": "Conferma",
+    "renewSomeoneElse": "Un’altra persona",
+    "renewRefused": "Il PIN non è stato accettato. Riprova.",
+    "renewOffline": "Il server non è raggiungibile, quindi l’accesso non è stato rinnovato. Riprova quando la cassa è online.",
+    "renewKeepsShift": "Si rinnova solo il tuo accesso su questa cassa. L’assistenza non vede mai il PIN. Il turno resta aperto e non viene addebitato nulla.",
+    "onShift": "Persona in turno"
   }
 }

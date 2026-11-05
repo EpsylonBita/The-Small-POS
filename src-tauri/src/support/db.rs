@@ -30,18 +30,39 @@ pub struct SupportDb {
 }
 
 /// Startup failure disables support while leaving selling available.
+///
+/// Support startup is crash recovery: it ends every session left open, settles
+/// unfinished commands and clears `support-replicas`. The till opens its
+/// database again for sync, heartbeat, printing and every background shift
+/// sync. In 1.4.142 each of those opens replayed recovery, so a shift open or
+/// close, an expense or a staff payment ended a live session and wiped its
+/// replicas. Startup now runs until it succeeds once per process; later opens
+/// return Ok without touching support state. A failed startup is retried by
+/// the next open, because no runtime or session exists yet.
 pub fn initialize(app_data: &Path) -> Result<(), String> {
-    let result = initialize_runtime(app_data);
-    // Other native services reopen DbState after the singleton has started.
-    let available = result.is_ok()
-        || result
-            .as_ref()
-            .is_err_and(|error| error == "support already initialized");
-    startup_observations()
+    initialize_with(app_data, initialize_runtime)
+}
+
+fn initialize_with(
+    app_data: &Path,
+    start: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let key = startup_key(app_data);
+    // Held for the whole start, so concurrent opens cannot run recovery twice.
+    let mut observations = startup_observations()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(app_data.to_path_buf(), available);
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if observations.get(&key) == Some(&true) {
+        return Ok(());
+    }
+    let result = start(app_data);
+    observations.insert(key, result.is_ok());
     result
+}
+
+/// Callers name the same folder in different ways (`app_data_dir`, `db_path.parent()`).
+fn startup_key(app_data: &Path) -> PathBuf {
+    std::fs::canonicalize(app_data).unwrap_or_else(|_| app_data.to_path_buf())
 }
 
 fn startup_observations() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, bool>> {
@@ -56,7 +77,7 @@ pub fn startup_health(app_data: &Path) -> serde_json::Value {
     match startup_observations()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(app_data)
+        .get(&startup_key(app_data))
     {
         Some(true) => serde_json::json!({"status":"available"}),
         Some(false) => {
@@ -68,6 +89,11 @@ pub fn startup_health(app_data: &Path) -> serde_json::Value {
 }
 
 fn initialize_runtime(app_data: &Path) -> Result<(), String> {
+    // The runtime is process-wide; recovery must never run beside a live one.
+    #[cfg(not(test))]
+    if super::session::initialized() {
+        return Ok(());
+    }
     let db = SupportDb::open(app_data)?;
     #[cfg(not(test))]
     {
@@ -269,6 +295,105 @@ mod tests {
             .is_err());
     }
 
+    // These tests judge a database open by its startup health and returned
+    // errors, never by captured logs. A scoped `with_default` subscriber misses
+    // an event whose callsite another test thread registers at the same moment
+    // (tracing caches callsite interest process-wide): #405's Windows run lost
+    // the "Support state unavailable" warning that way while
+    // `notice_copy_failure_…` raised the same warning beside it.
+
+    /// What a live session leaves on disk while the running runtime owns it.
+    const LIVE_SESSION: &str = "INSERT INTO support_session_state(session_id,status,tier_ceiling,max_expires_at,absolute_cap_at,updated_at) VALUES('live-session','active',2,'2099-01-01T00:00:00Z','2099-01-01T00:00:00Z','2026-11-03T20:00:00Z');
+        INSERT INTO support_device_applies(id,validation_id,device_kind,device_id,applied_at,state) VALUES('live-apply','live-validation','printer','printer-1','2026-11-03T20:00:00Z','saving');";
+
+    fn seed_live_session(root: &Path) -> Connection {
+        let live = Connection::open(root.join("support.db")).unwrap();
+        live.execute_batch(LIVE_SESSION).unwrap();
+        std::fs::create_dir_all(root.join("support-replicas")).unwrap();
+        std::fs::write(root.join("support-replicas").join("replica.db"), b"in use").unwrap();
+        live
+    }
+
+    fn assert_live_session_untouched(live: &Connection, root: &Path) {
+        let session: (String, Option<String>) = live
+            .query_row(
+                "SELECT status,end_reason FROM support_session_state WHERE session_id='live-session'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(session, ("active".to_string(), None));
+        assert_eq!(
+            live.query_row("SELECT count(*) FROM support_pending_notices", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            live.query_row(
+                "SELECT state FROM support_device_applies WHERE id='live-apply'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "saving"
+        );
+        assert!(root.join("support-replicas").join("replica.db").exists());
+    }
+
+    #[test]
+    fn later_database_opens_never_replay_support_recovery() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let root = std::env::temp_dir().join(format!("support-reopen-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let main = crate::db::init(&root).unwrap();
+        assert_eq!(startup_health(&root)["status"], "available");
+        let live = seed_live_session(&root);
+        // Sync, heartbeat, print and every background shift sync open the database again.
+        let shift_sync = crate::db::init(&root).unwrap();
+        assert_live_session_untouched(&live, &root);
+        assert_eq!(startup_health(&root)["status"], "available");
+        drop((main, shift_sync, live));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn support_recovery_runs_once_per_process_and_never_beside_a_live_session() {
+        let root =
+            std::env::temp_dir().join(format!("support-recovery-once-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        // The disk work production startup does before it installs the runtime.
+        let recovery = |dir: &Path| -> Result<(), String> {
+            let db = SupportDb::open(dir)?;
+            super::super::replica::cleanup_startup(dir)?;
+            super::super::session::Core::new(db).map(drop)
+        };
+        initialize_with(&root, recovery).unwrap();
+        let live = seed_live_session(&root);
+        let mut replayed = false;
+        initialize_with(&root, |dir| {
+            replayed = true;
+            recovery(dir)
+        })
+        .unwrap();
+        assert_live_session_untouched(&live, &root);
+        assert!(!replayed);
+        // An app restart is the one time recovery may end the session.
+        recovery(&root).unwrap();
+        assert_eq!(
+            live.query_row(
+                "SELECT status||'/'||end_reason FROM support_session_state WHERE session_id='live-session'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "ended/app_restart"
+        );
+        assert!(!root.join("support-replicas").join("replica.db").exists());
+        drop(live);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn support_open_failure_leaves_business_startup_available_with_health_evidence() {
         let _keyring = crate::tests::fake_keyring::install_empty();
@@ -280,7 +405,22 @@ mod tests {
             crate::diagnostics::get_system_health(&selling).unwrap()["remoteSupport"]["code"],
             "SUPPORT_DATABASE_UNAVAILABLE"
         );
+        assert_eq!(startup_health(&root)["status"], "unavailable");
+        // The failure carries its reason (what `db::init` logs as `error`), and
+        // the sanitized health evidence never repeats it.
+        let reason = initialize(&root).expect_err("support.db is a folder");
+        assert!(!reason.trim().is_empty());
+        assert!(
+            !startup_health(&root).to_string().contains(&reason),
+            "{reason}"
+        );
+        assert_eq!(startup_health(&root)["status"], "unavailable");
         drop(selling);
+        // A failed start leaves no runtime or session behind, so the next open retries.
+        std::fs::remove_dir_all(root.join("support.db")).unwrap();
+        let reopened = crate::db::init(&root).unwrap();
+        assert_eq!(startup_health(&root)["status"], "available");
+        drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
 

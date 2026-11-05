@@ -13,7 +13,10 @@ import { test } from 'node:test'
 // The parity runner executes the esbuild bundle from .cache/parity-tests with
 // the project root as cwd, so paths resolve from process.cwd(), never from this file's URL.
 const ROOT = process.cwd()
-const source = readFileSync(join(ROOT, 'src', 'renderer', 'pages', 'KitchenDisplayPage.tsx'), 'utf8')
+// The board is split into its persistent owner (always loaded) and the lazy page.
+const source = ['KitchenDisplayOwner.tsx', 'KitchenDisplayPage.tsx']
+  .map((file) => readFileSync(join(ROOT, 'src', 'renderer', 'pages', file), 'utf8'))
+  .join('\n')
 
 test('the board is local-only: no KDS API, realtime channel or fallback poll', () => {
   assert.doesNotMatch(source, /\/api\/pos\/kds|kds_tickets|subscriptionManager|KDS_FALLBACK_POLL_INTERVAL_MS|fetchFromAdmin|posApiFetch/)

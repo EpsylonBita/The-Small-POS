@@ -348,7 +348,9 @@
     "qr": "Skanoni për të hapur faqen e lidhjes së mbështetjes",
     "timeLeft": "Koha e mbetur",
     "loading": "Po kërkohet kodi…",
-    "newCode": "Kërko kod të ri"
+    "newCode": "Kërko kod të ri",
+    "alreadyOpen": "Një lidhje e mbështetjes është tashmë e hapur ose në pritje. Mbylleni për të kërkuar një kod të ri.",
+    "endExisting": "Mbyll lidhjen"
   },
   "banner": {
     "activity": "Po kontrollohet arka",
@@ -407,7 +409,8 @@
       "pre_quarantine_restore": "Rikthe të dhënat nga karantina",
       "pre_command": "Komandë e terminalit",
       "pre_restore": "Rikthe kopjen"
-    }
+    },
+    "changesTitle": "Zhbëj ndryshimet e mbështetjes"
   },
   "deviceApply": {
     "undo": "Zhbëj"
@@ -426,12 +429,27 @@
     "required": "Nevojitet pëlqimi i dyqanit para lidhjes së mbështetjes.",
     "agree": "Pranoj",
     "decline": "Jo",
-    "onlyOwnerAdmin": "Vetëm pronari ose një administrator i dyqanit mund të japë pëlqimin.",
+    "onlyOwnerAdmin": "Vetëm pronari, një administrator, një menaxher, një zëvendësmenaxher, një përgjegjës turni ose një arkëtar i dyqanit mund të japë pëlqimin.",
     "accepted": "Pëlqimi u regjistrua.",
     "withdrawn": "Dyqani tërhoqi pëlqimin. Mbështetja nuk është e disponueshme.",
     "outdated": "Teksti i pëlqimit ka ndryshuar. Nevojitet pëlqim i ri.",
     "textUnavailable": "Teksti i pëlqimit nuk është ende i disponueshëm në gjuhën e dyqanit.",
     "version": "Versioni i tekstit",
-    "storeAdminAlternative": "Pronari ose një administrator mund të pranojë edhe në administrimin e dyqanit."
+    "storeAdminAlternative": "Pronari ose një administrator mund të pranojë edhe në administrimin e dyqanit.",
+    "acceptingAs": "Pëlqimi jepet nga: {{name}}"
+  },
+  "staff": {
+    "required": "Në këtë arkë duhet të jetë në turn një arkëtar ose përgjegjës. Hyni në turn dhe provoni përsëri.",
+    "signInAgain": "Hyrja e punonjësit për mbështetjen ka skaduar. Konfirmoni me PIN-in tuaj për të vazhduar. Turni juaj mbetet i hapur.",
+    "pickConsent": "Kush pranon?",
+    "pickRequest": "Kush e kërkon mbështetjen?",
+    "renewTitle": "Kush konfirmon me PIN-in e vet?",
+    "renewPin": "PIN-i për {{name}}",
+    "renew": "Konfirmo",
+    "renewSomeoneElse": "Dikush tjetër",
+    "renewRefused": "PIN-i nuk u pranua. Provoni përsëri.",
+    "renewOffline": "Serveri nuk u arrit, ndaj hyrja nuk u rinovua. Provoni përsëri kur arka të jetë online.",
+    "renewKeepsShift": "Rinovohet vetëm hyrja juaj në këtë arkë. Mbështetja nuk e sheh kurrë PIN-in. Turni mbetet i hapur dhe nuk tarifohet asgjë.",
+    "onShift": "Punonjës në turn"
   }
 }

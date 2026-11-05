@@ -1,5 +1,5 @@
-import { CustomerDisplayProvider } from './pages/CustomerDisplayPage';
-import { KitchenDisplayProvider } from './pages/KitchenDisplayPage';
+import { CustomerDisplayProvider } from './pages/CustomerDisplayOwner';
+import { KitchenDisplayProvider } from './pages/KitchenDisplayOwner';
 import { LocalPreparationScopeSync } from './hooks/useLocalPreparation';
 import React, { lazy, Suspense, useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { HashRouter } from "react-router-dom";

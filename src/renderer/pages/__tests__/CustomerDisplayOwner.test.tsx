@@ -76,7 +76,8 @@ vi.mock('../../hooks/useResolvedPosIdentity', () => ({ useResolvedPosIdentity: (
 vi.mock('../../hooks/useOrderStore', () => ({ useOrderStore: (selector: any) => selector(state.local) }));
 vi.mock('../../services/SubscriptionManager', () => ({ subscriptionManager: { subscribe: state.subscribe } }));
 vi.mock('framer-motion', () => ({ motion: Object.fromEntries(['div', 'section', 'button'].map(tag => [tag, ({ children, variants, initial, animate, ...props }: any) => React.createElement(tag, props, children)])) }));
-import CustomerDisplayPage, { CustomerDisplayProvider } from '../CustomerDisplayPage';
+import CustomerDisplayPage from '../CustomerDisplayPage';
+import { CustomerDisplayProvider } from '../CustomerDisplayOwner';
 import { localPreparationStore } from '../../services/KdsLocalPhaseStore';
 import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
 
@@ -388,7 +389,8 @@ describe('persistent Windows Customer Display owner (strictly local)', () => {
   });
 
   it('has no display API, pairing link, clipboard, TV URL or realtime path', () => {
-    const source = readFileSync(resolve(__dirname, '..', 'CustomerDisplayPage.tsx'), 'utf8');
+    const source = ['CustomerDisplayOwner.tsx', 'CustomerDisplayPage.tsx']
+      .map(file => readFileSync(resolve(__dirname, '..', file), 'utf8')).join('\n');
     expect(source).not.toMatch(/\/api\/|adminApi|fetchFromAdmin|clipboard|pairing|\/display\/customer|ADMIN_DASHBOARD_URL|kds_tickets|subscriptionManager/);
     expect(source).toMatch(/await bridge\.orders\.getAll\(\)/);
     // Every native close goes through the token owner; no content-wide close remains.

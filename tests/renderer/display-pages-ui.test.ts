@@ -4,13 +4,15 @@ import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 
 const projectRoot = process.cwd();
-const customerDisplayPagePath = path.join(projectRoot, 'src', 'renderer', 'pages', 'CustomerDisplayPage.tsx');
-const kitchenDisplayPagePath = path.join(projectRoot, 'src', 'renderer', 'pages', 'KitchenDisplayPage.tsx');
+const pagesDir = path.join(projectRoot, 'src', 'renderer', 'pages');
 const systemUiPath = path.join(projectRoot, 'src-tauri', 'src', 'commands', 'system_ui.rs');
 const localesDir = path.join(projectRoot, 'src', 'locales');
 
-const customerDisplaySource = () => readFileSync(customerDisplayPagePath, 'utf8');
-const kitchenDisplaySource = () => readFileSync(kitchenDisplayPagePath, 'utf8');
+// Each display is a persistent owner module (always loaded) plus its lazy page; pin both together.
+const displaySource = (name: string) =>
+  [`${name}Owner.tsx`, `${name}Page.tsx`].map((file) => readFileSync(path.join(pagesDir, file), 'utf8')).join('\n');
+const customerDisplaySource = () => displaySource('CustomerDisplay');
+const kitchenDisplaySource = () => displaySource('KitchenDisplay');
 const systemUiSource = () => readFileSync(systemUiPath, 'utf8');
 
 function flattenKeys(value: unknown, prefix = '', out = new Set<string>()) {

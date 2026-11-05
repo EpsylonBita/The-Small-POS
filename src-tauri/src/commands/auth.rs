@@ -104,6 +104,15 @@ pub async fn auth_logout(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let actor_clear = logout_staff_session(&auth_state);
+    // Remote support no longer acts for anyone on shift here (1.4.143).
+    let hosted = app.clone();
+    let _ = run_blocking_command("auth_logout_hosted_sessions", move || {
+        let db = hosted.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|_| "DB_LOCK".to_string())?;
+        crate::hosted_staff_sessions::forget_on_shift(&conn);
+        Ok::<_, String>(())
+    })
+    .await;
     let _ = app.emit("session_timeout", serde_json::json!({ "reason": "logout" }));
     actor_clear
 }

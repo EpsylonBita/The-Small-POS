@@ -54,14 +54,10 @@ vi.mock('../contexts/i18n-context', () => ({ I18nProvider: ({ children }: Kids) 
 vi.mock('../contexts/theme-context', () => ({ ThemeProvider: ({ children }: Kids) => <>{children}</> }));
 vi.mock('../contexts/module-context', () => ({ ModuleProvider: ({ children }: Kids) => <>{children}</> }));
 vi.mock('../contexts/barcode-scanner-context', () => ({ BarcodeScannerProvider: ({ children }: Kids) => <>{children}</> }));
-vi.mock('../pages/CustomerDisplayPage', () => ({
-  default: () => <div data-testid="customer-display" />,
-  CustomerDisplayProvider: ({ children }: Kids) => <>{children}</>,
-}));
-vi.mock('../pages/KitchenDisplayPage', () => ({
-  default: () => <div data-testid="kitchen-display" />,
-  KitchenDisplayProvider: ({ children }: Kids) => <>{children}</>,
-}));
+vi.mock('../pages/CustomerDisplayPage', () => ({ default: () => <div data-testid="customer-display" /> }));
+vi.mock('../pages/CustomerDisplayOwner', () => ({ CustomerDisplayProvider: ({ children }: Kids) => <>{children}</> }));
+vi.mock('../pages/KitchenDisplayPage', () => ({ default: () => <div data-testid="kitchen-display" /> }));
+vi.mock('../pages/KitchenDisplayOwner', () => ({ KitchenDisplayProvider: ({ children }: Kids) => <>{children}</> }));
 vi.mock('../pages/LoginPage', async () => {
   const { useShift } = await import('../contexts/shift-context');
   return {

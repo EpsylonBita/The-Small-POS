@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SupportInteractionHost } from '../SupportOnsiteSheet';
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), authorize: vi.fn(), handlers: new Map<string, (event: { payload: unknown }) => void>(),
-  snapshot: { session_id: 'your-session', state: 'connected', critical_op_active: false, can_connect: true, staff: { staff_id: 'your-staff' } } }));
+  snapshot: { session_id: 'your-session', state: 'connected', critical_op_active: false, can_connect: true, staff: null } }));
 vi.mock('../../../../lib', () => ({ getBridge: () => ({ invoke: mocks.invoke }) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async (name: string, receive: (event: { payload: unknown }) => void) => {
   mocks.handlers.set(name, receive); return () => { mocks.handlers.delete(name); };
@@ -26,7 +26,9 @@ describe.each(['light', 'dark'])('native support host in %s', theme => {
     expect(mocks.invoke).toHaveBeenCalledWith('support_onsite_decision', expect.objectContaining({ decision: 'shown' }));
     act(() => vi.advanceTimersByTime(2000)); await act(async () => fireEvent.click(screen.getByText('support.onsite.execute')));
     expect(screen.queryByRole('dialog')).toBeNull();
-    expect(mocks.invoke).toHaveBeenCalledWith('support_onsite_decision', expect.objectContaining({ decision: 'confirmed', staff_ref: { staff_id: 'your-staff' } }));
+    expect(mocks.invoke).toHaveBeenCalledWith('support_onsite_decision', expect.objectContaining({ decision: 'confirmed' }));
+    // Native checks the till's own right; the banner names nobody, so no staff_ref is sent.
+    expect(mocks.invoke.mock.calls.every(([, payload]) => !('staff_ref' in (payload ?? {})))).toBe(true);
   });
   it('closes an immediate authorized decline', async () => {
     render(<SupportInteractionHost />); await receive();

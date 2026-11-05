@@ -1878,6 +1878,8 @@ fn server_check_in_answer(body: &Value, staff_id: &str, branch_id: &str) -> Valu
         return with_source(check_in_verify_failure("server_refused", error), "server");
     }
     offline_check_in::record_server_check_in(staff_id);
+    // Remote support acts for this person with this hosted session (1.4.143).
+    crate::hosted_staff_sessions::record_check_in(body, staff_id, Utc::now());
     serde_json::json!({
         "success": true,
         "staffId": staff_id,
@@ -3227,6 +3229,294 @@ pub(crate) mod tests {
             "pinHash": bcrypt::hash(pin, 4).expect("hash test pin"),
             "roles": roles.iter().map(|name| serde_json::json!({ "name": name })).collect::<Vec<_>>(),
         })
+    }
+
+    fn insert_staff_shift(
+        db_state: &db::DbState,
+        staff_id: &str,
+        name: &str,
+        terminal_id: &str,
+        role_type: &str,
+        minutes_ago: i64,
+    ) {
+        let at = (Utc::now() - chrono::Duration::minutes(minutes_ago)).to_rfc3339();
+        db_state.conn.lock().expect("db lock").execute(
+            "INSERT INTO staff_shifts (id, staff_id, staff_name, branch_id, terminal_id, role_type, check_in_time, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'branch-1', ?4, ?5, ?6, 'active', ?6, ?6)",
+            rusqlite::params![format!("shift-{staff_id}"), staff_id, name, terminal_id, role_type, at],
+        ).expect("insert staff shift");
+    }
+
+    /// 1.4.142: the till's own login is the PIN pseudo user, so support refused on
+    /// every desktop till. Support now acts for the checked-in staff member with
+    /// the hosted session of their own server check-in (1.4.143).
+    #[tokio::test]
+    async fn support_acts_for_the_checked_in_staff_never_the_pin_login() {
+        use crate::hosted_staff_sessions::{check_in_reply, SUPPORT_CONNECT};
+        use crate::support::session::actors_on_shift;
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        login_as_admin(&db_state, &auth);
+        // A production login names nobody: this is what support had to work with.
+        assert_eq!(get_session_json(&auth)["staffId"], "admin-user");
+        assert!(get_session_json(&auth)["databaseStaffId"].is_null());
+        let roster =
+            || actors_on_shift(&db_state.conn.lock().unwrap(), "terminal-1", Utc::now()).unwrap();
+        assert_eq!(roster().state, "staff_required");
+        assert_eq!(roster().actor(None).unwrap_err(), "SUPPORT_STAFF_REQUIRED");
+
+        let cashier = "44444444-4444-4444-8444-444444444444";
+        let session = "55555555-5555-4555-8555-555555555555";
+        insert_staff_shift(&db_state, cashier, "Μαρία", "terminal-1", "cashier", 30);
+        // On shift, but without a server check-in this till kept: sign in again.
+        assert_eq!(roster().actor(None).unwrap_err(), "SUPPORT_SIGN_IN_AGAIN");
+
+        let reply = check_in_reply(
+            cashier,
+            session,
+            "terminal-1",
+            "Cashier",
+            &[SUPPORT_CONNECT],
+            Utc::now() + chrono::Duration::hours(8),
+        );
+        let answer = verify_staff_check_in_pin_with(
+            check_in_request(cashier, "1111"),
+            &db_state,
+            |_| async move { Ok(reply) },
+        )
+        .await
+        .expect("check-in answer");
+        assert_eq!(answer["success"], true);
+        assert!(
+            !answer.to_string().contains(session),
+            "the renderer never sees the hosted session"
+        );
+        let actor = roster().actor(None).expect("the checked-in cashier acts");
+        assert_eq!(
+            (
+                actor.staff_id.as_str(),
+                actor.name.as_str(),
+                actor.base_role.as_str()
+            ),
+            (cashier, "Μαρία", "cashier")
+        );
+        assert_eq!(actor.base_roles, ["cashier"]);
+        assert_eq!(
+            actor.persisted(),
+            serde_json::json!({"staffId": cashier, "sessionId": session})
+        );
+        assert_eq!(
+            actor.staff(),
+            serde_json::json!({"databaseStaffId": cashier})
+        );
+
+        // A session for another till, or without the support permission, never acts.
+        let waiter = "66666666-6666-4666-8666-666666666666";
+        insert_staff_shift(&db_state, waiter, "Νίκος", "terminal-1", "server", 5);
+        let reply = check_in_reply(
+            waiter,
+            "77777777-7777-4777-8777-777777777777",
+            "terminal-1",
+            "waiter",
+            &["pos.orders.create"],
+            Utc::now() + chrono::Duration::hours(8),
+        );
+        verify_staff_check_in_pin_with(
+            check_in_request(waiter, "2222"),
+            &db_state,
+            |_| async move { Ok(reply) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(roster().actors.len(), 1);
+
+        // Two eligible people on shift: the till asks who, newest check-in first.
+        let manager = "88888888-8888-4888-8888-888888888888";
+        insert_staff_shift(&db_state, manager, "Ελένη", "terminal-1", "manager", 1);
+        let reply = check_in_reply(
+            manager,
+            "99999999-9999-4999-8999-999999999999",
+            "terminal-1",
+            "manager",
+            &[SUPPORT_CONNECT],
+            Utc::now() + chrono::Duration::hours(8),
+        );
+        verify_staff_check_in_pin_with(
+            check_in_request(manager, "3333"),
+            &db_state,
+            |_| async move { Ok(reply) },
+        )
+        .await
+        .unwrap();
+        let both = roster();
+        assert_eq!(
+            both.actors
+                .iter()
+                .map(|actor| actor.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Ελένη", "Μαρία"]
+        );
+        assert_eq!(
+            both.actor(None).unwrap_err(),
+            "SUPPORT_STAFF_CHOICE_REQUIRED"
+        );
+        assert_eq!(roster().actor(Some(cashier)).unwrap().staff_id, cashier);
+        assert_eq!(
+            roster().actor(Some(waiter)).unwrap_err(),
+            "SUPPORT_STAFF_REQUIRED"
+        );
+        assert_eq!(
+            roster().actor(Some("admin-user")).unwrap_err(),
+            "SUPPORT_STAFF_REQUIRED"
+        );
+
+        // Check-out and the till's logout forget the hosted sessions.
+        crate::hosted_staff_sessions::forget(manager);
+        assert_eq!(roster().actor(None).unwrap().staff_id, cashier);
+        crate::hosted_staff_sessions::forget_on_shift(&db_state.conn.lock().unwrap());
+        assert_eq!(roster().actor(None).unwrap_err(), "SUPPORT_SIGN_IN_AGAIN");
+    }
+
+    /// Codex review of #411: someone on shift whose hosted session expired (or
+    /// was forgotten at the till's logout) had no way back short of closing
+    /// their shift. They renew it with their PIN: the server check-in alone,
+    /// with no shift, checkout or sale involved.
+    #[tokio::test]
+    async fn support_renews_a_session_for_someone_still_on_shift() {
+        use crate::hosted_staff_sessions::{check_in_reply, SUPPORT_CONNECT};
+        use crate::support::guards::Scope;
+        use crate::support::session::{
+            actors_on_shift, renew_outcome, renewal_branch, RenewableStaff,
+        };
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        let roster =
+            || actors_on_shift(&db_state.conn.lock().unwrap(), "terminal-1", Utc::now()).unwrap();
+        let scope = || Scope {
+            organization_id: "org-1".into(),
+            branch_id: "branch-1".into(),
+            terminal_id: "terminal-1".into(),
+        };
+        let cashier = "44444444-4444-4444-8444-444444444444";
+        let waiter = "66666666-6666-4666-8666-666666666666";
+        let elsewhere = "77777777-7777-4777-8777-777777777777";
+        let session = "55555555-5555-4555-8555-555555555555";
+        let later = Utc::now() + chrono::Duration::hours(8);
+        insert_staff_shift(&db_state, cashier, "Μαρία", "terminal-1", "cashier", 30);
+        insert_staff_shift(&db_state, waiter, "Νίκος", "terminal-1", "server", 20);
+        insert_staff_shift(&db_state, elsewhere, "Ελένη", "terminal-1", "cashier", 10);
+        // The waiter has a current session without the permission: renewing
+        // it would change nothing. Ελένη's session belongs to another till.
+        crate::hosted_staff_sessions::record_check_in(
+            &check_in_reply(waiter, session, "terminal-1", "waiter", &[], later),
+            waiter,
+            Utc::now(),
+        );
+        crate::hosted_staff_sessions::record_check_in(
+            &check_in_reply(
+                elsewhere,
+                session,
+                "terminal-2",
+                "cashier",
+                &[SUPPORT_CONNECT],
+                later,
+            ),
+            elsewhere,
+            Utc::now(),
+        );
+        let before = roster();
+        assert_eq!(before.state, "sign_in_again");
+        assert_eq!(
+            before.renewable,
+            [
+                RenewableStaff {
+                    staff_id: elsewhere.into(),
+                    name: "Ελένη".into()
+                },
+                RenewableStaff {
+                    staff_id: cashier.into(),
+                    name: "Μαρία".into()
+                },
+            ]
+        );
+        assert_eq!(
+            renewal_branch(&before, scope(), cashier).unwrap(),
+            "branch-1"
+        );
+        for refused in [waiter, "admin-user", "88888888-8888-4888-8888-888888888888"] {
+            assert_eq!(
+                renewal_branch(&before, scope(), refused).unwrap_err(),
+                "SUPPORT_STAFF_REQUIRED"
+            );
+        }
+
+        // The renewal is the server check-in: it records the new session.
+        let reply = check_in_reply(
+            cashier,
+            session,
+            "terminal-1",
+            "Cashier",
+            &[SUPPORT_CONNECT],
+            later,
+        );
+        let answer = verify_staff_check_in_pin_with(
+            check_in_request(cashier, "1111"),
+            &db_state,
+            |_| async move { Ok(reply) },
+        )
+        .await
+        .expect("check-in answer");
+        assert_eq!(
+            renew_outcome(&answer),
+            serde_json::json!({"outcome": "renewed"})
+        );
+        assert!(!renew_outcome(&answer).to_string().contains(session));
+        let after = roster();
+        assert_eq!(after.state, "ready");
+        assert_eq!(after.actor(None).unwrap().staff_id, cashier);
+        assert_eq!(
+            roster().renewable,
+            [RenewableStaff {
+                staff_id: elsewhere.into(),
+                name: "Ελένη".into()
+            }]
+        );
+        let open: i64 = db_state
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM staff_shifts WHERE status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 3, "no shift was opened or closed");
+
+        for (answer, outcome) in [
+            (
+                serde_json::json!({"success": true, "source": "offline"}),
+                "offline",
+            ),
+            (
+                serde_json::json!({"success": false, "reasonCode": "check_in_unavailable"}),
+                "offline",
+            ),
+            (
+                serde_json::json!({"success": false, "reasonCode": "server_refused", "source": "server"}),
+                "refused",
+            ),
+            (
+                serde_json::json!({"success": false, "reasonCode": "invalid_pin", "source": "offline"}),
+                "refused",
+            ),
+        ] {
+            assert_eq!(
+                renew_outcome(&answer),
+                serde_json::json!({"outcome": outcome})
+            );
+        }
     }
 
     fn check_in_request(staff_id: &str, pin: &str) -> Option<Value> {

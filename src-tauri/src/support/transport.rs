@@ -184,23 +184,30 @@ async fn request_with_staff_session(
         } else {
             first
         };
-        reply.map_err(|e| {
-            if e.code() == Some("SESSION_ENDED") || e.status() == Some(404) {
-                "SESSION_ENDED".into()
-            } else if e.status() == Some(401)
-                || e.code() == Some("TERMINAL_AUTH_REFUSED")
-                || (e.status() == Some(403) && e.code() != Some("POLICY_REFUSED"))
-            {
-                "TERMINAL_AUTH_REFUSED".into()
-            } else if e.status() == Some(403) {
-                "POLICY_REFUSED".into()
-            } else {
-                "TILL_OFFLINE".into()
-            }
-        })
+        reply.map_err(|e| refusal_code(e.status(), e.code()).to_string())
     })
     .await
     .map_err(|_| "TILL_OFFLINE".to_string())?
+}
+
+/// The till's name for an admin refusal. A support session already starting
+/// for this till (409 `SESSION_LIMIT_REACHED`: its code was just used) passes
+/// through, so the till waits for it instead of reporting a failure or offline.
+fn refusal_code(status: Option<u16>, code: Option<&str>) -> &'static str {
+    if code == Some("SESSION_ENDED") || status == Some(404) {
+        "SESSION_ENDED"
+    } else if status == Some(409) && code == Some("SESSION_LIMIT_REACHED") {
+        "SESSION_LIMIT_REACHED"
+    } else if status == Some(401)
+        || code == Some("TERMINAL_AUTH_REFUSED")
+        || (status == Some(403) && code != Some("POLICY_REFUSED"))
+    {
+        "TERMINAL_AUTH_REFUSED"
+    } else if status == Some(403) {
+        "POLICY_REFUSED"
+    } else {
+        "TILL_OFFLINE"
+    }
 }
 
 pub(super) fn consent_accept_request(
@@ -256,29 +263,28 @@ pub(super) fn consent_decline_notice(
     )
 }
 
-fn persisted_staff_session() -> Result<Value, String> {
-    let raw = crate::storage::session_get_strict()
-        .map_err(|_| "POLICY_REFUSED")?
-        .ok_or("POLICY_REFUSED")?;
-    serde_json::from_str(&raw).map_err(|_| "POLICY_REFUSED".into())
-}
-
+/// The hosted session of the person who acts, from their own server check-in
+/// (1.4.143). The PIN login's secure-session blob names a pseudo user and is
+/// never a staff session.
 fn consent_accept_bound_request(
     body: Option<Value>,
-    staff: &Value,
+    actor: &super::session::SupportActor,
 ) -> Result<(Value, String), String> {
-    let persisted = persisted_staff_session()?;
-    consent_accept_request(body.ok_or("INVALID_INPUT")?, staff, &persisted)
+    consent_accept_request(
+        body.ok_or("INVALID_INPUT")?,
+        &actor.staff(),
+        &actor.persisted(),
+    )
 }
 
 pub(super) async fn consent_accept(
     app: &tauri::AppHandle,
     body: Option<Value>,
-    staff: Value,
+    actor: super::session::SupportActor,
 ) -> Result<Value, String> {
     let (body, session) =
         crate::database_lock::run_blocking_command("support_consent_accept", move || {
-            consent_accept_bound_request(body, &staff)
+            consent_accept_bound_request(body, &actor)
         })
         .await?;
     request_with_staff_session(
@@ -294,10 +300,10 @@ pub(super) async fn consent_accept(
 pub(super) fn queue_consent_decline(
     db: &super::db::SupportDb,
     text: &Value,
-    staff: &Value,
+    actor: &super::session::SupportActor,
     now: i64,
 ) -> Result<(), String> {
-    let notice = consent_decline_notice(text, staff, &persisted_staff_session()?, now)?;
+    let notice = consent_decline_notice(text, &actor.staff(), &actor.persisted(), now)?;
     super::session::queue_notice(db, "consent_decline", notice, now)
 }
 
@@ -559,7 +565,7 @@ async fn poll_cycle(api: &dyn SupportApi, rt: &super::session::Runtime, now: Ins
         if core.expire().is_err() {
             let _ = core.end("local_state_unavailable", false);
         }
-        let exists = core.session.is_some() || core.code.is_some();
+        let exists = core.session.is_some() || core.code.is_some() || core.awaiting_open;
         let active = core.session.as_ref().is_some_and(|s| s.admission.active);
         let due = core.schedule.due(exists, active, now);
         (due, core.epoch)
@@ -641,7 +647,9 @@ async fn fetch_session(
                     .as_ref()
                     .is_none_or(|s| s.info.session_id != info.session_id)
                 {
-                    if core.code.is_none() {
+                    // Only a session this till asked for: its own code, or one the
+                    // server reported with a 409 and staff chose to keep waiting for.
+                    if core.code.is_none() && !core.awaiting_open {
                         return Err("SESSION_ENDED".into());
                     }
                     core.adopt(info, &response.server_time)?;
@@ -659,6 +667,8 @@ async fn fetch_session(
                 return Ok(());
             }
             "none" => {
+                // Nothing is waiting any more: stop polling for an open session.
+                core.awaiting_open = false;
                 return Ok(());
             }
             "code_pending" => {
@@ -836,6 +846,15 @@ async fn fetch_commands(
         executor.accept(&command, &a, clock)?;
     }
     Ok(())
+}
+/// Delivers queued end/cancel notices now rather than on the next 3-second
+/// pass, for an explicit «Τερματισμός σύνδεσης». Delivery is idempotent on the
+/// server, so overlapping with the regular pass is harmless.
+pub(super) async fn deliver_notices(
+    app: &tauri::AppHandle,
+    rt: &super::session::Runtime,
+) -> Result<(), String> {
+    flush(&NativeApi { app: app.clone() }, rt).await
 }
 async fn flush(api: &dyn SupportApi, rt: &super::session::Runtime) -> Result<(), String> {
     // Queued notices and results are the documented exception to idle silence.
@@ -1088,6 +1107,46 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
+    async fn a_session_reported_by_a_409_is_adopted_and_acknowledged_while_staff_keep_waiting() {
+        // Codex review of #416: after a restart the till knows no code. A code request met the
+        // session the server still holds (409), and «Κλείσιμο» promises to keep waiting.
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _gate = super::super::critical_op::install_test_gate();
+        let (root, rt) = runtime();
+        let session = response(include_str!(
+            "../../../../shared/pos/support/__fixtures__/routes/pos-support-session.json"
+        ));
+        let ack = response(include_str!(
+            "../../../../shared/pos/support/__fixtures__/routes/pos-support-session-ack.json"
+        ));
+        // Without that 409 a session the till did not ask for is never adopted.
+        assert_eq!(
+            fetch_session(&mock(vec![session.clone()]), &rt, 0)
+                .await
+                .unwrap_err(),
+            "SESSION_ENDED"
+        );
+        // Nothing waiting any more stops the extra polling.
+        rt.core.lock().unwrap().await_open();
+        let none = json!({"state":"none","server_time":"2026-11-01T12:00:00.000Z"});
+        fetch_session(&mock(vec![none]), &rt, 0).await.unwrap();
+        assert!(!rt.core.lock().unwrap().awaiting_open);
+        rt.core.lock().unwrap().await_open();
+        let api = mock(vec![session, ack]);
+        fetch_session(&api, &rt, 0).await.unwrap();
+        {
+            let core = rt.core.lock().unwrap();
+            assert!(core.session.as_ref().is_some_and(|s| s.admission.active));
+            assert!(!core.awaiting_open);
+        }
+        assert_eq!(
+            api.calls.lock().unwrap()[1].0,
+            "/api/pos/support/session/ack"
+        );
+        drop(rt);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
     async fn idle_transport_is_silent_and_cancelled_fetch_cannot_activate_a_session() {
         let _keys = crate::tests::fake_keyring::install_empty();
         let _gate = super::super::critical_op::install_test_gate();
@@ -1245,7 +1304,7 @@ mod tests {
         assert!(!s.paused(at + Duration::from_secs(11)));
     }
     #[test]
-    fn consent_transport_binds_the_persisted_session_to_the_request_header() {
+    fn consent_transport_binds_the_actors_own_session_to_the_request_header() {
         let _keys = crate::tests::fake_keyring::install_empty();
         let _gate = super::super::critical_op::install_test_gate();
         let fixture: Value = serde_json::from_str(include_str!(
@@ -1253,10 +1312,18 @@ mod tests {
         ))
         .unwrap();
         let case = &fixture["cases"][0];
-        let staff = json!({"databaseStaffId":case["body"]["staff_id"]});
-        crate::storage::session_set(&json!({"staffId":staff["databaseStaffId"],"sessionId":case["headers"]["x-staff-session-id"]}).to_string()).unwrap();
+        let actor = super::super::session::SupportActor::for_test(
+            case["body"]["staff_id"].as_str().unwrap(),
+            case["headers"]["x-staff-session-id"].as_str().unwrap(),
+        );
+        // The PIN login's blob is a pseudo user's: it never becomes the header.
+        crate::storage::session_set(
+            &json!({"staffId":"admin-user","sessionId":"70000000-0000-4000-a000-000000000007"})
+                .to_string(),
+        )
+        .unwrap();
         let (body, header) =
-            consent_accept_bound_request(Some(case["body"].clone()), &staff).unwrap();
+            consent_accept_bound_request(Some(case["body"].clone()), &actor).unwrap();
         let request = reqwest::Client::new()
             .post("https://example.com/api/pos/support/consent/accept")
             .header("x-staff-session-id", &header)
@@ -1268,8 +1335,10 @@ mod tests {
             case["headers"]["x-staff-session-id"].as_str().unwrap()
         );
         assert_eq!(body, case["body"]);
-        let mut other = staff.clone();
-        other["databaseStaffId"] = json!("50000000-0000-4000-a000-000000000005");
+        let other = super::super::session::SupportActor::for_test(
+            "50000000-0000-4000-a000-000000000005",
+            case["headers"]["x-staff-session-id"].as_str().unwrap(),
+        );
         assert_eq!(
             consent_accept_bound_request(Some(body), &other).unwrap_err(),
             "POLICY_REFUSED"
@@ -1287,5 +1356,33 @@ mod tests {
             assert!(require_https(base).is_err());
         }
         assert!(require_https("https://example.com").is_ok());
+    }
+
+    #[test]
+    fn a_session_already_starting_is_named_never_offline() {
+        // 04/11/2026: a second code request after the first code was used came
+        // back 409 and the till showed "could not get a code".
+        assert_eq!(
+            refusal_code(Some(409), Some("SESSION_LIMIT_REACHED")),
+            "SESSION_LIMIT_REACHED"
+        );
+        assert_eq!(refusal_code(Some(409), Some("OTHER")), "TILL_OFFLINE");
+        assert_eq!(refusal_code(Some(409), None), "TILL_OFFLINE");
+        assert_eq!(refusal_code(Some(404), None), "SESSION_ENDED");
+        assert_eq!(
+            refusal_code(Some(409), Some("SESSION_ENDED")),
+            "SESSION_ENDED"
+        );
+        assert_eq!(refusal_code(Some(401), None), "TERMINAL_AUTH_REFUSED");
+        assert_eq!(
+            refusal_code(Some(403), Some("POLICY_REFUSED")),
+            "POLICY_REFUSED"
+        );
+        assert_eq!(refusal_code(Some(403), None), "TERMINAL_AUTH_REFUSED");
+        assert_eq!(
+            refusal_code(Some(400), Some("INVALID_INPUT")),
+            "TILL_OFFLINE"
+        );
+        assert_eq!(refusal_code(None, None), "TILL_OFFLINE");
     }
 }

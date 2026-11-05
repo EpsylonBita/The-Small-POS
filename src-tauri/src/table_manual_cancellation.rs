@@ -24,7 +24,11 @@ fn create_tables(conn: &Connection) -> Result<(), String> {
       PRIMARY KEY(organization_id,branch_id,terminal_id,event_id));
       CREATE TABLE IF NOT EXISTS table_manual_cancel_preflights_v1(
       organization_id TEXT NOT NULL,branch_id TEXT NOT NULL,terminal_id TEXT NOT NULL,order_id TEXT NOT NULL,
-      session_id TEXT NOT NULL,PRIMARY KEY(organization_id,branch_id,terminal_id,order_id));",
+      session_id TEXT NOT NULL,PRIMARY KEY(organization_id,branch_id,terminal_id,order_id));
+      CREATE TABLE IF NOT EXISTS table_manual_cancel_returned_elsewhere_v1(
+      organization_id TEXT NOT NULL,branch_id TEXT NOT NULL,terminal_id TEXT NOT NULL,order_id TEXT NOT NULL,
+      payment_id TEXT NOT NULL,amount_cents INTEGER NOT NULL,
+      PRIMARY KEY(organization_id,branch_id,terminal_id,order_id,payment_id));",
     )
     .map_err(|e| e.to_string())
 }
@@ -279,6 +283,29 @@ pub(crate) fn canonical_manual_receipt(payment: &Value) -> bool {
     method == "cash" || manual || reference.as_str().is_some_and(|s| s.starts_with("CASH-"))
 }
 
+/// Whether the server's snapshot shows this receipt returned in full: marked
+/// refunded, or refunds and voids of its own that cover its amount (the
+/// reversals the server's `table_order_paid_cents` subtracts).
+fn canonical_receipt_returned(receipt: &Value, adjustments: &Value) -> Result<bool, String> {
+    let id = receipt["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("CANCELLATION_PAYMENT_CHANGED")?;
+    if receipt["status"] == "refunded" {
+        return Ok(true);
+    }
+    let reversed = adjustments
+        .as_array()
+        .ok_or("CANCELLATION_PAYMENT_CHANGED")?
+        .iter()
+        .filter(|a| {
+            a["payment_id"].as_str() == Some(id)
+                && matches!(a["adjustment_type"].as_str(), Some("refund" | "void"))
+        })
+        .try_fold(0_i64, |sum, a| Ok::<_, String>(sum + amount(a)?))?;
+    Ok(reversed >= amount(receipt)?)
+}
+
 pub(crate) fn validate_snapshot(
     conn: &Connection,
     plan: &Value,
@@ -333,12 +360,29 @@ pub(crate) fn validate_snapshot(
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    if canonical
+    // A received receipt the server lists is either one this till holds,
+    // compared exactly below, or one it never held: taken and returned on
+    // other tills, or of a day a Z closed, whose payments a till does not
+    // mirror. The server's snapshot alone decides the latter (founder's dev
+    // till 04/11/2026). Returned in full, it needs no return here, and the
+    // server's `whole_order_cancel` checks the money again. Still holding
+    // money, it is a payment this till has no record of. Neither is a changed
+    // payment: a retry reads the same two ledgers and gets the same answer.
+    let received: Vec<&Value> = canonical
         .iter()
         .filter(|p| matches!(p["status"].as_str(), Some("completed" | "refunded")))
-        .count()
-        != local.len()
-    {
+        .collect();
+    let mut returned_elsewhere = Vec::new();
+    for receipt in &received {
+        if local.iter().any(|row| receipt["id"] == row.0) {
+            continue;
+        }
+        if !canonical_receipt_returned(receipt, &data["adjustments"])? {
+            return Err(crate::commands::orders::ORDER_PAYMENT_NOT_RECORDED.into());
+        }
+        returned_elsewhere.push((text(receipt, "id")?.to_string(), amount(receipt)?));
+    }
+    if received.len() != local.len() + returned_elsewhere.len() {
         return Err("CANCELLATION_PAYMENT_CHANGED".into());
     }
     for (id, method, status, currency, cents, local_id) in local {
@@ -405,6 +449,16 @@ pub(crate) fn validate_snapshot(
     }
     create_tables(conn)?;
     conn.execute("INSERT INTO table_manual_cancel_preflights_v1(organization_id,branch_id,terminal_id,order_id,session_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(organization_id,branch_id,terminal_id,order_id) DO UPDATE SET session_id=excluded.session_id",params![scope.organization_id,scope.branch_id,scope.terminal_id,order,session]).map_err(|e|e.to_string())?;
+    // The acknowledgement of this check's cancellation accepts exactly the
+    // receipts admitted above as returned elsewhere (`mirror_scoped`).
+    conn.execute(
+        "DELETE FROM table_manual_cancel_returned_elsewhere_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND order_id=?4",
+        params![scope.organization_id, scope.branch_id, scope.terminal_id, order],
+    )
+    .map_err(|e| e.to_string())?;
+    for (payment, cents) in &returned_elsewhere {
+        conn.execute("INSERT INTO table_manual_cancel_returned_elsewhere_v1(organization_id,branch_id,terminal_id,order_id,payment_id,amount_cents) VALUES(?1,?2,?3,?4,?5,?6)",params![scope.organization_id,scope.branch_id,scope.terminal_id,order,payment,cents]).map_err(|e|e.to_string())?;
+    }
     Ok(())
 }
 pub(crate) fn receiver(conn: &Connection, currency: &str) -> Result<(String, String), String> {
@@ -966,15 +1020,17 @@ fn same_fields(expected: &Value, actual: &Value, fields: &[&str]) -> Result<(), 
 #[cfg(test)]
 pub(crate) fn mirror(conn: &Connection, response: &Value) -> Result<(), String> {
     let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
-    mirror_scoped(conn, response, &captured)
+    mirror_scoped(conn, response, &captured).map(|_| ())
 }
+/// Returns the ids of the listed receipts this till never held that the
+/// preflight admitted as returned elsewhere: the caller mirrors nothing for them.
 pub(crate) fn mirror_scoped(
     conn: &Connection,
     response: &Value,
     captured: &crate::terminal_helpers::TerminalScopeSnapshot,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let Some(result) = response.pointer("/workflow/manual_cancellation") else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let scope = OpeningScope {
         organization_id: captured
@@ -1106,8 +1162,62 @@ pub(crate) fn mirror_scoped(
             ],
         )?;
     }
+    // The server answers with every payment of the order, including receipts
+    // this till never held (Codex P1 on #417, 04/11/2026). One is accepted only
+    // as the preflight admitted it: returned in full on other tills, by id and
+    // amount (`validate_snapshot`), or holding no money by its own status
+    // (voided, failed), which the preflight never compares. Never one this
+    // event returned. Its row carries no refund adjustments: mirrored as a
+    // payment, it would count money this till never held. Anything else is a
+    // mismatch, before any write, and again on every replay.
+    let mut returned_elsewhere = Vec::new();
+    for p in result
+        .get("payments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let id = text(p, "id")?;
+        let held: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM order_payments WHERE order_id=?1 AND remote_payment_id=?2)",
+                params![order, id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if held {
+            continue;
+        }
+        let returned_here = refunds.iter().any(|r| r["payment_id"] == p["id"])
+            || expected_handbacks
+                .iter()
+                .any(|h| h["payment_id"] == p["id"]);
+        let scoped = p["organization_id"] == scope.organization_id
+            && p["branch_id"] == scope.branch_id
+            && p["order_id"] == remote;
+        let admitted = match p["status"].as_str() {
+            Some("voided" | "failed") => true,
+            Some("completed" | "refunded") => {
+                let admitted: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM table_manual_cancel_returned_elsewhere_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND order_id=?4 AND payment_id=?5 AND amount_cents=?6)",
+                        params![scope.organization_id, scope.branch_id, scope.terminal_id, order, id, amount(p)?],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if admitted {
+                    returned_elsewhere.push(id.to_string());
+                }
+                admitted
+            }
+            _ => false,
+        };
+        if returned_here || !scoped || !admitted {
+            return Err("TABLE_CANCELLATION_RECEIPT_MISMATCH".into());
+        }
+    }
     if applied {
-        return Ok(());
+        return Ok(returned_elsewhere);
     }
     let now = chrono::Utc::now().to_rfc3339();
     let mut shifts = std::collections::BTreeSet::new();
@@ -1143,7 +1253,7 @@ pub(crate) fn mirror_scoped(
         )?;
     }
     conn.execute("UPDATE table_manual_cancel_intents_v1 SET applied=1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND event_id=?4",params![scope.organization_id,scope.branch_id,scope.terminal_id,event]).map_err(|e|e.to_string())?;
-    Ok(())
+    Ok(returned_elsewhere)
 }
 
 #[cfg(test)]
@@ -1662,6 +1772,339 @@ mod tests {
             receiver(&legacy, "EUR").unwrap_err(),
             "SHIFT_CURRENCY_UNAVAILABLE"
         );
+    }
+
+    // ---- Founder's dev till, 04/11/2026 -----------------------------------
+    //
+    // Symptom: five closed dine-in checks of the QA store (completed, payment
+    // label pending, no payment row on this till, their day inside a closed
+    // Z) answered every Cancel with «Η πληρωμή άλλαξε. Κλείστε το παράθυρο
+    // και επιλέξτε ξανά Ακύρωση…» (`CANCELLATION_PAYMENT_CHANGED`), and every
+    // retry the same. Root cause: their money was taken and returned on other
+    // tills. The server's cancellation snapshot lists those receipts, this
+    // till never held them, and the preflight counted them against its own
+    // empty ledger as a changed payment. A retry reads the same two ledgers.
+
+    const RETURNED_CARD: &str = "55555555-5555-4555-8555-555555555551";
+    const RETURNED_CASH: &str = "55555555-5555-4555-8555-555555555552";
+
+    /// The founder's check on this till: completed, label pending, no receipt
+    /// here, inside a Z this till closed. Answers its no-money plan.
+    fn unrecorded_closed_check(conn: &Connection) -> Value {
+        conn.execute_batch(
+            "DELETE FROM payment_adjustments; DELETE FROM order_payments;
+             UPDATE orders SET status='completed',payment_status='pending',
+               created_at='2026-10-09T20:27:06Z',updated_at='2026-10-12T11:00:28Z';
+             INSERT INTO z_reports(id,shift_id,branch_id,terminal_id,report_date,generated_at,sync_state,created_at,updated_at)
+               VALUES('z-closed','shift','branch','terminal','2026-10-09','2026-10-12T11:00:27Z','applied','2026-10-12T11:00:27Z','2026-10-12T11:00:27Z');",
+        )
+        .unwrap();
+        let plan = crate::manual_order_cancellation::prepare_validated(
+            conn,
+            "order",
+            &crate::manual_order_cancellation::tests::admitted(conn),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                &plan["requiresReturn"],
+                &plan["requiresHandback"],
+                &plan["amountCents"]
+            ),
+            (&json!(false), &json!(false), &json!(0))
+        );
+        plan
+    }
+
+    /// The server's snapshot of that check: a manual card receipt marked
+    /// refunded and a cash receipt refunded in full, both by other tills.
+    fn returned_on_other_tills(conn: &Connection) -> Value {
+        let remote = canonical_order(conn, "order").unwrap();
+        let mut snapshot = preflight_snapshot(conn);
+        snapshot["data"]["order"]["status"] = json!("completed");
+        snapshot["data"]["order"]["payment_status"] = json!("pending");
+        let receipt = |id: &str, method: &str, status: &str, cents: i64| {
+            json!({"id":id,"order_id":remote,"organization_id":"org","branch_id":"branch",
+                "payment_method":method,"status":status,"currency":"EUR","amount_cents":cents,
+                "metadata":{"payment_origin":"manual"}})
+        };
+        snapshot["data"]["payments"] = json!([
+            receipt(RETURNED_CARD, "card", "refunded", 600),
+            receipt(RETURNED_CASH, "cash", "completed", 450),
+        ]);
+        snapshot["data"]["adjustments"] = json!([
+            {"payment_id":RETURNED_CARD,"adjustment_type":"refund","amount_cents":600},
+            {"payment_id":RETURNED_CASH,"adjustment_type":"refund","amount_cents":450},
+        ]);
+        snapshot
+    }
+
+    #[test]
+    fn a_closed_check_returned_on_other_tills_cancels_reason_only_without_its_receipts_here() {
+        let conn = fixture();
+        let plan = unrecorded_closed_check(&conn);
+        let snapshot = returned_on_other_tills(&conn);
+        // The same answer on every attempt: nothing to return, the session
+        // preflight is saved for the reason-only `whole_order_cancel`.
+        for _ in 0..2 {
+            validate_snapshot(&conn, &plan, SESSION, &snapshot).unwrap();
+        }
+        assert!(original_session_proven(&conn, "order", SESSION).unwrap());
+        // A preflight moves no money and leaves the order as it was.
+        assert_eq!(
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM payment_adjustments),(SELECT COUNT(*) FROM order_payments),status FROM orders WHERE id='order'",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)),
+            )
+            .unwrap(),
+            (0, 0, "completed".to_string())
+        );
+        // A void returns the money as well.
+        let mut voided = snapshot.clone();
+        voided["data"]["adjustments"][1]["adjustment_type"] = json!("void");
+        validate_snapshot(&conn, &plan, SESSION, &voided).unwrap();
+    }
+
+    #[test]
+    fn money_the_server_still_holds_without_a_receipt_here_is_not_recorded_never_changed() {
+        let conn = fixture();
+        let plan = unrecorded_closed_check(&conn);
+        let returned = returned_on_other_tills(&conn);
+        let not_recorded = crate::commands::orders::ORDER_PAYMENT_NOT_RECORDED;
+        // 1.00 of the cash receipt is still held: a partial return.
+        let mut partial = returned.clone();
+        partial["data"]["adjustments"][1]["amount_cents"] = json!(350);
+        assert_eq!(
+            validate_snapshot(&conn, &plan, SESSION, &partial).unwrap_err(),
+            not_recorded
+        );
+        // A completed receipt nobody returned.
+        let mut kept = returned.clone();
+        kept["data"]["adjustments"] = json!([
+            {"payment_id":RETURNED_CARD,"adjustment_type":"refund","amount_cents":600}
+        ]);
+        assert_eq!(
+            validate_snapshot(&conn, &plan, SESSION, &kept).unwrap_err(),
+            not_recorded
+        );
+        // Another receipt's return never covers this one.
+        let mut foreign = returned.clone();
+        foreign["data"]["adjustments"][1]["payment_id"] = json!(RETURNED_CARD);
+        assert_eq!(
+            validate_snapshot(&conn, &plan, SESSION, &foreign).unwrap_err(),
+            not_recorded
+        );
+        // The same answer on retry, and no preflight is saved.
+        assert_eq!(
+            validate_snapshot(&conn, &plan, SESSION, &kept).unwrap_err(),
+            not_recorded
+        );
+        assert!(!original_session_proven(&conn, "order", SESSION).unwrap());
+        // A receipt this till holds is still compared exactly: one the server
+        // does not list is a changed payment, as before.
+        let conn = fixture();
+        let plan = crate::manual_order_cancellation::prepare_validated(
+            &conn,
+            "order",
+            &crate::manual_order_cancellation::tests::admitted(&conn),
+        )
+        .unwrap();
+        let mut missing = preflight_snapshot(&conn);
+        missing["data"]["payments"].as_array_mut().unwrap().pop();
+        assert_eq!(
+            validate_snapshot(&conn, &plan, SESSION, &missing).unwrap_err(),
+            "CANCELLATION_PAYMENT_CHANGED"
+        );
+    }
+
+    // ---- Codex P1 on #417, 04/11/2026 --------------------------------------
+    //
+    // A check holding this till's own receipts beside receipts taken and
+    // returned in full on other tills. The preflight admits it, and the server
+    // commits the return and the cancellation, answering with every payment of
+    // the order (`apply_manual_table_cancellation_returns`). The receipt mirror
+    // passed each listed payment to the generic payment mirror: a never-held
+    // `completed` receipt, returned by refund adjustments its row does not
+    // carry, was written here as money this till holds.
+
+    const FAILED_ATTEMPT: &str = "55555555-5555-4555-8555-555555555553";
+    const LATE_RETURN: &str = "55555555-5555-4555-8555-555555555554";
+
+    fn server_receipt(
+        conn: &Connection,
+        id: &str,
+        method: &str,
+        status: &str,
+        cents: i64,
+    ) -> Value {
+        json!({"id":id,"order_id":canonical_order(conn,"order").unwrap(),"organization_id":"org","branch_id":"branch",
+            "payment_method":method,"status":status,"currency":"EUR","amount":cents as f64/100.0,"amount_cents":cents,
+            "created_at":"2026-10-05T11:00:00Z","updated_at":"2026-10-05T12:00:00Z","metadata":{"payment_origin":"manual"}})
+    }
+
+    /// Preflights the held check beside two receipts returned on other tills
+    /// (and a failed attempt nobody held), freezes its return, and builds the
+    /// server's answer: every payment of the order, this event's refunds and
+    /// handback only.
+    fn held_beside_returned_elsewhere(conn: &Connection, preflight: bool) -> Value {
+        let plan = crate::manual_order_cancellation::prepare_validated(
+            conn,
+            "order",
+            &crate::manual_order_cancellation::tests::admitted(conn),
+        )
+        .unwrap();
+        let mut snapshot = preflight_snapshot(conn);
+        for (id, method, status, cents) in [
+            (RETURNED_CARD, "card", "refunded", 600),
+            (RETURNED_CASH, "cash", "completed", 450),
+            (FAILED_ATTEMPT, "card", "failed", 300),
+        ] {
+            let row = server_receipt(conn, id, method, status, cents);
+            snapshot["data"]["payments"]
+                .as_array_mut()
+                .unwrap()
+                .push(row);
+        }
+        snapshot["data"]["adjustments"] = json!([
+            {"payment_id":RETURNED_CARD,"adjustment_type":"refund","amount_cents":600},
+            {"payment_id":RETURNED_CASH,"adjustment_type":"refund","amount_cents":450},
+        ]);
+        if preflight {
+            validate_snapshot(conn, &plan, SESSION, &snapshot).unwrap();
+        }
+        let request = frozen(conn, "cash_drawer");
+        assert_eq!(
+            request["manual_refund"]["refunds"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let mut receipt = response(conn, &request);
+        let mut listed = snapshot["data"]["payments"].as_array().unwrap().clone();
+        for row in listed.iter_mut() {
+            if ![RETURNED_CARD, RETURNED_CASH, FAILED_ATTEMPT]
+                .contains(&row["id"].as_str().unwrap())
+            {
+                // This event returned the till's own receipts.
+                row["status"] = json!("refunded");
+                row["amount"] = json!(row["amount_cents"].as_i64().unwrap() as f64 / 100.0);
+            }
+        }
+        receipt["workflow"]["manual_cancellation"]["payments"] = json!(listed);
+        receipt
+    }
+
+    #[test]
+    fn a_held_return_beside_receipts_returned_on_other_tills_mirrors_only_its_own_and_replays() {
+        let conn = fixture();
+        for (key, value) in [
+            ("__ignore_keyring", "1"),
+            ("owner_terminal_id", "terminal"),
+            ("source_terminal_id", "terminal"),
+            ("pos_operating_mode", "main_isolated"),
+            ("terminal_type", "main"),
+        ] {
+            db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        let mut receipt = held_beside_returned_elsewhere(&conn, true);
+        receipt["cafe_lan_snapshot"] = json!({"orders":[{"id":canonical_order(&conn,"order").unwrap(),"organization_id":"org","branch_id":"branch","owner_terminal_id":"terminal","terminal_id":"terminal","source_terminal_id":"terminal","version":2,"order_number":"001","order_type":"dine-in","status":"cancelled","payment_status":"pending","total_amount":10.5,"subtotal":10.5,"tax_amount":0,"created_at":"2026-10-05T10:00:00Z","updated_at":"2026-10-05T19:00:00Z","table_id":null,"table_session_id":null,"order_items":[{"id":"55555555-5555-4555-8555-555555555555","quantity":1,"unit_price":10.5,"total_price":10.5,"name":"Meal"}]}],"sessions":[],"tables":[],"payments":[]});
+        // The answer is applied, then replayed from the same retained answer.
+        for _ in 0..2 {
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            crate::sync::apply_lan_canonical_response(&conn, "/api/pos/table-sessions", &receipt)
+                .unwrap();
+            conn.execute_batch("COMMIT").unwrap();
+            // This till's own two receipts, returned here once. Nothing for
+            // money it never held: no receipt, no return, no drawer movement.
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*),SUM(status='refunded'),(SELECT COUNT(*) FROM payment_adjustments),(SELECT SUM(amount_cents) FROM payment_adjustments) FROM order_payments",
+                    [],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?)),
+                )
+                .unwrap(),
+                (2, 2, 2, 1050)
+            );
+            assert_eq!(
+                conn.query_row("SELECT total_refunds_cents,driver_cash_returned_cents FROM cash_drawer_sessions", [], |r| Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?
+                )))
+                .unwrap(),
+                (1050, 450)
+            );
+            assert_eq!(
+                conn.query_row("SELECT status FROM orders WHERE id='order'", [], |r| r
+                    .get::<_, String>(
+                    0
+                ))
+                .unwrap(),
+                "cancelled"
+            );
+        }
+        assert!(pending(&conn, "branch").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_receipt_never_held_here_that_the_preflight_did_not_admit_fails_closed() {
+        for kind in ["unadmitted", "amount", "no-preflight", "still-held"] {
+            let mut conn = fixture();
+            let receipt = held_beside_returned_elsewhere(&conn, kind != "no-preflight");
+            let mut changed = receipt.clone();
+            let payments = changed["workflow"]["manual_cancellation"]["payments"]
+                .as_array_mut()
+                .unwrap();
+            match kind {
+                // Taken and returned elsewhere after the preflight read the ledger.
+                "unadmitted" => {
+                    payments.push(server_receipt(&conn, LATE_RETURN, "cash", "refunded", 200))
+                }
+                "amount" => {
+                    payments
+                        .iter_mut()
+                        .find(|p| p["id"] == RETURNED_CASH)
+                        .unwrap()["amount_cents"] = json!(500)
+                }
+                // Money the server lists in a pending state is never a return made elsewhere.
+                "still-held" => {
+                    payments
+                        .iter_mut()
+                        .find(|p| p["id"] == FAILED_ATTEMPT)
+                        .unwrap()["status"] = json!("pending")
+                }
+                _ => {}
+            }
+            let captured = crate::terminal_helpers::TerminalScopeSnapshot::capture(&conn).unwrap();
+            {
+                let tx = conn.transaction().unwrap();
+                assert_eq!(
+                    mirror_scoped(&tx, &changed, &captured).unwrap_err(),
+                    "TABLE_CANCELLATION_RECEIPT_MISMATCH",
+                    "{kind}"
+                );
+            }
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM payment_adjustments", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(pending(&conn, "branch").unwrap(), vec!["order"]);
+            if kind == "no-preflight" {
+                continue;
+            }
+            // The same answer with only what the preflight admitted is accepted;
+            // its receipts returned elsewhere are named for the caller to skip.
+            let tx = conn.transaction().unwrap();
+            assert_eq!(
+                mirror_scoped(&tx, &receipt, &captured).unwrap(),
+                vec![RETURNED_CARD.to_string(), RETURNED_CASH.to_string()]
+            );
+            tx.commit().unwrap();
+            assert!(pending(&conn, "branch").unwrap().is_empty());
+        }
     }
 
     // ---- Review 06/10/2026 -------------------------------------------------
