@@ -1,6 +1,6 @@
 import React, { lazy, useContext, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowRight, LogOut, Settings, Store } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 import { CashierGateContext, CashierRecovery, CashierWaiterContext, RecoveryActionsContext, useCashierOperationsLocked } from '../contexts/cashier-gate-context';
 import { useCashierDayGate } from '../hooks/useCashierDayGate';
 import { useFeatures } from '../hooks/useFeatures';
@@ -48,17 +48,12 @@ export function CashierOperationalBoundary({ children }: { children: React.React
           <p>{t('cashierGate.checking')}</p>
         </div> : <div className="p-6 sm:p-8">
           <div className="text-center">
-            <Store className="mx-auto mb-5 text-(--pos-s-muted)" size={28} strokeWidth={1.8} aria-hidden="true" />
             <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{t(actions.resolving ? 'cashierGate.checking' : 'cashierGate.title')}</h1>
             <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-(--pos-s-muted)">{t(actions.waiter ? 'cashierGate.waiterBody' : 'cashierGate.body')}</p>
           </div>
           <div className="mt-7 space-y-3">
             <button onClick={actions.checkIn} className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary w-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg) focus-visible:ring-offset-2">{t('navigation.checkIn')}<ArrowRight size={18} aria-hidden="true" /></button>
             {actions.pendingZ && !actions.waiter && <button onClick={actions.completeZ} className="pos-solid-btn pos-solid-btn--md w-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)">{t('shift.actions.completeZReport')}</button>}
-            <div className="grid grid-cols-2 gap-3 border-t border-(--pos-s-border) pt-4">
-              <button onClick={actions.settings} className="flex min-h-touch items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-(--pos-s-fg) transition-colors active:bg-(--pos-s-surface-2) focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)"><Settings size={17} aria-hidden="true" />{t('navigation.settings')}</button>
-              <button onClick={actions.logout} className="flex min-h-touch items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-(--pos-s-fg) transition-colors active:bg-(--pos-s-surface-2) focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)"><LogOut size={17} aria-hidden="true" />{t('navigation.logout')}</button>
-            </div>
           </div>
         </div>}
       </div>
@@ -66,9 +61,7 @@ export function CashierOperationalBoundary({ children }: { children: React.React
   </div>;
 }
 
-export function GlobalCashierGate({ children, onLogout, onOpenSettings }: {
-  children: React.ReactNode; onLogout: () => void; onOpenSettings: () => void;
-}) {
+export function GlobalCashierGate({ children }: { children: React.ReactNode }) {
   const features = useFeatures();
   const day = useCashierDayGate({ isMobileWaiter: features.isMobileWaiter,
     parentTerminalId: features.parentTerminalId || features.ownerTerminalId, ready: !features.loading });
@@ -119,8 +112,7 @@ export function GlobalCashierGate({ children, onLogout, onOpenSettings }: {
   }, [locked]);
   return <CashierWaiterContext.Provider value={features.isMobileWaiter}><CashierGateContext.Provider value={locked}>
     <RecoveryActionsContext.Provider value={{ resolving: day.isResolving, waiter: features.isMobileWaiter,
-      pendingZ: isPendingLocalSubmit, checkIn: () => shiftManager.current?.openCheckin(), completeZ: () => setShowZ(true),
-      settings: onOpenSettings, logout: onLogout }}>
+      pendingZ: isPendingLocalSubmit, checkIn: () => shiftManager.current?.openCheckin(), completeZ: () => setShowZ(true) }}>
       {children}
     </RecoveryActionsContext.Provider>
     <CashierRecovery>

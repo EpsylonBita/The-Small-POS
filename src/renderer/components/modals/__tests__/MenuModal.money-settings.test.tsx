@@ -717,7 +717,8 @@ describe('MenuModal closing an order correction (1.4.125)', () => {
       expect(screen.queryByText('modals.menu.draftSaveFailed')).toBeNull();
     });
     expect(restore).not.toHaveBeenCalled();
-    expect(draftStorage.draft).toMatchObject({ phase: 'editing', cartItems: [], context: { editMode: false } });
+    // The new order's empty draft is written just after the load ends, not with it.
+    await waitFor(() => expect(draftStorage.draft).toMatchObject({ phase: 'editing', cartItems: [], context: { editMode: false } }));
   });
 
   it('keeps a submitted (checkout_pending) correction and just closes', async () => {

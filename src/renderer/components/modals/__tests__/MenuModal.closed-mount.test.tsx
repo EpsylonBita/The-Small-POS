@@ -628,8 +628,15 @@ describe('MenuModal explicit immutable replay after crash before dispatch', () =
     expect(complete).not.toHaveBeenCalled(); expect(draftStorage.draft.cartItems).toEqual(editor().cartItems);
     expect(draftStorage.draft.phase).toBe('editing'); expect(draftStorage.draft.submission).toBeUndefined();
     await waitFor(() => expect(screen.getByText('Checkout')).not.toBeDisabled());
-    fireEvent.click(screen.getByText('Checkout'));
-    fireEvent.click(await screen.findByText('Pay cash'));
+    // The renewed draft's write can still be settling when the button turns
+    // enabled. Until it settles the till ignores Checkout by design, so press
+    // again until the payment window opens (a slow CI runner failed here,
+    // release run 42589327391). An accepted press fences any repeat.
+    await waitFor(() => {
+      if (!screen.queryByText('Pay cash')) fireEvent.click(screen.getByText('Checkout'));
+      expect(screen.getByText('Pay cash')).toBeInTheDocument();
+    }, { timeout: 5000 });
+    fireEvent.click(screen.getByText('Pay cash'));
     await waitFor(() => expect(complete).toHaveBeenCalledWith(expect.objectContaining({ clientRequestId: 'renewed-request' })));
   });
   it('native mixed evidence appearing after inspection cannot release or replace the frozen cart', async () => {

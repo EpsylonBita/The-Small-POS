@@ -9,8 +9,6 @@ export type CashierRecoveryActions = {
   pendingZ: boolean;
   checkIn: () => void;
   completeZ: () => void;
-  settings: () => void;
-  logout: () => void;
 };
 export const RecoveryActionsContext = createContext<CashierRecoveryActions | null>(null);
 /** Gate-owned lifecycle actions, or null outside the global cashier gate. */

@@ -8,7 +8,13 @@ const strip = ({ initial: _i, animate: _a, transition: _t, ...props }: Props) =>
 vi.mock('framer-motion', () => ({
   motion: {
     div: ({ children, ...props }: Props) => <div {...(strip(props) as React.HTMLAttributes<HTMLDivElement>)}>{children}</div>,
-    img: (props: Props) => <img {...(strip(props) as React.ImgHTMLAttributes<HTMLImageElement>)} />,
+    img: (props: Props) => (
+      <img
+        {...(strip(props) as React.ImgHTMLAttributes<HTMLImageElement>)}
+        data-initial={JSON.stringify(props.initial)}
+        data-animate={JSON.stringify(props.animate)}
+      />
+    ),
     video: React.forwardRef<HTMLVideoElement, Props>((props, ref) => (
       <video ref={ref} {...(strip(props) as React.VideoHTMLAttributes<HTMLVideoElement>)} />
     )),
@@ -26,6 +32,7 @@ import AppIntro, {
   introFrame,
   shouldPlayAppIntro,
 } from '../AppIntro';
+import { logoArtMatch } from '../../../../../shared/pos/intro-logo-art';
 
 /**
  * Founder 31/10: the clip plays as the till starts, then its logo goes to its place on the sign-in card.
@@ -84,6 +91,26 @@ describe('AppIntro', () => {
     expect(onGone).not.toHaveBeenCalled();
     act(() => { vi.advanceTimersByTime(INTRO_SETTLE_S * 1000 + 50); });
     expect(onGone).toHaveBeenCalledTimes(1);
+  });
+
+  // Founder's phone, 07/11/2026: on the way to the light sign-in logo the dark logo fades into the light one, which
+  // draws the logo about 3% smaller; for a moment two logos showed at different sizes.
+  it('in the light theme the fading logos share one artwork, and the light one ends at the sign-in size', () => {
+    signInLogo();
+    render(<AppIntro onGone={vi.fn()} />);
+    act(() => { screen.getByTestId('app-intro-clip').dispatchEvent(new Event('playing')); });
+    act(() => { vi.advanceTimersByTime(INTRO_LAND_AT_S * 1000); });
+    const motionOf = (testId: string) => {
+      const image = screen.getByTestId(testId);
+      return { initial: JSON.parse(image.dataset.initial ?? '{}'), animate: JSON.parse(image.dataset.animate ?? '{}') };
+    };
+    const still = { x: 0, y: 0, scale: 1 };
+    const dark = motionOf('app-intro-logo-dark');
+    const light = motionOf('app-intro-logo-light');
+    expect(dark.initial).toMatchObject({ opacity: 1, ...still });
+    expect(dark.animate).toMatchObject({ opacity: 0, ...logoArtMatch('dark', 'light', 112) });
+    expect(light.initial).toMatchObject({ opacity: 0, ...logoArtMatch('light', 'dark', 112) });
+    expect(light.animate).toMatchObject({ opacity: 1, ...still });
   });
 
   it('a clip that never starts never holds the till', () => {

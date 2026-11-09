@@ -39,7 +39,7 @@ describe('GlobalCashierGate', () => {
   it('keeps login verification neutral while blocking operational portals and shortcuts', () => {
     model.blocked = true;
     model.resolving = true;
-    const { rerender } = render(<GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
+    const { rerender } = render(<GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
     expect(screen.getByRole('status')).toHaveTextContent('cashierGate.checking');
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByText('cashierGate.body')).toBeNull();
@@ -48,14 +48,14 @@ describe('GlobalCashierGate', () => {
     fireEvent.click(screen.getByText('collect money'));
     expect(model.collect).not.toHaveBeenCalled();
     model.resolving = false;
-    rerender(<GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
+    rerender(<GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
     expect(screen.queryByRole('status')).toBeNull();
     expect(screen.getByRole('alert')).toBeTruthy();
     expect(document.activeElement).toBe(screen.getByText('navigation.checkIn'));
   });
 
   it('retains the direct-route draft and portal state while blocking sale clicks and window shortcuts', () => {
-    const host = <GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>;
+    const host = <GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>;
     const { rerender } = render(host);
     fireEvent.click(screen.getByText('collect money'));
     expect(model.collect).toHaveBeenCalledOnce();
@@ -64,7 +64,7 @@ describe('GlobalCashierGate', () => {
     const shortcut = vi.fn();
     window.addEventListener('keydown', shortcut);
     model.blocked = true;
-    rerender(<GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
+    rerender(<GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
     expect(model.disposed).not.toHaveBeenCalled();
     const operational = document.querySelector('[data-cashier-operational="true"]');
     expect(operational).toHaveAttribute('inert');
@@ -76,13 +76,13 @@ describe('GlobalCashierGate', () => {
     expect(shortcut).not.toHaveBeenCalled();
     window.removeEventListener('keydown', shortcut);
     model.blocked = false;
-    rerender(<GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
+    rerender(<GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
     expect(screen.getByLabelText('cart draft')).toHaveValue('unsaved payment original');
   });
 
   it('keeps recovery check-in visibly above an already-open payment portal and exposes pending Z', async () => {
     model.blocked = true;
-    render(<GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
+    render(<GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
     const gate = screen.getByRole('alert');
     expect(gate.closest('[data-cashier-recovery="true"]')).toHaveClass('absolute');
     expect(gate.closest('[data-cashier-recovery="true"]')).not.toHaveClass('fixed');
@@ -108,10 +108,10 @@ describe('GlobalCashierGate', () => {
   });
 
   it('focuses check-in on last checkout without trapping navigation behind a global alert', () => {
-    const { rerender } = render(<GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
+    const { rerender } = render(<GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
     screen.getByLabelText('cart draft').focus();
     model.blocked = true;
-    rerender(<GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
+    rerender(<GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
     const checkin = screen.getByText('navigation.checkIn');
     expect(document.activeElement).toBe(checkin);
     // The browser can now tab from the scoped prompt to shell support controls.
@@ -124,7 +124,7 @@ describe('GlobalCashierGate', () => {
     model.blocked = true;
     const support = vi.fn();
     render(<>
-      <GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>
+      <GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>
       <CashierRecovery><LiquidGlassModal isOpen onClose={() => {}} title="support updater">
         <button onClick={support}>support action</button>
       </LiquidGlassModal></CashierRecovery>
@@ -135,12 +135,23 @@ describe('GlobalCashierGate', () => {
     expect(support).toHaveBeenCalledOnce();
   });
 
+  // Founder 06/11/2026: settings and logout live in the sidebar; this card keeps check-in and a waiting Z.
+  it('leaves only check-in and the waiting Z on the closed-day card', () => {
+    model.blocked = true;
+    render(<GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
+    expect(screen.getByText('navigation.checkIn')).toBeVisible();
+    expect(screen.getByText('shift.actions.completeZReport')).toBeVisible();
+    expect(screen.queryByText('navigation.settings')).toBeNull();
+    expect(screen.queryByText('navigation.logout')).toBeNull();
+    expect(document.querySelector('.lucide-store')).toBeNull();
+  });
+
   it('keeps settings navigation and health accessible while the cashier day is closed', () => {
     model.blocked = true;
     const settings = vi.fn(), health = vi.fn();
     render(<>
       <div data-cashier-recovery="true"><button onClick={health}>Health</button></div>
-      <GlobalCashierGate onLogout={() => {}} onOpenSettings={settings}>
+      <GlobalCashierGate>
         <nav data-cashier-navigation="true"><button onClick={settings}>Settings navigation</button></nav>
         <CashierOperationalBoundary><Draft /></CashierOperationalBoundary>
       </GlobalCashierGate>
@@ -159,7 +170,7 @@ describe('GlobalCashierGate', () => {
     const unsafe = vi.fn(), windowAction = vi.fn(), shortcut = vi.fn();
     render(<>
       <div data-app-window-frame><button onClick={windowAction}>Window action</button></div>
-      <GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}>
+      <GlobalCashierGate>
         <nav data-cashier-navigation="true"><button>Navigation item</button></nav>
         <CashierOperationalBoundary><Draft /></CashierOperationalBoundary>
         {createPortal(<button onClick={unsafe}>raw sale portal</button>, document.body)}
@@ -177,7 +188,7 @@ describe('GlobalCashierGate', () => {
 
 
   it('keeps a direct new-order route mounted and unavailable until the cashier day reopens', async () => {
-    const host = () => <MemoryRouter initialEntries={['/new-order']}><GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}>
+    const host = () => <MemoryRouter initialEntries={['/new-order']}><GlobalCashierGate>
       <React.Suspense fallback={null}><AppRoutes onLogout={() => {}} onOpenConnectionSettings={() => {}} /></React.Suspense>
     </GlobalCashierGate></MemoryRouter>;
     const { rerender } = render(host());
@@ -201,7 +212,7 @@ describe('GlobalCashierGate', () => {
       <div data-cashier-recovery="true">
         <button onClick={() => window.dispatchEvent(new CustomEvent(PHONE_SHIFT_STAFF_OPEN_EVENT))}>Staff shifts</button>
       </div>
-      <GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>
+      <GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>
     </>);
     expect(screen.queryByRole('dialog', { name: 'cashier check-in' })).toBeNull();
     fireEvent.click(screen.getByText('Staff shifts'));
@@ -211,7 +222,7 @@ describe('GlobalCashierGate', () => {
   });
 
   it('opens the staff modal from the phone-shift notice while the cashier day is open', () => {
-    render(<GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
+    render(<GlobalCashierGate><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
     act(() => { window.dispatchEvent(new CustomEvent(PHONE_SHIFT_STAFF_OPEN_EVENT)); });
     expect(screen.getByRole('dialog', { name: 'cashier check-in' })).toBeVisible();
   });

@@ -6,6 +6,7 @@ import { ShieldCheck, Split } from 'lucide-react';
 import { resolvePlatformPaymentPresentation } from '../../../../../shared/platforms/payment-presentation';
 import { isFullyRefundedCompletedTable } from '../../../../../shared/pos/orders/returned-table-check';
 import { useTheme } from '../../contexts/theme-context';
+import { useElapsedMinutes } from '../../hooks/useElapsedMinutes';
 import { OrderStatusControls } from './OrderStatusControls';
 import TableOrderIcon from '../icons/TableOrderIcon';
 import { DeliveryScooterIcon, PickupHandBagIcon } from '../icons/OrderTypeGlyphs';
@@ -93,6 +94,8 @@ export const OrderCard = memo<OrderCardProps>(({
   const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
+  // Renders this memoized card again when its minute changes; the time, colour and edge below read the clock on render.
+  useElapsedMinutes(order.created_at || order.createdAt);
 
   const getStatusBadgeColor = (status: string) => getOrderStatusBadgeClasses(status);
 

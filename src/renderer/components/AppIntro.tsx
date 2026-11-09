@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import introClip from '../assets/intro/the-small-intro.mp4';
 import logoBlack from '../assets/logo-black.png';
 import logoWhite from '../assets/logo-white.png';
+import { logoArtMatch } from '../../../../shared/pos/intro-logo-art';
 
 /**
  * Founder 31/10: «αυτό το βίντεο να μπαίνει μόλις τρέχει η εφαρμογή και μετά να πηγαίνει εκεί στη θέση του
@@ -260,17 +261,28 @@ export default function AppIntro({ onGone }: { onGone: () => void }) {
                             }
                     }
                 >
-                    {[logoBlack, ...(landing.dark ? [] : [logoWhite])].map((src, index) => (
-                        <motion.img
-                            key={src}
-                            src={src}
-                            alt=""
-                            className="absolute inset-0 w-full h-full object-contain"
-                            initial={{ opacity: index === 0 ? 1 : 0 }}
-                            animate={{ opacity: landing.dark || index === 1 ? 1 : 0 }}
-                            transition={{ delay: INTRO_HANDOVER_S + INTRO_GLIDE_S * 0.15, duration: INTRO_GLIDE_S * 0.7, ease: 'easeInOut' }}
-                        />
-                    ))}
+                    {[logoBlack, ...(landing.dark ? [] : [logoWhite])].map((src, index) => {
+                        // The light image draws the logo about 3% smaller: while one fades into the other, each moves
+                        // onto the other's artwork, so one logo shows, never two of different sizes (founder, 07/11/2026).
+                        const box = (to ?? from).size;
+                        const fadingIn = index === 1;
+                        const moved = fadingIn ? logoArtMatch('light', 'dark', box) : logoArtMatch('dark', 'light', box);
+                        const still = { x: 0, y: 0, scale: 1 };
+                        const fades = !landing.dark;
+                        const [start, end] = fadingIn ? [moved, still] : [still, fades ? moved : still];
+                        return (
+                            <motion.img
+                                key={src}
+                                src={src}
+                                alt=""
+                                data-testid={fadingIn ? 'app-intro-logo-light' : 'app-intro-logo-dark'}
+                                className="absolute inset-0 w-full h-full object-contain"
+                                initial={{ opacity: index === 0 ? 1 : 0, ...start }}
+                                animate={{ opacity: landing.dark || index === 1 ? 1 : 0, ...end }}
+                                transition={{ delay: INTRO_HANDOVER_S + INTRO_GLIDE_S * 0.15, duration: INTRO_GLIDE_S * 0.7, ease: 'easeInOut' }}
+                            />
+                        );
+                    })}
                 </motion.div>
             )}
         </div>

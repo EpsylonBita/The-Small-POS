@@ -294,13 +294,15 @@ describe('incoming platform-order alert on the app routes', () => {
     fireEvent.click(screen.getByTestId('incoming-order-alert-open'))
 
     // The route changes to the main layout, whose Orders screen opens its own
-    // approval panel for the order.
-    expect(await screen.findByText('Approval for ef-1')).toBeInTheDocument()
+    // approval panel for the order. It is the first load of that lazy page: on a
+    // busy machine it takes over the default one second, and the wait ended with
+    // the Suspense fallback still on screen.
+    expect(await screen.findByText('Approval for ef-1', undefined, { timeout: 15_000 })).toBeInTheDocument()
     expect(screen.queryByText('New order page')).toBeNull()
     await waitFor(() => expect(alert()).toBeNull())
     // Still one sound: nothing starts a second loop.
     expect(h.playSelectedPlatformSound).toHaveBeenCalledTimes(1)
-  })
+  }, 30_000)
 
   it('/new-order with a payment dialog open: the alert takes focus on itself, a key in flight changes nothing, «Later» gives focus back', async () => {
     h.paymentOpen = true

@@ -1736,7 +1736,7 @@ function AppContent() {
 
 
 
-            <GlobalCashierGate onLogout={handleLogout} onOpenSettings={() => openConnectionSettings()}>
+            <GlobalCashierGate>
             <Suspense fallback={<PageLoading />}>
               {/* The local KDS / Customer Display providers wrap the routes
                   but stay outside their error boundary (AppRoutes): a page
