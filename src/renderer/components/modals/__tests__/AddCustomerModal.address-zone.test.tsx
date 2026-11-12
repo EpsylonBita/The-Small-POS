@@ -12,6 +12,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // point is now "zone not checked" (pick it again), never out of zone, and full
 // "Edit customer" finally saves its address changes (they were dropped).
 
+// The first test of this file also pays for loading the whole modal. On a busy
+// CI runner that took 5.4 s against the default 5 s limit and stopped the
+// release of desktop 1.4.145 (12/11/2026); every later test takes under 1 s.
+vi.setConfig({ testTimeout: 20_000 });
+
 const mock = vi.hoisted(() => ({
   createCustomer: vi.fn(),
   updateCustomer: vi.fn(),

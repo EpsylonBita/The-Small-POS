@@ -47,8 +47,14 @@ describe.each(['light', 'dark'])('support UI in %s theme', theme => {
     expect(end.className).toContain('min-w-[48px]');
     expect(end.className).toContain('focus-visible:');
     expect(end.className).toContain('active:');
-    expect(end.className).toContain('bg-(--pos-s-sel-bg)');
-    expect(end.className).toContain('text-(--pos-s-sel-fg)');
+    // The touch target is the button; the yellow is its smaller face, so the pill stays slim.
+    expect(end.firstElementChild?.className).toContain('bg-(--pos-s-sel-bg)');
+    expect(end.firstElementChild?.className).toContain('text-(--pos-s-sel-fg)');
+    // A glass pill, not a bar across the window (founder 12/11/2026).
+    const pill = screen.getByTestId('support-banner').querySelector('[data-support-pill]');
+    expect(pill?.className).toContain('pos-glass-panel');
+    expect(pill?.className).toContain('rounded-full');
+    expect(screen.getByTestId('support-banner').className.split(' ')).not.toContain('w-full');
   });
   it.each(['code', 'expired', 'offline', 'error', 'staff_required', 'sign_in_again'] as const)('renders the %s code screen', view => {
     document.documentElement.className = theme;
@@ -82,6 +88,17 @@ it('offers extension at ten minutes and shows the no-PIN promise and write outco
   expect(screen.getByText('support.banner.endDuringWrite.rolledBack')).toBeVisible();
   fireEvent.click(screen.getByRole('button', { expanded: false }));
   expect(screen.getByText('support.banner.noPinPromise')).toBeVisible();
+});
+it('closes the details when more time is asked for, so the staff step under the pill can be answered', () => {
+  const extend = vi.fn();
+  render(<SupportBannerView snapshot={snapshot} onEnd={vi.fn()} onExtend={extend} />);
+  fireEvent.click(screen.getByRole('button', { expanded: false }));
+  expect(screen.getByText('support.banner.noPinPromise')).toBeVisible();
+  const inDetails = screen.getAllByRole('button', { name: 'support.banner.extend' }).at(-1) as HTMLElement;
+  fireEvent.click(inDetails);
+  expect(extend).toHaveBeenCalledOnce();
+  expect(screen.queryByText('support.banner.noPinPromise')).toBeNull();
+  expect(screen.getByRole('button', { expanded: false })).toBeVisible();
 });
 it.each([false, true])('uses native extend_allowed=%s and displays the native activity in the banner', extend_allowed => {
   const view = render(<SupportBannerView snapshot={{ ...snapshot, current_activity_key: 'till_printers', extend_allowed }} onEnd={vi.fn()} onExtend={vi.fn()} />);
@@ -150,6 +167,8 @@ it('leaves the extend step to the banner and shows it there above End', () => {
   health.unmount();
   render(<SupportSessionProvider><SupportBanner /></SupportSessionProvider>);
   expect(screen.getByTestId('support-extend-step')).toBeVisible();
+  // Above the pill and its details (z 10070): nothing of the banner may cover the question.
+  expect(screen.getByTestId('support-extend-step').className).toContain('z-[10080]');
   expect(screen.getByRole('heading', { name: 'support.staff.pickRequest' })).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: /Μαρία/ }));
   expect(choose).toHaveBeenCalledWith(maria.staff_id);

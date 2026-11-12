@@ -674,7 +674,7 @@ fn all_desktop_tier_one_real_collectors_conform_to_closed_goldens() {
             json!({"database":"main","sql":"SELECT customer_name,staff_id,-10.5,NULL FROM orders"}),
         ),
     ] {
-        let command=serde_json::from_value(json!({"command_id":"your-command","session_id":"your-session","sequence":1,"kind":kind,"tier":1,"payload":{"data":data},"payload_sha256":"your-hash","idempotency_key":"your-key","call_id":"your-call","created_at":"2026-11-01T00:00:00Z","expires_at":"2026-11-01T00:01:00Z","server_time":"2026-11-01T00:00:00Z","approval":null})).unwrap();
+        let command=serde_json::from_value(json!({"command_id":"your-command","session_id":"your-session","sequence":1,"kind":kind,"tier":1,"payload":data,"payload_sha256":"your-hash","idempotency_key":"your-key","call_id":"your-call","created_at":"2026-11-01T00:00:00Z","expires_at":"2026-11-01T00:01:00Z","server_time":"2026-11-01T00:00:00Z","approval":null})).unwrap();
         let value = tools.run(&command, &permit).unwrap();
         conforms(kind, &value);
         if kind == "till_sql_schema" {

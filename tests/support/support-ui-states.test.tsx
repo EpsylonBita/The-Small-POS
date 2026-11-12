@@ -29,7 +29,9 @@ for (const theme of ['light', 'dark']) {
         assert.ok(markup.includes(String(i18n.t('support.banner.end'))));
         assert.ok(markup.includes('shrink-0 whitespace-nowrap'));
         assert.ok(markup.includes('min-h-[48px] min-w-[48px]'));
-        assert.ok(markup.includes('bg-(--pos-s-surface)'));
+        // The banner is a glass pill; its buttons keep solid faces.
+        assert.ok(markup.includes('pos-glass-panel'));
+        assert.ok(markup.includes('rounded-full'));
         assert.ok(markup.includes('bg-(--pos-s-sel-bg)'));
         assert.ok(!markup.includes('truncate'));
       }

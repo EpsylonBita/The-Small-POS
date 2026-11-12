@@ -77,7 +77,12 @@ pub fn end_session() {
 }
 impl Tools {
     fn run(&self, c: &Command, permit: &SupportPermit) -> Result<Value, String> {
-        let input = &c.payload["data"];
+        // The tool's arguments are the payload itself, as the server sends it
+        // (`tier1-till.ts` enqueues `{ ...input }`) and as Android reads it. This
+        // read `payload["data"]`, a key nobody sends, so every argument arrived
+        // empty: a query had no SQL, diagnostics no section, and both answered
+        // INVALID_INPUT on a real till (12/11/2026).
+        let input = &c.payload;
         let result = match c.kind.as_str() {
             "till_sql_query" | "till_sql_schema" | "till_sql_refresh_replica" => {
                 if input["database"].as_str().is_some_and(|db| db != "main") {
@@ -400,11 +405,32 @@ mod tests {
         let tools = installed().lock().unwrap().clone().unwrap();
         let gate = super::super::critical_op::CriticalOpGate::new();
         let permit = gate.try_begin_support(false, None).unwrap();
-        let mut command:Command=serde_json::from_value(json!({"command_id":uuid::Uuid::new_v4().to_string(),"session_id":"your-test-session","sequence":1,"kind":"till_health","tier":1,"payload":{"data":{}},"payload_sha256":"your-test-hash","idempotency_key":"your-test-key","call_id":uuid::Uuid::new_v4().to_string(),"created_at":"2026-11-01T00:00:00Z","expires_at":"2026-11-01T00:05:00Z","server_time":"2026-11-01T00:00:00Z","approval":null})).unwrap();
+        let mut command:Command=serde_json::from_value(json!({"command_id":uuid::Uuid::new_v4().to_string(),"session_id":"your-test-session","sequence":1,"kind":"till_health","tier":1,"payload":{},"payload_sha256":"your-test-hash","idempotency_key":"your-test-key","call_id":uuid::Uuid::new_v4().to_string(),"created_at":"2026-11-01T00:00:00Z","expires_at":"2026-11-01T00:05:00Z","server_time":"2026-11-01T00:00:00Z","approval":null})).unwrap();
         assert!(tools.run(&command, &permit).is_ok());
         command.kind = "till_sql_schema".into();
         let schema = tools.run(&command, &permit).unwrap();
         assert!(!schema["tables"].as_array().unwrap().is_empty());
+        // The arguments are the payload itself, as the server enqueues them
+        // (`tier1-till.ts`) and as Android reads them. The till read them
+        // from a `data` key nobody sends, so a query arrived without its SQL
+        // and diagnostics without its section (12/11/2026).
+        command.kind = "till_sql_query".into();
+        command.payload =
+            json!({"database":"main","sql":"SELECT COUNT(*) AS n FROM orders","max_rows":200});
+        let rows = tools.run(&command, &permit).unwrap();
+        assert_eq!(rows["columns"], json!(["n"]));
+        assert_eq!(rows["row_count"], 1);
+        command.payload =
+            json!({"data":{"database":"main","sql":"SELECT COUNT(*) AS n FROM orders"}});
+        assert_eq!(tools.run(&command, &permit).unwrap_err(), "INVALID_INPUT");
+        command.kind = "till_diagnostics_bundle".into();
+        command.payload = json!({"section":"closeout_readiness"});
+        assert_eq!(
+            tools.run(&command, &permit).unwrap()["section"],
+            "closeout_readiness"
+        );
+        command.payload = json!({});
+        assert_eq!(tools.run(&command, &permit).unwrap_err(), "INVALID_INPUT");
         end_session();
         assert!(tools.replicas.lock().unwrap().replica.is_none());
         command.kind = "till_network_scan".into();

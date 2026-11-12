@@ -24,6 +24,12 @@ const activityLabels: Readonly<Record<string, string>> = {
   till_list_quarantine: 'sync.system.database',
 };
 
+// The dot is the only colour on the pill: green while support works, amber while it waits, grey once it ended.
+const stateDots: Readonly<Record<NonNullable<SupportBannerSnapshot['state']>, string>> = {
+  connected: 'bg-emerald-500', executing: 'bg-emerald-500',
+  waiting: 'bg-amber-500', awaitingOnsite: 'bg-amber-500', deferredPayment: 'bg-amber-500', pausedOffline: 'bg-amber-500', restarting: 'bg-amber-500',
+  ended: 'bg-(--pos-s-muted)',
+};
 export function SupportBannerView({ snapshot, onEnd, onExtend }: {
   snapshot: SupportBannerSnapshot; onEnd(): void; onExtend(): void;
 }) {
@@ -42,39 +48,48 @@ export function SupportBannerView({ snapshot, onEnd, onExtend }: {
   const activityKey = activity && Object.prototype.hasOwnProperty.call(activityLabels, activity) ? activityLabels[activity] : null;
   const activityLabel = knownActivity ? t(`support.${activity}`) : t(activityKey ?? 'support.banner.activity');
   const canExtend = snapshot.extend_allowed && snapshot.remaining_ms <= 600_000 && snapshot.state !== 'waiting' && snapshot.state !== 'ended';
+  // The staff step of «+30 λεπτά» opens under the pill, where the details are: asking for more time closes them.
+  const requestExtension = () => { setExpanded(false); onExtend(); };
+  const outcome = snapshot.write_outcome && <p role="status">{t(`support.banner.endDuringWrite.${snapshot.write_outcome === 'rolled_back' ? 'rolledBack' : 'committed'}`)}</p>;
+  // A small glass pill in the top centre (founder 12/11/2026: «pill shaped στη μέση και liquid glass»), in place of
+  // a bar across the window. The glass is the neutral frost of the windows and the buttons on it stay solid. Each
+  // button keeps a 48px touch height; it is its face that is smaller, so the pill stays 40px tall.
   return <aside aria-label={t('support.connect.action')} data-testid="support-banner" data-cashier-recovery="true"
-    className="relative z-[10070] w-full shrink-0 border-b border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg)">
-    <div className="flex min-h-[48px] min-w-0 items-center gap-2 px-2">
+    className="pointer-events-auto relative z-[10070] flex max-w-full flex-col items-center gap-1 text-(--pos-s-fg)">
+    <div data-support-pill className="pos-glass-panel flex max-w-full min-w-0 items-center gap-1 rounded-full border px-1 shadow-(--pos-s-depth-card)">
       <button type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}
-        className="min-h-[48px] min-w-[48px] flex-1 rounded-lg px-2 text-left text-sm active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2">
-        <span role="status" className="block font-semibold">{t(`support.banner.${snapshot.state}`)}</span>
-        {snapshot.operator_name && <span className="block break-words">{snapshot.operator_name}</span>}
-        {activity && <span className="hidden sm:block">{activityLabel}</span>}
+        className="-my-1 flex min-h-[48px] min-w-[48px] flex-1 items-center gap-2 rounded-full py-1 pl-3 pr-2 text-left text-sm active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2">
+        <span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${stateDots[snapshot.state]}`} />
+        <span className="min-w-0">
+          <span role="status" className="block font-semibold leading-tight">{t(`support.banner.${snapshot.state}`)}</span>
+          {/* One small line under the state: what support is doing right now, else who is connected. */}
+          {(activity || snapshot.operator_name) && <span className="block break-words text-xs leading-tight text-(--pos-s-muted)">{activity ? activityLabel : snapshot.operator_name}</span>}
+        </span>
       </button>
-      {snapshot.state !== 'ended' && <span role="timer" aria-label={t('support.code.timeLeft')} className="shrink-0 tabular-nums">{supportCountdown(snapshot.remaining_ms)}</span>}
-      {canExtend && <button type="button" onClick={onExtend}
-        className="hidden min-h-[48px] min-w-[48px] shrink-0 whitespace-nowrap rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 sm:block">
-        {t('support.banner.extend')}
+      {snapshot.state !== 'ended' && <span role="timer" aria-label={t('support.code.timeLeft')} className="shrink-0 px-1 text-sm tabular-nums">{supportCountdown(snapshot.remaining_ms)}</span>}
+      {canExtend && <button type="button" onClick={requestExtension}
+        className="-my-1 hidden min-h-[48px] min-w-[48px] shrink-0 whitespace-nowrap items-center rounded-full px-1 text-sm font-semibold active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 sm:flex">
+        <span className="rounded-full bg-(--pos-s-raised) px-3 py-1.5 shadow-(--pos-s-depth)">{t('support.banner.extend')}</span>
       </button>}
       <button type="button" onClick={onEnd}
-        className="min-h-[48px] min-w-[48px] shrink-0 whitespace-nowrap rounded-xl bg-(--pos-s-sel-bg) px-4 font-bold text-(--pos-s-sel-fg) active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2">
-        {t('support.banner.end')}
+        className="-my-1 flex min-h-[48px] min-w-[48px] shrink-0 whitespace-nowrap items-center justify-center rounded-full text-sm font-bold active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2">
+        <span className="rounded-full bg-(--pos-s-sel-bg) px-4 py-1.5 text-(--pos-s-sel-fg) shadow-(--pos-s-depth-yellow)">{t('support.banner.end')}</span>
       </button>
     </div>
-    {expanded && <div className="space-y-2 border-t border-(--pos-s-border) bg-(--pos-s-surface) p-3">
-      {activity && <p className="sm:hidden">{activityLabel}</p>}
+    {/* The details float under the pill: opening them never moves the screen below. */}
+    {expanded && <div className="pos-glass-panel absolute left-1/2 top-full z-10 mt-2 w-[min(22rem,calc(100vw-1rem))] -translate-x-1/2 space-y-2 rounded-3xl border p-3 text-sm shadow-(--pos-s-depth-card)">
+      {activity && snapshot.operator_name && <p className="break-words font-semibold">{snapshot.operator_name}</p>}
       {activity && !knownActivity && !activityKey && <p className="break-words">{activity}</p>}
       <p>{t('support.banner.noPinPromise')}</p>
-      {canExtend && <button type="button" onClick={onExtend}
-        className="min-h-[48px] min-w-[48px] rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 sm:hidden">
+      {canExtend && <button type="button" onClick={requestExtension}
+        className="min-h-[48px] min-w-[48px] rounded-full bg-(--pos-s-raised) px-4 font-semibold shadow-(--pos-s-depth) active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 sm:hidden">
         {t('support.banner.extend')}
       </button>}
-      {snapshot.write_outcome && <p role="status">{t(`support.banner.endDuringWrite.${snapshot.write_outcome === 'rolled_back' ? 'rolledBack' : 'committed'}`)}</p>}
+      {outcome}
     </div>}
-    {!expanded && snapshot.write_outcome && <p role="status" className="px-3 pb-2">{t(`support.banner.endDuringWrite.${snapshot.write_outcome === 'rolled_back' ? 'rolledBack' : 'committed'}`)}</p>}
+    {!expanded && outcome && <div className="pos-glass-panel max-w-full rounded-2xl border px-3 py-1.5 text-center text-sm">{outcome}</div>}
   </aside>;
 }
-
 export function SupportBanner() {
   const session = useSupportSession();
   const state = session?.snapshot?.state;
@@ -102,15 +117,17 @@ export function SupportBanner() {
   // +30 minutes may need to know who asks when several people are on shift.
   const view = session.view;
   const extendStep = session.actorPurpose === 'extend' && (view === 'pick' || view === 'staff_required' || view === 'sign_in_again') ? view : null;
-  // A body portal keeps End above checkout/Health portals. Reserve the same band
-  // in the shell and modal viewports so it never covers their controls.
+  // A body portal keeps End above checkout/Health portals. The pill sits in a band of its own height, which the
+  // shell and the modal viewports leave free, so it never covers a control. Only the pill takes touches.
   return createPortal(<div ref={host} data-support-banner-host data-cashier-recovery="true"
-    className="fixed inset-x-0 z-[2147483646]" style={{ top: 'var(--app-window-frame-height, 0px)' }}>
+    className="pointer-events-none fixed inset-x-0 z-[2147483646] flex flex-col items-center px-2 py-1" style={{ top: 'var(--app-window-frame-height, 0px)' }}>
     <style>{`[data-app-window-content] { padding-top: var(--pos-support-banner-height, 0px); }
       [data-liquid-glass-modal-viewport] { top: calc(var(--app-window-frame-height, 0px) + var(--pos-support-banner-height, 0px)) !important; }`}</style>
     <SupportBannerView snapshot={state === 'waiting' && session.code ? { ...session.snapshot, remaining_ms: session.remainingMs } : session.snapshot}
       onEnd={() => { void session.end(); }} onExtend={() => { void session.extend(); }} />
-    {extendStep && <div data-testid="support-extend-step" className="border-b border-(--pos-s-border) bg-(--pos-s-surface) p-3">
+    {/* Out of the flow, like the pill's details: the band keeps the pill's height while someone answers. It is
+        layered above the pill (z 10070), so details opened again can never cover the question. */}
+    {extendStep && <div data-testid="support-extend-step" className="pos-glass-panel pointer-events-auto absolute left-1/2 top-full z-[10080] mt-1 w-[min(28rem,calc(100vw-1rem))] -translate-x-1/2 rounded-3xl border p-3 text-(--pos-s-fg) shadow-(--pos-s-depth-card)">
       {extendStep === 'pick'
         ? <SupportActorPicker purpose="extend" actors={session.actors} busy={session.busy}
           onChoose={staffId => { void session.choose(staffId); }} onCancel={() => { session.dismiss(); }} />
