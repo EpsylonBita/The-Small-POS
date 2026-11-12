@@ -6647,6 +6647,10 @@
     "customer": "Cliente",
     "paymentPending": "IN ATTESA",
     "paymentPendingA11y": "Pagamento in attesa",
+    "kioskCashPending": "CONTANTI",
+    "kioskCardPending": "CARTA",
+    "kioskCashPendingA11y": "Contanti scelti al kiosk; pagamento in attesa",
+    "kioskCardPendingA11y": "Carta scelta al kiosk; pagamento in attesa",
     "platformPayment": "PAGAMENTO PIATTAFORMA",
     "platformPaymentA11y": "Pagamento regolato dalla piattaforma; il negozio non incassa"
   },

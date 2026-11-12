@@ -6647,6 +6647,10 @@
     "customer": "Πελάτης",
     "paymentPending": "ΕΚΚΡΕΜΕΙ",
     "paymentPendingA11y": "Πληρωμή σε εκκρεμότητα",
+    "kioskCashPending": "ΜΕΤΡΗΤΑ",
+    "kioskCardPending": "ΚΑΡΤΑ",
+    "kioskCashPendingA11y": "Μετρητά, επιλογή στο kiosk· πληρωμή σε εκκρεμότητα",
+    "kioskCardPendingA11y": "Κάρτα, επιλογή στο kiosk· πληρωμή σε εκκρεμότητα",
     "platformPayment": "ΠΛΗΡΩΜΗ ΠΛΑΤΦΟΡΜΑΣ",
     "platformPaymentA11y": "Πληρωμή από την πλατφόρμα· δεν εισπράττει το κατάστημα"
   },

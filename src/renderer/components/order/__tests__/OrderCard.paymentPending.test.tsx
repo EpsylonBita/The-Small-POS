@@ -109,6 +109,37 @@ describe('OrderCard payment state', () => {
   });
 });
 
+// Founder 09/11/2026 (Le Petit Paris kiosk orders «ακόμη λένε pay pending»): an unpaid kiosk order names the
+// tender its customer chose, in the pending chip, until Complete records it. Android parity: getPaymentBadgeMeta.
+describe('OrderCard kiosk tender while unpaid', () => {
+  const kioskOrder = (method: string, overrides: Record<string, unknown> = {}) => makeOrder({
+    order_number: 'K-ed4158cf-20261109-093916-0002', status: 'confirmed', payment_status: 'pending',
+    payment_method: null, platform: 'web', source: 'webapp-customer',
+    ghost_metadata: { kiosk: { entryMode: 'pickup', paymentMethod: method } }, ...overrides,
+  });
+
+  it.each([['cash', 'CASH', 'Cash chosen at the kiosk; payment pending'], ['card', 'CARD', 'Card chosen at the kiosk; payment pending']])(
+    'an unpaid %s kiosk order names its tender in the pending chip', (method, label, a11y) => {
+      renderCard(kioskOrder(method));
+      const chip = screen.getByTestId('order-card-payment-pending');
+      expect(chip.textContent).toBe(label);
+      expect(chip.getAttribute('aria-label')).toBe(a11y);
+      expect(chip.getAttribute('data-kiosk-tender')).toBe(method);
+    });
+
+  it('once paid it reads as any paid order, and a table or other tender keeps PAY PENDING', () => {
+    renderCard(kioskOrder('card', { payment_status: 'paid', payment_method: 'card' }));
+    expect(screen.queryByTestId('order-card-payment-pending')).toBeNull();
+    expect(screen.getByRole('img', { name: 'Card' })).toBeTruthy();
+    cleanup();
+    renderCard(kioskOrder('cash', { ghost_metadata: { kiosk: { entryMode: 'table', paymentMethod: 'cash' } } }));
+    expect(screen.getByTestId('order-card-payment-pending').textContent).toBe('PAY PENDING');
+    cleanup();
+    renderCard(kioskOrder('twint'));
+    expect(screen.getByTestId('order-card-payment-pending').textContent).toBe('PAY PENDING');
+  });
+});
+
 describe('OrderCard platform payment ownership', () => {
   const platformOrder = (food_delivery: unknown, overrides: Record<string, unknown> = {}) =>
     makeOrder({

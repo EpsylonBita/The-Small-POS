@@ -6647,6 +6647,10 @@
     "customer": "Klienti",
     "paymentPending": "PAGESË NË PRITJE",
     "paymentPendingA11y": "Pagesë në pritje",
+    "kioskCashPending": "PARA NË DORË",
+    "kioskCardPending": "KARTË",
+    "kioskCashPendingA11y": "Para në dorë e zgjedhur në kiosk; pagesë në pritje",
+    "kioskCardPendingA11y": "Kartë e zgjedhur në kiosk; pagesë në pritje",
     "platformPayment": "PAGESË PLATFORME",
     "platformPaymentA11y": "Pagesë e shlyer nga platforma; dyqani nuk arkëton"
   },

@@ -4326,6 +4326,17 @@ pub(crate) fn apply_order_status_in_connection(
                 "Platform auto-settlement failed; falling back to payment blockers"
             );
         }
+        // Founder 09/11/2026: a kiosk order paid at the counter completes as
+        // paid with the tender the customer chose, with no extra button.
+        // Anything not eligible (or a failed write) falls through to the
+        // normal blocker, so the operator still gets the collection screen.
+        if let Err(error) = payments::auto_record_kiosk_requested_payment(&conn, &actual_order_id) {
+            tracing::warn!(
+                order_id = %actual_order_id,
+                error = %error,
+                "Kiosk tender record failed; falling back to payment blockers"
+            );
+        }
         let blockers = payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
         if !blockers.is_empty() {
             let action_label = if status == "delivered" {

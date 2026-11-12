@@ -3854,6 +3854,214 @@ pub(crate) fn auto_settle_platform_order(
     }
 }
 
+/// The tender a kiosk customer chose (`ghost_metadata.kiosk.paymentMethod`)
+/// when the store itself takes that money at its counter: `cash` or `card`,
+/// on a kiosk order that is not a table, room or delivery order. `None` for
+/// everything else, so no other order is ever touched by
+/// [`auto_record_kiosk_requested_payment`]. A table check is settled through
+/// its table, a room order through its folio, and a delivery order by the
+/// driver who carries it. Android mirrors this in
+/// `shared/pos/orders/kiosk-requested-tender.ts`.
+pub(crate) fn kiosk_requested_tender(
+    raw_metadata: Option<&str>,
+    order_type: &str,
+    table_session_id: Option<&str>,
+) -> Option<&'static str> {
+    let metadata: Value = serde_json::from_str(raw_metadata?.trim()).ok()?;
+    let kiosk = metadata.get("kiosk")?.as_object()?;
+    let entry_mode = kiosk
+        .get("entryMode")
+        .or_else(|| kiosk.get("entry_mode"))
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(entry_mode.as_str(), "table" | "room" | "delivery")
+        || order_type.trim().eq_ignore_ascii_case("delivery")
+        || table_session_id.is_some_and(|id| !id.trim().is_empty())
+    {
+        return None;
+    }
+    let method = kiosk
+        .get("paymentMethod")
+        .or_else(|| kiosk.get("payment_method"))
+        .and_then(Value::as_str)?
+        .trim()
+        .to_ascii_lowercase();
+    match method.as_str() {
+        "cash" => Some("cash"),
+        "card" => Some("card"),
+        _ => None,
+    }
+}
+
+/// Founder, 09/11/2026 (Le Petit Paris): «θα έπρεπε να καταγράφεται
+/// μετρητά/κάρτα ανάλογα τι έχει επιλέξει ο πελάτης, και όταν το κατάστημα
+/// την στέλνει στις ολοκληρωμένες σημαίνει πως έχει πληρωθεί χωρίς να
+/// χρειάζεται έξτρα κουμπιά.» A kiosk order paid at the counter is completed
+/// as paid with the tender the customer chose on the kiosk.
+///
+/// Symptom before: the order completed only after the cashier collected it
+/// again through the payment screen (desktop) or ended completed and unpaid
+/// (Android «Complete anyway»), and the unpaid kiosk orders held the Z.
+///
+/// Runs where [`auto_settle_platform_order`] runs, before the payment
+/// blockers of a completed/delivered transition. It records one ordinary
+/// till payment (the payment row first, then the paid label, as every
+/// collection) only when all of these hold, and otherwise leaves the order
+/// to the normal collection:
+/// - [`kiosk_requested_tender`] names cash or card;
+/// - the order is open, labelled unpaid (`pending`/`unpaid`) and has no
+///   payment row at all (a partly paid order is collected normally; a paid
+///   label with no local row keeps its missing-payment blocker);
+/// - card: no card-terminal plugin is admitted on this till (founder
+///   01/11/2026: without one, card is a plain record, like cash; with one,
+///   the terminal must charge it). Only the mark already kept decides; no
+///   network;
+/// - no fiscal cash register is admitted (its checkout prints the fiscal
+///   document, which only the normal collection runs).
+///
+/// The cashier now on this till collects it (`cashier_drawer`), as any new
+/// money at the till. The key `kiosk-requested-{order_id}` makes a retry the
+/// same payment. Returns Ok(true) when a payment row was written.
+pub(crate) fn auto_record_kiosk_requested_payment(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<bool, String> {
+    let row: Option<(Option<String>, String, String, Option<String>, String)> = conn
+        .query_row(
+            "SELECT ghost_metadata, COALESCE(order_type, ''),
+                    LOWER(TRIM(COALESCE(status, ''))), table_session_id,
+                    LOWER(TRIM(COALESCE(payment_status, '')))
+             FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("load kiosk order before recording its tender: {e}"))?;
+    let Some((metadata, order_type, status, table_session_id, payment_status)) = row else {
+        return Ok(false);
+    };
+    // Only an order nobody has been paid for yet. A paid or partly paid label
+    // whose local rows are missing is a missing-payment case: it keeps its
+    // blocker and is restored from the server or recorded by a manager, never
+    // collected again here as new money in today's drawer (PR #432 review).
+    if !matches!(payment_status.as_str(), "" | "pending" | "unpaid") {
+        return Ok(false);
+    }
+    let Some(method) = kiosk_requested_tender(
+        metadata.as_deref(),
+        &order_type,
+        table_session_id.as_deref(),
+    ) else {
+        return Ok(false);
+    };
+    if matches!(
+        status.as_str(),
+        "cancelled" | "canceled" | "refunded" | "declined" | "rejected"
+    ) {
+        return Ok(false);
+    }
+    if method == "card"
+        && crate::device_admission::is_admitted(conn, crate::device_admission::CARD_TERMINAL)
+    {
+        return Ok(false);
+    }
+    if crate::device_admission::is_admitted(conn, crate::device_admission::CASH_REGISTER) {
+        return Ok(false);
+    }
+    if !order_money_is_store_collectable(conn, order_id) {
+        return Ok(false);
+    }
+    let any_payment_row: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM order_payments WHERE order_id = ?1)",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read kiosk order payments: {e}"))?;
+    if any_payment_row {
+        return Ok(false);
+    }
+    let snapshot = load_order_payment_balance_snapshot(conn, order_id)?;
+    if snapshot.completed_payment_count != 0
+        || Cents::round_half_even(snapshot.net_paid).as_i64() != 0
+        || Cents::round_half_even(snapshot.outstanding_amount).as_i64() <= 0
+    {
+        return Ok(false);
+    }
+
+    let metadata = if method == "card" {
+        // The card terminal answer that made this a plain record, when this
+        // till kept one (the admin reviews a manual card by it).
+        crate::device_admission::last_known(conn, crate::device_admission::CARD_TERMINAL).map(
+            |admission| {
+                serde_json::json!({
+                    "payment_origin": "manual",
+                    "admission_basis": "cached",
+                    "admission_checked_at": admission.fetched_at,
+                })
+            },
+        )
+    } else {
+        None
+    };
+    let input = PaymentRecordInput {
+        order_id: order_id.to_string(),
+        method: method.to_string(),
+        amount: snapshot.outstanding_amount,
+        currency: String::new(),
+        tip_amount: 0.0,
+        cash_received: None,
+        change_given: None,
+        transaction_ref: None,
+        idempotency_key: Some(format!("kiosk-requested-{order_id}")),
+        discount_amount: 0.0,
+        payment_origin: "manual".to_string(),
+        terminal_device_id: None,
+        table_session_id: None,
+        seat_number: None,
+        requested_staff_id: None,
+        requested_staff_shift_id: None,
+        requested_tip_recipient_role: None,
+        requested_tip_recipient_staff_id: None,
+        requested_tip_recipient_staff_shift_id: None,
+        collected_by: Some("cashier_drawer".to_string()),
+        metadata,
+        items: Vec::new(),
+    };
+
+    // The status path can call this inside an open transaction; only manage
+    // one of our own in autocommit mode (as `auto_settle_platform_order`).
+    let own_transaction = conn.is_autocommit();
+    if own_transaction {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("begin kiosk tender record: {e}"))?;
+    }
+    match record_payment_in_connection(conn, &input, &PaymentInsertOptions::local()) {
+        Ok(_) => {
+            if own_transaction {
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| format!("commit kiosk tender record: {e}"))?;
+            }
+            Ok(true)
+        }
+        Err(error) => {
+            if own_transaction {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+            Err(error)
+        }
+    }
+}
+
 fn payload_reports_terminal_approval(payload: &Value) -> bool {
     payload
         .get("terminalApproved")

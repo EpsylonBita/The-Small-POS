@@ -6647,6 +6647,10 @@
     "customer": "Kunde",
     "paymentPending": "AUSSTEHEND",
     "paymentPendingA11y": "Zahlung ausstehend",
+    "kioskCashPending": "BAR",
+    "kioskCardPending": "KARTE",
+    "kioskCashPendingA11y": "Bar am Kiosk gewählt; Zahlung ausstehend",
+    "kioskCardPendingA11y": "Karte am Kiosk gewählt; Zahlung ausstehend",
     "platformPayment": "PLATTFORMZAHLUNG",
     "platformPaymentA11y": "Zahlung durch die Plattform abgerechnet; das Geschäft kassiert nicht"
   },

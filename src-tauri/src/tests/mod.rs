@@ -108,6 +108,10 @@ mod placeholder_payments;
 // writes nothing and never settles a cancelled order.
 mod platform_ready;
 
+// Le Petit Paris, 09/11/2026: a kiosk order completes as paid with the
+// tender the customer chose (Android: shared kiosk-requested-tender).
+mod kiosk_requested_tender;
+
 // Round 3 of the 01/10/2026 fix review: a platform settlement row never
 // refuses a cancel, and a folio charge is its own record (shared R1, R6).
 mod round3_settlement_and_folio;

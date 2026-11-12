@@ -404,7 +404,9 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
 
   const platformId = shownOrder ? platformIdOf(shownOrder) : null;
   const platformName = platformId ? getPluginName(platformId) : null;
-  const accentColor = platformId ? getPluginColor(platformId) : '#F59E0B';
+  // The kiosk badge is black (09/11/2026), which would vanish as a bell on the dark glass:
+  // the kiosk bell keeps its yellow.
+  const accentColor = platformId === 'kiosk' ? '#CA8A04' : platformId ? getPluginColor(platformId) : '#F59E0B';
   const title = platformName
     ? t('incomingOrderAlert.title', { platform: platformName, defaultValue: 'New {{platform}} order' })
     : t('incomingOrderAlert.titleCustomer', { defaultValue: 'New order to accept' });

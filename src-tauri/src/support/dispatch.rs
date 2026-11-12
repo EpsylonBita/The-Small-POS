@@ -38,8 +38,14 @@ pub fn capabilities() -> Vec<String> {
     caps.push("support.tier3.v1".into());
     caps
 }
+/// Whether the POS window is on screen. It asks for the window, not for a
+/// "webview window": Tauri answers `None` to `get_webview_window` for a window
+/// that holds more than one webview, and a till with efood keeps the efood
+/// Partner page as a second webview in the main window from startup
+/// (`efood_partner::ensure_webview`). Such a till read as hidden for good, so
+/// its banner said paused and no support command ever started (12/11/2026).
 pub fn window_visible(app: &tauri::AppHandle) -> bool {
-    app.get_webview_window("main")
+    app.get_window("main")
         .is_some_and(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(true))
 }
 pub fn visible_admission(
@@ -334,6 +340,45 @@ mod tests {
                 }
             }
         }
+    }
+    /// A till with efood holds the efood Partner page as a second webview in
+    /// the main window, and Tauri's single-webview lookups answer `None` for
+    /// such a window. Support used one, read the till as hidden and ran no
+    /// command at a store (12/11/2026). Nothing in the native app may find the
+    /// POS window that way.
+    #[test]
+    fn nothing_finds_the_pos_window_through_a_single_webview_lookup() {
+        fn walk(dir: &std::path::Path, needles: &[String], found: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("source directory").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, needles, found);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    let source = std::fs::read_to_string(&path).expect("source file");
+                    for (index, line) in source.lines().enumerate() {
+                        if needles.iter().any(|needle| line.contains(needle.as_str())) {
+                            found.push(format!("{}:{}", path.display(), index + 1));
+                        }
+                    }
+                }
+            }
+        }
+        // The two Tauri methods, as calls. Joined here so that this test does
+        // not find itself.
+        let needles = [
+            [".get_webview", "_window("].concat(),
+            [".webview", "_windows("].concat(),
+        ];
+        let mut found = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &needles,
+            &mut found,
+        );
+        assert!(
+            found.is_empty(),
+            "single-webview window lookup at {found:?}"
+        );
     }
     #[test]
     fn visible_window_without_presented_banner_never_starts_a_queued_command() {

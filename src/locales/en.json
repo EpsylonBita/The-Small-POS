@@ -6647,6 +6647,10 @@
     "customer": "Customer",
     "paymentPending": "PAY PENDING",
     "paymentPendingA11y": "Payment pending",
+    "kioskCashPending": "CASH",
+    "kioskCardPending": "CARD",
+    "kioskCashPendingA11y": "Cash chosen at the kiosk; payment pending",
+    "kioskCardPendingA11y": "Card chosen at the kiosk; payment pending",
     "platformPayment": "PLATFORM PAYMENT",
     "platformPaymentA11y": "Payment settled by platform; the store does not collect"
   },

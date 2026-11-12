@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { ShieldCheck, Split } from 'lucide-react';
 import { resolvePlatformPaymentPresentation } from '../../../../../shared/platforms/payment-presentation';
 import { isFullyRefundedCompletedTable } from '../../../../../shared/pos/orders/returned-table-check';
+import { kioskRequestedTender } from '../../../../../shared/pos/orders/kiosk-order';
 import { useTheme } from '../../contexts/theme-context';
 import { useElapsedMinutes } from '../../hooks/useElapsedMinutes';
 import { OrderStatusControls } from './OrderStatusControls';
@@ -296,6 +297,11 @@ export const OrderCard = memo<OrderCardProps>(({
     paymentStatusNormalized !== 'refunded' &&
     !['cancelled', 'canceled', 'refunded'].includes(orderStatusForPayment) &&
     totalNormalized > 0;
+  // A kiosk order arrives unpaid with the tender its customer chose (founder 09/11/2026): the pending chip names
+  // that tender until Complete records it. Android parity: getPaymentBadgeMeta (shared kioskRequestedTender).
+  const kioskTender = showPaymentPending && paymentStatusNormalized !== 'processing'
+    ? kioskRequestedTender(order)
+    : null;
 
   // Normalize plugin field (could be plugin/order_plugin or legacy platform)
   const orderPlugin = order.plugin || order.order_plugin || order.platform || order.order_platform || '';
@@ -607,11 +613,20 @@ export const OrderCard = memo<OrderCardProps>(({
           ) : showPaymentPending ? (
             <span
               data-testid="order-card-payment-pending"
+              data-kiosk-tender={kioskTender ?? undefined}
               role="status"
-              aria-label={t('orderCard.paymentPendingA11y', { defaultValue: 'Payment pending' })}
+              aria-label={kioskTender === 'cash'
+                ? t('orderCard.kioskCashPendingA11y', { defaultValue: 'Cash chosen at the kiosk; payment pending' })
+                : kioskTender === 'card'
+                  ? t('orderCard.kioskCardPendingA11y', { defaultValue: 'Card chosen at the kiosk; payment pending' })
+                  : t('orderCard.paymentPendingA11y', { defaultValue: 'Payment pending' })}
               className={`text-[10px] sm:text-xs font-semibold tracking-wide whitespace-nowrap rounded-sm px-1.5 py-0.5 border border-(--pos-s-warn) bg-(--pos-s-warn-bg) ${resolvedTheme === 'light' ? 'text-amber-700' : 'text-amber-400'}`}
             >
-              {t('orderCard.paymentPending', { defaultValue: 'PAY PENDING' })}
+              {kioskTender === 'cash'
+                ? t('orderCard.kioskCashPending', { defaultValue: 'CASH' })
+                : kioskTender === 'card'
+                  ? t('orderCard.kioskCardPending', { defaultValue: 'CARD' })
+                  : t('orderCard.paymentPending', { defaultValue: 'PAY PENDING' })}
             </span>
           ) : (
             paymentMethodPresentation === 'split' && (
