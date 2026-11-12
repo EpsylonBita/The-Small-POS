@@ -11,6 +11,7 @@ import { readPrintedVatAmount } from '../../utils/printedVat';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
 import { isKioskOriginOrder } from '../../../../../shared/order-approval';
+import { formatDeliveryAddress, readDeliveryText } from '../../../../../shared/utils/delivery-address-display';
 import { getPluginColor, getPluginName, isExternalPlugin } from '../../utils/plugin-icons';
 import {
   BOX_CLOSURE_CANCELLATION_REASONS,
@@ -464,8 +465,25 @@ export function OrderApprovalPanel({
   const externalOrderId = (['external_plugin_order_id', 'externalPluginOrderId', 'external_platform_order_id', 'externalPlatformOrderId']
     .map((key) => orderAsRecord[key])
     .find((value): value is string => typeof value === 'string' && value.trim().length > 0)) ?? null;
-  const deliveryAddressRaw = order.delivery_address || order.address || '';
-  const [deliveryAddress, setDeliveryAddress] = React.useState<string>(deliveryAddressRaw);
+  const orderDeliveryAddress = formatDeliveryAddress(
+    readDeliveryText(order.delivery_address, order.deliveryAddress, order.address),
+    readDeliveryText(order.delivery_city, order.deliveryCity),
+    readDeliveryText(order.delivery_postal_code, order.deliveryPostalCode),
+  );
+  // An order's location is one snapshot. Never fill its missing components
+  // from a customer's default, especially for an external provider order.
+  const canUseCustomerAddress = orderType === 'delivery'
+    && !orderPlatform && !externalOrderId && !isBox && !orderDeliveryAddress;
+  const [customerAddress, setCustomerAddress] = React.useState<{
+    orderId: string;
+    phone: string;
+    address: string;
+  } | null>(null);
+  const deliveryAddress = orderDeliveryAddress || (
+    canUseCustomerAddress && customerAddress?.orderId === order.id && customerAddress.phone === customerPhone
+      ? customerAddress.address
+      : ''
+  );
   const [fullOrder, setFullOrder] = React.useState<Order>(order);
   // Riders and staff match platform orders by the platform's short code
   // (efood: a 4-digit number), not our long internal order number.
@@ -505,8 +523,6 @@ export function OrderApprovalPanel({
         });
 
   // Additional delivery fields (snake_case from normalized data)
-  const deliveryCity = order.delivery_city || '';
-  const deliveryPostalCode = order.delivery_postal_code || '';
   const deliveryFloor = order.delivery_floor || '';
   const deliveryNotes = order.delivery_notes || '';
   const nameOnRinger = order.name_on_ringer || '';
@@ -586,27 +602,27 @@ export function OrderApprovalPanel({
   }, [order.id, t]);
 
   React.useEffect(() => {
-    if (deliveryAddressRaw) { setDeliveryAddress(deliveryAddressRaw); return; }
-    const phone = order.customer_phone || order.customerPhone;
-    if (!phone || typeof window === 'undefined') return;
+    setCustomerAddress(null);
+    if (!canUseCustomerAddress || !customerPhone || typeof window === 'undefined') return;
+    let active = true;
     (async () => {
       try {
-        const customer: any = await getBridge().customers.lookupByPhone(String(phone));
-        if (!customer) return;
+        const customer: any = await getBridge().customers.lookupByPhone(String(customerPhone));
+        if (!active || !customer) return;
         const addr: any = Array.isArray(customer.addresses) && customer.addresses.length > 0
           ? (customer.addresses.find((a: any) => a.is_default) || customer.addresses[0])
           : null;
         if (addr) {
-          let parts: string[] = [];
-          if (addr.street) parts.push(addr.street);
-          if (addr.city) parts.push(addr.city);
-          if (addr.postal_code) parts.push(addr.postal_code);
-          let full = parts.filter(Boolean).join(', ');
-          setDeliveryAddress(full);
+          setCustomerAddress({
+            orderId: order.id,
+            phone: customerPhone,
+            address: formatDeliveryAddress(addr.street, addr.city, addr.postal_code),
+          });
         }
       } catch {}
     })();
-  }, [deliveryAddressRaw, order.customer_phone, order.customerPhone]);
+    return () => { active = false; };
+  }, [canUseCustomerAddress, order.id, customerPhone]);
 
   /**
    * Retry loading items when user clicks retry button
@@ -1316,7 +1332,7 @@ export function OrderApprovalPanel({
             </section>
           </div>
 
-          {orderType === 'delivery' && (deliveryAddress || deliveryCity || deliveryPostalCode || deliveryFloor || nameOnRinger || deliveryNotes) && (
+          {orderType === 'delivery' && (deliveryAddress || deliveryFloor || nameOnRinger || deliveryNotes) && (
             <section className="liquid-glass-modal-card p-4">
               <div className="flex items-start gap-3">
                 <MapPin className="mt-0.5 h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
@@ -1325,7 +1341,7 @@ export function OrderApprovalPanel({
                     {t('orderApprovalPanel.address', { defaultValue: 'Address' })}
                   </p>
                   <p className="mt-1 font-semibold liquid-glass-modal-text">
-                    {[deliveryAddress, deliveryCity, deliveryPostalCode].filter(Boolean).join(', ')}
+                    {deliveryAddress}
                   </p>
                   {(deliveryFloor || nameOnRinger || deliveryNotes) && (
                     <p className="mt-1 text-sm liquid-glass-modal-text-muted">

@@ -9,7 +9,7 @@ use std::io::Cursor;
 use crate::escpos::{EscPosBuilder, PaperWidth};
 use crate::receipt_font::ReceiptFont;
 
-pub const RECEIPT_LAYOUT_REVISION: &str = "2026-07-30-r19";
+pub const RECEIPT_LAYOUT_REVISION: &str = "2026-11-12-r20";
 
 pub fn layout_revision() -> &'static str {
     RECEIPT_LAYOUT_REVISION
@@ -22,6 +22,9 @@ const NOTO_SERIF_BOLD_TTF: &[u8] = include_bytes!("../assets/fonts/NotoSerif-Bol
 // platforms' public marks; icons mirror the efood slip's header glyphs.
 const EFOOD_LOGO_PNG: &[u8] = include_bytes!("../assets/platform/efood-logo.png");
 const WOLT_LOGO_PNG: &[u8] = include_bytes!("../assets/platform/wolt-logo.png");
+// Official geometry: https://box.gr/assets/images/logo/logo.svg (12 Nov 2026).
+// Thermal palette only: orange background -> white, dark mark -> black.
+const BOX_LOGO_PNG: &[u8] = include_bytes!("../assets/platform/box-logo.png");
 const PLATFORM_ICON_HOME_PNG: &[u8] = include_bytes!("../assets/platform/icon-home.png");
 const PLATFORM_ICON_CHECK_PNG: &[u8] = include_bytes!("../assets/platform/icon-check.png");
 const PLATFORM_ICON_MONEY_PNG: &[u8] = include_bytes!("../assets/platform/icon-money.png");
@@ -4836,6 +4839,32 @@ fn document_layout<'a>(
     }
 }
 
+fn append_box_logo_html(body: &mut String, doc: &OrderReceiptDoc, lang: &str) {
+    let Some(info) = doc
+        .platform_slip
+        .as_ref()
+        .filter(|info| info.plugin.trim().eq_ignore_ascii_case("box"))
+    else {
+        return;
+    };
+    body.push_str(&format!(
+        "<div class=\"center\"><img alt=\"BOX\" style=\"width:28%;max-width:90px;height:auto\" src=\"data:image/png;base64,{}\"></div>",
+        BASE64_STANDARD.encode(BOX_LOGO_PNG),
+    ));
+    if let Some(code) = info
+        .external_order_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+    {
+        body.push_str(&format!(
+            "<div class=\"center\"><strong>{}: {}</strong></div>",
+            esc(receipt_label(lang, "Order Code")),
+            esc(code),
+        ));
+    }
+}
+
 pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
     let recorded_layout = document_layout(document, cfg);
     let cfg = recorded_layout.as_ref();
@@ -4851,6 +4880,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             let mut body = String::new();
             let banner = build_status_banner_html(doc, lang);
             body.push_str(&banner);
+            append_box_logo_html(&mut body, doc, lang);
             append_html_header_block(&mut body, cfg, lang, cfg.show_logo);
 
             if is_modern {
@@ -5613,6 +5643,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             let mut body = String::new();
             let banner = build_status_banner_html(doc, lang);
             body.push_str(&banner);
+            append_box_logo_html(&mut body, doc, lang);
             append_html_header_block(&mut body, cfg, lang, cfg.show_logo);
             // Order info block
             body.push_str(&format!(
@@ -10399,6 +10430,7 @@ fn platform_logo_image(plugin: &str) -> Option<&'static GrayImage> {
     use std::sync::OnceLock;
     static EFOOD: OnceLock<Option<GrayImage>> = OnceLock::new();
     static WOLT: OnceLock<Option<GrayImage>> = OnceLock::new();
+    static BOX: OnceLock<Option<GrayImage>> = OnceLock::new();
     match plugin.trim().to_ascii_lowercase().as_str() {
         "efood" => EFOOD
             .get_or_init(|| decode_platform_asset(EFOOD_LOGO_PNG))
@@ -10406,7 +10438,19 @@ fn platform_logo_image(plugin: &str) -> Option<&'static GrayImage> {
         "wolt" => WOLT
             .get_or_init(|| decode_platform_asset(WOLT_LOGO_PNG))
             .as_ref(),
+        "box" => BOX
+            .get_or_init(|| decode_platform_asset(BOX_LOGO_PNG))
+            .as_ref(),
         _ => None,
+    }
+}
+
+fn platform_logo_width(plugin: &str, content_width: i32) -> i32 {
+    if plugin.trim().eq_ignore_ascii_case("box") {
+        // BOX is a square mark, unlike the horizontal efood/Wolt wordmarks.
+        ((content_width as f32 * 0.28) as i32).clamp(1, 144)
+    } else {
+        (content_width as f32 * 0.62) as i32
     }
 }
 
@@ -10731,7 +10775,7 @@ fn draw_platform_slip_ttf(
 
     // ── Logo (the real mark; wordmark text only as fallback) ──
     if let Some(logo) = platform_logo_image(&info.plugin) {
-        let target_w = (canvas.content_width as f32 * 0.62) as i32;
+        let target_w = platform_logo_width(&info.plugin, canvas.content_width);
         canvas.draw_image_centered(logo, target_w, preset.medium_gap);
     } else {
         canvas.draw_text_line(
@@ -11034,6 +11078,7 @@ fn emit_platform_slip_escpos(
     comma: bool,
     use_star_commands: bool,
     zone: Option<chrono_tz::Tz>,
+    cfg: &LayoutConfig,
 ) {
     fn set_reverse(builder: &mut EscPosBuilder, use_star: bool, on: bool) {
         if use_star {
@@ -11060,12 +11105,57 @@ fn emit_platform_slip_escpos(
         builder.left();
     }
 
-    emit_banner(
-        builder,
-        use_star_commands,
-        width,
-        &info.plugin.to_uppercase(),
-    );
+    if let Some(logo) =
+        platform_logo_image(&info.plugin).filter(|_| info.plugin.trim().eq_ignore_ascii_case("box"))
+    {
+        let paper_width = default_printable_width_dots_for_paper(cfg.paper_width) as u32;
+        let content_width = u32::from(cfg.printable_width_dots).clamp(1, paper_width);
+        let logo_width = platform_logo_width(&info.plugin, content_width as i32) as u32;
+        let logo_height = (logo.height() * logo_width / logo.width()).max(1);
+        let resized = image::imageops::resize(
+            logo,
+            logo_width,
+            logo_height,
+            image::imageops::FilterType::Triangle,
+        );
+        let mut centered = GrayImage::from_pixel(paper_width, logo_height, Luma([255]));
+        copy_gray_image(&mut centered, &resized, (paper_width - logo_width) / 2, 0);
+        let (width_bytes, height_dots, data) =
+            grayscale_to_raster_bytes(&centered, cfg.raster_threshold.clamp(40, 240));
+        if use_star_commands {
+            builder.star_raster_image(width_bytes, height_dots, &data);
+            // Star's raster helper resets the printer. Restore the text
+            // configuration before printing Greek items and the order code.
+            let _ = apply_character_set(
+                builder,
+                &cfg.character_set,
+                cfg.greek_render_mode.as_deref(),
+                cfg.escpos_code_page,
+                true,
+            );
+            match cfg.font_type {
+                FontType::A => {
+                    builder.font_a();
+                }
+                FontType::B => {
+                    builder.font_b();
+                }
+            }
+            if cfg.template == ReceiptTemplate::Classic {
+                builder.text_size(2, 2);
+            }
+        } else {
+            builder.raster_image(width_bytes, height_dots, &data);
+        }
+        builder.lf().left();
+    } else {
+        emit_banner(
+            builder,
+            use_star_commands,
+            width,
+            &info.plugin.to_uppercase(),
+        );
+    }
     if info.is_test {
         builder.center().bold(true);
         builder.text(receipt_label(lang, "TEST ORDER")).lf();
@@ -11304,6 +11394,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 comma,
                 use_star_commands,
                 cfg.store_time_zone,
+                cfg,
             );
             if use_star_commands {
                 builder.lf().lf().lf().lf().star_cut();
@@ -14546,6 +14637,186 @@ mod tests {
         };
         assert_eq!(total_label_text("en", &line), "Discount (10%)");
         assert_eq!(total_label_text("el", &line), "Έκπτωση (10%)");
+    }
+
+    #[test]
+    fn box_platform_logo_asset_is_monochrome_and_compact() {
+        let logo = image::load_from_memory(BOX_LOGO_PNG)
+            .expect("official BOX asset decodes")
+            .to_rgba8();
+        assert_eq!(logo.dimensions(), (320, 320));
+        assert!(logo
+            .pixels()
+            .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[3] == 255));
+        assert!(
+            logo.pixels().any(|pixel| pixel[0] == 0),
+            "black official mark"
+        );
+        assert_eq!(
+            logo.get_pixel(0, 0).0,
+            [255, 255, 255, 255],
+            "white, never orange, background"
+        );
+        assert!(platform_logo_image(" BOX ").is_some());
+        for width in [384, 576, 832] {
+            assert!(platform_logo_width("box", width) <= 144);
+            assert_eq!(
+                platform_logo_width("efood", width),
+                (width as f32 * 0.62) as i32
+            );
+            assert_eq!(
+                platform_logo_width("wolt", width),
+                (width as f32 * 0.62) as i32
+            );
+        }
+    }
+
+    fn box_platform_receipt_fixture() -> OrderReceiptDoc {
+        OrderReceiptDoc {
+            order_number: "B100".to_string(),
+            order_type: "delivery".to_string(),
+            status: "confirmed".to_string(),
+            created_at: "2026-11-12T12:05:00Z".to_string(),
+            customer_name: Some("Test customer".to_string()),
+            delivery_address: Some("Μυτιλήνης 4, Περιστέρι, 12132".to_string()),
+            status_label: Some("TEST ORDER · BOX".to_string()),
+            items: vec![ReceiptItem {
+                name: "Espresso".to_string(),
+                quantity: 1.0,
+                total: 1.0,
+                ..ReceiptItem::default()
+            }],
+            totals: vec![TotalsLine {
+                label: "TOTAL".to_string(),
+                amount: 1.0,
+                emphasize: true,
+                ..TotalsLine::default()
+            }],
+            platform_slip: Some(PlatformSlipInfo {
+                plugin: "box".to_string(),
+                external_order_id: Some("BOX-REFERENCE-123".to_string()),
+                payment_method: Some("cash".to_string()),
+                is_test: true,
+                ..PlatformSlipInfo::default()
+            }),
+            ..OrderReceiptDoc::default()
+        }
+    }
+
+    #[test]
+    fn box_platform_slip_raster_preview_uses_official_mark() {
+        for paper_width in [PaperWidth::Mm58, PaperWidth::Mm80, PaperWidth::Mm112] {
+            let cfg = LayoutConfig {
+                template: ReceiptTemplate::Classic,
+                paper_width,
+                language: "el".to_string(),
+                organization_name: "ΤΟ ΜΙΚΡΟ ΠΑΡΙΣΙ".to_string(),
+                classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+                show_logo: false,
+                ..LayoutConfig::default()
+            };
+            let document = ReceiptDocument::OrderReceipt(box_platform_receipt_fixture());
+            let printed = render_escpos(&document, &cfg);
+            assert_eq!(printed.body_mode, EscPosBodyMode::RasterExact);
+            assert!(!printed
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "raster_exact_fallback"));
+            let (preview, _) = render_classic_raster_exact_preview_data_url(&document, &cfg)
+                .expect("BOX preview renders");
+            let png = BASE64_STANDARD
+                .decode(preview.strip_prefix("data:image/png;base64,").unwrap())
+                .unwrap();
+            let image = image::load_from_memory(&png).expect("BOX preview PNG");
+            assert!(image.height() > 400);
+            assert_eq!(
+                image.width(),
+                u32::from(default_printable_width_dots_for_paper(paper_width))
+            );
+            if matches!(paper_width, PaperWidth::Mm80) {
+                if let Some(path) = std::env::var_os("BOX_RECEIPT_PREVIEW_OUT") {
+                    std::fs::write(path, &png).expect("save requested BOX preview");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn box_platform_slip_text_and_html_preserve_logo_and_reference() {
+        for template in [ReceiptTemplate::Classic, ReceiptTemplate::Modern] {
+            for star in [false, true] {
+                let cfg = LayoutConfig {
+                    template,
+                    language: "en".to_string(),
+                    character_set: "PC737_GREEK".to_string(),
+                    emulation_mode: if star {
+                        ReceiptEmulationMode::StarLine
+                    } else {
+                        ReceiptEmulationMode::Auto
+                    },
+                    classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+                    show_logo: false,
+                    ..LayoutConfig::default()
+                };
+                for document in [
+                    ReceiptDocument::OrderReceipt(box_platform_receipt_fixture()),
+                    ReceiptDocument::DeliverySlip(box_platform_receipt_fixture()),
+                ] {
+                    let output = render_escpos(&document, &cfg);
+                    let raster_start: &[u8] = if star {
+                        &[0x1b, b'*', b'r', b'A']
+                    } else {
+                        &[0x1d, b'v', b'0']
+                    };
+                    assert!(output
+                        .bytes
+                        .windows(raster_start.len())
+                        .any(|bytes| bytes == raster_start));
+                    let text = String::from_utf8_lossy(&output.bytes);
+                    assert!(text.contains("BOX-REFERENCE-123"));
+                    assert!(text.contains("TEST ORDER"));
+                    if star {
+                        let raster_end = output
+                            .bytes
+                            .windows(4)
+                            .position(|bytes| bytes == [0x1b, b'*', b'r', b'B'])
+                            .unwrap()
+                            + 4;
+                        assert!(
+                            output.bytes[raster_end..]
+                                .windows(4)
+                                .any(|bytes| bytes == [0x1b, 0x1d, 0x74, 15]),
+                            "restore Greek page after Star raster reset"
+                        );
+                    }
+                    let html = render_html(&document, &cfg);
+                    assert!(html.contains("alt=\"BOX\""));
+                    assert!(html.contains(&BASE64_STANDARD.encode(BOX_LOGO_PNG)));
+                    assert!(html.contains("BOX-REFERENCE-123"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn box_platform_logo_keeps_other_platform_text_headers_unchanged() {
+        let cfg = LayoutConfig {
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            show_logo: false,
+            ..LayoutConfig::default()
+        };
+        for platform in ["efood", "wolt"] {
+            let mut doc = box_platform_receipt_fixture();
+            doc.platform_slip.as_mut().unwrap().plugin = platform.to_string();
+            let document = ReceiptDocument::OrderReceipt(doc);
+            let output = render_escpos(&document, &cfg);
+            assert!(String::from_utf8_lossy(&output.bytes).contains(&platform.to_uppercase()));
+            assert!(!output
+                .bytes
+                .windows(3)
+                .any(|bytes| bytes == [0x1d, b'v', b'0']));
+            assert!(!render_html(&document, &cfg).contains("alt=\"BOX\""));
+        }
     }
 
     #[test]

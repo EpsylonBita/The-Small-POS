@@ -346,7 +346,7 @@
 - Each Z-report staff entry prints Cash, Card, and their combined Total.
 
 ## Runtime Verification
-- Current renderer revision marker: `2026-07-30-r19`.
+- Current renderer revision marker: `2026-11-12-r20` (official monochrome BOX mark).
 - Queue dispatch logs include:
   - `layout_revision`
   - `template`
