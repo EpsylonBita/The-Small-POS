@@ -133,7 +133,7 @@ import { PrintPreviewModal } from "./modals/PrintPreviewModal";
 import { FloatingActionButton } from "./ui/FloatingActionButton";
 import { useTheme } from "../contexts/theme-context";
 import { useI18n } from "../contexts/i18n-context";
-import { isBoxOrder, runBoxApprovalDecision } from './order/box-order-decision';
+import { boxLocalCancellationMessageKey, boxOrderStatusMutationAllowed, isBoxOrder, runBoxApprovalDecision } from './order/box-order-decision';
 import { usePaymentPrintPrompt, type PaymentPrintPromptContext } from "../hooks/usePaymentPrintPrompt";
 import { MODULE_IDS, useAcquiredModules } from "../hooks/useAcquiredModules";
 import { useTables } from "../hooks/useTables";
@@ -6317,6 +6317,18 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Handle bulk actions
     // Shared entry: the Refund screen must hand off before it returns any money.
     const beginOrderCancellation = async (orderIds: string[], refundHandoff = false): Promise<boolean> => {
+      const targets = [...orders, ...pendingExternalOrders].filter(order => orderIds.includes(order.id));
+      const blockedOrder = targets.find(order => order.status !== 'pending'
+        && !boxOrderStatusMutationAllowed(order, 'cancelled'));
+      if (blockedOrder) {
+        toast.error(t(isBoxOrder(blockedOrder) ? boxLocalCancellationMessageKey(blockedOrder) : 'platformCancellation.platformOnly'));
+        return true;
+      }
+      if (targets.some(order => isBoxOrder(order) && order.status !== 'pending')
+        && targets.some(order => !isBoxOrder(order) && isExternalPlatform(String(order.plugin || order.order_plugin || order.platform || order.order_platform)))) {
+        toast.error(t('boxOrder.cancelSeparately'));
+        return true;
+      }
       const refusals = await findCancelRefusals(orderIds);
       if (refundHandoff && refusals.notRecorded.length > 0) throw new Error("ORDER_PAYMENT_NOT_RECORDED");
       if (refusals.notRecorded.length > 0) announceCancelRefusedNotRecorded(refusals.notRecorded);
@@ -9046,10 +9058,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             refused: Boolean(Object.values(manualCancelPlans).find(plan => plan.pending && plan.tableSessionId)?.refused),
             onRelease: handleReleaseSavedCancellation,
           } : undefined}
+          boxLocalCancellation={[...orders, ...pendingExternalOrders].some(order =>
+            pendingCancelOrders.includes(order.id) && isBoxOrder(order) && order.status !== 'pending')}
           platformOrder={orders.some((order) => {
             if (!pendingCancelOrders.includes(order.id)) {
               return false;
             }
+            if (isBoxOrder(order) && order.status !== 'pending') return false;
             const plugin =
               order.plugin ||
               order.order_plugin ||

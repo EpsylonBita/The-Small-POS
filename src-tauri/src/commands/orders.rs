@@ -675,6 +675,9 @@ fn ensure_box_order_mutation_allowed(
     next_status: &str,
     mutation: BoxOrderMutation<'_>,
 ) -> Result<(), String> {
+    if normalize_status_for_storage(next_status) == "cancelled" {
+        ensure_platform_cancellation_allowed(conn, order_id)?;
+    }
     if !is_box_order(conn, order_id)? {
         return Ok(());
     }
@@ -708,6 +711,8 @@ fn ensure_box_order_mutation_allowed(
                 // more: staff may close the order here, a plain local cancel
                 // that never reaches BOX (the server takes it as one).
                 next == "pending" || (next == "cancelled" && box_decision_closed(conn, order_id)?)
+            } else if next == "cancelled" {
+                box_local_cancellation_allowed(conn, order_id, &current)?
             } else {
                 !matches!(next.as_str(), "cancelled" | "rejected" | "pending")
             }
@@ -718,6 +723,112 @@ fn ensure_box_order_mutation_allowed(
     } else {
         Err("BOX requires a pending accept with estimate or an exact rejection reason; decisions are final and platform-ready notification is unsupported".into())
     }
+}
+
+/// Canonical SQLite disposition only; shared/platforms/order-cancellation.ts owns the UI/server policy.
+/// Unknown delivery is refused locally. The server alone resolves connection credentials.
+fn ensure_platform_cancellation_allowed(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<(), String> {
+    let (plugin, status, metadata, order_type): (String, String, String, String) = conn.query_row(
+        "SELECT COALESCE(plugin, ''), status, COALESCE(ghost_metadata, ''), COALESCE(order_type, '') FROM orders WHERE id = ?1",
+        rusqlite::params![order_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).map_err(|e| format!("load platform cancellation context: {e}"))?;
+    if !matches!(
+        status.as_str(),
+        "confirmed" | "preparing" | "ready" | "out_for_delivery" | "delivered" | "completed"
+    ) {
+        return Ok(());
+    }
+    let metadata: Value = serde_json::from_str(&metadata).unwrap_or(Value::Null);
+    let empty = Value::Null;
+    let food = metadata.get("food_delivery").unwrap_or(&empty);
+    let platform = if plugin.trim().is_empty() {
+        food.get("platform").and_then(Value::as_str).unwrap_or("")
+    } else {
+        &plugin
+    };
+    if !crate::platforms::is_external_delivery_platform(platform) {
+        return Ok(());
+    }
+    let store_delivers = if is_box_order(conn, order_id)? {
+        food.get("box_daas")
+            .and_then(Value::as_bool)
+            .map(|daas| !daas)
+            .unwrap_or(
+                food.get("delivery_provider").and_then(Value::as_str) == Some("vendor_delivery"),
+            )
+    } else {
+        food.get("delivery_provider").and_then(Value::as_str) == Some("vendor_delivery")
+    };
+    let pickup = matches!(order_type.as_str(), "pickup" | "takeaway")
+        && food
+            .get("delivery_provider")
+            .and_then(Value::as_str)
+            .is_none()
+        && food.get("box_daas").and_then(Value::as_bool).is_none();
+    if store_delivers || pickup {
+        Ok(())
+    } else {
+        Err("PLATFORM_COURIER_CANCELLATION_ONLY: Only the platform can cancel an accepted order delivered by its courier".into())
+    }
+}
+
+/// Native mirror of shared/box-order-contract.ts: a local status change, never
+/// a BOX decision. Keep money guards in the ordinary cancellation path.
+fn box_local_cancellation_allowed(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    status: &str,
+) -> Result<bool, String> {
+    if !matches!(
+        status,
+        "confirmed" | "preparing" | "ready" | "out_for_delivery" | "delivered" | "completed"
+    ) {
+        return Ok(false);
+    }
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT ghost_metadata FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load BOX delivery metadata: {e}"))?;
+    let metadata = raw
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok());
+    let empty = Value::Null;
+    let food = metadata
+        .as_ref()
+        .and_then(|value| value.get("food_delivery"))
+        .unwrap_or(&empty);
+    let store_delivers = match food.get("box_daas").and_then(Value::as_bool) {
+        Some(daas) => !daas,
+        None => food.get("delivery_provider").and_then(Value::as_str) == Some("vendor_delivery"),
+    };
+    if !store_delivers {
+        let order_type: String = conn
+            .query_row(
+                "SELECT COALESCE(order_type, '') FROM orders WHERE id = ?1",
+                [order_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !matches!(order_type.as_str(), "pickup" | "takeaway") {
+            return Ok(false);
+        }
+    }
+    if food.get("prepaid").and_then(Value::as_bool) == Some(true)
+        || food.get("payment_method").and_then(Value::as_str) == Some("online")
+        || food.get("payment_type").and_then(Value::as_str) == Some("card")
+    {
+        return Err(
+            "BOX_PREPAID_LOCAL_CANCEL_UNSUPPORTED: Prepaid orders must be cancelled through BOX"
+                .into(),
+        );
+    }
+    Ok(true)
 }
 
 /// True when the server closed this BOX order's decision: the local copy of
@@ -14817,9 +14928,9 @@ mod box_order_mutation_tests {
 
     fn connection(plugin: &str, status: &str, metadata: &str) -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT, plugin TEXT, ghost_metadata TEXT, drawer_amount INTEGER, sync_status TEXT); CREATE TABLE sync_queue (id TEXT);").unwrap();
+        conn.execute_batch("CREATE TABLE orders (order_type TEXT DEFAULT 'delivery',id TEXT PRIMARY KEY, status TEXT, plugin TEXT, ghost_metadata TEXT, drawer_amount INTEGER, sync_status TEXT); CREATE TABLE sync_queue (id TEXT);").unwrap();
         conn.execute(
-            "INSERT INTO orders VALUES ('box-order', ?1, ?2, ?3, 795, 'synced')",
+            "INSERT INTO orders (id,status,plugin,ghost_metadata,drawer_amount,sync_status) VALUES ('box-order', ?1, ?2, ?3, 795, 'synced')",
             rusqlite::params![status, plugin, metadata],
         )
         .unwrap();
@@ -14975,6 +15086,105 @@ mod box_order_mutation_tests {
             )
             .is_ok());
         }
+    }
+
+    #[test]
+    fn box_store_driver_local_cancel_after_acceptance_and_not_prepaid() {
+        for status in [
+            "confirmed",
+            "preparing",
+            "ready",
+            "out_for_delivery",
+            "delivered",
+            "completed",
+        ] {
+            for food in [
+                serde_json::json!({"box_daas": false, "prepaid": false}),
+                serde_json::json!({"delivery_provider": "vendor_delivery"}),
+            ] {
+                let metadata = serde_json::json!({"food_delivery": food}).to_string();
+                let conn = connection("box", status, &metadata);
+                let before = snapshot(&conn);
+                assert!(ensure_box_order_mutation_allowed(
+                    &conn,
+                    "box-order",
+                    "cancelled",
+                    BoxOrderMutation::Generic
+                )
+                .is_ok());
+                assert_eq!(snapshot(&conn), before);
+            }
+        }
+        for food in [
+            serde_json::json!({"box_daas": true}),
+            serde_json::json!({}),
+            serde_json::json!({"box_daas": false, "prepaid": true}),
+            serde_json::json!({"box_daas": false, "payment_method": "online"}),
+        ] {
+            let metadata = serde_json::json!({"food_delivery": food}).to_string();
+            let conn = connection("box", "confirmed", &metadata);
+            assert!(ensure_box_order_mutation_allowed(
+                &conn,
+                "box-order",
+                "cancelled",
+                BoxOrderMutation::Generic
+            )
+            .is_err());
+        }
+        for status in ["pending", "cancelled"] {
+            let conn = connection("box", status, r#"{"food_delivery":{"box_daas":false}}"#);
+            assert!(ensure_box_order_mutation_allowed(
+                &conn,
+                "box-order",
+                "cancelled",
+                BoxOrderMutation::Generic
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn food_platform_courier_cancellation_is_refused_before_local_changes() {
+        for plugin in ["efood", "wolt", "box", "glovo"] {
+            for status in [
+                "confirmed",
+                "preparing",
+                "ready",
+                "out_for_delivery",
+                "delivered",
+                "completed",
+            ] {
+                for provider in ["vendor_delivery", "platform_delivery", ""] {
+                    let metadata =
+                        serde_json::json!({"food_delivery": {"delivery_provider": provider}})
+                            .to_string();
+                    let conn = connection(plugin, status, &metadata);
+                    let before = snapshot(&conn);
+                    let outcome = ensure_box_order_mutation_allowed(
+                        &conn,
+                        "box-order",
+                        "cancelled",
+                        BoxOrderMutation::Generic,
+                    );
+                    if provider == "vendor_delivery" {
+                        assert!(outcome.is_ok());
+                    } else {
+                        assert!(outcome
+                            .unwrap_err()
+                            .starts_with("PLATFORM_COURIER_CANCELLATION_ONLY"));
+                    }
+                    assert_eq!(snapshot(&conn), before);
+                }
+            }
+        }
+        let conn = connection("efood", "pending", "");
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "cancelled",
+            BoxOrderMutation::Generic
+        )
+        .is_ok());
     }
 
     #[test]

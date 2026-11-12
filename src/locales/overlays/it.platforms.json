@@ -142,7 +142,11 @@
     "persistPending": "Impossibile salvare questo avviso al momento. Riprova prima di confermare.",
     "retry": "Riprova"
   },
+  "platformCancellation": { "platformOnly": "Solo la piattaforma può annullare questo ordine accettato perché lo consegna un suo corriere. Se non sapete chi lo consegna, contattate la piattaforma." },
   "boxOrder": {
+    "localCancellationNotice": "L’ordine viene annullato solo nel nostro sistema. BOX non viene informato. Avvisate il cliente e, se necessario, contattate BOX.",
+    "prepaidLocalCancellationUnsupported": "Questo ordine è stato pagato online. Contattate BOX per annullarlo e gestire il pagamento. L’annullamento locale non può rimborsare né regolarizzare questa somma.",
+    "cancelSeparately": "Annullate gli ordini BOX separatamente da quelli delle altre piattaforme di consegna.",
     "decisionUnconfirmed": "BOX non ha confermato questa decisione. Controlla l’ordine e la connessione, poi riprova se è ancora in attesa.",
     "testOrder": "TEST · SANDBOX",
     "reasonLabel": "Motivo inviato a BOX",

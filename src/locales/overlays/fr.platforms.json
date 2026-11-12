@@ -142,7 +142,11 @@
     "persistPending": "Impossible d'enregistrer cette notification pour le moment. Réessayez avant de confirmer.",
     "retry": "Réessayer"
   },
+  "platformCancellation": { "platformOnly": "Seule la plateforme peut annuler cette commande acceptée, car son coursier la livre. Si vous ne savez pas qui livre, contactez la plateforme." },
   "boxOrder": {
+    "localCancellationNotice": "La commande est annulée uniquement dans notre système. BOX ne sera pas informé. Prévenez le client et, si nécessaire, contactez BOX.",
+    "prepaidLocalCancellationUnsupported": "Cette commande a été payée en ligne. Contactez BOX pour l’annulation et le traitement du paiement. Une annulation locale ne permet ni de rembourser ni de régulariser cette somme.",
+    "cancelSeparately": "Annulez les commandes BOX séparément de celles des autres plateformes de livraison.",
     "decisionUnconfirmed": "BOX n’a pas confirmé cette décision. Vérifiez la commande et la connexion, puis réessayez si elle est toujours en attente.",
     "testOrder": "TEST · SANDBOX",
     "reasonLabel": "Motif envoyé à BOX",

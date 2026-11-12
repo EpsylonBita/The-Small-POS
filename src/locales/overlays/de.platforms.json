@@ -142,7 +142,11 @@
     "persistPending": "Diese Meldung konnte noch nicht gespeichert werden. Vor der Bestätigung erneut versuchen.",
     "retry": "Erneut versuchen"
   },
+  "platformCancellation": { "platformOnly": "Nur die Plattform kann diese angenommene Bestellung stornieren, da ihr Kurier sie liefert. Ist unbekannt, wer liefert, wenden Sie sich bitte an die Plattform." },
   "boxOrder": {
+    "localCancellationNotice": "Die Bestellung wird nur in unserem System storniert. BOX wird nicht informiert. Bitte benachrichtigen Sie den Kunden und wenden Sie sich bei Bedarf an BOX.",
+    "prepaidLocalCancellationUnsupported": "Diese Bestellung wurde online bezahlt. Wenden Sie sich für die Stornierung und die Klärung der Zahlung an BOX. Eine lokale Stornierung kann dieses Geld weder erstatten noch abrechnen.",
+    "cancelSeparately": "Stornieren Sie BOX-Bestellungen getrennt von Bestellungen anderer Lieferplattformen.",
     "decisionUnconfirmed": "BOX hat diese Entscheidung noch nicht bestätigt. Prüfen Sie die Bestellung und die Verbindung und versuchen Sie es erneut, wenn sie noch aussteht.",
     "testOrder": "TEST · SANDBOX",
     "reasonLabel": "An BOX gesendeter Grund",

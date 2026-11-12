@@ -142,7 +142,11 @@
     "persistPending": "Could not save this notice yet. Try again before acknowledging.",
     "retry": "Try again"
   },
+  "platformCancellation": { "platformOnly": "Only the platform can cancel this accepted order because its courier delivers it. If the delivery provider is unknown, please contact the platform." },
   "boxOrder": {
+    "localCancellationNotice": "This cancels the order only in our system. BOX is not informed. Please tell the customer and, if needed, contact BOX.",
+    "prepaidLocalCancellationUnsupported": "This order was paid online. Contact BOX to cancel it and arrange the payment. Local cancellation cannot return or reconcile that money.",
+    "cancelSeparately": "Cancel BOX orders separately from orders from other delivery platforms.",
     "decisionUnconfirmed": "BOX has not confirmed this decision. Check the order and connection, then retry if it is still pending.",
     "testOrder": "TEST · SANDBOX",
     "reasonLabel": "Reason sent to BOX",

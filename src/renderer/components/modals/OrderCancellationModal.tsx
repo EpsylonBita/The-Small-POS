@@ -32,6 +32,7 @@ interface OrderCancellationModalProps {
   orderCount: number;
   /** True when any order being cancelled came from a delivery platform. */
   platformOrder?: boolean;
+  boxLocalCancellation?: boolean;
   manualReturn?: { amountCents: number; currency: string };
   recovery?: { reason: string; returnChannel?: CancellationReturnChannel };
   /**
@@ -49,6 +50,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
   isOpen,
   orderCount,
   platformOrder = false,
+  boxLocalCancellation = false,
   manualReturn,
   recovery,
   savedAttempt,
@@ -241,6 +243,11 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
         </fieldset>
       )}
 
+      {boxLocalCancellation && (
+        <p role="note" className="mb-6 text-sm liquid-glass-modal-text">
+          {t('boxOrder.localCancellationNotice')}
+        </p>
+      )}
       {!needsChannel && !savedAttempt?.refused && <>
       {platformOrder && (
         <div className="mb-6">

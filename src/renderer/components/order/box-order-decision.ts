@@ -1,3 +1,4 @@
+import { platformOrderCancellationError, orderDeliveryProvider } from '../../../../../shared/platforms/order-cancellation';
 /**
  * BOX (box.gr) order decisions on the desktop POS.
  *
@@ -22,6 +23,9 @@
  */
 import {
   BOX_CLOSURE_CANCELLATION_REASONS,
+  boxLocalCancellationError,
+  canLocallyCancelAcceptedBoxOrder,
+  readBoxFoodDeliveryMetadata,
   boxDecisionFailureKind,
   isBoxDecisionClosed,
   isBoxPlatform,
@@ -31,6 +35,9 @@ import {
 
 export {
   BOX_CLOSURE_CANCELLATION_REASONS,
+  boxLocalCancellationError,
+  canLocallyCancelAcceptedBoxOrder,
+  readBoxFoodDeliveryMetadata,
   BOX_REJECTION_REASONS,
   boxDecisionFailureKind,
   isBoxDecisionClosed,
@@ -147,12 +154,20 @@ export function isBoxOrder(order: unknown): boolean {
   return isBoxPlatform((foodDelivery as Record<string, unknown>).platform);
 }
 
+/** Explanation when an accepted BOX order cannot be cancelled here. */
+export function boxLocalCancellationMessageKey(order: unknown): string {
+  return boxLocalCancellationError('box', (order as Record<string, unknown>)?.status, readBoxFoodDeliveryMetadata(order))
+    === 'BOX_PREPAID_LOCAL_CANCEL_UNSUPPORTED'
+    ? 'boxOrder.prepaidLocalCancellationUnsupported' : 'platformCancellation.platformOnly';
+}
+
 /** Guard shared mutation boundaries, before bridge or local persistence. */
 export function boxOrderStatusMutationAllowed(
   order: unknown,
   nextStatus: string,
   decision?: { kind: 'accept'; estimatedTime?: number } | { kind: 'reject'; reason?: unknown },
 ): boolean {
+  if (['cancelled', 'canceled'].includes(nextStatus.toLowerCase()) && platformOrderCancellationError(order)) return false;
   if (!isBoxOrder(order)) return true;
   const current = String((order as Record<string, unknown>).status ?? '').toLowerCase();
   const next = nextStatus.toLowerCase();
@@ -170,7 +185,10 @@ export function boxOrderStatusMutationAllowed(
     return next === 'pending' || ((next === 'cancelled' || next === 'canceled') && isBoxDecisionClosed(order));
   }
   // Local ready/completed/driver fulfillment remain usable after acceptance.
-  return next !== 'cancelled' && next !== 'canceled' && next !== 'rejected' && next !== 'pending';
+  if (next === 'cancelled' || next === 'canceled') {
+    return canLocallyCancelAcceptedBoxOrder('box', current, { ...readBoxFoodDeliveryMetadata(order), delivery_provider: orderDeliveryProvider(order) });
+  }
+  return next !== 'rejected' && next !== 'pending';
 }
 
 /** A false result is a failed BOX decision, so callers must retain the panel. */

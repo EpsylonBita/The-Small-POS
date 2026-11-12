@@ -142,7 +142,11 @@
     "persistPending": "Ky njoftim s'u ruajt dot ende. Provo përsëri para se ta konfirmosh.",
     "retry": "Provo përsëri"
   },
+  "platformCancellation": { "platformOnly": "Vetëm platforma mund ta anulojë këtë porosi të pranuar, sepse e dorëzon korrieri i saj. Nëse nuk dihet kush e dorëzon, kontakto platformën." },
   "boxOrder": {
+    "localCancellationNotice": "Porosia anulohet vetëm në sistemin tonë. BOX nuk njoftohet. Njofto klientin dhe, nëse duhet, kontakto BOX.",
+    "prepaidLocalCancellationUnsupported": "Kjo porosi është paguar online. Kontakto BOX për anulimin dhe rregullimin e pagesës. Anulimi lokal nuk mund t’i kthejë ose t’i rakordojë këto para.",
+    "cancelSeparately": "Anulo porositë BOX veçmas nga porositë e platformave të tjera të dërgesave.",
     "decisionUnconfirmed": "BOX nuk e ka konfirmuar këtë vendim. Kontrolloni porosinë dhe lidhjen, pastaj provoni përsëri nëse është ende në pritje.",
     "testOrder": "TEST · SANDBOX",
     "reasonLabel": "Arsyeja që dërgohet te BOX",

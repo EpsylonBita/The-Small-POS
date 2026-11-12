@@ -94,14 +94,37 @@ describe('desktop BOX store mutation boundary', () => {
     expect(await useOrderStore.getState().assignDriver('box-order', 'driver')).toBe(true);
     expect(mocks.assignDriver).toHaveBeenCalledWith('box-order', 'driver', undefined);
   });
+  it.each(['confirmed', 'preparing', 'ready', 'out_for_delivery'])('cancels store-driver BOX at %s through ordinary status with free text, never decline', async status => {
+    const order = { ...seed(status), ghost_metadata: JSON.stringify({ food_delivery: { box_daas: false, prepaid: false } }) };
+    useOrderStore.setState({ orders: [order] as never });
+    expect(await useOrderStore.getState().updateOrderStatusDetailed('box-order', 'cancelled', { cancellationReason: 'Customer called' })).toEqual({ success: true });
+    expect(mocks.updateOrderStatus).toHaveBeenCalledWith('box-order', 'cancelled', { cancellationReason: 'Customer called' });
+    expect(mocks.decline).not.toHaveBeenCalled();
+    expect(useOrderStore.getState().orders[0].status).toBe('cancelled');
+  });
+  it.each([{ box_daas: true }, {}, { box_daas: false, prepaid: true }])('refuses BOX courier/unknown/prepaid cancellation before service %j', async food_delivery => {
+    const order = { ...seed('confirmed'), ghost_metadata: { food_delivery } };
+    useOrderStore.setState({ orders: [order] as never });
+    expect((await useOrderStore.getState().updateOrderStatusDetailed('box-order', 'cancelled', { cancellationReason: 'Customer called' })).success).toBe(false);
+    expect(mocks.updateOrderStatus).not.toHaveBeenCalled();
+    expect(mocks.decline).not.toHaveBeenCalled();
+  });
 
-  it('preserves efood estimate omission, free-text decline and generic transitions', async () => {
-    seed('pending', 'efood');
+  it('preserves efood store-delivery estimate omission, free-text decline and transitions', async () => {
+    useOrderStore.setState({ orders: [{ ...seed('pending', 'efood'), ghost_metadata: { food_delivery: { delivery_provider: 'vendor_delivery' } } }] as never });
     expect(await useOrderStore.getState().approveOrder('box-order')).toBe(true);
     expect(await useOrderStore.getState().declineOrder('box-order', 'Busy')).toBe(true);
     expect(await useOrderStore.getState().updateOrderStatus('box-order', 'pending')).toBe(true);
     expect(mocks.approve).toHaveBeenCalledWith('box-order', undefined);
     expect(mocks.decline).toHaveBeenCalledWith('box-order', 'Busy');
+  });
+
+  it('explains a server courier refusal when the local copy said store delivery', async () => {
+    useOrderStore.setState({ orders: [{ ...seed('confirmed', 'efood'), ghost_metadata: { food_delivery: { delivery_provider: 'vendor_delivery' } } }] as never });
+    mocks.updateOrderStatus.mockRejectedValue(new Error('PLATFORM_COURIER_CANCELLATION_ONLY: Only the platform can cancel'));
+    const result = await useOrderStore.getState().updateOrderStatusDetailed('box-order', 'cancelled', { cancellationReason: 'Customer called' });
+    expect(result.success).toBe(false);
+    expect(result.errorMessage).toMatch(/Only the platform|platformCancellation.platformOnly/);
   });
 
   it.each([{ food_delivery: { platform: 'box_gr' } }, '{"food_delivery":{"platform":"boxgr"}}'])('guards legacy metadata-only BOX rows before mutation: %j', async ghost_metadata => {

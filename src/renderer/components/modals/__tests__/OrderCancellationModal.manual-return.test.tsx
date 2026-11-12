@@ -8,6 +8,15 @@ afterEach(cleanup);
 const key = (name: string) => `modals.orderCancellation.${name}`;
 
 describe('manual paid order cancellation', () => {
+  it('explains local BOX cancellation and uses ordinary free text without platform reasons', async () => {
+    const confirm = vi.fn().mockResolvedValue(undefined);
+    render(<OrderCancellationModal isOpen orderCount={1} boxLocalCancellation onConfirmCancel={confirm} onClose={vi.fn()} />);
+    expect(screen.getByRole('note')).toHaveTextContent('boxOrder.localCancellationNotice');
+    expect(screen.queryByText(key('platformReasonLabel'))).toBeNull();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Customer called the shop' } });
+    fireEvent.click(screen.getByText(key('confirm')));
+    await waitFor(() => expect(confirm).toHaveBeenCalledExactlyOnceWith('Customer called the shop', undefined));
+  });
   it.each([['cashDrawer', 'cash_drawer'], ['bank', 'bank']] as const)('records %s only after explicit channel and reason', async (label, channel) => {
     const confirm = vi.fn().mockResolvedValue(undefined);
     render(<OrderCancellationModal isOpen orderCount={1} manualReturn={{ amountCents: 600, currency: 'EUR' }} onConfirmCancel={confirm} onClose={vi.fn()} />);

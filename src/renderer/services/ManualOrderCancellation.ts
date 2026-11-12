@@ -1,3 +1,4 @@
+import { platformCancellationFailureMessageKey } from '../../../../shared/platforms/order-cancellation';
 import type { PlatformBridge } from '../../lib';
 import { tableCancellationFields } from './TableManualCancellation';
 
@@ -73,6 +74,8 @@ const errorCode = (error: unknown): string => {
 };
 
 export function manualCancellationFailureKey(error: unknown): string {
+  const platformKey = platformCancellationFailureMessageKey(error);
+  if (platformKey) return platformKey;
   const code = errorCode(error);
   const key = code.includes('TABLE_CANCELLATION_REFUSED') ? 'refusedByServer'
     : code.includes('TABLE_CANCELLATION_RELEASE_WAIT') ? 'releaseWait'

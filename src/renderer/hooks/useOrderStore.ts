@@ -1,3 +1,4 @@
+import { platformCancellationFailureMessageKey, platformOrderCancellationError } from '../../../../shared/platforms/order-cancellation';
 import { createElement } from 'react';
 import { create } from 'zustand';
 import { mapStatusForPOS, isValidOrderStatus } from '../../shared/types/order-status';
@@ -1630,6 +1631,10 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           get()._setLoading(operation, false);
           return { success };
         }
+        if (status === 'cancelled' && platformOrderCancellationError(targetOrder)) {
+          get()._setLoading(operation, false);
+          return { success: false, errorMessage: i18n.t('platformCancellation.platformOnly') };
+        }
         if (!boxOrderStatusMutationAllowed(targetOrder, status)) {
           get()._setLoading(operation, false);
           return { success: false };
@@ -1748,6 +1753,11 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           };
         }
 
+        const platformKey = platformCancellationFailureMessageKey(error);
+        if (platformKey) {
+          get()._setLoading(operation, false);
+          return { success: false, errorMessage: i18n.t(platformKey) };
+        }
         // Handle error
         const posError = errorHandler.handle(error);
         get()._setError(posError);
