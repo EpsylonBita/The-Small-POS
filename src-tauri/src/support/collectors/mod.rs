@@ -48,6 +48,7 @@ pub fn setting(conn: &Connection, category: &str, key: &str) -> Option<String> {
     .ok()
 }
 pub fn meta(mut value: Value) -> Result<Value, String> {
+    super::evidence::mark_unavailable(&mut value);
     value["observation_time"] = json!(chrono::Utc::now().to_rfc3339());
     value["app_version"] = json!(env!("CARGO_PKG_VERSION"));
     let mut redacted = redaction::record(value.clone()).ok_or("INTERNAL_ERROR")?;

@@ -38,6 +38,7 @@ impl Facts {
 }
 pub struct Policy {
     internal: AtomicBool,
+    confirmed: bool,
     pub facts: Mutex<Facts>,
     triggers: BTreeSet<String>,
     tables: BTreeSet<String>,
@@ -59,8 +60,25 @@ pub fn install(
     tables: BTreeSet<String>,
     accessors: BTreeSet<String>,
 ) -> Arc<Policy> {
+    install_mode(conn, triggers, tables, accessors, false)
+}
+pub fn install_confirmed(
+    conn: &Connection,
+    tables: BTreeSet<String>,
+    accessors: BTreeSet<String>,
+) -> Arc<Policy> {
+    install_mode(conn, BTreeSet::new(), tables, accessors, true)
+}
+fn install_mode(
+    conn: &Connection,
+    triggers: BTreeSet<String>,
+    tables: BTreeSet<String>,
+    accessors: BTreeSet<String>,
+    confirmed: bool,
+) -> Arc<Policy> {
     let policy = Arc::new(Policy {
         internal: AtomicBool::new(false),
+        confirmed,
         facts: Mutex::new(Facts::default()),
         triggers,
         tables,
@@ -90,7 +108,13 @@ pub fn install(
             return Authorization::Deny;
         };
         match ctx.action {
-            AuthAction::Select | AuthAction::Recursive => Authorization::Allow,
+            AuthAction::Select | AuthAction::Recursive => {
+                if own.confirmed {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }
             AuthAction::Read {
                 table_name,
                 column_name,
@@ -129,7 +153,7 @@ pub fn install(
             AuthAction::Update {
                 table_name,
                 column_name,
-            } if guards::policy(table_name)["update"]
+            } if write_policy(table_name, own.confirmed)["update"]
                 .as_array()
                 .is_some_and(|a| a.iter().any(|c| c.as_str() == Some(column_name))) =>
             {
@@ -146,8 +170,8 @@ pub fn install(
                 facts.writes.entry(table_name.into()).or_default();
                 Authorization::Allow
             }
-            // INSERT is conservatively refused, matching Android until the
-            // shared engine-derived insert target proof has been implemented.
+            // INSERT stays fail-closed: Windows settings generate a protected
+            // random primary key that the legacy insert proof cannot replay.
             AuthAction::Function { function_name } if allowed_function(function_name) => {
                 facts.functions.insert(function_name.into());
                 Authorization::Allow
@@ -230,4 +254,34 @@ pub fn inspect(conn: &Connection, policy: &Policy, sql: &str) -> Result<Facts, S
         return Err("POLICY_REFUSED".into());
     }
     Ok(facts)
+}
+
+pub fn write_policy(table: &str, confirmed: bool) -> &'static Value {
+    let p = &contracts::shared().other["confirmed_commands"]["effective_tables"]["windows"]
+        ["pos.db"][table];
+    if confirmed && !p.is_null() {
+        p
+    } else {
+        guards::policy(table)
+    }
+}
+/// Anonymous SQLite bindings only. Omitted legacy params still use payload().
+pub fn payload_bound(
+    conn: &Connection,
+    policy: &Policy,
+    sql: &str,
+    params: &[rusqlite::types::Value],
+) -> Result<usize, String> {
+    *policy.facts.lock().map_err(|_| "INTERNAL_ERROR")? = Facts::default();
+    let before = policy.internal.swap(false, Ordering::AcqRel);
+    let _reset = Reset(&policy.internal, before);
+    single_statement(conn, sql)?;
+    let mut s = conn.prepare(sql).map_err(guards::error)?;
+    if s.parameter_count() != params.len()
+        || (1..=s.parameter_count()).any(|i| s.parameter_name(i).is_some())
+    {
+        return Err("INVALID_INPUT".into());
+    }
+    s.execute(rusqlite::params_from_iter(params))
+        .map_err(guards::error)
 }

@@ -160,7 +160,13 @@ pub fn native_restore(
     session: &str,
     command: Option<&str>,
 ) -> Result<(), String> {
-    authorize(app)?;
+    let confirmed=command.and_then(|id|store.query_row("SELECT envelope_json FROM support_accepted_commands WHERE command_id=? AND kind='till_confirmed_command' AND started_at IS NOT NULL AND finished_at IS NULL",[id],|r|r.get::<_,String>(0)).ok()).and_then(|s|serde_json::from_str::<contracts::Command>(&s).ok());
+    if let Some(c) = &confirmed {
+        let confirmed_rt = super::session::runtime(app)?;
+        super::confirmed::current(app, &confirmed_rt, c)?;
+    } else {
+        authorize(app)?;
+    }
     let rt = super::session::runtime(app)?;
     let (session, clock) = {
         let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
@@ -179,9 +185,23 @@ pub fn native_restore(
             crate::recovery::SupportRestoreClock::capture(server_now)?,
         )
     };
-    let result = stage_restore_with(store, live, id, &session, command, clock, || {
-        let _ = app.emit("support://restore-lease", json!({"held":true}));
-    });
+    let result = stage_restore_with(
+        store,
+        live,
+        id,
+        &session,
+        command,
+        clock,
+        || {
+            let _ = app.emit("support://restore-lease", json!({"held":true}));
+        },
+        || {
+            if let Some(c) = &confirmed {
+                super::confirmed::current(app, &rt, c)?;
+            }
+            Ok(())
+        },
+    );
     let _ = app.emit("support://restore-lease", json!({"held":false}));
     result
 }
@@ -202,6 +222,7 @@ pub fn stage_restore(
         command,
         crate::recovery::SupportRestoreClock::capture(chrono::Utc::now().timestamp_millis())?,
         || {},
+        || Ok(()),
     )
 }
 fn stage_restore_with(
@@ -212,6 +233,7 @@ fn stage_restore_with(
     command: Option<&str>,
     clock: crate::recovery::SupportRestoreClock,
     on_lease: impl FnOnce(),
+    recheck: impl Fn() -> Result<(), String>,
 ) -> Result<(), String> {
     let gate = critical_op::global();
     let _lease = gate.begin_exclusive_restore().map_err(str::to_string)?;
@@ -249,6 +271,7 @@ fn stage_restore_with(
     if pre.full != post || snapshot::watermarks(&c)?.0 != post {
         return Err("RESTORE_WOULD_LOSE_SALES".into());
     }
+    recheck()?;
     crate::recovery::stage_verified_support_snapshot(
         store, live, &snap, &pre, session, command, clock,
     )
@@ -288,6 +311,14 @@ pub fn report_startup(store: &Connection, app_data: &Path, command: &str) -> Res
     ).optional().map_err(guards::error)?;
     if let Some(raw) = raw {
         let c: contracts::Command = serde_json::from_str(&raw).map_err(|_| "INTERNAL_ERROR")?;
+        if c.kind == super::confirmed::KIND {
+            return super::confirmed_restore::complete(
+                store,
+                app_data,
+                &c,
+                notice["status"] == "applied",
+            );
+        }
         let applied = notice["status"] == "applied";
         let mut data = json!({"outcome":if applied {"succeeded"} else {"rolled_back"},
             "snapshot":notice["snapshot"],"restore":{"restarted":true,"status":notice["status"],"rows_lost_or_reverted":[]}});

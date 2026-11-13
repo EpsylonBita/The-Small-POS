@@ -73,9 +73,26 @@ fn bundle_observations() -> &'static RetainedObservations {
 
 /// The actual diagnostics builder's last observation, never a new device read.
 pub(crate) fn support_health_observation(conn: &rusqlite::Connection) -> Value {
-    health_observations().read(conn.path().unwrap_or(""))
+    support_health_observation_at(Path::new(conn.path().unwrap_or("")))
 }
 
+pub(crate) fn support_health_observation_at(path: &Path) -> Value {
+    health_observations().read(&path.to_string_lossy())
+}
+pub(crate) fn support_cached_section(path: &Path, section: &str) -> Value {
+    let content = if section == "about" {
+        get_about_info()
+    } else if section == "system_health" {
+        support_health_observation_at(path)["content"].clone()
+    } else if section == "runtime_logs" {
+        runtime_logs::collect(&get_log_dir(), true)
+    } else {
+        bundle_observations().read(&format!("{}|{section}", path.display()))["content"]
+            ["section_content"]
+            .clone()
+    };
+    json!({"section":section,"collector_status":if content.is_null(){"unavailable"}else{"ok"},"content":content,"truncation":[],"redaction_dropped":0})
+}
 /// Uses the same backlog builder as the bundle, on the caller's support handle.
 pub(crate) fn support_sync_backlog(conn: &rusqlite::Connection) -> Result<Value, String> {
     get_sync_backlog(conn)
@@ -150,6 +167,21 @@ pub(crate) fn support_bundle_section(
     section: &str,
     permit: &crate::support::critical_op::SupportPermit,
 ) -> Result<Value, String> {
+    support_bundle_section_inner(conn, section, permit, false)
+}
+pub(crate) fn support_bundle_section_evidence(
+    conn: &rusqlite::Connection,
+    section: &str,
+    permit: &crate::support::critical_op::SupportPermit,
+) -> Result<Value, String> {
+    support_bundle_section_inner(conn, section, permit, true)
+}
+fn support_bundle_section_inner(
+    conn: &rusqlite::Connection,
+    section: &str,
+    permit: &crate::support::critical_op::SupportPermit,
+    evidence: bool,
+) -> Result<Value, String> {
     let content = match section {
         "about" => get_about_info(),
         "system_health" => {
@@ -183,7 +215,11 @@ pub(crate) fn support_bundle_section(
         }
     };
     let mut truncation = Vec::new();
-    let content = redact_value_for_export(content, section, &mut truncation);
+    let content = if evidence {
+        content
+    } else {
+        redact_value_for_export(content, section, &mut truncation)
+    };
     Ok(
         json!({"section":section,"collector_status":"ok","content":content,"truncation":support_truncation(&truncation.into_iter().map(Value::String).collect::<Vec<_>>())?,"redaction_dropped":0}),
     )
@@ -3325,7 +3361,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db_state = crate::db::init(&dir).unwrap();
         let sentinel_uuid = "9b36be15-9c2d-4ce1-a61b-c12f487cb2c1";
-        let log_dir = get_log_dir();
+        let log_dir = dir.join("isolated-runtime-logs");
         std::fs::create_dir_all(&log_dir).unwrap();
         let log_path = log_dir.join(format!("pos.repair-seal-{}.log", uuid::Uuid::new_v4()));
         std::fs::write(
@@ -3337,7 +3373,14 @@ mod tests {
         .unwrap();
         let _log_cleanup = RemoveFileOnDrop(log_path);
 
-        let export_path = export_diagnostics(&db_state, &dir).expect("default diagnostics export");
+        let export_path = export_diagnostics_bundle_with_log_dir(
+            &db_state,
+            &dir,
+            DiagnosticsExportOptions::default(),
+            None,
+            &log_dir,
+        )
+        .expect("default diagnostics export");
         let file = std::fs::File::open(&export_path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         for index in 0..archive.len() {

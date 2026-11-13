@@ -206,7 +206,13 @@ pub fn write_sql(
         if snapshot::cheap_watermark(c)? != *proof.cheap {
             return Err("PAYLOAD_DRIFT".into());
         }
-        let targets = dry_run::live_targets(c, policy, sql, scope)?;
+        let bindings = proof
+            .stored
+            .params
+            .as_ref()
+            .map(|p| super::confirmed_sql::params_of(&json!({"params":p})))
+            .transpose()?;
+        let targets = dry_run::live_targets_bound(c, policy, sql, scope, bindings.as_deref())?;
         if dry_run::target_hash(&targets) != proof.stored.result["target_key_sha256"] {
             return Err("PAYLOAD_DRIFT".into());
         }
@@ -216,7 +222,11 @@ pub fn write_sql(
         }
         let facts = authorizer::inspect(c, policy, sql)?;
         let before = dry_run::capture(c, facts.writes.keys().cloned())?;
-        let n = authorizer::payload(c, policy, sql)?;
+        let n = if let Some(bindings) = &bindings {
+            authorizer::payload_bound(c, policy, sql, bindings)?
+        } else {
+            authorizer::payload(c, policy, sql)?
+        };
         let actual = dry_run::changed(c, &before)?;
         if n != actual.len()
             || actual.len() as u64 > proof.cap
@@ -733,7 +743,15 @@ pub fn local_restore_group(
     Ok(())
 }
 pub fn finish(store: &Connection, c: &Command, data: Value, now: i64) -> Result<(), String> {
-    let outcome = data["outcome"].as_str().unwrap_or("succeeded");
+    let outcome = if c.kind == super::confirmed::KIND {
+        match data["outcome"].as_str() {
+            Some("unknown") => "outcome_unknown",
+            Some("failed") => "failed",
+            _ => "succeeded",
+        }
+    } else {
+        data["outcome"].as_str().unwrap_or("succeeded")
+    };
     let code = data["error_code"].as_str();
     let started: Option<String> = store
         .query_row(
@@ -780,6 +798,7 @@ pub fn finish(store: &Connection, c: &Command, data: Value, now: i64) -> Result<
         },
     )
     .map_err(guards::error)?;
+    super::confirmed::event(&tx, c, "confirmed_command_finished", now)?;
     tx.commit().map_err(guards::error)
 }
 fn progress(store: &Connection, c: &Command, status: &str) -> Result<(), String> {

@@ -9,6 +9,8 @@ pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_mode: Option<String>,
     pub session_id: String,
     pub operator_display_name: String,
     pub tier_ceiling: u8,
@@ -444,6 +446,9 @@ pub(super) fn consent_decline_request(notice: &Value) -> Result<(Value, String),
 pub trait SupportApi: Send + Sync {
     fn request<'a>(&'a self, path: &'a str, method: &'a str, body: Option<Value>) -> ApiFuture<'a>;
     fn visible(&self) -> bool;
+    fn command_authority(&self) -> bool {
+        false
+    }
     fn consent_decline<'a>(&'a self, _body: Value, _staff: &'a str) -> DeclineFuture<'a> {
         Box::pin(async { Err(DeclineError::transient()) })
     }
@@ -461,6 +466,9 @@ struct NativeApi {
     app: tauri::AppHandle,
 }
 impl SupportApi for NativeApi {
+    fn command_authority(&self) -> bool {
+        super::confirmed::availability(&self.app)
+    }
     fn request<'a>(&'a self, path: &'a str, method: &'a str, body: Option<Value>) -> ApiFuture<'a> {
         Box::pin(request(&self.app, path, method, body))
     }
@@ -652,6 +660,7 @@ async fn fetch_session(
                     if core.code.is_none() && !core.awaiting_open {
                         return Err("SESSION_ENDED".into());
                     }
+                    core.command_consent = api.command_authority();
                     core.adopt(info, &response.server_time)?;
                 }
                 core.session
@@ -701,9 +710,16 @@ async fn fetch_session(
         {
             return Ok(());
         }
-        let (capabilities, ids) = core
+        let (mut capabilities, ids) = core
             .verifier
             .advertisement(&core.executor.db.conn, super::dispatch::capabilities())?;
+        if capabilities
+            .iter()
+            .any(|c| c == super::confirmed::CAPABILITY)
+            && !capabilities.iter().any(|c| c == "support.tier3.v1")
+        {
+            capabilities.push("support.tier3.v1".into());
+        }
         let mut body = ack(&id, baseline, capabilities);
         body["pinned_approver_key_ids"] = json!(ids);
         body
@@ -837,7 +853,8 @@ async fn fetch_commands(
     let Some(s) = &mut core.session else {
         return Ok(());
     };
-    let a = s.admission.clone();
+    let mut a = s.admission.clone();
+    a.confirmed &= api.command_authority();
     for value in commands {
         let command = serde_json::from_value(value.clone()).map_err(|_| "INVALID_INPUT")?;
         let super::session::Core {
@@ -918,7 +935,7 @@ async fn flush(api: &dyn SupportApi, rt: &super::session::Runtime) -> Result<(),
     }
     let results = {
         let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
-        core.executor.pending_results(core.now())?
+        core.executor.pending_results_limit(core.now(), 3)?
     };
     for result in results.into_iter().take(3) {
         let response = api

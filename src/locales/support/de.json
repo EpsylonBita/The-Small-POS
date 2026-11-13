@@ -48,7 +48,9 @@
     "resolvedAddress": "Aufgelöste Adresse",
     "verificationStatus": "Verifizierungsstatus",
     "recentJobsFailed": "Fehlgeschlagene aktuelle Jobs",
-    "printerQueueLength": "Druckerwarteschlange"
+    "printerQueueLength": "Druckerwarteschlange",
+    "screenshot": "Bildschirm der Kasse wird aufgenommen: {{reason}}",
+    "personalData": "Personenbezogene Daten werden gelesen: {{reason}}"
   },
   "fallbacks": {
     "health": {
@@ -451,5 +453,26 @@
     "renewOffline": "Der Server war nicht erreichbar, daher wurde die Anmeldung nicht erneuert. Versuchen Sie es erneut, wenn die Kasse online ist.",
     "renewKeepsShift": "Erneuert wird nur Ihr Check-in an dieser Kasse. Der Support sieht die PIN nie. Die Schicht bleibt offen, und es wird nichts abgerechnet.",
     "onShift": "Mitarbeiter in der Schicht"
+  },
+  "confirmed": {
+    "waiting": "Wartet auf den Start",
+    "running": "Wird jetzt ausgeführt",
+    "finished": "Abgeschlossen",
+    "refused": "Konnte nicht ausgeführt werden",
+    "undone": "Rückgängig gemacht",
+    "endSession": "Beenden",
+    "snapshot": "Vor jeder Änderung wird eine Kopie gespeichert",
+    "shiftClose": "Schicht {{shift_id}} mit den angegebenen gezählten Beträgen schließen",
+    "queueRetry": "Warteschlangeneintrag {{queue_id}} erneut versuchen",
+    "queueSetAside": "Eintrag {{queue_id}} und die darauf wartenden Einträge zurückstellen und ihre Daten behalten",
+    "queueReturn": "Zurückgestellten Eintrag {{queue_id}} und seine Gruppe wieder in die Warteschlange stellen",
+    "undoSnapshot": "Mit gespeicherter Kopie {{snapshot_id}} rückgängig machen",
+    "outcomes": {
+      "pending": "Wartet auf die Übertragung",
+      "resolved": "Behoben",
+      "failed": "Nicht abgeschlossen",
+      "unknown": "Prüfung erforderlich",
+      "rolled_back": "Änderung zurückgenommen"
+    }
   }
 }

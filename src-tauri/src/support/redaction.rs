@@ -34,7 +34,7 @@ fn number_pan(number: &serde_json::Number) -> bool {
             value.fract() == 0.0 && (1e12..1e19).contains(&value) && luhn(&format!("{value:.0}"))
         })
 }
-fn scrub_pan(text: &str) -> String {
+pub(super) fn scrub_pan(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -47,7 +47,10 @@ fn scrub_pan(text: &str) -> String {
         let start = i;
         let mut end = i;
         let mut digits = String::new();
-        while i < chars.len() && (chars[i].is_ascii_digit() || matches!(chars[i], ' ' | '-')) {
+        while i < chars.len()
+            && (chars[i].is_ascii_digit()
+                || matches!(chars[i], ' ' | '\t' | '\u{a0}' | '\u{200b}' | '-'))
+        {
             if chars[i].is_ascii_digit() {
                 digits.push(chars[i]);
                 end = i + 1;

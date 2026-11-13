@@ -48,7 +48,9 @@
     "resolvedAddress": "Adresse résolue",
     "verificationStatus": "Statut de vérification",
     "recentJobsFailed": "Tâches récentes en échec",
-    "printerQueueLength": "File d'impression"
+    "printerQueueLength": "File d'impression",
+    "screenshot": "Capture de l’écran de la caisse : {{reason}}",
+    "personalData": "Lecture des données personnelles : {{reason}}"
   },
   "fallbacks": {
     "health": {
@@ -451,5 +453,26 @@
     "renewOffline": "Le serveur est injoignable : la connexion n’a pas été renouvelée. Réessayez quand la caisse sera en ligne.",
     "renewKeepsShift": "Seul votre pointage sur cette caisse est renouvelé. L’assistance ne voit jamais le code PIN. Le service reste ouvert et rien n’est encaissé.",
     "onShift": "Employé en service"
+  },
+  "confirmed": {
+    "waiting": "En attente de démarrage",
+    "running": "En cours",
+    "finished": "Terminé",
+    "refused": "Impossible à exécuter",
+    "undone": "Annulé",
+    "endSession": "Terminer",
+    "snapshot": "Une copie est enregistrée avant chaque modification",
+    "shiftClose": "Clôturer le service {{shift_id}} avec les montants comptés indiqués",
+    "queueRetry": "Réessayer l’envoi de l’élément {{queue_id}}",
+    "queueSetAside": "Mettre de côté l’élément {{queue_id}} et ceux qui l’attendent, en conservant leurs données",
+    "queueReturn": "Remettre l’élément {{queue_id}} et son groupe dans la file d’envoi",
+    "undoSnapshot": "Annuler avec la copie enregistrée {{snapshot_id}}",
+    "outcomes": {
+      "pending": "En attente de synchronisation",
+      "resolved": "Résolu",
+      "failed": "Non terminé",
+      "unknown": "À vérifier",
+      "rolled_back": "Modification annulée"
+    }
   }
 }

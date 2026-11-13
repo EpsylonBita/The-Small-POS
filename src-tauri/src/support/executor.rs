@@ -12,12 +12,14 @@ use std::time::Instant;
 pub struct Executor {
     pub db: SupportDb,
     pub delivery: Delivery,
+    pixels: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, (Instant, Value)>>>,
 }
 impl Executor {
     pub fn new(db: SupportDb) -> Self {
         Self {
             db,
             delivery: Delivery::default(),
+            pixels: Default::default(),
         }
     }
     pub fn accept(
@@ -68,16 +70,34 @@ impl Executor {
             )
             .optional()
             .map_err(db_error)?;
-        let code = check.err().or_else(|| match session {
-            Some((ref status, last)) if status == "active" => {
-                if c.sequence <= last {
-                    Some("INVALID_INPUT")
-                } else {
-                    None
+        let capture_rate = if c.kind == "till_screenshot" {
+            let (count,last):(u64,Option<String>)=tx.query_row("SELECT count(*),max(accepted_at) FROM support_accepted_commands WHERE session_id=?1 AND kind='till_screenshot'",[&c.session_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(db_error)?;
+            count >= contracts::cap("screenshot", "perSession")
+                || last
+                    .as_deref()
+                    .and_then(|s| clock::parse(s).ok())
+                    .is_some_and(|at| now - at < contracts::cap("screenshot", "intervalMs") as i64)
+        } else {
+            false
+        };
+        let code = check
+            .err()
+            .or(super::confirmed::rate(&tx, c, now).err())
+            .or(if capture_rate {
+                Some("RATE_LIMITED")
+            } else {
+                None
+            })
+            .or_else(|| match session {
+                Some((ref status, last)) if status == "active" => {
+                    if c.sequence <= last {
+                        Some("INVALID_INPUT")
+                    } else {
+                        None
+                    }
                 }
-            }
-            _ => Some("SESSION_ENDED"),
-        });
+                _ => Some("SESSION_ENDED"),
+            });
         if let Some(code) = code {
             refuse(&tx, c, code, now)?;
             tx.commit().map_err(db_error)?;
@@ -90,6 +110,7 @@ impl Executor {
         )
         .map_err(db_error)?;
         audit_local::append(&tx, &entry(c, "accepted", None, None, now)).map_err(db_error)?;
+        super::confirmed::event(&tx, c, "confirmed_command_waiting", now)?;
         tx.commit().map_err(db_error)?;
         Ok(true)
     }
@@ -139,6 +160,7 @@ impl Executor {
             return Err("INVALID_INPUT".into());
         }
         audit_local::append(&tx, &entry(c, "started", None, None, now)).map_err(db_error)?;
+        super::confirmed::event(&tx, c, "confirmed_command_started", now)?;
         tx.commit().map_err(db_error)
     }
     pub fn finish(&mut self, c: &Command, data: Value, now: i64) -> Result<(), String> {
@@ -160,11 +182,29 @@ impl Executor {
         if serde_json::to_vec(&result)
             .map_err(|_| "INTERNAL_ERROR")?
             .len() as u64
-            > contracts::cap("tools", "resultBytes")
+            > result_cap(c)
         {
             return Err("RESULT_TOO_LARGE".into());
         }
-        self.complete(c, result, now, true)
+        let pixels = c.kind == "till_screenshot" && result["data"]["base64"].is_string();
+        self.complete(c, result.clone(), now, true)?;
+        if pixels {
+            let weak = std::sync::Arc::downgrade(&self.pixels);
+            let id = c.command_id.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                if let Some(map) = weak.upgrade() {
+                    if let Ok(mut map) = map.lock() {
+                        map.remove(&id);
+                    }
+                }
+            });
+            self.pixels
+                .lock()
+                .map_err(|_| "INTERNAL_ERROR")?
+                .insert(c.command_id.clone(), (Instant::now(), result));
+        }
+        Ok(())
     }
     pub fn fail_with_data(
         &mut self,
@@ -197,7 +237,7 @@ impl Executor {
         if serde_json::to_vec(&result)
             .map_err(|_| "INTERNAL_ERROR")?
             .len() as u64
-            > contracts::cap("tools", "resultBytes")
+            > result_cap(c)
         {
             return Err("RESULT_TOO_LARGE".into());
         }
@@ -298,6 +338,10 @@ impl Executor {
         tx.commit().map_err(db_error)
     }
     pub fn end(&mut self, id: &str, now: i64) -> Result<(), String> {
+        self.pixels
+            .lock()
+            .map_err(|_| "INTERNAL_ERROR")?
+            .retain(|_, (_, v)| v["session_id"] != id);
         self.db
             .conn
             .execute(
@@ -314,6 +358,9 @@ impl Executor {
         tx.commit().map_err(db_error)
     }
     pub fn pending_results(&self, now: i64) -> Result<Vec<Value>, String> {
+        self.pending_results_limit(now, 200)
+    }
+    pub fn pending_results_limit(&self, now: i64, limit: usize) -> Result<Vec<Value>, String> {
         let tx = super::db::transaction(&self.db.conn).map_err(db_error)?;
         let oldest = now - contracts::cap("transport", "localResultRetentionMs") as i64;
         tx.execute(
@@ -323,14 +370,44 @@ impl Executor {
         .map_err(db_error)?;
         tx.execute("UPDATE support_accepted_commands SET result_json=NULL,result_bytes=NULL,envelope_json=NULL WHERE finished_at<?1",[clock::iso(oldest)]).map_err(db_error)?;
         let strings: Vec<String> = {
-            let mut stmt=tx.prepare("SELECT result_json FROM support_result_outbox WHERE delivered=0 ORDER BY created_ms,command_id LIMIT 200").map_err(db_error)?;
-            let rows = stmt.query_map([], |r| r.get(0)).map_err(db_error)?;
+            let mut stmt=tx.prepare("SELECT result_json FROM support_result_outbox WHERE delivered=0 ORDER BY created_ms,command_id LIMIT ?1").map_err(db_error)?;
+            let rows = stmt
+                .query_map([limit as i64], |r| r.get(0))
+                .map_err(db_error)?;
             rows.collect::<rusqlite::Result<_>>().map_err(db_error)?
         };
         tx.commit().map_err(db_error)?;
         strings
             .into_iter()
-            .map(|s| serde_json::from_str(&s).map_err(|_| "INTERNAL_ERROR".into()))
+            .map(|s| {
+                let mut result: Value = serde_json::from_str(&s).map_err(|_| "INTERNAL_ERROR")?;
+                if result["data"]["mime_type"] == "image/jpeg" {
+                    let id = result["command_id"].as_str().ok_or("INTERNAL_ERROR")?;
+                    let pending = self.pixels.lock().map_err(|_| "INTERNAL_ERROR")?.remove(id);
+                    if let Some((at, pixels)) =
+                        pending.filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(30))
+                    {
+                        let _ = at;
+                        return Ok(pixels);
+                    }
+                    result["status"] = json!("failed");
+                    result["outcome"] = json!("outcome_unknown");
+                    result
+                        .as_object_mut()
+                        .ok_or("INTERNAL_ERROR")?
+                        .remove("data");
+                    result["error_code"] = json!("OUTCOME_UNKNOWN");
+                    result["failure_detail_code"] = json!("SCREENSHOT_ALREADY_CONSUMED");
+                    result
+                        .as_object_mut()
+                        .ok_or("INTERNAL_ERROR")?
+                        .remove("result_sha256");
+                    result["result_sha256"] = json!(contracts::payload_hash(&result));
+                    self.db.conn.execute("UPDATE support_result_outbox SET result_json=?1 WHERE command_id=?2",params![result.to_string(),result["command_id"].as_str()]).map_err(db_error)?;
+                    self.db.conn.execute("UPDATE support_accepted_commands SET result_json=?1 WHERE command_id=?2",params![result.to_string(),result["command_id"].as_str()]).map_err(db_error)?;
+                }
+                Ok(result)
+            })
             .collect()
     }
     pub fn delivered(&self, id: &str, hash: &str) -> Result<(), String> {
@@ -347,11 +424,27 @@ fn complete_on(
     now: i64,
     started: bool,
 ) -> Result<(), String> {
-    let updated=conn.execute("UPDATE support_accepted_commands SET state='finished',finished_at=?1,outcome=?2,result_json=?3,result_bytes=?4 WHERE command_id=?5 AND finished_at IS NULL AND (?6=0 OR state='executing')",params![clock::iso(now),result["outcome"].as_str(),result.to_string(),result.to_string().len(),c.command_id,started]).map_err(db_error)?;
+    let updated=conn.execute("UPDATE support_accepted_commands SET state='finished',finished_at=?1,outcome=?2,result_json=?3,result_bytes=?4 WHERE command_id=?5 AND finished_at IS NULL AND (?6=0 OR state='executing')",params![clock::iso(now),result["outcome"].as_str(),storage_result(result).to_string(),result.to_string().len(),c.command_id,started]).map_err(db_error)?;
     if updated != 1 {
         return Err("INVALID_INPUT".into());
     }
     store_result(conn, c, &result, now)?;
+    super::confirmed::event(
+        conn,
+        c,
+        if result["error_code"].is_string() {
+            "confirmed_command_refused"
+        } else {
+            "confirmed_command_finished"
+        },
+        now,
+    )?;
+    if c.kind == super::confirmed::KIND
+        && c.payload["action"]["action_id"] == "queue.return_to_queue.v1"
+        && !result["error_code"].is_string()
+    {
+        super::confirmed::event(conn, c, "confirmed_command_undone", now)?;
+    }
     conn.execute(
         "UPDATE support_session_state SET result_bytes=result_bytes+?1 WHERE session_id=?2",
         params![result.to_string().len(), c.session_id],
@@ -367,6 +460,25 @@ fn complete_on(
     audit.result_sha256 = result["result_sha256"].as_str().map(str::to_string);
     audit_local::append(conn, &audit).map_err(db_error)?;
     Ok(())
+}
+fn result_cap(c: &Command) -> u64 {
+    contracts::cap(
+        if c.kind == "till_screenshot" {
+            "screenshot"
+        } else {
+            "tools"
+        },
+        "resultBytes",
+    )
+}
+fn storage_result(result: &Value) -> Value {
+    let mut safe = result.clone();
+    if safe["data"]["mime_type"] == "image/jpeg" {
+        if let Some(data) = safe["data"].as_object_mut() {
+            data.remove("base64");
+        }
+    }
+    safe
 }
 fn db_error(_: rusqlite::Error) -> String {
     "INTERNAL_ERROR".into()
@@ -410,7 +522,12 @@ fn make_result(
     if let Some(at) = started {
         timings["started_at"] = json!(at);
     }
+    let detail = code.and_then(|code| super::evidence::split_error(code).1);
+    let code = code.map(|code| super::evidence::split_error(code).0);
     let mut result = json!({"command_id":c.command_id,"session_id":c.session_id,"status":if code.is_some(){"failed"}else{"completed"},"outcome":if code==Some("OUTCOME_UNKNOWN"){"outcome_unknown"}else if code.is_some(){"failed"}else{"succeeded"},"timings":timings});
+    if let Some(detail) = detail {
+        result["failure_detail_code"] = json!(detail);
+    }
     if let Some(data) = data {
         result["data"] = data;
     }
@@ -424,14 +541,22 @@ fn make_result(
         );
     }
     if code == Some("OUTCOME_UNKNOWN") {
-        result["data"] = json!({"verification_guidance":"Verify the current till state and audit before proposing another action. This command will never execute again."});
+        if c.kind == "till_screenshot" {
+            result
+                .as_object_mut()
+                .ok_or("INTERNAL_ERROR")?
+                .remove("data");
+            result["failure_detail_code"] = json!("SCREENSHOT_ALREADY_CONSUMED");
+        } else {
+            result["data"] = json!({"verification_guidance":"Verify the current till state and audit before proposing another action. This command will never execute again."});
+        }
     }
     result["result_sha256"] = json!(contracts::payload_hash(&result));
     Ok(result)
 }
 fn store_result(conn: &Connection, c: &Command, result: &Value, now: i64) -> Result<(), String> {
-    let encoded = result.to_string();
-    if encoded.len() as u64 > contracts::cap("tools", "resultBytes") {
+    let encoded = storage_result(result).to_string();
+    if encoded.len() as u64 > result_cap(c) {
         return Err("RESULT_TOO_LARGE".into());
     }
     let created = result["timings"]["finished_at"]
@@ -464,5 +589,6 @@ fn refuse(conn: &Connection, c: &Command, code: &str, now: i64) -> Result<(), St
     let mut audit = entry(c, "refused", Some(code), Some("failed"), now);
     audit.result_sha256 = result["result_sha256"].as_str().map(str::to_string);
     audit_local::append(conn, &audit).map_err(db_error)?;
+    super::confirmed::event(conn, c, "confirmed_command_refused", now)?;
     store_result(conn, c, &result, now)
 }

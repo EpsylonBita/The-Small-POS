@@ -3231,7 +3231,7 @@ export const IntegrationsPage: React.FC = () => {
                           disabled={saveAction.disabled}
                         />
                       )}
-                      <POSGlassInput
+                      <POSGlassInput data-support-secret
                         label={`${fieldLabel('api_key', 'integrations.fields.apiKey', 'API Key')}${isRequired('api_key') ? ' *' : ''}`}
                         value={pluginForm.api_key}
                         onChange={(event) => setPluginForm(prev => ({ ...prev, api_key: event.target.value }))}
@@ -3240,7 +3240,7 @@ export const IntegrationsPage: React.FC = () => {
                         disabled={saveAction.disabled}
                       />
                       {(isRequired('api_secret') || activePlugin.id !== 'google_analytics') && (
-                        <POSGlassInput
+                        <POSGlassInput data-support-secret
                           label={`${fieldLabel('api_secret', 'integrations.fields.apiSecret', 'API Secret')}${isRequired('api_secret') ? ' *' : ''}`}
                           value={pluginForm.api_secret}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, api_secret: event.target.value }))}
@@ -3280,7 +3280,7 @@ export const IntegrationsPage: React.FC = () => {
                             />
                           )}
                           {isRequired('webhook_secret') && (
-                            <POSGlassInput
+                            <POSGlassInput data-support-secret
                               label={`${fieldLabel('webhook_secret', 'integrations.fields.webhookSecret', 'Webhook Secret')}${isRequired('webhook_secret') ? ' *' : ''}`}
                               value={pluginForm.webhook_secret}
                               onChange={(event) => setPluginForm(prev => ({ ...prev, webhook_secret: event.target.value }))}

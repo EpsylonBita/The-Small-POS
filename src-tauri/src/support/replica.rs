@@ -12,7 +12,13 @@ use std::{
 };
 
 pub fn sql_error(error: rusqlite::Error) -> String {
+    if let Some(detail) = super::evidence::sql_error(&error) {
+        return super::evidence::error(detail);
+    }
     match error.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt) => {
+            return super::evidence::error("BUSINESS_DATABASE_OPEN_FAILED")
+        }
         Some(rusqlite::ErrorCode::OperationInterrupted) => "QUERY_TIMEOUT",
         _ => "POLICY_REFUSED",
     }
@@ -26,11 +32,18 @@ pub fn read_connection(
     if permit.is_cancelled() {
         return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
     }
+    match std::fs::metadata(path) {
+        Ok(_) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(super::evidence::error("BUSINESS_DATABASE_MISSING"))
+        }
+        Err(_) => return Err(super::evidence::error("BUSINESS_DATABASE_OPEN_FAILED")),
+    }
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(sql_error)?;
+    .map_err(|_| super::evidence::error("BUSINESS_DATABASE_OPEN_FAILED"))?;
     conn.busy_timeout(Duration::from_millis(100))
         .map_err(sql_error)?;
     permit.guard_connection(&conn, deadline);
@@ -71,6 +84,17 @@ pub fn safe_key(category: &str, key: &str) -> bool {
                         .all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
             })
 }
+fn cleanup_file(path: &Path) {
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    let _ = std::fs::remove_file(path);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut side = path.as_os_str().to_os_string();
+        side.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(side));
+    }
+}
 struct Scratch(PathBuf);
 impl Scratch {
     fn persist(mut self) -> PathBuf {
@@ -79,7 +103,7 @@ impl Scratch {
 }
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        cleanup_file(&self.0);
     }
 }
 pub struct Replica {
@@ -89,7 +113,7 @@ pub struct Replica {
 }
 impl Drop for Replica {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        cleanup_file(&self.path);
     }
 }
 #[derive(Default)]
@@ -173,6 +197,31 @@ pub(super) fn build_budget() -> Duration {
     Duration::from_millis(contracts::cap("performance", "replicaBuildMs"))
 }
 pub fn build(live: &Path, permit: &SupportPermit) -> Result<Replica, String> {
+    build_evidence(live, permit, false)
+}
+pub fn build_evidence(
+    live: &Path,
+    permit: &SupportPermit,
+    personal: bool,
+) -> Result<Replica, String> {
+    build_inner(live, permit, personal).map_err(|code| {
+        if super::evidence::split_error(&code).1.is_some()
+            || matches!(
+                code.as_str(),
+                "PREEMPTED_BY_CRITICAL_OPERATION" | "QUERY_TIMEOUT" | "RATE_LIMITED"
+            )
+        {
+            code
+        } else if code == "INSUFFICIENT_DISK" {
+            format!("{code}|INSUFFICIENT_FREE_DISK")
+        } else {
+            super::evidence::error("REPLICA_BUILD_FAILED")
+        }
+    })
+}
+fn build_inner(live: &Path, permit: &SupportPermit, personal: bool) -> Result<Replica, String> {
+    let source = read_connection(live, permit, Instant::now() + build_budget())?;
+    drop(source);
     let dir = live
         .parent()
         .ok_or("INTERNAL_ERROR")?
@@ -200,6 +249,7 @@ pub fn build(live: &Path, permit: &SupportPermit) -> Result<Replica, String> {
             .map_err(sql_error)?;
     }
     let snapshot = read_connection(&raw.0, permit, deadline)?;
+    let policy = super::evidence::Policy::load(&snapshot, personal, permit)?;
     let dest = Connection::open(&clean.0).map_err(sql_error)?;
     permit.guard_connection(&dest, deadline);
     let write = crate::db::immediate_transaction(&dest).map_err(sql_error)?;
@@ -262,7 +312,7 @@ pub fn build(live: &Path, permit: &SupportPermit) -> Result<Replica, String> {
                 if (name=="local_settings" || name=="pos_local_config") && matches!(col,"setting_value"|"config_value") {
                     // Only operational printer-brand keys can retain their value.
                     format!("CASE WHEN setting_category='local' AND setting_key GLOB 'printer_last_known_brand:[A-Za-z0-9]*' AND substr(setting_key,26) NOT GLOB '*[^A-Za-z0-9._:-]*' AND length(setting_key)<=278 THEN {} ELSE '[REDACTED]' END",quote(col))
-                } else if classification(&name,col)=="safe" {quote(col)} else {"'[REDACTED]'".into()}
+                } else if matches!(classification(&name,col),"safe"|"free_text") || personal && classification(&name,col)=="pii" {quote(col)} else {"'[REDACTED]'".into()}
             }).collect::<Vec<_>>().join(",");
             // An arbitrary source scan may choose an index on a sensitive
             // column. Do not preserve that ordering as a hidden property of
@@ -296,10 +346,27 @@ pub fn build(live: &Path, permit: &SupportPermit) -> Result<Replica, String> {
                 if permit.is_cancelled() || Instant::now() >= deadline {
                     return Err("QUERY_TIMEOUT".into());
                 }
-                let values = (0..cols.len())
+                let mut values = (0..cols.len())
                     .map(|i| row.get::<_, rusqlite::types::Value>(i))
                     .collect::<rusqlite::Result<Vec<_>>>()
                     .map_err(sql_error)?;
+                for (index, value) in values.iter_mut().enumerate() {
+                    if (name == "local_settings" || name == "pos_local_config")
+                        && matches!(
+                            cols[index]["name"].as_str(),
+                            Some("setting_key" | "setting_category")
+                        )
+                    {
+                        continue;
+                    }
+                    if let rusqlite::types::Value::Text(text) = value {
+                        // JSON free text gets field-level masking before SQL/aliases.
+                        *text = match serde_json::from_str::<Value>(text) {
+                            Ok(v) if v.is_object() || v.is_array() => policy.record(v).to_string(),
+                            _ => policy.string(text),
+                        };
+                    }
+                }
                 insert
                     .execute(rusqlite::params_from_iter(values))
                     .map_err(sql_error)?;

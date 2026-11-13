@@ -928,15 +928,31 @@ pub(crate) fn stage_verified_support_snapshot(
                 rusqlite::params![command,session], |r| r.get(0)).map_err(guards::error)?;
             let c: crate::support::contracts::Command =
                 serde_json::from_str(&raw).map_err(|_| "INVALID_INPUT")?;
-            if c.kind != "breakglass_propose_restore"
-                || c.payload["step"] != "execute"
-                || c.payload["target"]["snapshot_id"] != snapshot.id
-            {
+            let legacy = c.kind == "breakglass_propose_restore"
+                && c.payload["step"] == "execute"
+                && c.payload["target"]["snapshot_id"] == snapshot.id;
+            let confirmed = c.kind == crate::support::confirmed::KIND
+                && c.payload["step"] == "action"
+                && c.payload["action"]["action_id"] == "recovery.undo_snapshot.v1"
+                && c.payload["action"]["inputs"]["snapshot_id"] == snapshot.id
+                && c.payload["founder_confirmed"] == true
+                && c.approval.is_none();
+            if !legacy && !confirmed {
                 return Err("INVALID_INPUT".into());
             }
             let mut result = json!({"command_id":command,"session_id":session,"status":"pending","outcome":"pending",
                 "data":{"snapshot":crate::support::snapshot::metadata(store, &pre_restore.id)?,"restore":{"staged":true,"restart_required":true,"restarted":false,"notice_key":"support.restore.notices.staged"}},
                 "timings":{"accepted_at":c.server_time,"finished_at":clock::iso(now),"ms":0}});
+            if confirmed {
+                result["data"] = crate::support::confirmed_restore::data(
+                    store,
+                    &c,
+                    &pre_restore.id,
+                    "staged_restart",
+                    "pending",
+                    true,
+                )?;
+            }
             result["result_sha256"] = json!(crate::support::contracts::payload_hash(&result));
             let tx = crate::support::db::transaction(store).map_err(guards::error)?;
             crate::support::restore::resume_token(&tx, session, command)?;

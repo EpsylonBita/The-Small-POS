@@ -676,7 +676,7 @@ fn cancellation_budget_is_one_and_intents_cannot_be_used_as_sql_previews() {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        3
+        crate::support::db::VERSION
     );
 }
 
@@ -692,6 +692,7 @@ fn real_session_admission_checks_expiry_visibility_switches_and_merged_kill_list
         .observe(&c.session_id, &c.server_time, Instant::now())
         .unwrap();
     let admission = super::super::delivery::Admission {
+        confirmed: false,
         session_id: c.session_id.clone(),
         active: true,
         online: true,
@@ -776,6 +777,7 @@ fn closeout_catalogue_is_admitted_at_tier_one_and_cancel_stays_proposal_only() {
         .observe(&c.session_id, &c.server_time, Instant::now())
         .unwrap();
     let mut admission = delivery::Admission {
+        confirmed: false,
         session_id: c.session_id.clone(),
         active: true,
         online: true,

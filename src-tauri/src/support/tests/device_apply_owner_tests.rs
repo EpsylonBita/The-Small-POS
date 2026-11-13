@@ -204,6 +204,7 @@ fn native_device_apply_session_admission_never_reads_keyring() {
             .unwrap();
     core.terminal_id = Some("your-terminal".into());
     let info = super::super::transport::SessionInfo {
+        confirmation_mode: None,
         session_id: command.session_id.clone(),
         operator_display_name: "Your support".into(),
         tier_ceiling: 2,

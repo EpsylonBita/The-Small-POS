@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-pub const VERSION: i64 = 3;
+pub const VERSION: i64 = 5;
 #[cfg(test)]
 pub const TABLES: &[&str] = &[
     "support_session_state",
@@ -20,6 +20,8 @@ pub const TABLES: &[&str] = &[
     "support_snapshots",
     "support_quarantine",
     "support_network_evidence",
+    "support_evidence_events",
+    "support_evidence_sessions",
 ];
 
 pub struct SupportDb {
@@ -150,7 +152,10 @@ impl SupportDb {
         if current == 2 {
             migrate_notices(&tx).map_err(|e| e.to_string())?;
         }
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS support_evidence_events(terminal_seq INTEGER PRIMARY KEY,session_id TEXT NOT NULL,command_id TEXT NOT NULL,command_sequence INTEGER NOT NULL,organization_id TEXT NOT NULL,branch_id TEXT NOT NULL,terminal_id TEXT NOT NULL,actor_label TEXT NOT NULL,details_json TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS support_evidence_sessions(session_id TEXT PRIMARY KEY,actor_label TEXT NOT NULL,scope_json TEXT);").map_err(|e|e.to_string())?;
         tx.execute_batch("UPDATE support_device_applies SET state='unknown' WHERE state='saving'; UPDATE support_device_applies SET state='undo_unknown' WHERE state='undoing';").map_err(|e|e.to_string())?;
+        tx.execute_batch(include_str!("confirmed_schema.sql"))
+            .map_err(|e| e.to_string())?;
         tx.pragma_update(None, "user_version", VERSION)
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
@@ -226,7 +231,7 @@ mod tests {
 
     #[test]
     fn notice_upgrade_preserves_every_value_from_each_older_version() {
-        for version in 0..VERSION {
+        for version in 0..3 {
             let conn = Connection::open_in_memory().unwrap();
             let before = if version == 0 {
                 vec![]
@@ -427,7 +432,7 @@ mod tests {
     #[test]
     fn notice_copy_failure_rolls_back_and_startup_reports_unavailable_while_selling_starts() {
         let _keyring = crate::tests::fake_keyring::install_empty();
-        for version in 0..VERSION {
+        for version in 0..3 {
             let root = std::env::temp_dir()
                 .join(format!("support-failed-upgrade-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&root).unwrap();

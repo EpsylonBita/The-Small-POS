@@ -508,7 +508,7 @@ const GiftCardsPage: React.FC = () => {
                   data-testid="gift-card-issued-number"
                   className="mt-2 select-all break-all font-mono text-2xl font-bold tracking-widest"
                 >
-                  {groupCardNumber(issuedNumber)}
+                  <span data-support-secret>{groupCardNumber(issuedNumber)}</span>
                 </p>
                 <p className={`mt-2 text-sm ${mutedClass}`}>{t('giftCards.issue.deliverHint')}</p>
                 <POSGlassButton type="button" variant="secondary" className="mt-3" onClick={() => setIssuedNumber(null)}>
@@ -521,7 +521,7 @@ const GiftCardsPage: React.FC = () => {
               <h2 className="mb-3 text-base font-semibold">{t('giftCards.lookup.title')}</h2>
               <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
                 <div className="flex-1">
-                  <POSGlassInput
+                  <POSGlassInput data-support-secret
                     value={lookupNumber}
                     onChange={(event) => setLookupNumber(event.target.value)}
                     onKeyDown={(event) => {

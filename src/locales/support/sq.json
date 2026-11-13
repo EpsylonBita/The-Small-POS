@@ -48,7 +48,9 @@
     "resolvedAddress": "Adresa e përcaktuar",
     "verificationStatus": "Statusi i verifikimit",
     "recentJobsFailed": "Printime të fundit që dështuan",
-    "printerQueueLength": "Radha e printerit"
+    "printerQueueLength": "Radha e printerit",
+    "screenshot": "Po merret pamja e ekranit të arkës: {{reason}}",
+    "personalData": "Po lexohen të dhënat personale: {{reason}}"
   },
   "fallbacks": {
     "health": {
@@ -451,5 +453,26 @@
     "renewOffline": "Serveri nuk u arrit, ndaj hyrja nuk u rinovua. Provoni përsëri kur arka të jetë online.",
     "renewKeepsShift": "Rinovohet vetëm hyrja juaj në këtë arkë. Mbështetja nuk e sheh kurrë PIN-in. Turni mbetet i hapur dhe nuk tarifohet asgjë.",
     "onShift": "Punonjës në turn"
+  },
+  "confirmed": {
+    "waiting": "Në pritje për të nisur",
+    "running": "Po kryhet tani",
+    "finished": "Përfundoi",
+    "refused": "Nuk mund të kryhej",
+    "undone": "U zhbë",
+    "endSession": "Përfundo",
+    "snapshot": "Ruhet një kopje para çdo ndryshimi",
+    "shiftClose": "Mbyll turnin {{shift_id}} me shumat e numëruara të dhëna",
+    "queueRetry": "Provo sërish dërgimin e rreshtit {{queue_id}}",
+    "queueSetAside": "Lër mënjanë rreshtin {{queue_id}} dhe rreshtat që e presin, duke ruajtur të dhënat e tyre",
+    "queueReturn": "Kthe në radhë rreshtin {{queue_id}} dhe grupin e tij",
+    "undoSnapshot": "Zhbëj me kopjen e ruajtur {{snapshot_id}}",
+    "outcomes": {
+      "pending": "Në pritje të sinkronizimit",
+      "resolved": "U zgjidh",
+      "failed": "Nuk përfundoi",
+      "unknown": "Duhet kontrolluar",
+      "rolled_back": "Ndryshimi u kthye mbrapsht"
+    }
   }
 }

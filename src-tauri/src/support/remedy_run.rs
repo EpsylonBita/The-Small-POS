@@ -469,6 +469,7 @@ pub(crate) mod tests {
         core.terminal_id = Some(terminal.into());
         core.adopt(
             super::super::transport::SessionInfo {
+                confirmation_mode: None,
                 session_id: command.session_id.clone(),
                 operator_display_name: "Your support".into(),
                 tier_ceiling: 2,

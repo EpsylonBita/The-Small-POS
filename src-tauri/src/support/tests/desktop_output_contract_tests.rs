@@ -87,6 +87,17 @@ enum Shape {
     Union(Vec<Shape>),
 }
 use Shape::*;
+
+pub(crate) fn confirmed_result(value: &Value) {
+    let schema: Value =
+        serde_json::from_str(include_str!("../confirmed_result_schema.json")).unwrap();
+    let mut body = value.clone();
+    body.as_object_mut().unwrap().remove("snapshot");
+    assert!(
+        crate::support::delivery::valid_schema(&schema, &body, 0),
+        "confirmed result: {body}"
+    );
+}
 fn text() -> Shape {
     Text(usize::MAX)
 }
@@ -218,7 +229,7 @@ fn shape(tool: &str, path: &str, samples: &[&Value]) -> Shape {
         return enumeration(&["pending", "processing", "failed", "conflict", "set_aside"]);
     }
     if is("till_sync_queue", "items[].payload") || path == "open_shifts[].staff" {
-        return Literal(json!("redacted"));
+        return Union(vec![Literal(json!("redacted")), wrapper(1024)]);
     }
     if is("till_modules", "enabled_modules[].version") {
         return nullable(text());
@@ -481,6 +492,19 @@ fn infer(tool: &str, path: &str, samples: &[&Value]) -> Shape {
                 props.insert(key.clone(), shape(tool, &child, &values));
             }
             let mut optional = vec![];
+            if path.is_empty() {
+                props.insert(
+                    "failure_detail_code".into(),
+                    enumeration(super::super::evidence::DETAILS),
+                );
+                optional.push("failure_detail_code".into());
+                if tool == "till_logs" {
+                    optional.push("coverage".into());
+                }
+                if tool == "till_screenshot" {
+                    optional.push("screen_name".into());
+                }
+            }
             if tool == "till_diagnostics_bundle" && path.is_empty() {
                 props.insert("last_observation_at".into(), nullable(Iso));
                 optional.push("last_observation_at".into());
@@ -665,6 +689,7 @@ fn all_desktop_tier_one_real_collectors_conform_to_closed_goldens() {
         live: db.db_path().into(),
         replicas: Default::default(),
         network: Default::default(),
+        personal_mask: Default::default(),
     };
     for (kind, data) in [
         ("till_sql_refresh_replica", json!({"database":"main"})),
@@ -698,6 +723,95 @@ fn all_desktop_tier_one_real_collectors_conform_to_closed_goldens() {
     .unwrap();
     assert!(read.is_readonly(rusqlite::DatabaseName::Main).unwrap());
     assert_eq!(before, std::fs::read(db.db_path()).unwrap());
+}
+
+#[test]
+fn evidence_inputs_and_real_jpeg_encoder_conform_to_updated_shared_goldens() {
+    use crate::support::{critical_op::CriticalOpGate, evidence, screenshot};
+    use std::time::{Duration, Instant};
+    let _keys = crate::tests::fake_keyring::install_empty();
+    let _global_gate = crate::support::critical_op::install_test_gate();
+    let db = crate::tests::harness::TestDb::open();
+    crate::support::tests::collector_privacy_scan_tests::seed(&db);
+    let gate = CriticalOpGate::new();
+    let permit = gate.try_begin_support(false, None).unwrap();
+    let conn = crate::support::replica::read_connection(
+        db.db_path(),
+        &permit,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+    for personal in [false, true] {
+        let policy = evidence::Policy::load(&conn, personal, &permit).unwrap();
+        for (tool, result) in [
+            (
+                "till_logs",
+                collectors::logs::collect_evidence(
+                    &db.dir().join("support-log-fixture"),
+                    &json!({"detail":"text"}),
+                    &permit,
+                    &policy,
+                )
+                .unwrap(),
+            ),
+            (
+                "till_sync_queue",
+                collectors::sync_queue::collect_evidence(
+                    &conn,
+                    &json!({"include_payload":true}),
+                    &permit,
+                    &policy,
+                )
+                .unwrap(),
+            ),
+            (
+                "till_shifts",
+                collectors::shifts::collect_evidence(&conn, &permit, &policy).unwrap(),
+            ),
+            (
+                "till_diagnostics_bundle",
+                collectors::diagnostics::collect_evidence(
+                    &conn,
+                    &json!({"section":"sync_errors"}),
+                    &permit,
+                )
+                .unwrap(),
+            ),
+        ] {
+            let value = super::evidence_meta(result, &policy).unwrap();
+            let fixture = golden(tool);
+            let schema = shape(tool, "", &[&fixture]);
+            validate(&schema, &value, tool).unwrap();
+            if !personal {
+                for private in crate::support::tests::collector_privacy_scan_tests::PRIVATE {
+                    assert!(!value.to_string().contains(private), "{tool}: {private}");
+                }
+            }
+            if tool == "till_logs" {
+                let text = value["lines"][0]["message"]["value"].as_str().unwrap();
+                assert!(text.contains("Parity sync failed"));
+                assert_eq!(text.contains("PrivCustomerQuokka"), personal);
+            }
+            if tool == "till_sync_queue" {
+                assert_eq!(value["items"][0]["payload"]["kind"], "untrusted_till_data");
+                assert_eq!(value.to_string().contains("PrivCustomerQuokka"), personal);
+            }
+            if tool == "till_shifts" {
+                assert_eq!(value["open_shifts"][0]["staff"].is_object(), personal);
+            }
+        }
+    }
+    let mut jpeg = screenshot::encode(
+        image::DynamicImage::new_rgb8(640, 360),
+        320,
+        &permit,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+    jpeg.as_object_mut().unwrap().remove("base64");
+    jpeg["observation_time"] = json!(chrono::Utc::now().to_rfc3339());
+    jpeg["app_version"] = json!(env!("CARGO_PKG_VERSION"));
+    conforms("till_screenshot", &jpeg);
 }
 
 #[test]

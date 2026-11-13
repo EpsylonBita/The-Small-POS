@@ -143,7 +143,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
           {blockedMessage}
         </p>
       ) : <>
-      <div
+      <div data-support-secret
         aria-label={t('auth.login.pinEntry', 'PIN entry')}
         className="rounded-2xl border border-slate-300 bg-white p-3 text-center shadow-inner dark:border-white/15 dark:bg-slate-950/80"
       >

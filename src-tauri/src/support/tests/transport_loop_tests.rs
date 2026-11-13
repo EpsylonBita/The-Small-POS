@@ -406,6 +406,7 @@ async fn heartbeat_verifies_unattended_proof_and_revocation_restores_attendance(
         core.terminal_id = Some(v["context"]["terminal_id"].as_str().unwrap().into());
         core.adopt(
             SessionInfo {
+                confirmation_mode: None,
                 session_id: id.into(),
                 operator_display_name: "Your support".into(),
                 tier_ceiling: 2,

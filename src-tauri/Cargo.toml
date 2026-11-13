@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.4.149"
+version = "1.4.150"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -163,6 +163,7 @@ windows = { version = "0.62", features = [
   "Win32_NetworkManagement_Ndis",
   "Win32_Networking_WinSock",
   "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
   "Win32_System_Ole",
   "Win32_System_Variant",
 ] }

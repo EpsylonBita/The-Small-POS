@@ -48,7 +48,9 @@
     "resolvedAddress": "Resolved address",
     "verificationStatus": "Verification status",
     "recentJobsFailed": "Failed recent jobs",
-    "printerQueueLength": "Printer queue"
+    "printerQueueLength": "Printer queue",
+    "screenshot": "Capturing the till screen: {{reason}}",
+    "personalData": "Reading personal data: {{reason}}"
   },
   "fallbacks": {
     "health": {
@@ -451,5 +453,26 @@
     "renewOffline": "The server could not be reached, so the sign-in was not renewed. Try again when the till is online.",
     "renewKeepsShift": "This only renews your check-in on this till. Support never sees the PIN. The shift stays open and nothing is charged.",
     "onShift": "Staff member on shift"
+  },
+  "confirmed": {
+    "waiting": "Waiting to run",
+    "running": "Running now",
+    "finished": "Finished",
+    "refused": "Could not run",
+    "undone": "Undone",
+    "endSession": "End",
+    "snapshot": "A copy is saved before every change",
+    "shiftClose": "Close shift {{shift_id}} with the supplied closing counts",
+    "queueRetry": "Retry queue row {{queue_id}}",
+    "queueSetAside": "Set aside row {{queue_id}} and the rows waiting for it, keeping their records",
+    "queueReturn": "Return set-aside row {{queue_id}} and its group to the queue",
+    "undoSnapshot": "Undo using saved copy {{snapshot_id}}",
+    "outcomes": {
+      "pending": "Waiting for sync",
+      "resolved": "Resolved",
+      "failed": "Could not finish",
+      "unknown": "Needs checking",
+      "rolled_back": "Change rolled back"
+    }
   }
 }

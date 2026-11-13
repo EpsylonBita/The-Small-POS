@@ -16,7 +16,7 @@ export function SupportCodeScreen({ view, code, remainingMs, busy, onRetry, onCa
   const message = view === 'offline' ? 'code.needsInternet' : view === 'staff_required' ? 'staff.required'
     : view === 'sign_in_again' ? 'staff.signInAgain' : view === 'expired' || (view === 'code' && !issued)
       ? 'code.expired' : view === 'loading' ? 'code.loading' : 'code.retry';
-  return <section aria-labelledby={titleId} className="space-y-4 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface) p-4 text-(--pos-s-fg)">
+  return <section data-support-secret aria-labelledby={titleId} className="space-y-4 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface) p-4 text-(--pos-s-fg)">
     <h3 id={titleId} className="text-lg font-bold">{t('support.connect.action')}</h3>
     {issued && code ? <>
       <p>{code.terminal_name}</p>

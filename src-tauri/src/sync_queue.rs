@@ -7110,7 +7110,7 @@ fn with_live_generic_claim<T>(
 }
 
 pub fn retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
-    retry_transaction(conn, |conn| {
+    in_own_transaction(conn, |conn| {
         quarantine_existing_refused_table_batches(conn)?;
         refuse_terminal_table_retry(conn, item_id)?;
         let semantic_reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
@@ -7154,6 +7154,37 @@ pub fn retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
         .map_err(|e| format!("sync_queue retry_item: {e}"))?;
         Ok(())
     })
+}
+
+/// Read on the confirmed command's writer reservation. A scheduling reset
+/// cannot make an unacknowledged parent ready or bypass a set-aside original.
+pub(crate) fn support_retry_dependencies_ready(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<(), String> {
+    let row = load_queue_row(conn, item_id)?.ok_or("POLICY_REFUSED")?;
+    let data: Value = serde_json::from_str(&row.data).map_err(|_| "POLICY_REFUSED")?;
+    let order = if row.table_name == "orders" {
+        Some(row.record_id.clone())
+    } else {
+        string_field(&data, &["orderId", "order_id"])
+    };
+    if let Some(order) = order {
+        let parent:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE organization_id=?1 AND table_name='orders' AND record_id=?2 AND id<>?3 AND status IN ('pending','processing','failed','conflict') AND (?4=0 OR operation='INSERT'))",params![row.organization_id,order,item_id,i64::from(row.table_name=="orders")],|r|r.get(0)).map_err(|_|"POLICY_REFUSED")?;
+        if parent {
+            return Err("POLICY_REFUSED".into());
+        }
+    }
+    if let Some(shift) = string_field(
+        &data,
+        &["staffShiftId", "staff_shift_id", "shiftId", "shift_id"],
+    ) {
+        let waiting:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE organization_id=? AND table_name='staff_shifts' AND record_id=? AND operation='INSERT' AND id<>? AND status IN ('pending','processing','failed','conflict'))",params![row.organization_id,shift,item_id],|r|r.get(0)).map_err(|_|"POLICY_REFUSED")?;
+        if waiting {
+            return Err("POLICY_REFUSED".into());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn renderer_retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
@@ -19168,6 +19199,7 @@ fn record_row_set_aside(
     table_name: &str,
     record_id: &str,
     insert_only: bool,
+    organization_id: &str,
 ) -> Result<bool, String> {
     conn.query_row(
         "SELECT EXISTS(
@@ -19177,8 +19209,14 @@ fn record_row_set_aside(
              WHERE queued.table_name = ?1
                AND queued.record_id = ?2
                AND (?3 = 0 OR queued.operation = 'INSERT')
+               AND queued.organization_id = ?4
          )",
-        params![table_name, record_id, i64::from(insert_only)],
+        params![
+            table_name,
+            record_id,
+            i64::from(insert_only),
+            organization_id
+        ],
         |row| row.get(0),
     )
     .map_err(|e| format!("sync_queue read parent set-aside: {e}"))
@@ -19200,7 +19238,13 @@ fn waiting_parent_is_set_aside(conn: &Connection, row: &SyncQueueItem) -> Result
             shift_ids_named_by(row, &payload)
         };
         for shift_id in shift_ids {
-            if record_row_set_aside(conn, "staff_shifts", shift_id.trim(), true)? {
+            if record_row_set_aside(
+                conn,
+                "staff_shifts",
+                shift_id.trim(),
+                true,
+                &row.organization_id,
+            )? {
                 return Ok(true);
             }
         }
@@ -19213,13 +19257,23 @@ fn waiting_parent_is_set_aside(conn: &Connection, row: &SyncQueueItem) -> Result
             string_field(&payload, &["orderId", "order_id"])
         };
         return match order_id {
-            Some(order_id) => record_row_set_aside(conn, "orders", order_id.trim(), true),
+            // Dispatch also waits behind an order UPDATE. Its retained edit
+            // must be set aside with the money waiting on that same order.
+            Some(order_id) => {
+                record_row_set_aside(conn, "orders", order_id.trim(), false, &row.organization_id)
+            }
             None => Ok(false),
         };
     }
     if error.starts_with("Waiting for parent payment") {
         return match string_field(&payload, &["paymentId", "payment_id"]) {
-            Some(payment_id) => record_row_set_aside(conn, "payments", payment_id.trim(), false),
+            Some(payment_id) => record_row_set_aside(
+                conn,
+                "payments",
+                payment_id.trim(),
+                false,
+                &row.organization_id,
+            ),
             None => Ok(false),
         };
     }
@@ -19235,10 +19289,45 @@ pub(crate) fn rows_waiting_on_queue_row(
     conn: &Connection,
     queue_id: &str,
 ) -> Result<Vec<String>, String> {
+    dependent_queue_rows(conn, queue_id, false)
+}
+/// The retained group can originate in Health as well as in support. Its
+/// unchanged dependency waits prove membership even after markers were added.
+pub(crate) fn retained_set_aside_group(
+    conn: &Connection,
+    root: &str,
+) -> Result<Vec<String>, String> {
+    if !queue_row_is_set_aside(conn, root)? {
+        return Err("SET_ASIDE_NOT_FOUND".into());
+    }
+    let mut group = vec![root.to_string()];
+    let mut i = 0;
+    while i < group.len() {
+        for id in dependent_queue_rows(conn, &group[i], true)? {
+            if queue_row_is_set_aside(conn, &id)? && !group.contains(&id) {
+                group.push(id)
+            }
+        }
+        if group.len() > SET_ASIDE_GROUP_LIMIT as usize {
+            return Err("SET_ASIDE_NOT_ELIGIBLE".into());
+        }
+        i += 1;
+    }
+    Ok(group)
+}
+fn dependent_queue_rows(
+    conn: &Connection,
+    queue_id: &str,
+    including_set_aside: bool,
+) -> Result<Vec<String>, String> {
     let Some(parent) = load_queue_row(conn, queue_id)? else {
         return Ok(Vec::new());
     };
-    let not_set_aside = set_aside_exclusion_sql("waiting");
+    let not_set_aside = if including_set_aside {
+        "1".to_string()
+    } else {
+        set_aside_exclusion_sql("waiting")
+    };
     let payload = serde_json::from_str::<Value>(&parent.data).unwrap_or(Value::Null);
     let (sql, key): (String, String) = match (parent.table_name.as_str(), parent.operation.as_str())
     {
@@ -19255,10 +19344,11 @@ pub(crate) fn rows_waiting_on_queue_row(
                 waiting_for_shift_open_reason(&shift_id),
             )
         }
-        ("orders", "INSERT") => (
+        ("orders", "INSERT" | "UPDATE") => (
             format!(
                 "SELECT waiting.id FROM parity_sync_queue AS waiting
                   WHERE waiting.status = 'pending' AND waiting.id <> ?1
+                    AND waiting.organization_id = (SELECT organization_id FROM parity_sync_queue WHERE id = ?1)
                     AND (waiting.error_message LIKE 'Waiting for parent order%'
                          OR waiting.error_message = '{FISCAL_ORDER_WAIT_REASON}')
                     AND (waiting.record_id = ?2
@@ -19491,6 +19581,8 @@ pub(crate) fn undo_set_aside(
             .optional()
             .map_err(|e| format!("sync_queue read set-aside entry: {e}"))?
             .ok_or_else(|| "SET_ASIDE_NOT_FOUND".to_string())?;
+        // A manager may still return a row a Z already lists (unchanged store
+        // rule). Support refuses such a row before it calls this owner.
         conn.execute(
             "DELETE FROM parity_sync_set_aside WHERE queue_id = ?1",
             params![queue_id],
@@ -43894,3 +43986,6 @@ pub(crate) mod edit_canonical_drift_tests;
 #[cfg(test)]
 #[path = "sync_queue_scaling_tests.rs"]
 mod scaling_tests;
+
+#[cfg(test)]
+mod confirmed_queue_tests;

@@ -110,6 +110,7 @@ pub fn query(replica: &Replica, input: &Value, permit: &SupportPermit) -> Result
     }
     let start = Instant::now();
     let conn = replica::query_connection(replica, permit, start + Duration::from_secs(5))?;
+    drop(conn.prepare(sql).map_err(replica::sql_error)?);
     prepared_read_with_empty_tail(&conn, sql)?;
     let mut stmt = conn.prepare(sql).map_err(replica::sql_error)?;
     if !stmt.readonly() {
@@ -141,7 +142,11 @@ pub fn query(replica: &Replica, input: &Value, permit: &SupportPermit) -> Result
                 ValueRef::Text(s) => {
                     let s = String::from_utf8_lossy(s);
                     cells |= s.chars().count() > 1024;
-                    redaction::text(&s.chars().take(1024).collect::<String>())
+                    super::evidence::Policy {
+                        personal: super::evidence::personal(input)?,
+                        ..Default::default()
+                    }
+                    .text(&s)
                 }
                 ValueRef::Blob(_) => redaction::text(redaction::MARKER),
             };

@@ -870,7 +870,7 @@ const GiftCardFundingPanel: React.FC<GiftCardFundingPanelProps> = ({
             {t(cashierAvailability ? 'giftCards.funding.renew.required' : 'giftCards.funding.renew.optional')}
           </p>
           <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-            <input
+            <input data-support-secret
               ref={renewPinRef}
               type="password"
               inputMode="numeric"
@@ -1026,7 +1026,7 @@ const GiftCardFundingPanel: React.FC<GiftCardFundingPanelProps> = ({
                     </option>
                   ))}
                 </select>
-                <input
+                <input data-support-secret
                   ref={managerPinRef}
                   type="password"
                   inputMode="numeric"

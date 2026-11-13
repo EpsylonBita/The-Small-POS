@@ -4444,6 +4444,10 @@ fn validated_support_availability(value: &Value) -> Option<Value> {
     object
         .entry("catalogue_mutations")
         .or_insert(Value::Bool(false));
+    let confirmed = object.remove("confirmed_commands");
+    if confirmed.as_ref().is_some_and(|v| !v.is_boolean()) {
+        return None;
+    }
     let value = &value;
     let consent = &value["consent"];
     (keys(
@@ -4488,7 +4492,13 @@ fn validated_support_availability(value: &Value) -> Option<Value> {
         && consent["accepting_base_roles"]
             .as_array()
             .is_some_and(|a| a.iter().all(|s| s.as_str().is_some_and(|s| !s.is_empty()))))
-    .then(|| value.clone())
+    .then(|| {
+        let mut value = value.clone();
+        if let Some(confirmed) = confirmed {
+            value["confirmed_commands"] = confirmed;
+        }
+        value
+    })
 }
 
 async fn send_terminal_heartbeat_with_sender<F, Fut>(

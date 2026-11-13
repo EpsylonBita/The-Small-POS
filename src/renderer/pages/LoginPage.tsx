@@ -592,7 +592,7 @@ export default function LoginPage({ onLogin, exitPhase = null, onLeft }: LoginPa
                 <motion.div variants={pageMotionItem} className="mb-4 sm:mb-6 relative z-10">
                     {/* Founder 31/10: one dot per digit the till expects, filling as the PIN is typed; they
                         pulse while the PIN is checked. A wrong PIN shakes the field. */}
-                    <div
+                    <div data-support-secret
                         key={`pin-field-${shakeCount}`}
                         data-testid="login-pin-field"
                         className={`relative bg-white/10 border border-white/20 rounded-xl p-3 sm:p-4 ${shakeCount > 0 ? 'pos-login-shake' : ''}`}
@@ -747,7 +747,7 @@ export default function LoginPage({ onLogin, exitPhase = null, onLeft }: LoginPa
                                     <label htmlFor="setup-new-pin" className="liquid-glass-modal-text-muted text-sm font-medium block mb-2">
                                         {t('login.newPin', 'New PIN (6 digits)')}
                                     </label>
-                                    <input
+                                    <input data-support-secret
                                         id="setup-new-pin"
                                         type="password"
                                         inputMode="numeric"
@@ -764,7 +764,7 @@ export default function LoginPage({ onLogin, exitPhase = null, onLeft }: LoginPa
                                     <label htmlFor="setup-confirm-pin" className="liquid-glass-modal-text-muted text-sm font-medium block mb-2">
                                         {t('login.confirmPin', 'Confirm PIN')}
                                     </label>
-                                    <input
+                                    <input data-support-secret
                                         id="setup-confirm-pin"
                                         type="password"
                                         inputMode="numeric"

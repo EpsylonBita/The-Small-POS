@@ -24,6 +24,8 @@ pub struct Target {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Stored {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Vec<Value>>,
     pub result: Value,
     pub targets: Vec<Target>,
     #[serde(rename = "sessionId")]
@@ -32,7 +34,11 @@ pub struct Stored {
 pub fn payload_digest(payload: &Value) -> Result<String, String> {
     let mut p = payload.as_object().ok_or("INVALID_INPUT")?.clone();
     p.remove("step");
-    Ok(contracts::payload_hash(&Value::Object(p)))
+    Ok(if p.contains_key("params") {
+        super::confirmed_hash::hash(&Value::Object(p))
+    } else {
+        contracts::payload_hash(&Value::Object(p))
+    })
 }
 pub fn target_hash(targets: &[Target]) -> String {
     let mut keys = targets
@@ -88,6 +94,7 @@ pub fn result(
     }
     let r = json!({"dry_run_id":uuid::Uuid::new_v4().to_string(),"payload_sha256":payload_digest(payload)?,"target_key_sha256":target_hash(&targets),"expires_at":super::clock::iso(now+600000),"duration_ms":duration,"rows_cap_evaluated":cap,"rows_affected":rows,"write_targets":facts.writes_json(),"reads":facts.reads_json(),"functions":facts.functions,"protected_violations":[],"cascaded_effects":[],"synced_to_server_warning":targets.iter().any(|t|t.before.as_ref().is_some_and(|r|r["sync_status"]=="synced")),"free_disk_ok":true,"critical_operation_active":false,"pii_reads_flagged":facts.pii,"samples":samples});
     Ok(Stored {
+        params: payload.get("params").and_then(Value::as_array).cloned(),
         result: r,
         targets,
         session: session.into(),
@@ -190,7 +197,23 @@ pub fn live_targets(
     sql: &str,
     scope: &Scope,
 ) -> Result<Vec<Target>, String> {
-    let facts = authorizer::inspect(c, policy, sql)?;
+    live_targets_bound(c, policy, sql, scope, None)
+}
+pub fn live_targets_bound(
+    c: &Connection,
+    policy: &Policy,
+    original: &str,
+    scope: &Scope,
+    bindings: Option<&[rusqlite::types::Value]>,
+) -> Result<Vec<Target>, String> {
+    let numbered;
+    let sql = if bindings.is_some() {
+        numbered = number_bindings(original)?;
+        &numbered
+    } else {
+        original
+    };
+    let facts = authorizer::inspect(c, policy, original)?;
     if facts.writes.len() != 1 {
         return Err("POLICY_REFUSED".into());
     }
@@ -278,14 +301,17 @@ pub fn live_targets(
         .iter()
         .find(|t| t.name == *table)
         .ok_or("POLICY_REFUSED")?;
-    let found = guards::rows(
-        c,
-        &format!(
-            "SELECT * FROM {} WHERE ({predicate})",
-            replica::quote(table)
-        ),
-        &[],
-    )?;
+    let query = format!(
+        "SELECT * FROM {} WHERE ({predicate})",
+        replica::quote(table)
+    );
+    let count = c.prepare(&query).map_err(guards::error)?.parameter_count();
+    let selected = if let Some(bindings) = bindings {
+        bindings.get(..count).ok_or("INVALID_INPUT")?
+    } else {
+        &[]
+    };
+    let found = guards::rows(c, &query, selected)?;
     found
         .into_iter()
         .map(|row| {
@@ -337,10 +363,22 @@ pub fn sql(
             }
         }
     }
-    let expected = live_targets(&c, &policy, sql, scope)?;
+    let bindings = payload
+        .get("params")
+        .map(|_| super::confirmed_sql::params_of(payload))
+        .transpose()?;
+    let expected = if bindings.is_some() {
+        live_targets_bound(&c, &policy, sql, scope, bindings.as_deref())?
+    } else {
+        live_targets(&c, &policy, sql, scope)?
+    };
     let before = capture(&c, facts.writes.keys().cloned())?;
     let tx = crate::db::immediate_transaction(&c).map_err(guards::error)?;
-    let count = authorizer::payload(&c, &policy, sql)?;
+    let count = if let Some(bindings) = &bindings {
+        authorizer::payload_bound(&c, &policy, sql, bindings)?
+    } else {
+        authorizer::payload(&c, &policy, sql)?
+    };
     let targets = changed(&c, &before)?;
     if count != targets.len() || target_hash(&targets) != target_hash(&expected) {
         return Err("PAYLOAD_DRIFT".into());
@@ -375,4 +413,44 @@ pub fn sql(
     }
     save(store, &record, proposal, now)?;
     Ok(record.result)
+}
+
+/// Number only anonymous bindings, keeping quoted question marks untouched.
+/// Used solely in native target selection, never in a supplied statement.
+fn number_bindings(sql: &str) -> Result<String, String> {
+    let b = sql.as_bytes();
+    let mut out = String::new();
+    let mut last = 0;
+    let mut i = 0;
+    let mut index = 0;
+    while i < b.len() {
+        if [b'\'', b'"', b'`', b'['].contains(&b[i]) {
+            let q = if b[i] == b'[' { b']' } else { b[i] };
+            i += 1;
+            while i < b.len() {
+                if b[i] == q {
+                    i += 1;
+                    if b.get(i) == Some(&q) {
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+                i += 1;
+            }
+        } else if b[i] == b'?' {
+            if b.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                return Err("INVALID_INPUT".into());
+            }
+            index += 1;
+            out.push_str(&sql[last..i]);
+            out.push_str(&format!("?{index}"));
+            i += 1;
+            last = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&sql[last..]);
+    Ok(out)
 }

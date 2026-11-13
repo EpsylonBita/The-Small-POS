@@ -34,6 +34,13 @@ pub fn capabilities() -> Vec<String> {
     if handlers().lock().is_ok_and(|h| !h.is_empty()) {
         caps.push("support.tier1.v1".into());
     }
+    if handlers().lock().is_ok_and(|h| !h.is_empty()) {
+        caps.push("support.evidence.v1".into());
+    }
+    if super::screenshot::available() {
+        caps.push("support.screenshot.v1".into());
+    }
+    caps.push(super::confirmed::CAPABILITY.into());
     caps.push("support.tier2.v1".into());
     caps.push("support.tier3.v1".into());
     caps
@@ -130,7 +137,17 @@ pub async fn drive(app: &tauri::AppHandle, rt: &Arc<Runtime>) {
         let app = app.clone();
         let rt = rt.clone();
         let _ = run_blocking_command("support_dispatch", move || {
-            let handler = handlers().lock().ok().and_then(|h| h.get(&c.kind).cloned());
+            let handler = if c.kind=="till_screenshot" {
+                Some(Arc::new(|c:&Command,permit:&SupportPermit| {
+                    let (reason,edge)=super::screenshot::input(&c.payload)?;
+                    let app=super::screenshot::application().ok_or_else(||super::evidence::error("SCREEN_CAPTURE_UNAVAILABLE"))?;
+                    let path=app.path().app_data_dir().map_err(|_|"INTERNAL_ERROR")?.join("support.db");
+                    super::evidence::journal(&path,c,serde_json::json!({"event":"screenshot_requested","command_id":c.command_id,"reason":reason,"max_edge":edge}))?;
+                    let result=super::screenshot::capture(edge,permit)?;
+                    super::evidence::journal(&path,c,serde_json::json!({"event":"screenshot_captured","command_id":c.command_id,"reason":reason,"byte_size":result["byte_size"],"sha256":result["sha256"]}))?;
+                    Ok(result)
+                }) as TierOneHandler)
+            } else {handlers().lock().ok().and_then(|h| h.get(&c.kind).cloned())};
             let mut core = rt.core.lock().map_err(|_| "INTERNAL_ERROR".to_string())?;
             let visible = window_visible(&app);
             if !admit_presented(
@@ -186,6 +203,16 @@ pub async fn drive(app: &tauri::AppHandle, rt: &Arc<Runtime>) {
                 spawn_catalogue(app, rt, c, path, Some(proof));
                 return Ok(());
             }
+            if c.kind==super::confirmed::KIND {
+                let super::session::Core{executor,clock,..}=&mut *core;
+                if let Err(code)=executor.start(&c,&a,clock){executor.refuse_queued(&c,&code,now)?;return Ok(())}
+                let path=core.executor.db.path.clone();drop(core);
+                tokio::task::spawn_blocking(move ||{
+                    let result=(||{let store=rusqlite::Connection::open(path).map_err(|_|"INTERNAL_ERROR")?;store.busy_timeout(std::time::Duration::from_millis(100)).map_err(|_|"INTERNAL_ERROR")?;super::confirmed::run(&app,&rt,&store,&c)})();
+                    if let Ok(mut core)=rt.core.lock(){let now=core.now();match result{Ok(data) if data["evidence"]["state"]=="staged_restart"=>{},Ok(data)=>{if let Err(code)=core.executor.finish(&c,data,now){let _=core.executor.fail(&c,&code,now);}},Err(code)=>{let _=core.executor.fail(&c,&code,now);}}}
+                });return Ok(());
+            }
+            let evidence_started=std::time::Instant::now();
             let permit = match critical_op::global().try_begin_support(false, None) {
                 Ok(p) => p,
                 Err("deferred_critical_operation") => {
@@ -290,7 +317,9 @@ pub async fn drive(app: &tauri::AppHandle, rt: &Arc<Runtime>) {
             drop(core);
             // No runtime, support DB, gate or business DB mutex is held while
             // collector code runs. Every collector must honor the cancel flag.
+            let presentation=if c.kind=="till_screenshot" || c.payload["include_personal_data"]==true {super::evidence::wait_presented(&c.command_id,&permit)}else{Ok(())};
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                presentation?;
                 handler.ok_or("FEATURE_DISABLED")?(&c, &permit)
             }))
             .unwrap_or_else(|_| Err("INTERNAL_ERROR".into()));
@@ -308,7 +337,8 @@ pub async fn drive(app: &tauri::AppHandle, rt: &Arc<Runtime>) {
                 } else {
                     "PREEMPTED_BY_CRITICAL_OPERATION"
                 };
-                core.executor.fail(&c, code, now)?;
+                let detail=critical_op::global().activity_between(evidence_started,std::time::Instant::now()).and_then(|v|v.into_iter().find_map(super::evidence::preemption));
+                core.executor.fail(&c, &detail.map(|detail|format!("{code}|{detail}")).unwrap_or_else(||code.into()), now)?;
             } else {
                 match result {
                     Ok(data) => {

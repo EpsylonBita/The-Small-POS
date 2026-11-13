@@ -1,6 +1,11 @@
 use super::*;
 pub fn collect(conn: &Connection) -> Result<Value, String> {
-    let observation = crate::diagnostics::support_health_observation(conn);
+    from_observation(crate::diagnostics::support_health_observation(conn))
+}
+pub fn collect_at(path: &std::path::Path) -> Result<Value, String> {
+    from_observation(crate::diagnostics::support_health_observation_at(path))
+}
+fn from_observation(observation: Value) -> Result<Value, String> {
     let at = observation["at"]
         .as_str()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
@@ -53,7 +58,9 @@ pub fn collect(conn: &Connection) -> Result<Value, String> {
             issues.push(json!({"code":code,"severity":"warning","area":area,"recommended_action_id":"open_health","recommended_action":redaction::text("Open Health to review the observation."),"observed_at":observation["at"],"stale":stale}));
         }
     }
-    Ok(
-        json!({"health_state":if !available {"unavailable"} else if stale {"stale"} else if !complete {"unavailable"} else if issues.is_empty() {"healthy"} else {"issues"},"last_observation_ok":complete && !stale,"last_observation_at":observation["at"],"issues":issues}),
-    )
+    let mut result = json!({"health_state":if !available {"unavailable"} else if stale {"stale"} else if !complete {"unavailable"} else if issues.is_empty() {"healthy"} else {"issues"},"last_observation_ok":complete && !stale,"last_observation_at":observation["at"],"issues":issues});
+    if !available || !complete {
+        result["failure_detail_code"] = json!("HEALTH_OBSERVATION_MISSING");
+    }
+    Ok(result)
 }

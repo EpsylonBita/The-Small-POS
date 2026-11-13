@@ -559,7 +559,7 @@ export function GiftCardTender({
       )}
       {formVisible && (
         <div className="space-y-2">
-          <input
+          <input data-support-secret
             type="text"
             aria-label={t('giftCardCheckout.cardNumber', 'Gift card number')}
             placeholder={t('giftCardCheckout.cardNumberPlaceholder', 'Scan or type the card number')}

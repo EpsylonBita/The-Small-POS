@@ -48,7 +48,9 @@
     "resolvedAddress": "Indirizzo risolto",
     "verificationStatus": "Stato verifica",
     "recentJobsFailed": "Lavori recenti non riusciti",
-    "printerQueueLength": "Coda stampante"
+    "printerQueueLength": "Coda stampante",
+    "screenshot": "Acquisizione dello schermo della cassa: {{reason}}",
+    "personalData": "Lettura dei dati personali: {{reason}}"
   },
   "fallbacks": {
     "health": {
@@ -451,5 +453,26 @@
     "renewOffline": "Il server non è raggiungibile, quindi l’accesso non è stato rinnovato. Riprova quando la cassa è online.",
     "renewKeepsShift": "Si rinnova solo il tuo accesso su questa cassa. L’assistenza non vede mai il PIN. Il turno resta aperto e non viene addebitato nulla.",
     "onShift": "Persona in turno"
+  },
+  "confirmed": {
+    "waiting": "In attesa di iniziare",
+    "running": "In esecuzione",
+    "finished": "Completato",
+    "refused": "Impossibile eseguire",
+    "undone": "Annullato",
+    "endSession": "Termina",
+    "snapshot": "Una copia viene salvata prima di ogni modifica",
+    "shiftClose": "Chiudi il turno {{shift_id}} con gli importi contati indicati",
+    "queueRetry": "Riprova l’invio della voce {{queue_id}}",
+    "queueSetAside": "Metti da parte la voce {{queue_id}} e quelle in attesa, conservandone i dati",
+    "queueReturn": "Rimetti in coda la voce {{queue_id}} e il suo gruppo",
+    "undoSnapshot": "Annulla usando la copia salvata {{snapshot_id}}",
+    "outcomes": {
+      "pending": "In attesa di sincronizzazione",
+      "resolved": "Risolto",
+      "failed": "Non completato",
+      "unknown": "Da verificare",
+      "rolled_back": "Modifica annullata"
+    }
   }
 }

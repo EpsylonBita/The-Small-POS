@@ -14,6 +14,147 @@ fn now() -> i64 {
 }
 
 #[test]
+fn evidence_failure_details_survive_envelopes_without_native_exception_text() {
+    for detail in crate::support::evidence::DETAILS {
+        let (root, mut executor) = fixture();
+        let command = command();
+        let admission = admission();
+        let clock = clock();
+        executor.accept(&command, &admission, &clock).unwrap();
+        executor.start(&command, &admission, &clock).unwrap();
+        executor
+            .fail(&command, &crate::support::evidence::error(detail), now())
+            .unwrap();
+        let results = executor.pending_results(now()).unwrap();
+        assert_eq!(results[0]["error_code"], "INTERNAL_ERROR");
+        assert_eq!(results[0]["failure_detail_code"], *detail);
+        drop(executor);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn screenshot_pixels_never_enter_durable_outbox_and_can_be_uploaded_only_once() {
+    let (root, mut executor) = fixture();
+    let mut command = command();
+    command.kind = "till_screenshot".into();
+    command.payload = json!({"reason":"Review the failed order"});
+    command.payload_sha256 = crate::support::contracts::payload_hash(&command.payload);
+    let admission = admission();
+    let clock = clock();
+    executor.accept(&command, &admission, &clock).unwrap();
+    executor.start(&command, &admission, &clock).unwrap();
+    let gate = crate::support::critical_op::CriticalOpGate::new();
+    let permit = gate.try_begin_support(false, None).unwrap();
+    let data = crate::support::screenshot::encode(
+        image::DynamicImage::new_rgb8(320, 240),
+        320,
+        &permit,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let pixels = data["base64"].as_str().unwrap().to_string();
+    executor.finish(&command, data, now()).unwrap();
+    let stored: String = executor
+        .db
+        .conn
+        .query_row("SELECT result_json FROM support_result_outbox", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(!stored.contains("base64"));
+    assert!(!stored.contains(&pixels));
+    let first = executor.pending_results_limit(now(), 3).unwrap();
+    assert_eq!(first[0]["data"]["base64"], pixels);
+    let accounted: i64 = executor
+        .db
+        .conn
+        .query_row("SELECT result_bytes FROM support_session_state", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(accounted as usize, first[0].to_string().len());
+    let repeat = executor.pending_results_limit(now(), 3).unwrap();
+    assert_eq!(repeat[0]["error_code"], "OUTCOME_UNKNOWN");
+    assert_eq!(
+        repeat[0]["failure_detail_code"],
+        "SCREENSHOT_ALREADY_CONSUMED"
+    );
+    assert!(repeat[0].get("data").is_none());
+    executor
+        .delivered(
+            &command.command_id,
+            repeat[0]["result_sha256"].as_str().unwrap(),
+        )
+        .unwrap();
+    assert!(executor.pending_results(now()).unwrap().is_empty());
+    executor
+        .db
+        .conn
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    let bytes = std::fs::read(&executor.db.path).unwrap();
+    assert!(!bytes.windows(pixels.len()).any(|v| v == pixels.as_bytes()));
+    drop(executor);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_screenshot_attempts_count_towards_durable_five_second_and_twenty_per_session_caps() {
+    let (root, mut executor) = fixture();
+    let mut command = command();
+    command.kind = "till_screenshot".into();
+    command.payload = json!({"reason":"Review the failed order"});
+    command.payload_sha256 = crate::support::contracts::payload_hash(&command.payload);
+    let admission = admission();
+    let clock = clock();
+    assert!(executor.accept(&command, &admission, &clock).unwrap());
+    executor.start(&command, &admission, &clock).unwrap();
+    executor
+        .fail(
+            &command,
+            &crate::support::evidence::error("SCREEN_CONTAINS_SECRETS"),
+            now(),
+        )
+        .unwrap();
+    let mut next = command.clone();
+    next.command_id = uuid::Uuid::new_v4().to_string();
+    next.idempotency_key = "your_next_screenshot_01".into();
+    next.sequence = 2;
+    assert!(!executor.accept(&next, &admission, &clock).unwrap());
+    assert!(executor
+        .pending_results(now())
+        .unwrap()
+        .iter()
+        .any(|r| r["command_id"] == next.command_id && r["error_code"] == "RATE_LIMITED"));
+    executor
+        .db
+        .conn
+        .execute(
+            "UPDATE support_accepted_commands SET accepted_at='2026-11-01T11:00:00.000Z'",
+            [],
+        )
+        .unwrap();
+    for sequence in 2..=20 {
+        executor.db.conn.execute("INSERT INTO support_accepted_commands(command_id,session_id,sequence,kind,payload_sha256,idempotency_key,accepted_at) VALUES(?1,?2,?3,'till_screenshot','your-hash',?4,'2026-11-01T11:00:00.000Z')",rusqlite::params![uuid::Uuid::new_v4().to_string(),command.session_id,sequence,format!("your_capped_key_{sequence}")]).unwrap();
+    }
+    next.command_id = uuid::Uuid::new_v4().to_string();
+    next.idempotency_key = "your_next_screenshot_21".into();
+    next.sequence = 21;
+    assert!(!executor.accept(&next, &admission, &clock).unwrap());
+    assert_eq!(
+        crate::support::contracts::cap("screenshot", "perSession"),
+        20
+    );
+    assert_eq!(
+        crate::support::contracts::cap("screenshot", "intervalMs"),
+        5000
+    );
+    drop(executor);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn durable_acceptance_precedes_execution_and_replay_or_out_of_order_is_never_started() {
     let (root, mut e) = fixture();
     let c = command();
@@ -283,5 +424,28 @@ fn local_end_discards_a_pending_batch_with_bounded_durable_commits() {
     assert!(e.queued().unwrap().is_empty());
     assert_eq!(e.pending_results(now()).unwrap().len(), 20);
     drop(e);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn interrupted_screenshot_restart_uses_data_free_consumed_transport() {
+    let (root, mut executor) = fixture();
+    let mut command = command();
+    command.kind = "till_screenshot".into();
+    command.payload = json!({"reason":"Review the failed order"});
+    command.payload_sha256 = crate::support::contracts::payload_hash(&command.payload);
+    executor.accept(&command, &admission(), &clock()).unwrap();
+    executor.start(&command, &admission(), &clock()).unwrap();
+    drop(executor);
+    let mut executor = Executor::new(SupportDb::open(&root).unwrap());
+    executor.recover(now()).unwrap();
+    let result = executor.pending_results(now()).unwrap();
+    assert_eq!(result[0]["error_code"], "OUTCOME_UNKNOWN");
+    assert_eq!(
+        result[0]["failure_detail_code"],
+        "SCREENSHOT_ALREADY_CONSUMED"
+    );
+    assert!(result[0].get("data").is_none());
+    drop(executor);
     std::fs::remove_dir_all(root).unwrap();
 }

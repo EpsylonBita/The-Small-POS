@@ -356,7 +356,7 @@ export const POSGlassPINInput: React.FC<POSGlassPINInputProps> = ({
   }
 
   return (
-    <div className={cn("flex gap-3 justify-center", className)}>
+    <div data-support-secret className={cn("flex gap-3 justify-center", className)}>
       {Array.from({ length }, (_, index) => (
         <input
           key={index}

@@ -17,6 +17,7 @@ pub(super) fn command() -> Command {
 }
 pub(super) fn admission() -> Admission {
     Admission {
+        confirmed: false,
         session_id: command().session_id,
         active: true,
         online: true,

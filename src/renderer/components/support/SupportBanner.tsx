@@ -9,7 +9,7 @@ import { supportCountdown } from './SupportCodeScreen';
 
 // Native sends a command kind; use shipped labels rather than showing a tool ID.
 const activityLabels: Readonly<Record<string, string>> = {
-  till_health: 'sync.labels.health', till_error_codes: 'support.evidence.syncError',
+  till_confirmed_command: 'support.confirmed.running', till_screenshot: 'support.banner.activity', till_health: 'sync.labels.health', till_error_codes: 'support.evidence.syncError',
   till_sync_queue: 'support.evidence.pendingQueue', till_printers: 'sync.system.printers',
   till_settings: 'settings.title', till_shifts: 'settings.recovery.shifts',
   till_modules: 'settings.managedByAdmin.enabledModulesLabel', till_diagnostics_bundle: 'support.actions.exportDiagnostics',
@@ -34,6 +34,14 @@ export function SupportBannerView({ snapshot, onEnd, onExtend }: {
   snapshot: SupportBannerSnapshot; onEnd(): void; onExtend(): void;
 }) {
   const { t } = useTranslation();
+  useEffect(() => {
+    if (!snapshot.executing_command_id || !snapshot.evidence_reason || (snapshot.current_activity_key !== 'till_screenshot' && !snapshot.personal_data_open)) return;
+    let second = 0;
+    const first = requestAnimationFrame(() => { second = requestAnimationFrame(() => {
+      void supportIpc('support_banner_state', { visible: !document.hidden, evidence_command_id: snapshot.executing_command_id }).catch(() => { /* Native fails closed if the pill cannot acknowledge. */ });
+    }); });
+    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
+  }, [snapshot.executing_command_id, snapshot.evidence_reason, snapshot.current_activity_key, snapshot.personal_data_open]);
   const [expanded, setExpanded] = useState(false);
   const [endedVisible, setEndedVisible] = useState(true);
   useEffect(() => {
@@ -44,6 +52,7 @@ export function SupportBannerView({ snapshot, onEnd, onExtend }: {
   }, [snapshot.state]);
   if (!snapshot.state || (snapshot.state === 'ended' && !endedVisible)) { return null; }
   const activity = snapshot.current_activity_key;
+  const confirmed = activity === 'till_confirmed_command' ? (snapshot.confirmed_command_id ? snapshot.confirmed_history?.find(row => row.command_id === snapshot.confirmed_command_id) : snapshot.confirmed_history?.[0]) : undefined;
   const knownActivity = activity && Object.prototype.hasOwnProperty.call(SUPPORT_GREEK_REFERENCE, activity);
   const activityKey = activity && Object.prototype.hasOwnProperty.call(activityLabels, activity) ? activityLabels[activity] : null;
   const activityLabel = knownActivity ? t(`support.${activity}`) : t(activityKey ?? 'support.banner.activity');
@@ -62,8 +71,10 @@ export function SupportBannerView({ snapshot, onEnd, onExtend }: {
         <span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${stateDots[snapshot.state]}`} />
         <span className="min-w-0">
           <span role="status" className="block font-semibold leading-tight">{t(`support.banner.${snapshot.state}`)}</span>
+          {confirmed && <span data-testid="support-confirmed-explanation" className="block break-words text-xs leading-tight">{t(`support.confirmed.${confirmed.state === 'started' ? 'running' : confirmed.state}`)}: {confirmed.explanation}<span className="block text-(--pos-s-muted)">{confirmed.reason}</span></span>}
           {/* One small line under the state: what support is doing right now, else who is connected. */}
-          {(activity || snapshot.operator_name) && <span className="block break-words text-xs leading-tight text-(--pos-s-muted)">{activity ? activityLabel : snapshot.operator_name}</span>}
+          {snapshot.evidence_reason && (activity === 'till_screenshot' || snapshot.personal_data_open) && <span data-testid="support-evidence-reason" className="block break-words text-xs leading-tight">{t(activity === 'till_screenshot' ? 'support.evidence.screenshot' : 'support.evidence.personalData', { reason: snapshot.evidence_reason })}</span>}
+          {(activity || snapshot.operator_name) && !confirmed && !(snapshot.evidence_reason && (activity === 'till_screenshot' || snapshot.personal_data_open)) && <span className="block break-words text-xs leading-tight text-(--pos-s-muted)">{activity ? activityLabel : snapshot.operator_name}</span>}
         </span>
       </button>
       {snapshot.state !== 'ended' && <span role="timer" aria-label={t('support.code.timeLeft')} className="shrink-0 px-1 text-sm tabular-nums">{supportCountdown(snapshot.remaining_ms)}</span>}
@@ -73,13 +84,15 @@ export function SupportBannerView({ snapshot, onEnd, onExtend }: {
       </button>}
       <button type="button" onClick={onEnd}
         className="-my-1 flex min-h-[48px] min-w-[48px] shrink-0 whitespace-nowrap items-center justify-center rounded-full text-sm font-bold active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2">
-        <span className="rounded-full bg-(--pos-s-sel-bg) px-4 py-1.5 text-(--pos-s-sel-fg) shadow-(--pos-s-depth-yellow)">{t('support.banner.end')}</span>
+        <span className="rounded-full bg-(--pos-s-sel-bg) px-4 py-1.5 text-(--pos-s-sel-fg) shadow-(--pos-s-depth-yellow)">{t(confirmed ? 'support.confirmed.endSession' : 'support.banner.end')}</span>
       </button>
     </div>
     {/* The details float under the pill: opening them never moves the screen below. */}
     {expanded && <div className="pos-glass-panel absolute left-1/2 top-full z-10 mt-2 w-[min(22rem,calc(100vw-1rem))] -translate-x-1/2 space-y-2 rounded-3xl border p-3 text-sm shadow-(--pos-s-depth-card)">
       {activity && snapshot.operator_name && <p className="break-words font-semibold">{snapshot.operator_name}</p>}
       {activity && !knownActivity && !activityKey && <p className="break-words">{activity}</p>}
+      {confirmed && <p>{confirmed.reason}</p>}
+      <SupportConfirmedHistory rows={snapshot.confirmed_history} />
       <p>{t('support.banner.noPinPromise')}</p>
       {canExtend && <button type="button" onClick={requestExtension}
         className="min-h-[48px] min-w-[48px] rounded-full bg-(--pos-s-raised) px-4 font-semibold shadow-(--pos-s-depth) active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 sm:hidden">
@@ -137,4 +150,17 @@ export function SupportBanner() {
         </>}
     </div>}
   </div>, document.body);
+}
+
+/** A support record time in the app language; an unreadable value is shown as it came. */
+export function supportRecordTime(at: string, language?: string): string {
+  const date = new Date(at);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString(language) : at;
+}
+
+export function SupportConfirmedHistory({rows=[]}:{rows?:SupportBannerSnapshot['confirmed_history']}){
+  const {t,i18n}=useTranslation();
+  if(!rows.length)return null;
+  const latest=[...new Map([...rows].reverse().map(row=>[row.command_id,row])).values()].reverse();
+  return <div data-testid="support-confirmed-history" className="space-y-2"><p>{t('support.confirmed.snapshot')}</p>{latest.map(row=><div key={row.command_id} className="break-words"><p>{row.explanation}</p><p>{row.reason}</p><p><time dateTime={row.at}>{supportRecordTime(row.at, i18n?.language)}</time> · {t(`support.confirmed.${row.state==='started'?'running':row.state}`)}{row.outcome?` · ${t(`support.confirmed.outcomes.${row.outcome}`)}`:''}</p></div>)}</div>;
 }

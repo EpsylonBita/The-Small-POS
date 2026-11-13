@@ -1186,7 +1186,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 <label className="block text-sm font-medium liquid-glass-modal-text">
                   {t('settings.deviceSetup.posKey', 'POS key')}
                   <span className="relative mt-1 block">
-                    <input
+                    <input data-support-secret
                       value={apiKey}
                       aria-label={t('settings.deviceSetup.posKey', 'POS key')}
                       onChange={e => setApiKey(e.target.value)}
@@ -1291,7 +1291,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
             <>
               <div>
                 <label htmlFor="settings-new-pin" className="block text-sm font-medium mb-1 liquid-glass-modal-text">{t('modals.connectionSettings.newPin')}</label>
-                <input
+                <input data-support-secret
                   id="settings-new-pin"
                   value={pin}
                   onChange={e => setPin(e.target.value.replace(/[^0-9]/g, ''))}
@@ -1304,7 +1304,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               </div>
               <div>
                 <label htmlFor="settings-confirm-pin" className="block text-sm font-medium mb-1 liquid-glass-modal-text">{t('modals.connectionSettings.confirmPin')}</label>
-                <input
+                <input data-support-secret
                   id="settings-confirm-pin"
                   value={confirmPin}
                   onChange={e => setConfirmPin(e.target.value.replace(/[^0-9]/g, ''))}

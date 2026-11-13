@@ -80,7 +80,7 @@ mod tests {
     #[test]
     fn embedded_contracts_drift() {
         let c = shared();
-        assert_eq!(c.kinds.len(), 30);
+        assert_eq!(c.kinds.len(), 32);
         assert_eq!(c.error_codes.len(), 39);
         assert_eq!(c.payload_schemas.len(), c.kinds.len());
         assert_eq!(c.probes["catalogue"].as_object().unwrap().len(), 5);
@@ -118,7 +118,7 @@ mod tests {
                 .len(),
             2
         );
-        assert_eq!(c.caps.as_object().unwrap().len(), 12);
+        assert_eq!(c.caps.as_object().unwrap().len(), 14);
         assert_eq!(c.write_policy["default"], "protected");
         assert_eq!(cap("transport", "tillCommandsPerMinute"), 120);
         assert_eq!(cap("onsite", "writeTransactionMs"), 250);

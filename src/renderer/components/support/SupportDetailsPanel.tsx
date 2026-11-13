@@ -1,3 +1,4 @@
+import { SupportConfirmedHistory } from './SupportBanner';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { z } from 'zod';
@@ -88,10 +89,11 @@ export function SupportDetailsPanel({ active = true }: { active?: boolean }) {
   // Shown when something can be acted on, or when a list could not be read (never shown as empty).
   // Hidden, it renders nothing, not even the closed confirmation modal: the Health view must
   // render outside the app's i18n provider too. Only an action still in flight keeps the modal.
-  if (undoable.length === 0 && !restorable && !quarantined && !confirm && !failed && !recoveryFailed) {
+  if (!session.snapshot?.confirmed_history?.length && undoable.length === 0 && !restorable && !quarantined && !confirm && !failed && !recoveryFailed) {
     return busy ? confirmationModal : null;
   }
   return <section data-testid="support-details-panel" className="space-y-3 text-(--pos-s-fg)">
+    <SupportConfirmedHistory rows={session.snapshot?.confirmed_history} />
     <h4 className="text-sm font-bold">{t('support.restore.changesTitle')}</h4>
     {applies.map(apply => <div key={apply.id} className="flex flex-wrap items-center gap-3">
       <span className="break-all">{apply.device_id}</span>

@@ -24,3 +24,7 @@ mod terminal_cmd_tests;
 mod write_guard_tests;
 
 mod transaction_admission_tests;
+
+mod evidence_tests;
+
+mod confirmed_tests;

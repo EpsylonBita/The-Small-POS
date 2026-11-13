@@ -10,6 +10,7 @@ use std::{
 #[derive(Clone, Debug)]
 pub struct Admission {
     pub session_id: String,
+    pub confirmed: bool,
     pub active: bool,
     pub online: bool,
     pub visible: bool,
@@ -102,7 +103,14 @@ pub fn recheck(
     {
         return Err("INVALID_INPUT");
     }
-    if contracts::payload_hash(&c.payload) != c.payload_sha256 {
+    let digest = if c.kind == super::confirmed::KIND
+        || c.kind == "breakglass_propose_sql" && c.payload.get("params").is_some()
+    {
+        super::confirmed_hash::hash(&c.payload)
+    } else {
+        contracts::payload_hash(&c.payload)
+    };
+    if digest != c.payload_sha256 {
         return Err("PAYLOAD_MISMATCH");
     }
     let schema = contracts::shared()
@@ -111,6 +119,15 @@ pub fn recheck(
         .ok_or("INVALID_INPUT")?;
     if !valid_schema(schema, &c.payload, 0) {
         return Err("INVALID_INPUT");
+    }
+    if super::evidence::PERSONAL_TOOLS.contains(&c.kind.as_str())
+        && super::evidence::personal(&c.payload).is_err()
+        || c.kind == "till_screenshot" && super::screenshot::input(&c.payload).is_err()
+    {
+        return Err("INVALID_INPUT");
+    }
+    if c.kind == "till_confirmed_command" {
+        super::confirmed::validate(c, a.confirmed)?;
     }
     if !a.online {
         return Err("TILL_OFFLINE");

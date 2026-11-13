@@ -34,6 +34,7 @@ pub struct Tools {
     live: PathBuf,
     replicas: Mutex<ReplicaManager>,
     network: Mutex<network::DiscoveryState>,
+    personal_mask: Mutex<Option<(String, super::evidence::Policy)>>,
 }
 fn installed() -> &'static Mutex<Option<Arc<Tools>>> {
     static TOOLS: OnceLock<Mutex<Option<Arc<Tools>>>> = OnceLock::new();
@@ -50,6 +51,7 @@ pub fn initialize(dir: &Path) -> Result<(), String> {
         live: dir.join("pos.db"),
         replicas: Mutex::default(),
         network: Mutex::default(),
+        personal_mask: Mutex::default(),
     });
     // register only native reviewed handlers, never code from a command payload.
     for kind in KINDS {
@@ -70,6 +72,9 @@ pub fn end_session() {
         if let Ok(mut replica) = tools.replicas.lock() {
             replica.clear();
         }
+        if let Ok(mut mask) = tools.personal_mask.lock() {
+            *mask = None;
+        }
         if let Ok(mut network) = tools.network.lock() {
             *network = network::DiscoveryState::default();
         }
@@ -82,11 +87,85 @@ impl Tools {
         // read `payload["data"]`, a key nobody sends, so every argument arrived
         // empty: a query had no SQL, diagnostics no section, and both answered
         // INVALID_INPUT on a real till (12/11/2026).
+        if permit.is_cancelled() {
+            return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+        }
         let input = &c.payload;
+        let personal = super::evidence::personal(input)?;
+        if personal && !super::evidence::PERSONAL_TOOLS.contains(&c.kind.as_str()) {
+            return Err("INVALID_INPUT".into());
+        }
+        if personal {
+            super::evidence::journal(
+                &self.live.with_file_name("support.db"),
+                c,
+                json!({"event":"personal_data_access","command_id":c.command_id,"tool":c.kind,"reason":super::evidence::reason(input)?.ok_or("INVALID_INPUT")?}),
+            )?;
+        }
+        let evidence_tool = super::evidence::PERSONAL_TOOLS.contains(&c.kind.as_str());
+        let cached_section = c.kind == "till_diagnostics_bundle"
+            && [
+                "about",
+                "system_health",
+                "runtime_logs",
+                "health_view",
+                "terminal_context",
+                "diagnostics_manifest",
+            ]
+            .iter()
+            .any(|s| input["section"] == *s);
+        let needs_mask = evidence_tool
+            && !cached_section
+            && !personal
+            && c.kind != "till_sql_query"
+            && !(c.kind == "till_logs" && input["detail"] != "text")
+            && !(c.kind == "till_diagnostics_bundle" && input["section"] == "about");
+        let policy = if needs_mask {
+            let prior = self
+                .personal_mask
+                .lock()
+                .map_err(|_| "INTERNAL_ERROR")?
+                .clone()
+                .filter(|(session, _)| session == &c.session_id)
+                .map(|(_, p)| p);
+            match replica::read_connection(
+                &self.live,
+                permit,
+                Instant::now() + Duration::from_secs(5),
+            ) {
+                Ok(conn) => {
+                    let policy = super::evidence::Policy::load(&conn, false, permit)?;
+                    *self.personal_mask.lock().map_err(|_| "INTERNAL_ERROR")? =
+                        Some((c.session_id.clone(), policy.clone()));
+                    Some(policy)
+                }
+                Err(_) if prior.is_some() => prior,
+                Err(code) => return Err(code),
+            }
+        } else if cached_section && !personal {
+            self.personal_mask
+                .lock()
+                .map_err(|_| "INTERNAL_ERROR")?
+                .clone()
+                .filter(|(session, _)| session == &c.session_id)
+                .map(|(_, p)| p)
+        } else {
+            None
+        };
+        let empty = super::evidence::Policy {
+            personal,
+            ..Default::default()
+        };
+        let evidence_policy = policy.as_ref().unwrap_or(&empty);
         let result = match c.kind.as_str() {
             "till_sql_query" | "till_sql_schema" | "till_sql_refresh_replica" => {
                 if input["database"].as_str().is_some_and(|db| db != "main") {
                     return Err("UNSUPPORTED_ON_PLATFORM".into());
+                }
+                if c.kind == "till_sql_query" && personal {
+                    let replica = replica::build_evidence(&self.live, permit, true)?;
+                    let value = sql_query::query(&replica, input, permit)?;
+                    return evidence_meta(value, evidence_policy);
                 }
                 let mut manager = self.replicas.lock().map_err(|_| "INTERNAL_ERROR")?;
                 let at = Instant::now();
@@ -143,8 +222,29 @@ impl Tools {
                 self.audit_network_result(c, &result)?;
                 result
             }
-            "till_logs" => {
-                collectors::logs::collect(&crate::diagnostics::get_log_dir(), input, permit)?
+            "till_logs" => collectors::logs::collect_evidence(
+                &crate::diagnostics::get_log_dir(),
+                input,
+                permit,
+                evidence_policy,
+            )?,
+            "till_health" => collectors::health::collect_at(&self.live)?,
+            "till_diagnostics_bundle"
+                if [
+                    "about",
+                    "system_health",
+                    "runtime_logs",
+                    "health_view",
+                    "terminal_context",
+                    "diagnostics_manifest",
+                ]
+                .iter()
+                .any(|section| input["section"] == *section) =>
+            {
+                crate::diagnostics::support_cached_section(
+                    &self.live,
+                    input["section"].as_str().ok_or("INVALID_INPUT")?,
+                )
             }
             "till_error_codes" => collectors::error_codes::collect(input, permit)?,
             kind => {
@@ -158,12 +258,19 @@ impl Tools {
                 match kind {
                     "till_health" => collectors::health::collect(&conn)?,
                     "till_settings" => collectors::settings::collect(&conn)?,
-                    "till_sync_queue" => collectors::sync_queue::collect(&conn, &permit)?,
-                    "till_shifts" => collectors::shifts::collect(&conn, &permit)?,
+                    "till_sync_queue" => collectors::sync_queue::collect_evidence(
+                        &conn,
+                        input,
+                        permit,
+                        evidence_policy,
+                    )?,
+                    "till_shifts" => {
+                        collectors::shifts::collect_evidence(&conn, permit, evidence_policy)?
+                    }
                     "till_modules" => collectors::modules::collect(&conn)?,
                     "till_printers" => collectors::printers::collect(&conn)?,
                     "till_diagnostics_bundle" => {
-                        collectors::diagnostics::collect(&conn, input, permit)?
+                        collectors::diagnostics::collect_evidence(&conn, input, permit)?
                     }
                     _ => return Err("FEATURE_DISABLED".into()),
                 }
@@ -172,7 +279,11 @@ impl Tools {
         if permit.is_cancelled() {
             return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
         }
-        collectors::meta(result)
+        if evidence_tool {
+            evidence_meta(result, evidence_policy)
+        } else {
+            collectors::meta(result)
+        }
     }
     fn public_admin_base(&self, permit: &SupportPermit) -> Result<Option<String>, String> {
         let conn =
@@ -288,6 +399,29 @@ impl Tools {
     }
 }
 
+fn evidence_meta(mut value: Value, policy: &super::evidence::Policy) -> Result<Value, String> {
+    super::evidence::mark_unavailable(&mut value);
+    value["observation_time"] = json!(chrono::Utc::now().to_rfc3339());
+    value["app_version"] = json!(env!("CARGO_PKG_VERSION"));
+    let rows = if value.get("section").is_some() {
+        50
+    } else {
+        500
+    };
+    fn cut(value: &Value, rows: usize) -> bool {
+        match value {
+            Value::Array(list) => list.len() > rows || list.iter().any(|v| cut(v, rows)),
+            Value::Object(map) => map.values().any(|v| cut(v, rows)),
+            _ => false,
+        }
+    }
+    if rows == 50 && cut(&value["content"], 50) {
+        if let Some(entries) = value["truncation"].as_array_mut() {
+            entries.push(json!({"field":"content","reason":"rows"}));
+        }
+    }
+    Ok(policy.record_rows(value, rows))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,4 +585,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "tests/desktop_output_contract_tests.rs"]
-mod desktop_output_contract_tests;
+pub(crate) mod desktop_output_contract_tests;

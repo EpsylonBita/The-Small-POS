@@ -844,6 +844,15 @@ fn load_cash_drawer_snapshot_for_shift(
 /// For calculation_version >= 2, recorded staff payouts for the cashier shift are
 /// used as the source of truth, with the cash drawer aggregate as a fallback.
 pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
+    close_shift_with_support(db, payload, None)
+}
+/// Optional support observer owns no business policy: the normal owner still
+/// performs every eligibility/accounting check. Refusal rolls back its close.
+pub(crate) fn close_shift_with_support(
+    db: &DbState,
+    payload: &Value,
+    support: Option<&dyn Fn(&rusqlite::Connection, bool) -> Result<(), String>>,
+) -> Result<Value, String> {
     let shift_id = str_field(payload, "shiftId")
         .or_else(|| str_field(payload, "shift_id"))
         .ok_or("Missing shiftId")?;
@@ -1008,12 +1017,23 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         };
 
     if role_type == "cashier" || role_type == "manager" {
-        let blockers = load_checkout_payment_blockers_with_auto_repair(
-            db,
-            &shift_branch_id,
-            shift_business_day.period_start_at.as_str(),
-            now.as_str(),
-        )?;
+        let blockers = if support.is_some() {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            payment_integrity::load_branch_window_payment_blockers(
+                &conn,
+                &shift_branch_id,
+                shift_business_day.period_start_at.as_str(),
+                Some(now.as_str()),
+                true,
+            )?
+        } else {
+            load_checkout_payment_blockers_with_auto_repair(
+                db,
+                &shift_branch_id,
+                shift_business_day.period_start_at.as_str(),
+                now.as_str(),
+            )?
+        };
         if !blockers.is_empty() {
             return Ok(payment_integrity::build_unsettled_payment_blocker_response(
                 "Cannot close shift",
@@ -1031,6 +1051,13 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     // subsequent UPDATEs, which would cause an incorrect cash variance.
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
+
+    if let Some(check) = support {
+        if let Err(e) = check(&conn, false) {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
+    }
 
     // The gift-bound admission rereads the confirmed opening, its open
     // mirrors, current hosted fingerprint and unresolved funding under this
@@ -1649,6 +1676,12 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     match result {
         Ok((expected, variance, gift_original)) => {
+            if let Some(check) = support {
+                if let Err(e) = check(&conn, true) {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(e);
+                }
+            }
             if let Err(e) = conn.execute_batch("COMMIT") {
                 // A failed gift-bound commit must not leave its capture open.
                 if gift_original.is_some() {

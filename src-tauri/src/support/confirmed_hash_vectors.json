@@ -1,0 +1,167 @@
+[
+  {
+    "value": {
+      "params": [
+        0,
+        "0",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "08c9cc75986edb0566a57daf6c217ed1fd5fda0148748e3ca613382ed04e5356"
+  },
+  {
+    "value": {
+      "params": [
+        1e-7,
+        "1e-7",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "7a2ed69e7c3c21bd01d86452e9eeaf59cb8e9394b920268c8c4523e76323efa4"
+  },
+  {
+    "value": {
+      "params": [
+        0.000001,
+        "0.000001",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "a96bbc8e9896433d9b1e5b59e234fae10695a3c0f06fa336891fe4deb690044b"
+  },
+  {
+    "value": {
+      "params": [
+        0.00001,
+        "0.00001",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "21171724458d43223109aff45bfbc038b6dbaecb815f84cedaeb593b729fa890"
+  },
+  {
+    "value": {
+      "params": [
+        100000000000000000000,
+        "100000000000000000000",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "20516f2496e2baa4fef209c9e55a02db6d8d192d2c37082fa50067016d02d8b5"
+  },
+  {
+    "value": {
+      "params": [
+        1e+21,
+        "1e+21",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "f7b54bcf059cd6701f0718c5c361ec172bd99bb9812ef08e3ef6c6cee5bd7b18"
+  },
+  {
+    "value": {
+      "params": [
+        1e+23,
+        "1e+23",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "ffcab2d180191c706be93de3646f0374e0af3280aa4d90893f8fd8fb80d75907"
+  },
+  {
+    "value": {
+      "params": [
+        0.1,
+        "0.1",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "c381d11c9b6f9595bb72e5ec7a7a553b86862a0ffbaa284c2ec477cffd0ef682"
+  },
+  {
+    "value": {
+      "params": [
+        1.25,
+        "1.25",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "de74cdd59d8f0b55c3b4efca8ba1c03516f5548005312b2f9ebf5838a1dd2bb0"
+  },
+  {
+    "value": {
+      "params": [
+        1.2345678901234567,
+        "1.2345678901234567",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "de992de563a4358e41bcd7e2dbbb8724d45412e24aeb7e679f57f16376721632"
+  },
+  {
+    "value": {
+      "params": [
+        9007199254740991,
+        "9007199254740991",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "477c07d9319f7fe57402fab1aab3b04bb4c8dc0487dd436bb332c9f3ebd9849e"
+  },
+  {
+    "value": {
+      "params": [
+        9007199254740992,
+        "9007199254740992",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "9bc3b070d55ef58ef11005515c7e75432c43943131ce46c5974f3da1b3871025"
+  },
+  {
+    "value": {
+      "params": [
+        1000000000000000100,
+        "1000000000000000100",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "c8380b44f8f21524f8f786a51fef9522c5e48088ba7bd6ee8c11ed82e41b4ce8"
+  },
+  {
+    "value": {
+      "params": [
+        1.7976931348623157e+308,
+        "1.7976931348623157e+308",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "7d919cfb4eb06d9147ce7264face032f0a219629058f547bc3b77043e148a04c"
+  },
+  {
+    "value": {
+      "params": [
+        5e-324,
+        "5e-324",
+        null
+      ],
+      "sql": "UPDATE reviewed SET value=? WHERE id=?"
+    },
+    "sha256": "8bde569965dd304000d0fd497e3a590daa92952e212eb2ac55d2b12b3e977642"
+  }
+]

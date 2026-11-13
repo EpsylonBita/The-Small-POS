@@ -27,6 +27,7 @@ pub struct NativeSession {
     pub admission: Admission,
 }
 pub struct Core {
+    pub command_consent: bool,
     pub verifier: super::approval_verify::Verifier,
     pub terminal_id: Option<String>,
     pub executor: Executor,
@@ -120,6 +121,7 @@ impl Core {
         let rotation = super::key_rotation::Schedule::resume(&executor.db.conn)
             .map_err(|_| "INTERNAL_ERROR")?;
         Ok(Self {
+            command_consent: false,
             verifier: super::approval_verify::Verifier::pinned(),
             terminal_id: None,
             executor,
@@ -143,7 +145,7 @@ impl Core {
         let Some((id, command, max, absolute)) = pending else {
             return Ok(false);
         };
-        let local:bool=self.executor.db.conn.query_row("SELECT EXISTS(SELECT 1 FROM support_accepted_commands WHERE command_id=?1 AND session_id=?2 AND kind='breakglass_propose_restore' AND started_at IS NOT NULL AND finished_at IS NULL AND state IN ('restore_swapped','restore_rolled_back','restore_unknown') AND json_extract(envelope_json,'$.payload.step')='execute' AND json_extract(envelope_json,'$.payload.target.kind')='snapshot')",params![command,id],|r|r.get(0)).map_err(|_|"INTERNAL_ERROR")?;
+        let local:bool=self.executor.db.conn.query_row("SELECT EXISTS(SELECT 1 FROM support_accepted_commands WHERE command_id=?1 AND session_id=?2 AND started_at IS NOT NULL AND finished_at IS NULL AND state IN ('restore_swapped','restore_rolled_back','restore_unknown') AND ((kind='breakglass_propose_restore' AND json_extract(envelope_json,'$.payload.step')='execute' AND json_extract(envelope_json,'$.payload.target.kind')='snapshot') OR (kind='till_confirmed_command' AND json_extract(envelope_json,'$.payload.mode')='founder_conversation' AND json_extract(envelope_json,'$.payload.action.action_id')='recovery.undo_snapshot.v1' AND json_extract(envelope_json,'$.payload.founder_confirmed')=1)))",params![command,id],|r|r.get(0)).map_err(|_|"INTERNAL_ERROR")?;
         let proof = response.and_then(|r| {
             let info = r.session?;
             let now = clock::parse(&r.server_time).ok()?;
@@ -171,6 +173,7 @@ impl Core {
                     .map_err(str::to_string)?
                     .min(clock::parse(&absolute).map_err(str::to_string)?),
             );
+            self.command_consent=self.executor.db.conn.query_row("SELECT EXISTS(SELECT 1 FROM support_confirmed_sessions WHERE session_id=? AND consent_version=? AND mode='founder_conversation')",params![id,super::confirmed::CONSENT_VERSION],|r|r.get(0)).map_err(|_|"INTERNAL_ERROR")?;
             self.adopt(info, &time)?;
             self.session
                 .as_mut()
@@ -324,6 +327,8 @@ impl Core {
         Ok(())
     }
     pub fn adopt(&mut self, mut info: SessionInfo, server_time: &str) -> Result<(), String> {
+        let scope=critical_op::global().try_begin_support(false,None).ok().and_then(|permit|super::replica::read_connection(&self.executor.db.path.with_file_name("pos.db"),&permit,Instant::now()+Duration::from_secs(1)).ok().and_then(|conn|super::identity::local(&conn).ok())).map(|scope|json!({"organization_id":scope.organization_id,"branch_id":scope.branch_id,"terminal_id":scope.terminal_id}).to_string());
+        self.executor.db.conn.execute("INSERT INTO support_evidence_sessions(session_id,actor_label,scope_json) VALUES(?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET actor_label=excluded.actor_label,scope_json=COALESCE(excluded.scope_json,support_evidence_sessions.scope_json)",params![info.session_id,info.operator_display_name,scope]).map_err(|_|"INTERNAL_ERROR")?;
         if !(1..=3).contains(&info.tier_ceiling)
             || info.doorbell_topic != format!("support:session:{}", info.session_id)
         {
@@ -349,6 +354,7 @@ impl Core {
                 .min(absolute),
         );
         let a = Admission {
+            confirmed: false,
             session_id: info.session_id.clone(),
             active: false,
             online: true,
@@ -359,6 +365,10 @@ impl Core {
             max_expires_at: info.max_expires_at.clone(),
         };
         self.executor.db.conn.execute("INSERT INTO support_session_state(session_id,status,tier_ceiling,max_expires_at,absolute_cap_at,last_server_time,updated_at) VALUES (?1,'pending_ack',?2,?3,?4,?5,?5) ON CONFLICT(session_id) DO NOTHING",params![info.session_id,info.tier_ceiling,info.max_expires_at,info.absolute_cap_at,server_time]).map_err(|_|"INTERNAL_ERROR")?;
+        if self.command_consent && info.confirmation_mode.as_deref() == Some("founder_conversation")
+        {
+            self.executor.db.conn.execute("INSERT INTO support_confirmed_sessions VALUES(?,?,?) ON CONFLICT(session_id) DO NOTHING",params![info.session_id,super::confirmed::CONSENT_VERSION,"founder_conversation"]).map_err(|_|"INTERNAL_ERROR")?;
+        }
         self.code = None;
         self.awaiting_open = false;
         self.session = Some(NativeSession { info, admission: a });
@@ -400,6 +410,15 @@ impl Core {
         s.admission.tier_ceiling = s.admission.tier_ceiling.min(h.tier_ceiling);
         s.admission.max_expires_at = max_expires_at;
         s.admission.online = true;
+        let confirmed = self.command_consent
+            && s.info.confirmation_mode.as_deref() == Some("founder_conversation")
+            && h.consent["state"] == "valid"
+            && h.consent["text_version"] == "1.1"
+            && h.unattended.is_none();
+        if s.admission.confirmed && !confirmed {
+            critical_op::global().cancel_support();
+        }
+        s.admission.confirmed = confirmed;
         self.schedule.success();
         let last_seq: i64 = self
             .executor
@@ -441,7 +460,7 @@ impl Core {
         let Some(s) = &self.session else {
             return Ok(None);
         };
-        self.executor.db.conn.query_row("SELECT command_id,kind,state FROM support_accepted_commands WHERE session_id=?1 AND state IN ('executing','awaiting_onsite') ORDER BY CASE state WHEN 'executing' THEN 0 ELSE 1 END LIMIT 1",[&s.info.session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|_|"INTERNAL_ERROR".into())
+        self.executor.db.conn.query_row("SELECT command_id,kind,state FROM support_accepted_commands WHERE session_id=?1 AND (state IN ('executing','awaiting_onsite') OR (kind='till_confirmed_command' AND started_at IS NULL AND finished_at IS NULL)) ORDER BY CASE state WHEN 'executing' THEN 0 ELSE 1 END LIMIT 1",[&s.info.session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|_|"INTERNAL_ERROR".into())
     }
     fn apply_extension(&mut self, id: &str, value: Value) -> Result<(), String> {
         #[derive(serde::Deserialize)]
@@ -482,6 +501,22 @@ impl Core {
     pub fn banner(&mut self, visible: bool) -> Result<Value, String> {
         self.expire()?;
         let activity = self.activity()?;
+        let evidence_input: Option<String> = activity.as_ref().and_then(|(id, _, _)| {
+            self.executor
+                .db
+                .conn
+                .query_row(
+                    "SELECT envelope_json FROM support_accepted_commands WHERE command_id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .ok()
+        });
+        let evidence_payload = evidence_input
+            .and_then(|s| serde_json::from_str::<contracts::Command>(&s).ok())
+            .map(|c| c.payload)
+            .unwrap_or(Value::Null);
+        let evidence_reason = super::evidence::reason(&evidence_payload).ok().flatten();
         let unattended = self.approval_context().ok().is_some_and(|c| {
             self.verifier
                 .is_unattended(&self.executor.db.conn, &c)
@@ -513,7 +548,7 @@ impl Core {
                 "pending_ack"
             };
             return Ok(
-                json!({"state":status,"session_id":s.info.session_id,"operator_display_name":s.info.operator_display_name,"remaining_ms":(clock::parse(&s.admission.max_expires_at).map_err(str::to_string)?-now).max(0),"attended":!unattended,"extend_allowed":s.admission.active && !unattended && clock::parse(&s.admission.max_expires_at).is_ok_and(|max| max-now <= 600_000 && clock::parse(&s.info.absolute_cap_at).is_ok_and(|cap| max < cap)),"tier_ceiling":s.admission.tier_ceiling,"activity":activity.as_ref().map(|(_,kind,_)|kind),"executing_command_id":activity.as_ref().filter(|(_,_,state)|state=="executing").map(|(id,_,_)|id),"write_outcome":null}),
+                json!({"state":status,"session_id":s.info.session_id,"operator_display_name":s.info.operator_display_name,"remaining_ms":(clock::parse(&s.admission.max_expires_at).map_err(str::to_string)?-now).max(0),"attended":!unattended,"extend_allowed":s.admission.active && !unattended && clock::parse(&s.admission.max_expires_at).is_ok_and(|max| max-now <= 600_000 && clock::parse(&s.info.absolute_cap_at).is_ok_and(|cap| max < cap)),"tier_ceiling":s.admission.tier_ceiling,"activity":activity.as_ref().map(|(_,kind,_)|kind),"confirmed_command_id":activity.as_ref().filter(|(_,kind,_)|kind==super::confirmed::KIND).map(|(id,_,_)|id),"executing_command_id":activity.as_ref().filter(|(_,_,state)|state=="executing").map(|(id,_,_)|id),"write_outcome":null,"evidence_reason":evidence_reason,"personal_data_open":evidence_payload["include_personal_data"]==true}),
             );
         }
         if let Some(c) = &self.code {
@@ -579,6 +614,7 @@ pub fn initialized() -> bool {
     RUNTIME.get().is_some()
 }
 pub fn runtime(app: &tauri::AppHandle) -> Result<Arc<Runtime>, String> {
+    super::screenshot::install(app);
     let runtime = RUNTIME.get().cloned().ok_or("FEATURE_DISABLED")?;
     if !runtime.started.swap(true, Ordering::AcqRel) {
         let owned = runtime.clone();
@@ -1134,6 +1170,13 @@ pub async fn support_banner_state(
 ) -> Result<Value, String> {
     let rt = runtime(&app)?;
     acknowledge_banner(&rt.banner_ready, arg0.as_ref());
+    if let Some(id) = arg0
+        .as_ref()
+        .filter(|v| v["visible"] == true)
+        .and_then(|v| v["evidence_command_id"].as_str())
+    {
+        super::evidence::presented(id);
+    }
     resume_after_restore(&app, &rt).await?;
     let visible = super::dispatch::window_visible(&app);
     crate::database_lock::run_blocking_command("support_banner_state", move || {
@@ -1148,6 +1191,21 @@ pub async fn support_banner_state(
             .lock()
             .map_err(|_| "INTERNAL_ERROR")?
             .banner(visible)?;
+        let history = (|| {
+            let permit = critical_op::global()
+                .try_begin_support(false, None)
+                .map_err(str::to_string)?;
+            let conn = super::replica::read_connection(
+                &app.state::<crate::db::DbState>().db_path,
+                &permit,
+                Instant::now() + Duration::from_secs(1),
+            )?;
+            let scope = super::identity::local(&conn)?;
+            let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
+            super::confirmed::history(&core.executor.db.conn, &scope)
+        })()
+        .unwrap_or_else(|_: String| json!([]));
+        value["confirmed_history"] = history;
         value["can_connect"] = json!(can_connect);
         value["availability"] = app
             .try_state::<Arc<crate::sync::SyncState>>()
@@ -1337,6 +1395,7 @@ mod tests {
             let response = transport::SessionFetch {
                 state: "active".into(),
                 session: Some(SessionInfo {
+                    confirmation_mode: None,
                     session_id: id.into(),
                     operator_display_name: "Your support".into(),
                     tier_ceiling: 3,
@@ -1633,6 +1692,7 @@ mod tests {
         let id = v["context"]["session_id"].as_str().unwrap();
         let cap = v["context"]["absolute_cap_at"].as_str().unwrap();
         let info = SessionInfo {
+            confirmation_mode: None,
             session_id: id.into(),
             operator_display_name: "Your support".into(),
             tier_ceiling: 2,
