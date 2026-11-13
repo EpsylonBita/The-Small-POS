@@ -51,7 +51,8 @@ test('CustomerSearchModal search spinner uses the yellow accent, not blue', () =
 // neutral (red only for a banned customer), the chosen address glows yellow behind with its check, and a coloured
 // button keeps the neutral face with its colour as the shadow behind it.
 test('CustomerSearchModal renders found customers as raised kit cards with neutral icons', () => {
-  assert.match(source, /className=\{`pos-choice-card relative mb-3 cursor-pointer text-left \$\{c\.is_banned \? 'pos-neon-bad' : ''\}`\}/);
+  // founder 11/11/2026: glass tap cards retain shared press depth and neutral icons.
+  assert.match(source, /className=\{`pos-glass-tap-card relative min-h-touch w-full cursor-pointer p-4 text-left`\}/);
   assert.match(source, /<User className=\{`h-6 w-6 shrink-0 \$\{c\.is_banned \? 'text-\(--pos-s-bad\)' : 'text-\(--pos-s-muted\)'\}`\}/);
   assert.doesNotMatch(source, /text-yellow-500 dark:text-yellow-300/, 'the phone icon is neutral, not decorated yellow');
   assert.doesNotMatch(source, /bg-zinc-100\/85|bg-zinc-800\/80|border-zinc-300\/70/, 'no translucent card chrome');
@@ -60,24 +61,26 @@ test('CustomerSearchModal renders found customers as raised kit cards with neutr
 });
 
 test('CustomerSearchModal renders the customer as a kit panel and addresses as raised cards; the chosen one glows yellow', () => {
-  assert.match(source, /className=\{`pos-card mb-6 p-4 \$\{customer\.is_banned \? 'pos-neon-bad' : ''\}`\}/);
-  assert.match(source, /className=\{`pos-raised w-full cursor-pointer rounded-2xl border p-3 text-left \$\{isSelected\s*\? 'pos-raised--tint \[--pos-tint:var\(--pos-s-sel-bg\)\]'/);
+  // founder 11/11/2026: frosted customer panel; selected address uses solid kit yellow.
+  assert.match(source, /className=\{`pos-glass-form-card mb-3`\}/);
+  assert.match(source, /className=\{`pos-glass-tap-card min-h-touch w-full cursor-pointer p-3 text-left focus-visible:outline-2 focus-visible:outline-yellow-400 \$\{isSelected\s*\? 'bg-\(--pos-s-sel-bg\)! text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)!/);
   assert.match(source, /rounded-full bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)/);
   assert.doesNotMatch(source, /border-green-600|text-green-400|bg-green-500/, 'the selection is the kit yellow, never green');
   assert.match(source, /<MapPin className="mt-0\.5 h-5 w-5 shrink-0 text-\(--pos-s-muted\)" aria-hidden="true" \/>/);
-  assert.match(source, /className="pos-icon-btn h-10! w-10!"/);
-  assert.match(source, /className="pos-icon-btn pos-icon-btn--danger h-10! w-10!"/);
+  assert.match(source, /className="pos-glass-field inline-flex min-h-touch min-w-touch items-center justify-center p-2"/);
+  assert.match(source, /className="pos-solid-btn pos-solid-btn--danger min-h-touch min-w-touch p-2"/);
 });
 
-test('CustomerSearchModal order types use the till glyphs and colours, the colour as the shadow behind', () => {
+test('CustomerSearchModal order types keep till glyphs on glass tap cards with press depth', () => {
   assert.match(source, /<DeliveryScooterIcon className="h-full w-full" \/>/);
   assert.match(source, /<PickupHandBagIcon className="h-full w-full" \/>/);
   assert.match(source, /<TableOrderIcon className="h-full w-full" strokeWidth=\{1\.6\} opticalScale=\{1\.62\} \/>/);
-  assert.match(source, /className=\{`pos-raised pos-raised--tint flex min-h-\[104px\] flex-col/);
+  // founder 11/11/2026: glass cards replace colored shadows; touch size and glyphs stay.
+  assert.match(source, /className=\{`pos-glass-tap-card flex min-h-\[104px\] flex-col/);
   assert.doesNotMatch(source, /border-2 bg-white px-4 py-4/, 'no coloured outline on a white tile');
   const css = readFileSync(path.join(projectRoot, 'src', 'renderer', 'styles', 'glassmorphism.css'), 'utf8');
-  assert.match(css, /\.pos-raised--tint \{ box-shadow: [^}]*var\(--pos-tint, transparent\); \}/);
-  assert.match(css, /\.pos-raised--tint:is\(:active, \[data-pressed\]\):not\(:disabled\) \{/);
+  assert.match(css, /\.pos-glass-tap-card \{[\s\S]*?box-shadow: var\(--pos-s-depth-card\);/);
+  assert.match(css, /\.pos-glass-tap-card:is\(:active, \[data-pressed\]\):not\(:disabled\) \{[\s\S]*?box-shadow: var\(--pos-s-depth-press\);[\s\S]*?translate: 0 1px/);
 });
 
 test('CustomerSearchModal address + action MapPins are neutral (not blue); actions are solid kit buttons', () => {
@@ -129,7 +132,8 @@ test('CustomerSearchModal add-new-customer prompt is a kit panel with the kit pr
   assert.notEqual(promptSectionEnd, -1);
   const promptSection = source.slice(promptSectionStart, promptSectionEnd);
 
-  assert.match(promptSection, /<div className="pos-card p-4">/);
+  // founder 11/11/2026: the prompt is a frosted card; its primary action stays solid.
+  assert.match(promptSection, /<motion.div[^>]*className="pos-glass-form-card">/);
   assert.match(promptSection, /pos-solid-btn pos-solid-btn--md w-full gap-2 \$\{customer \? '' : `pos-solid-btn--primary pos-raised--tint \[--pos-tint:var\(--pos-s-yellow\)\]`\}/);
   assert.doesNotMatch(promptSection, /#16a34a|backgroundColor:/);
   assert.doesNotMatch(promptSection, /blue/);

@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useI18n } from '../../contexts/i18n-context';
 import toast from 'react-hot-toast';
@@ -392,6 +393,14 @@ export function OrderApprovalPanel({
 }: OrderApprovalPanelProps) {
   const bridge = getBridge();
   const { t } = useI18n();
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   // What staff picked; null keeps the default (20′, or less inside the
   // platform's pickup window — see usePrepTimePicker).
   const [pickedTime, setPickedTime] = useState<number | null>(null);
@@ -1076,7 +1085,7 @@ export function OrderApprovalPanel({
         header={(
           <div
             {...approvalMarker}
-            className="shrink-0 border-b liquid-glass-modal-border px-5 py-4 sm:px-6"
+            className="shrink-0 px-5 py-4 sm:px-6"
           >
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
@@ -1129,7 +1138,7 @@ export function OrderApprovalPanel({
                 <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
                   {t('orderApprovalPanel.total', { defaultValue: 'Total' })}
                 </p>
-                <p className="text-3xl font-black text-blue-500 dark:text-blue-400">
+                <p className="text-3xl font-black liquid-glass-modal-text">
                   {formatCurrency(totalAmount)}
                 </p>
               </div>
@@ -1148,13 +1157,13 @@ export function OrderApprovalPanel({
           </div>
         )}
         footer={(
-          <div className="shrink-0 space-y-3 border-t liquid-glass-modal-border px-5 py-4 sm:px-6">
+          <div className="shrink-0 space-y-3 px-6 pb-5 pt-2">
             {isBoxDecisionClosedHere ? (
               <>
                 <div
                   role="status"
                   data-testid="box-decision-closed"
-                  className="rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3"
+                  className="pos-glass-form-card px-4! py-3!"
                 >
                   {isBoxManualCheck ? (
                     <>
@@ -1218,8 +1227,8 @@ export function OrderApprovalPanel({
                         onClick={() => setPickedTime(time)}
                         disabled={disabled}
                         data-testid={`order-approval-prep-${time}`}
-                        className={`pos-choice min-h-11 flex-col px-2 text-sm font-bold ${
-                          estimatedTime === time ? 'is-selected' : ''
+                        className={`inline-flex min-h-11 flex-col items-center justify-center rounded-xl px-2 py-2 text-sm font-bold ${
+                          estimatedTime === time ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)' : 'pos-glass-field'
                         }`}
                         aria-pressed={estimatedTime === time}
                       >
@@ -1279,9 +1288,9 @@ export function OrderApprovalPanel({
           </div>
         )}
       >
-        <div className="space-y-4">
+        <div className="space-y-3">
           <div className="grid gap-3 md:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-            <section className="liquid-glass-modal-card p-4">
+            <section className="pos-glass-form-card">
               <div className="flex items-center gap-3">
                 <User className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
                 <div className="min-w-0">
@@ -1300,13 +1309,7 @@ export function OrderApprovalPanel({
               </div>
             </section>
 
-            <section className={`liquid-glass-modal-card p-4 ${
-              requestedPaymentMethod === 'cash'
-                ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
-                : requestedPaymentMethod === 'card' || requestedPaymentMethod === 'online'
-                  ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
-                  : ''
-            }`}>
+            <section className="pos-glass-form-card">
               <div className="flex items-center gap-3">
                 {requestedPaymentMethod === 'cash' ? (
                   <CashHandIcon className="h-5 w-5 shrink-0 text-green-400" />
@@ -1332,8 +1335,11 @@ export function OrderApprovalPanel({
             </section>
           </div>
 
-          {orderType === 'delivery' && (deliveryAddress || deliveryFloor || nameOnRinger || deliveryNotes) && (
-            <section className="liquid-glass-modal-card p-4">
+          {/* It appears with the reveal and leaves at once: an exit animation keeps the last address on screen for
+              a moment, and that address can belong to the previous order (the lookup answered late, the next order
+              has no phone, or the same order turned out to be a provider order). */}
+          <AnimatePresence initial={false}>{orderType === 'delivery' && (deliveryAddress || deliveryFloor || nameOnRinger || deliveryNotes) && (
+            <motion.div key="glass-reveal-1" {...revealMotion} exit={undefined}><section className="pos-glass-form-card">
               <div className="flex items-start gap-3">
                 <MapPin className="mt-0.5 h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
                 <div className="min-w-0 flex-1">
@@ -1350,11 +1356,11 @@ export function OrderApprovalPanel({
                   )}
                 </div>
               </div>
-            </section>
-          )}
+            </section></motion.div>
+          )}</AnimatePresence>
 
-          <section className="liquid-glass-modal-card overflow-hidden p-0">
-            <div className="flex items-center justify-between gap-3 border-b liquid-glass-modal-border px-4 py-3">
+          <section className="pos-glass-form-card overflow-hidden p-0!">
+            <div className="flex items-center justify-between gap-3 px-4 py-3">
               <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
                 <Package className="h-4 w-4" />
                 {t('orderApprovalPanel.orderItems', { defaultValue: 'Order Items' })}
@@ -1376,7 +1382,7 @@ export function OrderApprovalPanel({
                 {normalizedItems.map((item: { name: string; quantity: number; price: number; total_price: number; special_instructions?: string; customizations?: any[]; categoryName?: string | null; categoryPath?: string | null }, idx: number) => (
                   <div
                     key={idx}
-                    className="border-b border-(--pos-s-border) px-4 py-3 last:border-b-0"
+                    className="pos-glass-form-card mx-3 mb-3 px-4! py-3!"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex min-w-0 flex-1 items-start gap-3">
@@ -1436,35 +1442,35 @@ export function OrderApprovalPanel({
               </div>
             )}
 
-            <div className="space-y-2 border-t liquid-glass-modal-border px-4 py-3">
+            <div className="space-y-2 px-4 py-3">
               {!showsBoxDisplayItems ? (
                 <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
                   <span>{t('orderApprovalPanel.subtotal', { defaultValue: 'Subtotal' })}</span>
                   <span>{formatCurrency(subtotal)}</span>
                 </div>
               ) : null}
-              {taxAmount > 0 && (
-                <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
+              <AnimatePresence initial={false}>{taxAmount > 0 && (
+                <motion.div key="glass-reveal-2" {...revealMotion}><div className="flex justify-between text-sm liquid-glass-modal-text-muted">
                   <span>{t('orderApprovalPanel.tax', { defaultValue: 'Tax' })}</span>
                   <span>{formatCurrency(taxAmount)}</span>
-                </div>
-              )}
-              {deliveryFee > 0 && (
-                <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
+                </div></motion.div>
+              )}</AnimatePresence>
+              <AnimatePresence initial={false}>{deliveryFee > 0 && (
+                <motion.div key="glass-reveal-3" {...revealMotion}><div className="flex justify-between text-sm liquid-glass-modal-text-muted">
                   <span>{t('orderApprovalPanel.deliveryFee', { defaultValue: 'Delivery fee' })}</span>
                   <span>{formatCurrency(deliveryFee)}</span>
-                </div>
-              )}
-              {discountAmount > 0 && (
-                <div className="flex justify-between text-sm font-medium text-green-500">
+                </div></motion.div>
+              )}</AnimatePresence>
+              <AnimatePresence initial={false}>{discountAmount > 0 && (
+                <motion.div key="glass-reveal-4" {...revealMotion}><div className="flex justify-between text-sm font-medium text-green-500">
                   <span className="inline-flex items-center gap-2">
                     <Tag className="h-4 w-4" aria-hidden="true" />
                     {t('orderApprovalPanel.discount', { defaultValue: 'Discount' })}
                     {discountPercentage > 0 && ` (${discountPercentage}%)`}
                   </span>
                   <span>-{formatCurrency(discountAmount)}</span>
-                </div>
-              )}
+                </div></motion.div>
+              )}</AnimatePresence>
             </div>
           </section>
         </div>
@@ -1479,11 +1485,11 @@ export function OrderApprovalPanel({
         }}
         title={t('orderApprovalPanel.declineReason', { defaultValue: 'Decline reason' })}
         size="sm"
-        className="max-w-md!"
+        className="max-w-md! [&_.liquid-glass-modal-header]:border-b-0"
         closeOnBackdrop={!isDeclining}
         closeOnEscape={!isDeclining}
         footer={(
-          <div className="flex gap-3 border-t liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20">
+          <div className="flex gap-3 px-6 pb-5 pt-2">
             <button
               type="button"
               onClick={() => setShowDeclineModal(false)}
@@ -1503,7 +1509,7 @@ export function OrderApprovalPanel({
           </div>
         )}
       >
-        <div {...approvalMarker} className="space-y-4">
+        <div {...approvalMarker} className="space-y-3">
           <p className="text-sm liquid-glass-modal-text-muted">
             {isBox
               ? t('boxOrder.reasonPrompt', { defaultValue: 'BOX accepts only these reasons. Choose the one to send.' })
@@ -1529,8 +1535,8 @@ export function OrderApprovalPanel({
                     data-testid={`box-reject-reason-${index}`}
                     onClick={() => setSelectedBoxReason(reason)}
                     disabled={isDeclining}
-                    className={`liquid-glass-modal-button min-h-11 w-full justify-between px-4 py-2 text-left disabled:opacity-50 ${
-                      isSelected ? 'border-red-600 bg-(--pos-s-surface-2) text-red-800 dark:text-red-300' : ''
+                    className={`pos-glass-tap-card flex min-h-11 w-full items-center justify-between px-4 py-2 text-left disabled:opacity-50 ${
+                      isSelected ? 'bg-(--pos-s-sel-bg)! text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)!' : ''
                     }`}
                   >
                     <span className="flex min-w-0 flex-col items-start">
@@ -1555,7 +1561,7 @@ export function OrderApprovalPanel({
                 value={declineReason}
                 onChange={(e) => setDeclineReason(e.target.value)}
                 placeholder={t('orderApprovalPanel.declinePlaceholder', { defaultValue: 'Enter a reason...' })}
-                className="liquid-glass-modal-input min-h-32 w-full resize-none"
+                className="liquid-glass-modal-input pos-glass-field min-h-32 w-full resize-none"
                 maxLength={DECLINE_REASON_MAX_LENGTH}
                 disabled={isDeclining}
               />

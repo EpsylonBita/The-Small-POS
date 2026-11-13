@@ -117,6 +117,7 @@ import {
   Zap,
 } from "lucide-react";
 import TableOrderIcon from "./icons/TableOrderIcon";
+import { ModalBackdropBridge } from "./ui/ModalBackdropBridge";
 import { DeliveryScooterIcon, PickupHandBagIcon } from "./icons/OrderTypeGlyphs";
 import { submitTableReservation } from "../utils/table-reservation-submit";
 import { debugLog } from "../utils/debugLog";
@@ -918,9 +919,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [editingReservation, setEditingReservation] =
       useState<Reservation | null>(null);
     const [tableGuestCount, setTableGuestCount] = useState(1);
-    const [isOrderTypeTransitioning, setIsOrderTypeTransitioning] =
-      useState(false);
-
     const tableFloorOptions = useMemo(() => {
       const floors = Array.from(
         new Set(displayTables.map((table) => getTableFloorValue(table))),
@@ -1143,6 +1141,18 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [reservationRoom, setReservationRoom] = useState<Room | null>(null);
     // Bumped to open the embedded AppointmentsView Create modal from New Order -> Services.
     const [servicesOpenCreateSignal, setServicesOpenCreateSignal] = useState(0);
+    // From the press on "Service" until that window is on screen: the Services screen loads on
+    // demand, and the page must not show sharp in between (founder 11/11/2026).
+    const [servicesCreatePending, setServicesCreatePending] = useState(false);
+    const handleServicesCreateSettled = useCallback(() => {
+      setServicesCreatePending(false);
+      // One press opens one window: without this, every later visit to the Services tab
+      // mounted the view with the old signal and opened the window again.
+      setServicesOpenCreateSignal(0);
+    }, []);
+    const releaseServicesCreatePending = useCallback(() => {
+      setServicesCreatePending(false);
+    }, []);
     const [selectedOrderType, setSelectedOrderType] = useState<
       "pickup" | "delivery" | "dine-in" | null
     >(null);
@@ -2300,6 +2310,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const handleSelectServiceFlow = () => {
       callerIdOrderIntentRef.current = null;
       setShowOrderTypeModal(false);
+      setServicesCreatePending(true);
       setActiveTab("services");
       setServicesOpenCreateSignal((n) => n + 1);
     };
@@ -3282,10 +3293,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const handleOrderTypeSelect = async (
       type: "pickup" | "delivery" | "dine-in",
     ) => {
-      setIsOrderTypeTransitioning(true);
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Founder 11/11/2026: the chooser hands over to the next window in the same step. A 300 ms
+      // "Setting up order…" spinner used to swap the cards out, wait for nothing, and show them
+      // again for a few frames before the next window opened: it read as a flash.
       setShowOrderTypeModal(false);
-      setIsOrderTypeTransitioning(false);
 
       const callerIntent = callerIdOrderIntentRef.current;
 
@@ -8078,6 +8089,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               <AppointmentsView
                 embedded
                 openCreateSignal={servicesOpenCreateSignal}
+                onCreateRequestSettled={handleServicesCreateSettled}
               />
             </Suspense>
           </div>
@@ -8103,6 +8115,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           onOpen={handleNewOrderClick}
         />
 
+        <ModalBackdropBridge
+          active={servicesCreatePending}
+          onGiveUp={releaseServicesCreatePending}
+        />
+
         {/* Order Type Selection Modal - Glassmorphism style */}
         <LiquidGlassModal
           isOpen={showOrderTypeModal}
@@ -8112,14 +8129,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           contentClassName="p-0! overflow-visible!"
         >
           <div className="p-2">
-            {isOrderTypeTransitioning ? (
-              <div className="flex items-center justify-center py-8">
-                <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-b-yellow-500 dark:border-white/20 dark:border-b-yellow-400"></div>
-                <span className="ml-3 liquid-glass-modal-text-muted">
-                  {t("orderFlow.settingUpOrder") || "Setting up order..."}
-                </span>
-              </div>
-            ) : (() => {
+            {(() => {
               // Localize each card's title + description once, then reuse for both the visible
               // text and the explicit aria-label (built via composeOrderTypeAriaLabel so the
               // accessible name never repeats the title when a locale leaves them identical).
@@ -8359,14 +8369,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   t("orderFlow.roomFlowOrder", { defaultValue: "Room Order" }),
                   t("orderFlow.roomFlowOrderDesc", { defaultValue: "Charge an order to a room" }),
                 )}
-                className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-(--pos-s-border) px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+                className="pos-glass-tap-card flex min-h-touch-xl w-full items-center gap-4 px-5 py-4 text-left"
               >
-                <DoorOpen className="h-7 w-7 shrink-0 text-amber-400" strokeWidth={1.6} />
+                <DoorOpen className="h-7 w-7 shrink-0 text-amber-600 dark:text-amber-300" strokeWidth={1.6} />
                 <div>
-                  <h3 className="text-base font-bold text-amber-400">
+                  <h3 className="text-base font-bold liquid-glass-modal-text">
                     {t("orderFlow.roomFlowOrder", { defaultValue: "Room Order" })}
                   </h3>
-                  <p className="text-sm leading-snug text-white/60">
+                  <p className="mt-0.5 text-sm leading-snug liquid-glass-modal-text-muted">
                     {t("orderFlow.roomFlowOrderDesc", { defaultValue: "Charge an order to a room" })}
                   </p>
                 </div>
@@ -8381,14 +8391,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 t("orderFlow.roomFlowCheckin", { defaultValue: "Check-in" }),
                 t("orderFlow.roomFlowCheckinDesc", { defaultValue: "Check in a reserved room" }),
               )}
-              className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-(--pos-s-border) px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+              className="pos-glass-tap-card flex min-h-touch-xl w-full items-center gap-4 px-5 py-4 text-left"
             >
-              <UserCheck className="h-7 w-7 shrink-0 text-green-400" strokeWidth={1.6} />
+              <UserCheck className="h-7 w-7 shrink-0 text-emerald-600 dark:text-emerald-300" strokeWidth={1.6} />
               <div>
-                <h3 className="text-base font-bold text-green-400">
+                <h3 className="text-base font-bold liquid-glass-modal-text">
                   {t("orderFlow.roomFlowCheckin", { defaultValue: "Check-in" })}
                 </h3>
-                <p className="text-sm leading-snug text-white/60">
+                <p className="mt-0.5 text-sm leading-snug liquid-glass-modal-text-muted">
                   {t("orderFlow.roomFlowCheckinDesc", { defaultValue: "Check in a reserved room" })}
                 </p>
               </div>
@@ -8403,14 +8413,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   t("orderFlow.roomFlowReservation", { defaultValue: "Create Reservation" }),
                   t("orderFlow.roomFlowReservationDesc", { defaultValue: "Reserve an available room" }),
                 )}
-                className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-(--pos-s-border) px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+                className="pos-glass-tap-card flex min-h-touch-xl w-full items-center gap-4 px-5 py-4 text-left"
               >
-                <CalendarPlus className="h-7 w-7 shrink-0 text-[#a855f7]" strokeWidth={1.6} />
+                <CalendarPlus className="h-7 w-7 shrink-0 text-violet-600 dark:text-violet-300" strokeWidth={1.6} />
                 <div>
-                  <h3 className="text-base font-bold text-[#a855f7]">
+                  <h3 className="text-base font-bold liquid-glass-modal-text">
                     {t("orderFlow.roomFlowReservation", { defaultValue: "Create Reservation" })}
                   </h3>
-                  <p className="text-sm leading-snug text-white/60">
+                  <p className="mt-0.5 text-sm leading-snug liquid-glass-modal-text-muted">
                     {t("orderFlow.roomFlowReservationDesc", { defaultValue: "Reserve an available room" })}
                   </p>
                 </div>
@@ -8429,13 +8439,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           <div className="p-2">
             {roomOrderRooms.length === 0 ? (
               <div className="flex flex-col items-center gap-2 py-10 text-center">
-                <BedDouble className="h-12 w-12 text-white/30" strokeWidth={1.5} />
-                <p className="text-sm text-white/60">
+                <BedDouble className="h-12 w-12 liquid-glass-modal-text-muted opacity-60" strokeWidth={1.5} />
+                <p className="liquid-glass-modal-text-muted text-sm">
                   {t("orderFlow.roomOrderEmpty", {
                     defaultValue: "No occupied rooms with an open folio yet",
                   })}
                 </p>
-                <p className="max-w-xs text-xs text-white/45">
+                <p className="liquid-glass-modal-text-muted max-w-xs text-xs">
                   {t("orderFlow.roomOrderEmptyHint", {
                     defaultValue:
                       "A room charge needs a checked-in guest with an active folio. Use Check-in first to open one.",
@@ -8451,13 +8461,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 />
                 {visibleRoomOrderRooms.length === 0 ? (
                   <div className="flex flex-col items-center gap-2 py-10 text-center">
-                    <BedDouble className="h-12 w-12 text-white/30" strokeWidth={1.5} />
-                    <p className="text-sm text-white/60">
+                    <BedDouble className="h-12 w-12 liquid-glass-modal-text-muted opacity-60" strokeWidth={1.5} />
+                    <p className="liquid-glass-modal-text-muted text-sm">
                       {t("roomsView.noRooms", { defaultValue: "No rooms found" })}
                     </p>
                   </div>
                 ) : (
-                  <div className="grid max-h-[60vh] grid-cols-1 gap-2 overflow-y-auto scrollbar-hide pb-2 sm:grid-cols-2 lg:grid-cols-3">
+                  <div className="grid max-h-[60vh] grid-cols-1 gap-3 overflow-y-auto scrollbar-hide p-1 pb-4 sm:grid-cols-2 lg:grid-cols-3">
                     {visibleRoomOrderRooms.map((room) => {
                       const folioId = room.activeFolio?.id || null;
                       const guest = room.activeFolio?.guestName;
@@ -8471,25 +8481,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                             room: room.roomNumber,
                             defaultValue: "Room {{room}}",
                           })}
-                          className={`flex flex-col gap-1 rounded-2xl border-2 px-4 py-3 text-left transition-transform duration-150 ${
-                            folioId
-                              ? "border-(--pos-s-border) active:scale-95"
-                              : "border-white/10 bg-white/3 opacity-50 cursor-not-allowed"
-                          }`}
+                          className="pos-glass-tap-card flex min-h-touch-xl flex-col gap-1 px-4 py-3 text-left"
                         >
-                          <span className="text-base font-bold text-white">
+                          <span className="liquid-glass-modal-text text-base font-bold">
                             {t("orderFlow.roomOrderSelectRoom", {
                               room: room.roomNumber,
                               defaultValue: "Room {{room}}",
                             })}
                           </span>
-                          {guest && <span className="text-sm text-white/70">{guest}</span>}
+                          {guest && <span className="liquid-glass-modal-text-muted text-sm">{guest}</span>}
                           {folioId ? (
-                            <span className="text-xs font-semibold text-amber-300">
+                            <span className="liquid-glass-modal-text text-sm font-semibold">
                               {formatCurrency(room.activeFolio?.balance || 0)}
                             </span>
                           ) : (
-                            <span className="text-xs font-semibold text-red-400">
+                            <span className="text-xs font-semibold text-red-700 dark:text-red-300">
                               {t("orderFlow.roomOrderNoFolio", { defaultValue: "No active folio" })}
                             </span>
                           )}

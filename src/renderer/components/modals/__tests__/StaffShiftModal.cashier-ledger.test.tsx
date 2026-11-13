@@ -174,6 +174,28 @@ describe('StaffShiftModal ordinary cashier ledger and confirmation', { timeout: 
   });
 
 
+  it('shows net collections with real tenders and tips, preserving expected cash', async () => {
+    bridge.shifts.getSummary.mockResolvedValue({ success: true, data: {
+      ...summary(100), currency: 'EUR',
+      cashierCash: { cashCollections: 40, cashRefunds: 10, currency: 'EUR' },
+      netCollections: { version: 1, total: 95, totalCents: 9500, refunded: 10, refundedCents: 1000,
+        tips: 5, tipsCents: 500, tenders: [
+          { tender: 'cash', kept: 35, keptCents: 3500 },
+          { tender: 'twint', kept: 60, keptCents: 6000 },
+        ] },
+    } });
+    render(<StaffShiftModal {...props} />);
+    await screen.findByTestId('staff-checkout-confirm-button');
+    const collections = await screen.findByTestId('shift-net-collections');
+    expect(collections).toHaveTextContent('Net collections');
+    expect(collections).toHaveTextContent(/95[,.]00/);
+    expect(collections).toHaveTextContent('TWINT');
+    expect(collections).toHaveTextContent('of which tips');
+    for (const label of screen.getAllByText('Expected In Drawer')) {
+      expect(label.parentElement).toHaveTextContent(/30[,.]00/);
+    }
+  });
+
   it('keeps a zero-count confirmation above the recovery checkout, without closing before confirmation', async () => {
     bridge.shifts.getSummary.mockResolvedValue({ success: true, data: {
       ...summary(0), currency: 'EUR',

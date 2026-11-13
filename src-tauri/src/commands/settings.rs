@@ -751,6 +751,23 @@ fn renderer_settings_snapshot(db: &db::DbState) -> Result<Value, String> {
             settings.insert(key, Value::String(value));
         }
     }
+    let staff = categories
+        .entry("staff")
+        .or_insert_with(|| serde_json::json!({}));
+    for (hash_key, status_key) in [
+        ("admin_pin_hash", "admin_pin_configured"),
+        ("staff_pin_hash", "staff_pin_configured"),
+    ] {
+        let configured: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_settings WHERE setting_category = 'staff'
+             AND setting_key = ?1 AND LENGTH(TRIM(COALESCE(setting_value, ''))) > 0)",
+                [hash_key],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        staff[status_key] = Value::Bool(configured);
+    }
     Ok(Value::Object(categories))
 }
 
@@ -1054,6 +1071,11 @@ fn persist_terminal_transition_intent(
             return DefiniteFailure(error_code.to_string());
         }
     };
+    if candidate.operation == TerminalTransitionOperation::Rebind {
+        if let Err(error) = crate::core_helpers::ensure_no_unsent_money(&transaction) {
+            return DefiniteFailure(error);
+        }
+    }
     if db::set_setting(
         &transaction,
         "sync",
@@ -1505,12 +1527,29 @@ fn set_terminal_connection_rebind_pending(db: &db::DbState, pending: bool) -> Re
     }
 }
 
+fn clear_terminal_rebind_operational_data(
+    db: &db::DbState,
+    _repair_transition: &crate::repairs::RepairTransitionGuard,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    let transaction = crate::db::immediate_transaction(&conn)
+        .map_err(|error| format!("clear operational data: {error}"))?;
+    crate::core_helpers::ensure_no_unsent_money(&transaction)?;
+    crate::core_helpers::clear_generic_operational_data_in_transaction(&transaction)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("clear operational data: {error}"))
+}
+
 fn prepare_terminal_connection_rebind(
     db: &db::DbState,
 ) -> Result<crate::recovery::DestructiveSnapshotDecision, String> {
+    crate::core_helpers::ensure_no_unsent_money(
+        &*db.conn.lock().map_err(|error| error.to_string())?,
+    )?;
     set_terminal_connection_rebind_pending(db, true)?;
     let (repair_transition, recovery_decision) = crate::prepare_operational_clear(db)?;
-    crate::clear_operational_data_while_repair_blocked(db, &repair_transition)?;
+    clear_terminal_rebind_operational_data(db, &repair_transition)?;
     storage::invalidate_terminal_authority()?;
     // Releasing the transition mutex does not reopen repair access: the
     // lifecycle and durable scope stay transition_pending until finish below.
@@ -1529,6 +1568,9 @@ where
         crate::recovery::RecoveryPointKind,
     ) -> Result<crate::recovery::DestructiveSnapshotDecision, String>,
 {
+    crate::core_helpers::ensure_no_unsent_money(
+        &*db.conn.lock().map_err(|error| error.to_string())?,
+    )?;
     set_terminal_connection_rebind_pending(db, true)?;
     let (repair_transition, recovery_decision) =
         crate::core_helpers::prepare_operational_clear_with_recovery(
@@ -1536,7 +1578,7 @@ where
             crate::recovery::RecoveryPointKind::PreClearOperationalData,
             recovery_preflight,
         )?;
-    crate::clear_operational_data_while_repair_blocked(db, &repair_transition)?;
+    clear_terminal_rebind_operational_data(db, &repair_transition)?;
     storage::invalidate_terminal_authority()?;
     // Releasing the transition mutex does not reopen repair access: the
     // lifecycle and durable scope stay transition_pending until finish below.
@@ -1562,6 +1604,7 @@ where
         "sync",
         TERMINAL_CONNECTION_REBIND_PENDING_KEY,
         TERMINAL_CONNECTION_REBIND_CANDIDATE_KEY,
+        crate::core_helpers::ensure_no_unsent_money,
         after_clear_before_scope_publication,
     )
 }
@@ -1760,6 +1803,11 @@ fn publish_terminal_binding_under_lock(
             next_branch_id.as_deref(),
         )
     }) || pending_before;
+
+    if binding_changed {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        crate::core_helpers::ensure_no_unsent_money(&conn)?;
+    }
 
     let transition_journal = if binding_changed {
         let journal = if recovering_existing {
@@ -4134,6 +4182,11 @@ mod dto_tests {
             ("  LeGaCy  ", " TERMINAL.POS_API_KEY "),
             ("diagnostics", "cache.supabase_anon_key"),
             ("general", "nested.connection_string"),
+            ("staff", "admin_pin_hash"),
+            ("staff", "staff_pin_hash"),
+            ("legacy", "nested.manager_pin_hash"),
+            ("diagnostics", " PIN_VERIFIER "),
+            ("legacy", "staff.pinFastVerifier"),
         ] {
             assert!(
                 crate::is_sensitive_setting_path(category, key),
@@ -5094,6 +5147,10 @@ mod dto_tests {
                 ("terminal", crate::storage::KEY_REPAIR_SCOPE_V1),
                 ("legacy", crate::storage::KEY_REPAIR_ENTITLEMENT_V1),
                 ("diagnostics", crate::storage::KEY_REPAIR_QUEUE_AES_KEY_V1),
+                ("staff", "admin_pin_hash"),
+                ("staff", "staff_pin_hash"),
+                ("legacy", "manager_pin_hash"),
+                ("diagnostics", "nested.pin_verifier"),
                 (
                     "staff-cache",
                     crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1,
@@ -5111,6 +5168,34 @@ mod dto_tests {
         let encoded = serde_json::to_string(&projected).expect("encode projection");
         assert!(!encoded.contains(PRIVATE_SENTINEL));
         assert_eq!(projected["printer"]["paper_width"], serde_json::json!("80"));
+        assert_eq!(projected["staff"]["admin_pin_configured"], true);
+        assert_eq!(projected["staff"]["staff_pin_configured"], true);
+
+        crate::scrub_sensitive_local_settings_checked(&database.state).expect("scrub shadows");
+        let connection = database.state.conn.lock().expect("check native PINs");
+        assert_eq!(
+            crate::db::get_setting(&connection, "staff", "admin_pin_hash").as_deref(),
+            Some(PRIVATE_SENTINEL)
+        );
+        assert_eq!(
+            crate::db::get_setting(&connection, "staff", "staff_pin_hash").as_deref(),
+            Some(PRIVATE_SENTINEL)
+        );
+        assert!(crate::db::get_setting(&connection, "legacy", "manager_pin_hash").is_none());
+    }
+
+    #[test]
+    fn renderer_settings_pin_status_is_derived_from_native_verifiers() {
+        let database = crate::tests::harness::TestDb::open();
+        {
+            let conn = database.state.conn.lock().unwrap();
+            crate::db::set_setting(&conn, "staff", "admin_pin_configured", "true").unwrap();
+            crate::db::set_setting(&conn, "staff", "staff_pin_hash", "  ").unwrap();
+        }
+        let projected = super::renderer_settings_snapshot(&database.state).unwrap();
+        assert_eq!(projected["staff"]["admin_pin_configured"], false);
+        assert_eq!(projected["staff"]["staff_pin_configured"], false);
+        assert!(projected["staff"].get("staff_pin_hash").is_none());
     }
 
     #[test]
@@ -5484,7 +5569,7 @@ mod dto_tests {
                      id, items, total_amount, total_amount_cents, status,
                      sync_status, created_at, updated_at
                  ) VALUES (
-                     'interleaved-old-order', '[]', 4.0, 400, 'pending', 'pending',
+                     'interleaved-old-order', '[]', 4.0, 400, 'pending', 'synced',
                      datetime('now'), datetime('now')
                  );
                  INSERT INTO parity_sync_queue (
@@ -5492,7 +5577,7 @@ mod dto_tests {
                      created_at, retry_delay_ms, module_type, conflict_strategy,
                      version, status
                  ) VALUES (
-                     'interleaved-old-parity', 'orders', 'interleaved-old-order',
+                     'interleaved-old-parity', 'menu_cache', 'interleaved-old-order',
                      'INSERT', '{{}}', '{REPAIR_ORG}', datetime('now'), 1000,
                      'orders', 'server-wins', 1, 'pending'
                  );"
@@ -5671,6 +5756,252 @@ mod dto_tests {
         assert!(scoped_identity_changed(Some("branch-a"), Some("branch-b")));
         assert!(!scoped_identity_changed(Some("org-a"), None));
         assert!(!scoped_identity_changed(None, Some("org-a")));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn terminal_rebind_refuses_unsent_money_before_credentials_or_mirrors_change() {
+        for field in ["organizationId", "branchId"] {
+            let (_keyring, database, staged_path) = install_native_repair_fixture();
+            super::set_terminal_credential_under_owner(
+                "admin_dashboard_url",
+                "https://admin.example.com",
+            )
+            .unwrap();
+            super::set_terminal_credential_under_owner("pos_api_key", "same-api-key").unwrap();
+            {
+                let connection = database.state.conn.lock().unwrap();
+                crate::db::set_setting(&connection, "terminal", "organization_id", REPAIR_ORG)
+                    .unwrap();
+                crate::db::set_setting(&connection, "terminal", "branch_id", REPAIR_BRANCH)
+                    .unwrap();
+                connection.execute("INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id, status) VALUES ('unsent-money', 'payments', 'payment-1', 'INSERT', '{}', ?1, 'failed')", [REPAIR_ORG]).unwrap();
+                connection.execute_batch("INSERT INTO orders (id, items, total_amount, status, created_at, updated_at) VALUES ('pending-order', '[]', 4, 'completed', datetime('now'), datetime('now'));
+                    INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at) VALUES ('pending-payment', 'pending-order', 'cash', 4, 'pending', 'pending', datetime('now'), datetime('now'));").unwrap();
+            }
+            let mut payload = serde_json::json!({
+                "terminalId": REPAIR_TERMINAL, "organizationId": REPAIR_ORG,
+                "branchId": REPAIR_BRANCH, "adminDashboardUrl": "https://admin.example.com",
+                "apiKey": "same-api-key",
+            });
+            assert!(
+                !publish_terminal_binding_checked(&database.state, &payload)
+                    .unwrap()
+                    .1
+            );
+            {
+                let connection = database.state.conn.lock().unwrap();
+                assert_eq!(
+                    connection
+                        .query_row(
+                            "SELECT amount FROM order_payments WHERE id='pending-payment'",
+                            [],
+                            |row| row.get::<_, f64>(0)
+                        )
+                        .unwrap(),
+                    4.0
+                );
+                assert_eq!(
+                    connection
+                        .query_row(
+                            "SELECT COUNT(*) FROM parity_sync_queue WHERE id='unsent-money'",
+                            [],
+                            |row| row.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    1
+                );
+            }
+            payload["apiKey"] = serde_json::json!("renewed-api-key");
+            assert!(
+                !publish_terminal_binding_checked(&database.state, &payload)
+                    .unwrap()
+                    .1
+            );
+            let before = {
+                let connection = database.state.conn.lock().unwrap();
+                crate::db::get_all_settings(&connection)
+            };
+            payload[field] = serde_json::json!(REBIND_NEW_ORG);
+            payload["apiKey"] = serde_json::json!("replacement-key");
+            assert_eq!(
+                publish_terminal_binding_checked(&database.state, &payload).unwrap_err(),
+                "UNSYNCED_QUEUE"
+            );
+            assert_eq!(
+                crate::storage::get_credential("pos_api_key").as_deref(),
+                Some("renewed-api-key")
+            );
+            assert_eq!(
+                crate::storage::get_credential("organization_id").as_deref(),
+                Some(REPAIR_ORG)
+            );
+            assert_eq!(
+                crate::storage::get_credential("branch_id").as_deref(),
+                Some(REPAIR_BRANCH)
+            );
+            let connection = database.state.conn.lock().unwrap();
+            assert_eq!(crate::db::get_all_settings(&connection), before);
+            assert_eq!(connection.query_row("SELECT COUNT(*) FROM order_payments WHERE id='pending-payment' AND amount=4 AND sync_status='pending' AND sync_state='pending'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM orders WHERE id='pending-order'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM parity_sync_queue WHERE id='unsent-money'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            connection
+                .execute("DELETE FROM parity_sync_queue WHERE id='unsent-money'", [])
+                .unwrap();
+            drop(connection);
+            assert!(!terminal_connection_rebind_pending(&database.state).unwrap());
+            assert_native_repair_fixture_intact(&database, &staged_path);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn terminal_rebind_with_only_stuck_non_financial_queue_rows_proceeds() {
+        let (_keyring, database, _staged_path) = install_native_repair_fixture();
+        super::set_terminal_credential_under_owner(
+            "admin_dashboard_url",
+            "https://admin.example.com",
+        )
+        .unwrap();
+        super::set_terminal_credential_under_owner("pos_api_key", "old-key").unwrap();
+        {
+            let connection = database.state.conn.lock().unwrap();
+            crate::db::set_setting(&connection, "terminal", "organization_id", REPAIR_ORG).unwrap();
+            crate::db::set_setting(&connection, "terminal", "branch_id", REPAIR_BRANCH).unwrap();
+            connection.execute("INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status) VALUES ('menu_cache', 'menu', 'UPDATE', '{}', 'stuck-menu', 'failed')", []).unwrap();
+        }
+        let payload = serde_json::json!({
+            "terminalId": REPAIR_TERMINAL, "organizationId": REBIND_NEW_ORG,
+            "branchId": REBIND_NEW_BRANCH, "adminDashboardUrl": "https://admin.example.com",
+            "apiKey": "replacement-key",
+        });
+        assert!(
+            publish_terminal_binding_checked(&database.state, &payload)
+                .unwrap()
+                .1
+        );
+        assert_eq!(
+            crate::storage::get_credential("organization_id").as_deref(),
+            Some(REBIND_NEW_ORG)
+        );
+        assert_eq!(
+            crate::storage::get_credential("pos_api_key").as_deref(),
+            Some("replacement-key")
+        );
+        assert!(!terminal_connection_rebind_pending(&database.state).unwrap());
+        let connection = database.state.conn.lock().unwrap();
+        assert_eq!(
+            crate::db::get_setting(&connection, "terminal", "organization_id").as_deref(),
+            Some(REBIND_NEW_ORG)
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM sync_queue", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn terminal_rebind_money_gate_precedes_snapshot_marker_and_repair_purge() {
+        let (_keyring, database, staged_path) = install_native_repair_fixture();
+        {
+            let connection = database.state.conn.lock().unwrap();
+            connection.execute("INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status) VALUES ('order', 'unsent-order', 'INSERT', '{}', 'unsent-order', 'pending')", []).unwrap();
+        }
+        let error = prepare_terminal_connection_rebind_with_recovery(&database.state, |_, _| {
+            panic!("unsent money must refuse before snapshot or repair mutation")
+        })
+        .unwrap_err();
+        assert_eq!(error, "UNSYNCED_QUEUE");
+        assert!(!terminal_connection_rebind_pending(&database.state).unwrap());
+        assert_native_repair_fixture_intact(&database, &staged_path);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn terminal_rebind_intent_rechecks_money_before_writing_the_journal() {
+        let (_keyring, database, staged_path) = install_native_repair_fixture();
+        {
+            let connection = database.state.conn.lock().unwrap();
+            crate::core_helpers::ensure_no_unsent_money(&connection).unwrap();
+            connection.execute("INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id, status) VALUES ('in-flight-money', 'orders', 'order-1', 'INSERT', '{}', ?1, 'pending')", [REPAIR_ORG]).unwrap();
+        }
+        let payload = serde_json::json!({
+            "terminalId": REBIND_NEW_TERMINAL, "organizationId": REBIND_NEW_ORG,
+            "branchId": REBIND_NEW_BRANCH, "adminDashboardUrl": "https://admin.example.com",
+            "apiKey": "replacement-key",
+        });
+        let candidate = super::candidate_journal_from_payload(&payload, None).unwrap();
+        let result = super::persist_terminal_transition_intent(
+            &database.state,
+            &candidate,
+            "TERMINAL_REBIND_CANDIDATE_WRITE_FAILED",
+        );
+        assert!(
+            matches!(result, crate::repairs::TerminalIdentityIntentDurability::DefiniteFailure(ref error) if error == "UNSYNCED_QUEUE")
+        );
+        assert!(!terminal_connection_rebind_pending(&database.state).unwrap());
+        {
+            let connection = database.state.conn.lock().unwrap();
+            assert_eq!(
+                connection
+                    .execute(
+                        "DELETE FROM parity_sync_queue WHERE id='in-flight-money'",
+                        []
+                    )
+                    .unwrap(),
+                1
+            );
+        }
+        assert_native_repair_fixture_intact(&database, &staged_path);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn terminal_rebind_final_clear_refuses_late_unsent_money() {
+        let (_keyring, database, _staged_path) = install_native_repair_fixture();
+        prepare_terminal_connection_rebind(&database.state).unwrap();
+        {
+            let connection = database.state.conn.lock().unwrap();
+            connection.execute("INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id, status) VALUES ('late-money', 'cash_drawer_sessions', 'drawer-1', 'UPDATE', '{}', ?1, 'pending')", [REPAIR_ORG]).unwrap();
+        }
+        assert_eq!(
+            finish_terminal_connection_rebind(&database.state).unwrap_err(),
+            "UNSYNCED_QUEUE"
+        );
+        assert!(terminal_connection_rebind_pending(&database.state).unwrap());
+        let connection = database.state.conn.lock().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue WHERE id='late-money'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

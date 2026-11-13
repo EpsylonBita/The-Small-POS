@@ -12,7 +12,7 @@ const source = readFileSync(
 test('ReportsPage uses touch-first palette-safe controls and metric cards', () => {
   assert.match(source, /text-4xl font-bold mb-2/);
   assert.match(source, /border-yellow-400/);
-  assert.match(source, /focus:ring-yellow-400/);
+  assert.match(source, /focus-visible:ring-yellow-400/);
   assert.match(source, /active:scale-\[0\.98\]/);
   assert.match(source, /bg-yellow-400 text-black/);
   assert.match(source, /bg-black text-white/);

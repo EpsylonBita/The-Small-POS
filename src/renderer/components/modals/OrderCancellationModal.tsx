@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
@@ -57,6 +58,15 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
   onConfirmCancel,
   onClose
 }) => {
+  
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const { t, i18n } = useTranslation();
   const [cancelReason, setCancelReason] = useState('');
   const [returnChannel, setReturnChannel] = useState<CancellationReturnChannel>();
@@ -169,13 +179,13 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
       onClose={handleClose}
       title={t('modals.orderCancellation.title')}
       size="md"
-      className="max-w-lg!"
+      className="max-w-lg! [&_.liquid-glass-modal-header]:border-b-0!"
       closeOnBackdrop={!submitting}
       closeOnEscape={!submitting}
       initialFocusRef={reasonInputRef}
       footer={(
-        /* Fixed glass action bar: neutral safe close + red destructive confirm (disabled until a reason is given). */
-        <div className="flex gap-3 border-t border-white/15 bg-white/5 px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-white/3">
+        /* Fixed actions: neutral safe close + red destructive confirm (disabled until a reason is given). */
+        <div className="flex gap-3 px-6 pb-5 pt-2">
           <button
             type="button"
             onClick={handleClose}
@@ -203,11 +213,11 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
         {t('modals.orderCancellation.message', { count: orderCount })}
       </p>
 
-      {savedAttempt && (
-        <div
+      <AnimatePresence initial={false}>{savedAttempt && (
+        <motion.div {...revealMotion}
           data-testid="order-cancellation-saved-attempt"
           role={savedAttempt.refused ? 'alert' : 'status'}
-          className="mb-6 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 text-sm liquid-glass-modal-text"
+          className="pos-glass-form-card mb-3 p-3! text-sm liquid-glass-modal-text"
         >
           <p className="mb-3">
             {t(savedAttempt.refused
@@ -222,11 +232,11 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
           >
             {t('modals.orderCancellation.clearRefusedAttempt')}
           </button>
-        </div>
-      )}
+        </motion.div>
+      )}</AnimatePresence>
 
-      {manualReturn && !recovery && (
-        <fieldset className="mb-6" disabled={submitting}>
+      <AnimatePresence initial={false}>{manualReturn && !recovery && (
+        <motion.fieldset {...revealMotion} className="pos-glass-form-card mb-3" disabled={submitting}>
           <legend className="mb-2 font-medium liquid-glass-modal-text">{t('modals.orderCancellation.returnChannel')}</legend>
           <p className="mb-3 text-sm liquid-glass-modal-text-muted">
             {t('modals.orderCancellation.returnRecorded', { amount: new Intl.NumberFormat(i18n?.resolvedLanguage || i18n?.language, { style: 'currency', currency: manualReturn.currency }).format(manualReturn.amountCents / 100) })}
@@ -235,23 +245,23 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
             {(['cash_drawer', 'bank'] as const).map((channel) => (
               <button key={channel} type="button" aria-pressed={returnChannel === channel}
                 onClick={() => setReturnChannel(channel)}
-                className={`rounded-xl border px-4 py-3 font-medium ${returnChannel === channel ? 'border-amber-400 bg-amber-400 text-black' : 'border-white/20 bg-white/6 liquid-glass-modal-text'}`}>
+                className={`min-h-touch rounded-xl border px-4 py-3 font-medium ${returnChannel === channel ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)' : 'pos-glass-field'}`}>
                 {t(`modals.orderCancellation.${channel === 'cash_drawer' ? 'cashDrawer' : 'bank'}`)}
               </button>
             ))}
           </div>
-        </fieldset>
-      )}
+        </motion.fieldset>
+      )}</AnimatePresence>
 
       {boxLocalCancellation && (
-        <p role="note" className="mb-6 text-sm liquid-glass-modal-text">
+        <p role="note" className="pos-glass-form-card mb-3 text-sm liquid-glass-modal-text">
           {t('boxOrder.localCancellationNotice')}
         </p>
       )}
-      {!needsChannel && !savedAttempt?.refused && <>
-      {platformOrder && (
-        <div className="mb-6">
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+      <AnimatePresence initial={false}>{!needsChannel && !savedAttempt?.refused && <motion.div {...revealMotion}><>
+      <AnimatePresence initial={false}>{platformOrder && (
+        <motion.div {...revealMotion} className="pos-glass-form-card mb-3">
+          <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-2">
             {t('modals.orderCancellation.platformReasonLabel')}
           </label>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -263,10 +273,10 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
                   type="button"
                   onClick={() => selectPlatformCode(code, selected)}
                   aria-pressed={selected}
-                  className={`rounded-xl border px-3 py-2 text-left text-sm transition active:scale-[0.98] ${
+                  className={`min-h-touch rounded-xl border px-3 py-2 text-left text-sm transition ${
                     selected
-                      ? 'border-amber-400 bg-amber-400 text-black shadow-md'
-                      : 'border-white/20 bg-white/6 liquid-glass-modal-text active:bg-white/12'
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-[var(--pos-s-depth-card)] active:translate-y-px active:shadow-[var(--pos-s-depth-press)]'
+                      : 'pos-glass-field'
                   }`}
                 >
                   {t(platformReasonLabelKey(code))}
@@ -277,11 +287,11 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
           <div className="text-xs liquid-glass-modal-text-muted mt-2">
             {t('modals.orderCancellation.platformReasonHint')}
           </div>
-        </div>
-      )}
+        </motion.div>
+      )}</AnimatePresence>
 
-      <div className="mb-6">
-        <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+      <div className="pos-glass-form-card mb-3">
+        <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-2">
           {platformOrder
             ? t('modals.orderCancellation.internalNoteLabel')
             : t('modals.orderCancellation.reasonLabel')}
@@ -293,7 +303,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
           disabled={submitting}
           onChange={(e) => setCancelReason(e.target.value)}
           placeholder={t('modals.orderCancellation.reasonPlaceholder')}
-          className="liquid-glass-modal-input w-full resize-none"
+          className="liquid-glass-modal-input pos-glass-field min-h-touch w-full resize-none"
           rows={platformOrder ? 2 : 4}
           maxLength={500}
         />
@@ -301,7 +311,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
           {t('modals.orderCancellation.characterCount', { current: cancelReason.length, max: 500 })}
         </div>
       </div>
-      </>}
+      </></motion.div>}</AnimatePresence>
     </LiquidGlassModal>
   );
 };

@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.setConfig({ testTimeout: 20_000 });
 
 const mock = vi.hoisted(() => ({
+  deliveryPro: true,
   createCustomer: vi.fn(),
   updateCustomer: vi.fn(),
   updateCustomerAddress: vi.fn(),
@@ -27,6 +28,8 @@ const mock = vi.hoisted(() => ({
   validateAddressForDelivery: vi.fn(),
   searchAddressSuggestions: vi.fn(),
   resolveAddressSuggestion: vi.fn(),
+  locateTypedAddress: vi.fn(),
+  extractStreetNumber: vi.fn(),
   upsertVerifiedLocalCandidate: vi.fn(),
   bridge: null as any,
 }));
@@ -48,16 +51,18 @@ vi.mock('../../../contexts/theme-context', () => ({ useTheme: () => ({ resolvedT
 vi.mock('../../../hooks/useAcquiredModules', () => ({
   MODULE_IDS: { DELIVERY: 'delivery', DELIVERY_ZONES: 'delivery_zones' },
   // Delivery Pro: address search and zone validation are on.
-  useAcquiredModules: () => ({ hasModule: () => true }),
+  useAcquiredModules: () => ({ hasModule: () => mock.deliveryPro }),
 }));
 vi.mock('../../../services/terminal-credentials', () => ({
   getResolvedTerminalCredentials: vi.fn().mockResolvedValue({ branchId: 'branch-1' }),
 }));
-vi.mock('../../../services/address-workflow', () => ({
+vi.mock('../../../services/address-workflow', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../services/address-workflow')>(),
   buildAddressFingerprint: vi.fn((address: string) => `fp:${address}`),
   createAddressSessionToken: vi.fn(() => 'session'),
   ensureAddressOfflineRuntime: vi.fn(),
-  extractStreetNumber: vi.fn(() => null),
+  extractStreetNumber: mock.extractStreetNumber,
+  locateTypedAddress: mock.locateTypedAddress,
   getSuggestionStreetLabel: vi.fn((suggestion: any) => suggestion?.main_text ?? ''),
   resolveAddressSuggestion: mock.resolveAddressSuggestion,
   searchAddressSuggestions: mock.searchAddressSuggestions,
@@ -65,7 +70,7 @@ vi.mock('../../../services/address-workflow', () => ({
   validateAddressForDelivery: mock.validateAddressForDelivery,
 }));
 vi.mock('../../ui/pos-glass-components', () => ({
-  LiquidGlassModal: ({ children, isOpen }: any) => (isOpen ? <div>{children}</div> : null),
+  LiquidGlassModal: ({ children, footer, isOpen }: any) => (isOpen ? <div>{children}{footer}</div> : null),
 }));
 vi.mock('../../forms/FloorPresetPicker', () => ({
   FloorPresetPicker: ({ value, onChange, placeholder }: any) => (
@@ -150,7 +155,7 @@ const renderModal = async (props: Partial<React.ComponentProps<typeof AddCustome
     </I18nextProvider>,
   );
   await act(async () => {});
-  return { ...view, onCustomerAdded };
+  return { ...view, onCustomerAdded, i18n };
 };
 
 const submit = (container: HTMLElement) => fireEvent.submit(container.querySelector('form')!);
@@ -158,9 +163,12 @@ const submit = (container: HTMLElement) => fireEvent.submit(container.querySelec
 const everyValidationPoint = () =>
   mock.validateAddressForDelivery.mock.calls.map(([, options]) => options?.coordinates);
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 beforeEach(() => {
   vi.clearAllMocks();
+  mock.deliveryPro = true;
+  mock.extractStreetNumber.mockReturnValue(null);
+  mock.locateTypedAddress.mockReset().mockResolvedValue({ located: false, reason: 'not_found' });
   mock.getSetting.mockResolvedValue('GR');
   mock.getBranchId.mockResolvedValue('branch-1');
   mock.bridge = {
@@ -498,4 +506,168 @@ describe('full "Edit customer" saves address changes (founder, 29/09/2026)', () 
     expect(mock.updateCustomer).not.toHaveBeenCalled();
     expect(mock.updateCustomerAddress).not.toHaveBeenCalled();
   });
+});
+
+
+describe('map street name note', () => {
+  it.each(['pick', 'typed'] as const)('shows a different route after %s, clears on edit, and hides a matching route', async source => {
+    const street = 'Κωνσταντινουπόλεως 62';
+    const route = 'Γιάννη Χαλκίδη';
+    const note = `The map calls this street "${route}". Check that it is the right one.`;
+    const details = { streetAddress: street, route, city: 'Thessaloniki', postalCode: '54249',
+      coordinates: { lat: 40.614, lng: 22.9603 }, addressFingerprint: 'fp-note', validationSource: 'online' };
+    mock.extractStreetNumber.mockReturnValue('62');
+    mock.searchAddressSuggestions.mockResolvedValue([{ place_id: 'pick', main_text: street, secondary_text: 'City' }]);
+    mock.resolveAddressSuggestion.mockResolvedValue(details);
+    mock.locateTypedAddress.mockResolvedValue({ located: true, details });
+    await renderModal({ mode: 'editAddress', initialCustomer: { ...customer, editAddressId: coordinatedDefault.id } });
+    const input = screen.getByPlaceholderText(en.modals.addCustomer.streetPlaceholder);
+    fireEvent.change(input, { target: { value: street } });
+    if (source === 'pick') fireEvent.click(await screen.findByText('City', { selector: 'p' }));
+    else fireEvent.change(screen.getByLabelText(en.modals.addCustomer.postcodeLabel), { target: { value: '54640' } });
+    const line = await screen.findByText(note);
+    expect(line).toHaveClass('text-xs', 'liquid-glass-modal-text-muted');
+    expect(input).toHaveValue(street);
+    fireEvent.change(input, { target: { value: `${street}A` } });
+    expect(screen.queryByText(note)).toBeNull();
+    mock.resolveAddressSuggestion.mockResolvedValue({ ...details, route: 'Κωνσταντινουπόλεως' });
+    fireEvent.click(await screen.findByText('City', { selector: 'p' }));
+    await waitFor(() => expect(mock.resolveAddressSuggestion).toHaveBeenCalledTimes(source === 'pick' ? 2 : 1));
+    await waitFor(() => expect(input).toHaveValue(street));
+    expect(screen.queryByText(/The map calls this street/)).toBeNull();
+  });
+});
+
+describe('typed postal and city corrections', () => {
+  const point = { lat: 40.614, lng: 22.9603 };
+  const located = { located: true, details: { streetAddress: 'Synthetic New Street 62',
+    city: 'Provider city', postalCode: '54249', coordinates: point, placeId: 'typed-place',
+    resolvedStreetNumber: '62', addressFingerprint: 'fp:Synthetic New Street 62', validationSource: 'online' },
+    postalCodeDiffers: true, providerPostalCode: '54249' };
+  const setup = async () => {
+    mock.extractStreetNumber.mockImplementation((street: string) => street.match(/\d+/)?.[0]);
+    mock.searchAddressSuggestions.mockResolvedValue([{ place_id: 'pick', main_text: 'Synthetic New Street 62',
+      secondary_text: 'Thessaloniki', distance_meters: 1140 }]);
+    mock.resolveAddressSuggestion.mockResolvedValue({ ...located.details, city: 'Thessaloniki', placeId: 'pick' });
+    mock.locateTypedAddress.mockResolvedValue(located);
+    const initialCustomer = { ...customer, editAddressId: coordinatedDefault.id };
+    const result = await renderModal({ mode: 'editAddress', initialCustomer });
+    fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.streetPlaceholder), { target: { value: 'Synthetic New Street 62' } });
+    const row = await screen.findByText(/Thessaloniki.*1.1 km/, { selector: 'p' });
+    fireEvent.click(row);
+    await waitFor(() => expect(mock.validateAddressForDelivery).toHaveBeenCalled());
+    mock.validateAddressForDelivery.mockClear();
+    return { ...result, initialCustomer };
+  };
+  const postal = () => screen.getByLabelText(en.modals.addCustomer.postcodeLabel);
+
+  it('locates once after 700ms, keeps typed fields, shows the provider note and saves located proof', async () => {
+    const { container, onCustomerAdded } = await setup();
+    vi.useFakeTimers();
+    fireEvent.change(postal(), { target: { value: '546 4' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(400); });
+    fireEvent.change(postal(), { target: { value: '546 40' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(699); });
+    expect(mock.locateTypedAddress).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    vi.useRealTimers();
+    expect(mock.locateTypedAddress).toHaveBeenCalledTimes(1);
+    expect(mock.locateTypedAddress).toHaveBeenCalledWith({ street: 'Synthetic New Street 62', city: 'Thessaloniki', postalCode: '546 40' }, { branchId: 'branch-1' });
+    expect(postal()).toHaveValue('546 40');
+    expect(screen.getByLabelText(en.modals.addCustomer.cityLabel)).toHaveValue('Thessaloniki');
+    expect(screen.getByText('The map gives postal code 54249 for this address.')).toBeInTheDocument();
+    expect(screen.getByText(en.modals.addCustomer.deliveryAvailable)).toBeInTheDocument();
+    submit(container);
+    await waitFor(() => expect(onCustomerAdded).toHaveBeenCalledTimes(1));
+    expect(mock.updateCustomerAddress.mock.calls.at(-1)?.[1]).toMatchObject({ postal_code: '546 40', city: 'Thessaloniki',
+      coordinates: point, place_id: 'typed-place', resolved_street_number: '62', validation_source: 'online' });
+    expect(mock.locateTypedAddress).toHaveBeenCalledTimes(1);
+  });
+
+  it('locates a postal-only change to an existing saved address without another pick', async () => {
+    mock.extractStreetNumber.mockReturnValue('3');
+    mock.locateTypedAddress.mockResolvedValue({ ...located, details: { ...located.details, streetAddress: coordinatedDefault.street_address } });
+    const { container } = await renderModal({ mode: 'editAddress', initialCustomer: { ...customer, editAddressId: coordinatedDefault.id } });
+    fireEvent.change(postal(), { target: { value: '546 40' } });
+    await screen.findByText('The map gives postal code 54249 for this address.');
+    submit(container);
+    await waitFor(() => expect(mock.updateCustomerAddress).toHaveBeenCalledTimes(1));
+    expect(mock.updateCustomerAddress.mock.calls[0][1]).toMatchObject({ postal_code: '546 40', coordinates: point, place_id: 'typed-place' });
+    expect(mock.resolveAddressSuggestion).not.toHaveBeenCalled();
+  });
+
+  it('keeps a manually typed city after locating it', async () => {
+    await setup();
+    fireEvent.change(screen.getByLabelText(en.modals.addCustomer.cityLabel), { target: { value: 'Typed City' } });
+    await waitFor(() => expect(mock.locateTypedAddress).toHaveBeenCalledTimes(1));
+    expect(mock.locateTypedAddress.mock.calls[0][0].city).toBe('Typed City');
+    expect(screen.getByLabelText(en.modals.addCustomer.cityLabel)).toHaveValue('Typed City');
+  });
+
+  it('drops a typed-location zone verdict after a later street edit', async () => {
+    await setup();
+    let finish!: (value: any) => void;
+    mock.validateAddressForDelivery.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    fireEvent.change(postal(), { target: { value: '546 40' } });
+    await waitFor(() => expect(mock.validateAddressForDelivery).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.streetPlaceholder), { target: { value: 'Later Street 80' } });
+    await act(async () => { finish(inZone(point)); });
+    expect(screen.queryByText(en.modals.addCustomer.deliveryAvailable)).toBeNull();
+    expect(screen.getByText(en.modals.addCustomer.selectAddressForValidation)).toBeInTheDocument();
+  });
+
+  it.each(['not_found', 'offline', 'no_number', 'error'])('keeps requires_selection for %s', async (mode) => {
+    const { container } = await setup();
+    mock.locateTypedAddress.mockResolvedValue({ located: false, reason: 'not_found' });
+    if (mode === 'offline') vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    if (mode === 'no_number') mock.extractStreetNumber.mockReturnValue(null);
+    if (mode === 'error') mock.locateTypedAddress.mockRejectedValue(new Error('old server'));
+    vi.useFakeTimers();
+    fireEvent.change(postal(), { target: { value: '546 40' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+    vi.useRealTimers();
+    expect(screen.getByText(en.modals.addCustomer.selectAddressForValidation)).toBeInTheDocument();
+    if (mode === 'offline' || mode === 'no_number') expect(mock.locateTypedAddress).not.toHaveBeenCalled();
+    else expect(mock.locateTypedAddress).toHaveBeenCalledTimes(1);
+    expect(mock.validateAddressForDelivery).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('The map gives postal code');
+  });
+
+  it.each(['street', 'postal', 'pick', 'cancel', 'close', 'customer', 'module', 'unmount'])('drops a pending typed answer after %s', async (action) => {
+    let finish!: (value: any) => void;
+    const view = await setup();
+    mock.locateTypedAddress.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    fireEvent.change(postal(), { target: { value: '546 40' } });
+    await waitFor(() => expect(mock.locateTypedAddress).toHaveBeenCalledTimes(1));
+    expect(screen.getByText(en.modals.addCustomer.validatingAddress)).toBeInTheDocument();
+    if (action === 'street' || action === 'pick') {
+      fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.streetPlaceholder), { target: { value: 'Later Street 80' } });
+      if (action === 'pick') fireEvent.click(await screen.findByText(/Thessaloniki.*1.1 km/, { selector: 'p' }));
+    } else if (action === 'postal') fireEvent.change(postal(), { target: { value: '546 41' } });
+    else if (action === 'cancel') fireEvent.click(screen.getByRole('button', { name: en.modals.addCustomer.cancel }));
+    else if (action === 'unmount') view.unmount();
+    else {
+      if (action === 'module') mock.deliveryPro = false;
+      view.rerender(<I18nextProvider i18n={view.i18n}><AddCustomerModal isOpen={action !== 'close'} mode="editAddress"
+        initialCustomer={action === 'customer' ? { ...view.initialCustomer, id: 'other-customer' } : view.initialCustomer}
+        onClose={vi.fn()} onCustomerAdded={view.onCustomerAdded} /></I18nextProvider>);
+    }
+    await act(async () => { finish(located); });
+    expect(screen.queryByText('The map gives postal code 54249 for this address.')).toBeNull();
+    expect(mock.validateAddressForDelivery.mock.calls.some(([, options]) => options.placeId === 'typed-place')).toBe(false);
+  });
+});
+
+
+it('clears stale autocomplete loading when a manual postal edit invalidates the search', async () => {
+  let finish!: (value: any) => void;
+  mock.searchAddressSuggestions.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+  await renderModal({ mode: 'editAddress', initialCustomer: { ...customer, editAddressId: coordinatedDefault.id } });
+  fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.streetPlaceholder), { target: { value: 'Street 62' } });
+  await waitFor(() => expect(mock.searchAddressSuggestions).toHaveBeenCalledTimes(1));
+  expect(screen.getByText(en.modals.addCustomer.searchingAddresses)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText(en.modals.addCustomer.postcodeLabel), { target: { value: '546 40' } });
+  await act(async () => { finish([{ place_id: 'stale', main_text: 'Stale Street 62' }]); });
+  expect(screen.queryByText(en.modals.addCustomer.searchingAddresses)).toBeNull();
+  expect(screen.queryByText('Stale Street 62')).toBeNull();
 });

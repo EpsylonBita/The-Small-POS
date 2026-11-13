@@ -140,23 +140,17 @@ export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
         }`}
       >
         <div
-          className={`flex flex-wrap items-center gap-3 border-b px-4 py-3 sm:px-6 ${
-            isDark ? 'border-white/10' : 'border-[#dfe2e6]'
-          }`}
+          className="flex flex-wrap items-center gap-3 px-4 py-3 sm:px-6"
         >
           <span
-            className={`inline-flex items-center gap-2 text-lg font-semibold ${
-              isDark ? 'text-white' : 'text-slate-900'
-            }`}
+            className="inline-flex items-center gap-2 text-lg font-semibold liquid-glass-modal-text"
           >
             <MapIcon className="h-5 w-5" />
             {t('tablesDashboard.viewMode.floorPlan', '2D')}
           </span>
 
           <div
-            className={`flex flex-1 flex-wrap items-center gap-1 rounded-xl border p-1 ${
-              isDark ? 'border-white/10 bg-white/6' : 'border-(--pos-s-border) bg-white'
-            }`}
+            className="flex flex-1 flex-wrap items-center gap-2"
           >
             <button
               type="button"

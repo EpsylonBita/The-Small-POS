@@ -189,6 +189,32 @@ describe('ZReportModal TWINT receipt returned outside the POS', { timeout: 20_00
 
   afterEach(() => cleanup());
 
+  it('shows stored received, refunded and kept cents, including a negative cash day', async () => {
+    const response = reportWith([]);
+    mock.generateZReport.mockResolvedValue({ ...response, data: { ...response.data,
+      tenderReconciliation: { version: 1, lines: [
+        { tender: 'card', receivedCents: 10000, refundedCents: 10000, keptCents: 0 },
+        { tender: 'cash', receivedCents: 0, refundedCents: 2000, keptCents: -2000 },
+      ] },
+    } });
+    await renderModal('en');
+    const card = await screen.findByTestId('z-tender-card');
+    expect(within(card).getByText('Received')).toBeTruthy();
+    expect(within(card).getByText('Refunded')).toBeTruthy();
+    expect(within(card).getByText('Kept')).toBeTruthy();
+    expect(card.textContent).toMatch(/100[.,]00/);
+    const cash = screen.getByTestId('z-tender-cash');
+    expect(cash.textContent).toMatch(/-.*20[.,]00/);
+  });
+
+  it('keeps a legacy report free of reconciliation rows', async () => {
+    mock.generateZReport.mockResolvedValue(reportWith([]));
+    await renderModal('en');
+    await screen.findByText('Z Report - 2026-10-06');
+    expect(screen.queryByTestId('z-tender-card')).toBeNull();
+    expect(screen.queryByText('Received')).toBeNull();
+  });
+
   it('needs a reference, then records it under a manager and reads the report again', async () => {
     mock.generateZReport
       .mockResolvedValueOnce(reportWith([twintFinding()]))

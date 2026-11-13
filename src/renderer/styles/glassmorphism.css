@@ -93,6 +93,16 @@
   /* Glass modals (founder 30/10, «Νέο ραντεβού»): neutral frost only, never a colour. */
   --modal-backdrop: rgba(0, 0, 0, 0.22);
   --modal-glass: rgba(255, 255, 255, 0.18);
+  /* Notification toasts (founder 11/11): the same neutral frost, denser so a short line stays readable over any screen. */
+  --toast-glass: rgba(255, 255, 255, 0.62);
+  --toast-glass-border: rgba(255, 255, 255, 0.8);
+  --toast-glass-text: #18181b;
+  --toast-glass-shadow: 0 12px 36px rgba(0, 0, 0, 0.18);
+  /* Fields inside a glass modal (founder 11/11): frosted like the cards, never an opaque white block. */
+  --field-glass: rgba(255, 255, 255, 0.42);
+  --field-glass-border: rgba(255, 255, 255, 0.78);
+  --field-glass-fg: #18181b;
+  --field-glass-placeholder: #52525b;
   --modal-glass-border: rgba(255, 255, 255, 0.7);
   --modal-glass-card: rgba(255, 255, 255, 0.14);
   --modal-glass-card-border: rgba(255, 255, 255, 0.5);
@@ -152,6 +162,14 @@
   --modal-control-bg-active: #27272a;
   --modal-backdrop: rgba(0, 0, 0, 0.55);
   --modal-glass: rgba(9, 9, 11, 0.55);
+  --toast-glass: rgba(24, 24, 27, 0.6);
+  --toast-glass-border: rgba(255, 255, 255, 0.16);
+  --toast-glass-text: #fafafa;
+  --toast-glass-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  --field-glass: rgba(255, 255, 255, 0.06);
+  --field-glass-border: rgba(255, 255, 255, 0.14);
+  --field-glass-fg: #fafafa;
+  --field-glass-placeholder: #a1a1aa;
   --modal-glass-border: rgba(255, 255, 255, 0.1);
   --modal-glass-card: rgba(39, 39, 42, 0.62);
   --modal-glass-card-border: rgba(255, 255, 255, 0.1);
@@ -688,6 +706,7 @@
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.35);
   transition: transform 180ms cubic-bezier(0.4, 0, 0.2, 1), opacity 180ms cubic-bezier(0.4, 0, 0.2, 1);
   animation: liquidModalEnter var(--pos-motion-base, 180ms) var(--pos-ease, cubic-bezier(0.2, 0.8, 0.2, 1));
+  transform-origin: var(--modal-origin-x, 50%) var(--modal-origin-y, 50%);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -858,15 +877,22 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
   }
 }
 
+/* A window grows out of the control that opened it (founder 11/11/2026): the shell's transform
+   origin is the press point (modal-origin.ts sets --modal-origin-x/y; the centre without one). */
 @keyframes liquidModalEnter {
   from {
     opacity: 0;
-    transform: translateY(-10px) scale(0.96);
+    transform: scale(0.6);
+  }
+
+  /* Solid early, so the growth out of the pressed control is what the eye sees, not a fade. */
+  55% {
+    opacity: 1;
   }
 
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: scale(1);
   }
 }
 
@@ -895,12 +921,12 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 @keyframes liquidModalExit {
   from {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: scale(1);
   }
 
   to {
     opacity: 0;
-    transform: translateY(-10px) scale(0.96);
+    transform: scale(0.9);
   }
 }
 
@@ -908,6 +934,20 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 
 .liquid-glass-modal-shell.leaving {
   animation: liquidModalExit var(--pos-motion-base, 180ms) var(--pos-ease, cubic-bezier(0.2, 0.8, 0.2, 1)) forwards;
+}
+
+/* A window that replaces a closing one keeps the backdrop: no fade-in, so the page behind never
+   shows sharp between the two (founder 11/11/2026: «σαν να φλασάρει κάτι»). */
+.liquid-glass-modal-backdrop--continued {
+  animation: none;
+}
+
+/* The backdrop alone, held between a window that closed and one whose screen is still loading
+   (ModalBackdropBridge). Below every window, so the next one opens over it. */
+.liquid-glass-modal-backdrop.modal-backdrop-bridge {
+  position: fixed;
+  inset: var(--app-window-frame-height, 2rem) 0 0 0;
+  z-index: 999;
 }
 
 .liquid-glass-modal-backdrop.leaving {
@@ -1089,6 +1129,45 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
 }
 
 /* Modal header and content layout */
+/* Frosted field and card for forms inside glass modals (founder, 11/11/2026). */
+.pos-glass-field,
+.liquid-glass-modal-input.pos-glass-field {
+  background: var(--field-glass) !important;
+  border: 1px solid var(--field-glass-border) !important;
+  color: var(--field-glass-fg) !important;
+  border-radius: 14px;
+  box-shadow: none !important;
+}
+.pos-glass-field::placeholder { color: var(--field-glass-placeholder); opacity: 1; }
+.pos-glass-field:focus,
+.pos-glass-field:focus-visible {
+  border-color: #facc15 !important;
+  outline: 2px solid #facc15;
+  outline-offset: 1px;
+}
+.pos-glass-field:disabled { opacity: 0.45; }
+.pos-glass-form-card {
+  background: var(--modal-glass-card);
+  border: 1px solid var(--modal-glass-card-border);
+  border-radius: 20px;
+  padding: 1rem;
+}
+/* Progressive glass forms: neutral frost, solid kit actions, touch-visible focus. */
+.pos-progressive-form button:focus-visible,
+.pos-progressive-form input:focus-visible,
+.pos-progressive-form textarea:focus-visible {
+  outline: 2px solid #facc15;
+  outline-offset: 2px;
+}
+.pos-progressive-form input,
+.pos-progressive-form textarea { color: var(--field-glass-fg); }
+
+.liquid-glass-modal-header.pos-glass-header--plain,
+.dark .liquid-glass-modal-header.pos-glass-header--plain {
+  border-bottom: 0;
+  padding-bottom: 0.75rem;
+}
+
 .liquid-glass-modal-header {
   display: flex;
   align-items: center;
@@ -2216,6 +2295,27 @@ html[data-app-intro] [data-login-logo] {
   box-shadow: var(--pos-s-depth-press);
   translate: 0 1px;
 }
+
+/* Tappable glass cards (rooms, choosers) and tappable frosted fields (calendar days, time slots, tabs,
+   steppers): frosted like the panels, with the panel depth, sinking while pressed (founder 11/11: «εδώ οι
+   κάρτες δωματίων δεν έχουν βάθος»; the same rule as the payment choices above). Text fields stay flat. */
+.pos-glass-tap-card {
+  border: 1px solid var(--modal-glass-card-border);
+  border-radius: 20px;
+  background: var(--modal-glass-card);
+  box-shadow: var(--pos-s-depth-card);
+}
+.pos-glass-tap-card:is(:active, [data-pressed]):not(:disabled) {
+  box-shadow: var(--pos-s-depth-press);
+  translate: 0 1px;
+}
+.pos-glass-tap-card:disabled { box-shadow: none; opacity: 0.5; cursor: not-allowed; }
+button.pos-glass-field { box-shadow: var(--pos-s-depth-card) !important; }
+button.pos-glass-field:is(:active, [data-pressed]):not(:disabled) {
+  box-shadow: var(--pos-s-depth-press) !important;
+  translate: 0 1px;
+}
+button.pos-glass-field:disabled { box-shadow: none !important; }
 
 /* Wave ΣΤ4: the kit focus outline (solid fg), not a coloured translucent ring. */
 .liquid-glass-modal-shell button.payment-option-cash:focus-visible,

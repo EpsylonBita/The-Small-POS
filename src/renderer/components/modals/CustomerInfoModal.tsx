@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useState, useEffect } from 'react';
 import { toast } from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
@@ -38,6 +39,14 @@ export const CustomerInfoModal: React.FC<CustomerInfoModalProps> = ({
   staffRole = 'staff'
 }) => {
   const { t } = useTranslation();
+  // Presentation only: preserve every existing reveal condition (founder 11/11/2026).
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
   const [customerInfo, setCustomerInfo] = useState<CustomerInfo>(initialData);
   const [deliveryValidation, setDeliveryValidation] = useState<DeliveryBoundaryValidationResponse | null>(null);
   const [canProceed, setCanProceed] = useState(true);
@@ -160,104 +169,11 @@ export const CustomerInfoModal: React.FC<CustomerInfoModalProps> = ({
       onClose={onClose}
       title={t('modals.customerInfo.title')}
       size="md"
-      className="max-w-lg!"
+      className="max-w-lg! pos-progressive-form [&_.liquid-glass-modal-header]:border-b-0!"
       closeOnBackdrop={true}
       closeOnEscape={true}
-    >
-      <div className="space-y-4">
-        {/* Customer Name */}
-        <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.customerInfo.customerName')}
-          </label>
-          <POSGlassInput
-            type="text"
-            value={customerInfo.name}
-            onChange={(e) => handleInputChange('name', e.target.value)}
-            placeholder={t('modals.customerInfo.customerNamePlaceholder')}
-            autoFocus
-          />
-        </div>
-
-        {/* Phone Number */}
-        <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.customerInfo.phoneNumber')}
-          </label>
-          <POSGlassInput
-            type="tel"
-            value={customerInfo.phone}
-            onChange={(e) => handleInputChange('phone', e.target.value)}
-            placeholder={t('modals.customerInfo.phoneNumberPlaceholder')}
-          />
-        </div>
-
-        {/* Address/Notes Field with Delivery Validation */}
-        <div>
-          {orderType === 'delivery' ? (
-            <DeliveryValidationComponent
-              orderAmount={orderAmount}
-              onValidationResult={handleValidationResult}
-              onAddressChange={handleAddressChange}
-              staffId={staffId}
-              staffRole={staffRole}
-              initialAddress={customerInfo.address}
-              className="bg-white/5 border border-white/10 rounded-2xl p-4"
-            />
-          ) : (
-            <>
-              <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-                {getAddressLabel()}
-              </label>
-              <POSGlassInput
-                type="text"
-                value={customerInfo.address}
-                onChange={(e) => handleInputChange('address', e.target.value)}
-                placeholder={getAddressPlaceholder()}
-              />
-            </>
-          )}
-        </div>
-
-        {orderType === 'delivery' && (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <FloorPresetPicker
-              value={customerInfo.floor_number || ''}
-              onChange={(value) => handleInputChange('floor_number', value)}
-              label={t('modals.customerInfo.floorNumber')}
-              placeholder={t('modals.addCustomer.floorPlaceholder')}
-              inputClassName="liquid-glass-modal-input w-full"
-              required
-            />
-
-            <div>
-              <label className="mb-2 block text-sm font-medium liquid-glass-modal-text">
-                {t('modals.customerInfo.nameOnRinger')}
-              </label>
-              <POSGlassInput
-                type="text"
-                value={customerInfo.name_on_ringer || ''}
-                onChange={(e) => handleInputChange('name_on_ringer', e.target.value)}
-                placeholder={t('modals.addCustomer.nameOnRingerPlaceholder')}
-                required
-                aria-required="true"
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Order Type Display */}
-        <div className="p-3 bg-white/10 dark:bg-gray-800/20 rounded-2xl border liquid-glass-modal-border">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium liquid-glass-modal-text">{t('modals.customerInfo.orderType')}:</span>
-            <span className="text-sm font-semibold text-amber-500 dark:text-amber-300 capitalize">
-              {orderType.replace('-', ' ')}
-            </span>
-          </div>
-        </div>
-
-        {/* Action Buttons */}
-        <div className="flex space-x-3 mt-6">
+      footer={(
+        <div className="flex space-x-3 px-6 pb-5 pt-2">
           <POSGlassButton
             variant="error"
             onClick={onClose}
@@ -278,6 +194,111 @@ export const CustomerInfoModal: React.FC<CustomerInfoModalProps> = ({
               : t('modals.customerInfo.save')}
           </POSGlassButton>
         </div>
+      )}
+    >
+      <div className="space-y-3">
+        <div className="pos-glass-form-card space-y-3">
+        {/* Customer Name */}
+        <div>
+          <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
+            {t('modals.customerInfo.customerName')}
+          </label>
+          <POSGlassInput
+            className="pos-glass-field min-h-touch"
+            type="text"
+            value={customerInfo.name}
+            onChange={(e) => handleInputChange('name', e.target.value)}
+            placeholder={t('modals.customerInfo.customerNamePlaceholder')}
+            autoFocus
+          />
+        </div>
+
+        {/* Phone Number */}
+        <div>
+          <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
+            {t('modals.customerInfo.phoneNumber')}
+          </label>
+          <POSGlassInput
+            className="pos-glass-field min-h-touch"
+            type="tel"
+            value={customerInfo.phone}
+            onChange={(e) => handleInputChange('phone', e.target.value)}
+            placeholder={t('modals.customerInfo.phoneNumberPlaceholder')}
+          />
+        </div>
+
+        </div>
+
+        {/* Address/Notes Field with Delivery Validation */}
+        <div className="pos-glass-form-card">
+          {orderType === 'delivery' ? (
+            <DeliveryValidationComponent
+              orderAmount={orderAmount}
+              onValidationResult={handleValidationResult}
+              onAddressChange={handleAddressChange}
+              staffId={staffId}
+              staffRole={staffRole}
+              initialAddress={customerInfo.address}
+              className="pos-glass-form-card"
+            />
+          ) : (
+            <>
+              <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
+                {getAddressLabel()}
+              </label>
+              <POSGlassInput
+                className="pos-glass-field min-h-touch"
+                type="text"
+                value={customerInfo.address}
+                onChange={(e) => handleInputChange('address', e.target.value)}
+                placeholder={getAddressPlaceholder()}
+              />
+            </>
+          )}
+        </div>
+
+        <AnimatePresence initial={false}>
+
+          {orderType === 'delivery' && (
+          <motion.div {...revealMotion} key="reveal-1" className="pos-glass-form-card grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <FloorPresetPicker
+              value={customerInfo.floor_number || ''}
+              onChange={(value) => handleInputChange('floor_number', value)}
+              label={t('modals.customerInfo.floorNumber')}
+              placeholder={t('modals.addCustomer.floorPlaceholder')}
+              inputClassName="liquid-glass-modal-input pos-glass-field min-h-touch w-full"
+              required
+            />
+
+            <div>
+              <label className="mb-1.5 block text-xs font-semibold liquid-glass-modal-text-muted">
+                {t('modals.customerInfo.nameOnRinger')}
+              </label>
+              <POSGlassInput
+                className="pos-glass-field min-h-touch"
+                type="text"
+                value={customerInfo.name_on_ringer || ''}
+                onChange={(e) => handleInputChange('name_on_ringer', e.target.value)}
+                placeholder={t('modals.addCustomer.nameOnRingerPlaceholder')}
+                required
+                aria-required="true"
+              />
+            </div>
+          </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Order Type Display */}
+        <div className="pos-glass-form-card p-3!">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium liquid-glass-modal-text">{t('modals.customerInfo.orderType')}:</span>
+            <span className="text-sm font-semibold liquid-glass-modal-text capitalize">
+              {orderType.replace('-', ' ')}
+            </span>
+          </div>
+        </div>
+
+
       </div>
     </LiquidGlassModal>
   );

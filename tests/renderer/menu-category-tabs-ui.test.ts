@@ -148,14 +148,15 @@ test('menu modal cards and cart keep the compact glass layout', () => {
   assert.doesNotMatch(modalSource, /shadow-\[0_18px_42px_rgba\(0,0,0,0\.22\)\]/);
   assert.doesNotMatch(modalSource, /bg-white\/2\.5(?![\w.-])/);
   assert.doesNotMatch(modalSource, /backdrop-blur-2xl/);
+  // founder 11/11/2026: frosted cart body, with an explicitly opaque checkout/total area.
   // Founder 31/10 («το καλάθι δεν είναι εύκολα αναγνώσιμο»): the cart is a solid kit panel, not see-through.
-  assert.match(cartSource, /rounded-\[28px\] border border-\(--pos-s-border\) bg-\(--pos-s-surface\) text-\(--pos-s-fg\)/);
+  assert.match(cartSource, /pos-glass-form-card p-0! flex h-full w-full flex-col overflow-hidden rounded-\[28px\]! text-\(--pos-s-fg\)/);
   assert.doesNotMatch(cartSource, /bg-black\/3 dark:bg-white\/6|bg-black\/8 dark:bg-white\/12|bg-slate-500\/15/);
   // Wave ΣΤ2: flat solid surfaces, no tinted elevation shadow.
   assert.doesNotMatch(cartSource, /shadow-\[0_10px_28px_rgba/);
   assert.match(cartSource, /overflow-y-auto p-3 touch-scroll scrollbar-hide/);
   assert.doesNotMatch(cartSource, /overflow-y-auto p-3 touch-scroll pos-scrollbar-glass/);
-  assert.match(cartSource, /bg-transparent space-y-3/);
+  assert.match(cartSource, /shrink-0 p-3 bg-\(--pos-s-surface\) space-y-3/);
   assert.match(cartSource, /bg-transparent border-0 p-0 shadow-none/);
   assert.match(cartSource, /<Ticket className="h-8 w-8 shrink-0"/);
   assert.match(cartSource, /<Award className="h-8 w-8 shrink-0"/);

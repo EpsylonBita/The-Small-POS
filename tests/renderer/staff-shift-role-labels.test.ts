@@ -127,7 +127,7 @@ test('Round 313: the PIN step has a touch numeric keypad wired to enteredPin, wi
   assert.match(modalSource, /const checkInKeyClass =\s*'flex min-h-touch(?![\w.-])/);
   // Every keypad button (the 1-9 map, 0, clear, backspace) uses the shared key class.
   const keypadButtons = (pinStep.match(/<button\b/g) ?? []).length;
-  const keyClassUses = (pinStep.match(/className=\{(?:checkInKeyClass|`\$\{checkInKeyClass\} text-\(--pos-s-muted\)`)\}/g) ?? []).length;
+  const keyClassUses = (pinStep.match(/className=\{(?:checkInKeyClass|`\$\{checkInKeyClass\} liquid-glass-modal-text-muted`)\}/g) ?? []).length;
   assert.equal(keypadButtons, 4);
   assert.equal(keyClassUses, keypadButtons);
   assert.doesNotMatch(pinStep, /hover:/);
@@ -136,8 +136,8 @@ test('Round 313: the PIN step has a touch numeric keypad wired to enteredPin, wi
 });
 
 test('Round 313: the shared check-in eyebrow micro-labels are normal-case (not shouty uppercase/tracking)', () => {
-  assert.match(modalSource, /const checkInEyebrowClass = 'text-xs font-semibold text-slate-500 dark:text-slate-400';/);
-  // The old uppercase + letter-spaced eyebrow style is gone from the shared check-in label.
+  assert.match(modalSource, /const checkInEyebrowClass = 'text-xs font-semibold liquid-glass-modal-text-muted';/);
+  // founder 11/11/2026: muted glass text keeps the same small, normal-case label.
   assert.doesNotMatch(modalSource, /const checkInEyebrowClass = 'text-xs uppercase tracking-/);
 });
 
@@ -180,8 +180,8 @@ test('Round 313 (2nd follow-up): keypad keys are exactly-44px (no py-3 overshoot
   const keyClass = /const checkInKeyClass =\s*'([^']+)'/.exec(modalSource)?.[1] ?? '';
   assert.match(keyClass, /min-h-touch(?![\w.-])/);
   assert.doesNotMatch(keyClass, /\bpy-\d/, 'keypad keys must not add vertical padding over the 44px floor');
-  // The compact digit key is the 44 px floor + text-xl, on the kit surface.
-  assert.match(keyClass, /min-h-touch items-center justify-center rounded-xl border border-\(--pos-s-border\) bg-\(--pos-s-surface\) text-xl/);
+  // founder 11/11/2026: frosted keys keep the exact same 44 px floor and compact type.
+  assert.match(keyClass, /min-h-touch items-center justify-center pos-glass-field text-xl/);
 
   // The PIN heading is rendered once (the duplicate eyebrow + inset label are gone); the helper stays.
   // Counted as visible headings; the PIN field's screen-reader label (aria-label) is not a heading.
@@ -259,8 +259,8 @@ test('start-shift disabled states keep readable text without fading the whole ca
   const busyCard = modalSource.slice(busyCardStart, busyCardEnd);
   const footer = modalSource.slice(checkInFooterStart, checkInFooterEnd);
   assert.doesNotMatch(busyCard, /\bopacity-\d+/, 'disabled staff cards must not dim all child text');
-  // Busy staff keep readable words on the raised kit surface and say why with a badge.
-  assert.match(busyCard, /pos-choice-card pos-choice-card--row cursor-not-allowed bg-\(--pos-s-surface-2\)/);
+  // founder 11/11/2026: disabled glass cards keep full-contrast words and the unavailable reason.
+  assert.match(busyCard, /pos-glass-form-card flex min-h-\[56px\] w-full items-center gap-3 p-3! cursor-not-allowed/);
   assert.match(busyCard, /t\('modals\.staffShift\.unavailable', 'Unavailable'\)/);
   assert.match(footer, /pos-solid-btn pos-solid-btn--md pos-solid-btn--primary/, 'actions are kit buttons (kit disabled state)');
 });
@@ -286,5 +286,35 @@ test('start-shift person icons are standalone without decorative rounded icon ti
     checkIn,
     /flex h-(?:14|16) w-(?:14|16)[^"']*items-center justify-center[^"']*rounded[^"']*border/,
   );
-  assert.match(checkIn, /<User className="h-7 w-7 shrink-0 text-\(--pos-s-muted\)"/);
+  assert.match(checkIn, /<User className="h-7 w-7 shrink-0 liquid-glass-modal-text-muted"/);
+});
+
+// founder 11/11/2026: all shift views share the glass form language without changing control rules.
+test('StaffShiftModal uses frosted panels, fields and raised choices without inner blur or footer bars', () => {
+  assert.match(modalSource, /const checkoutSurfaceClass = 'pos-glass-form-card';/);
+  assert.match(modalSource, /const checkInSurfaceClass = 'pos-glass-form-card';/);
+  assert.match(modalSource, /const checkoutFieldClass =\s*'liquid-glass-modal-input pos-glass-field block min-h-\[48px\]/);
+  assert.match(modalSource, /const checkInKeyClass =\s*'flex min-h-touch items-center justify-center pos-glass-field/);
+  assert.match(modalSource, /const checkInFooterClass = 'sticky bottom-0 z-10 mt-3 px-6 pb-5 pt-2';/);
+  assert.match(modalSource, /className="flex flex-col gap-3 px-6 pb-5 pt-2 sm:flex-row sm:items-center sm:justify-between"/);
+  assert.match(modalSource, /\[&_\.liquid-glass-modal-header\]:border-b-0!/);
+  assert.doesNotMatch(modalSource, /staff-checkout-footer-panel|backdrop-blur|backdrop-filter/);
+  assert.doesNotMatch(modalSource, /(?:bg|from|via|to)-(?:white|black|slate|gray|zinc|emerald|green|red|rose|amber)-[\d/]+|bg-(?:white|black)\//);
+  // Money/state colours and the unchanged primary actions remain explicit.
+  assert.match(modalSource, /data-expected-in-drawer className="[^"]*text-\(--pos-s-ok\)/);
+  assert.match(modalSource, /actual === null \? 'text-\(--pos-s-warn\)'[\s\S]*?: 'text-rose-500 dark:text-rose-300'/);
+  assert.match(modalSource, /disabled=\{loading \|\| enteredPin\.length !== 4\}\s*className="pos-solid-btn pos-solid-btn--md pos-solid-btn--primary/);
+});
+
+test('StaffShiftModal reveals conditional blocks with reduced motion and retires their old controls immediately', () => {
+  assert.match(modalSource, /const prefersReducedMotion = useReducedMotion\(\);/);
+  assert.match(modalSource, /initial: prefersReducedMotion \? false as const : \{ opacity: 0, height: 0, y: 12, overflow: 'hidden' \}/);
+  assert.match(modalSource, /animate: \{ opacity: 1, height: 'auto', y: 0, overflow: 'visible' \}/);
+  assert.match(modalSource, /exit: prefersReducedMotion \? \{ opacity: 0 \} : \{ opacity: 0, height: 0, overflow: 'hidden'/);
+  assert.match(modalSource, /duration: prefersReducedMotion \? 0 : 0\.24, ease: \[0\.2, 0\.8, 0\.2, 1\]/);
+  assert.match(modalSource, /overflow: \{ delay: prefersReducedMotion \? 0 : 0\.24, duration: 0 \}/);
+  assert.match(modalSource, /return useIsPresent\(\) \? children : null;/);
+  assert.doesNotMatch(modalSource, /<AnimatePresence mode="wait"/);
+  assert.match(modalSource, /<AnimatePresence initial=\{false\}>\s*\{canRecordInlineExpenses && showExpenseForm && \(\s*<motion\.div[^>]*ref=\{expenseFormRef\}/);
+  assert.match(modalSource, /<AnimatePresence initial=\{false\}>\s*\{showStaffPaymentForm && \(\s*<motion\.div[^>]*ref=\{staffPaymentFormRef\}/);
 });

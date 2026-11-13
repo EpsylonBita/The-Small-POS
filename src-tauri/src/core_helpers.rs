@@ -317,7 +317,47 @@ where
     Ok((repair_transition, recovery_decision))
 }
 
-fn clear_generic_operational_data_in_transaction(
+pub(crate) fn ensure_no_unsent_money(conn: &rusqlite::Connection) -> Result<(), String> {
+    // A rebind wipes every window, including orphaned and set-aside rows that
+    // the closing-window Z selector deliberately leaves in place.
+    let pending: bool = conn.query_row(
+        "WITH financial_tables(table_name, legacy_entity_type) AS (VALUES
+             ('orders', 'order'), ('payments', 'payment'),
+             ('order_payments', 'order_payment'), ('payment_adjustments', 'payment_adjustment'),
+             ('staff_shifts', 'shift'), ('staff_shifts', 'staff_shift'),
+             ('cash_drawer_sessions', 'cash_drawer_session'), ('cash_drawer_sessions', 'cash_drawer'),
+             ('shift_expenses', 'shift_expense'), ('staff_payments', 'staff_payment'),
+             ('driver_earnings', 'driver_earnings'), ('driver_earning', 'driver_earning'),
+             ('staff_order_cash_returns', 'staff_order_cash_return'),
+             ('cash_drawer_events', 'cash_drawer_event'), ('z_reports', 'z_report'),
+             ('financial_openings', 'financial_opening'),
+             ('gift_card_financial_closings', 'gift_card_financial_closing'),
+             ('loyalty_transactions', 'loyalty_transaction'),
+             ('customer_loyalty_points', 'customer_loyalty_point'),
+             ('coupons', 'coupon'), ('coupon_usage', 'coupon_usage'))
+         SELECT EXISTS(SELECT 1 FROM sync_queue
+                       WHERE COALESCE(status, '') NOT IN ('synced', 'applied')
+                         AND (entity_type IN (SELECT table_name FROM financial_tables)
+                              OR entity_type IN (SELECT legacy_entity_type FROM financial_tables)))
+         OR EXISTS(SELECT 1 FROM parity_sync_queue
+                   WHERE COALESCE(status, '') NOT IN ('synced', 'applied')
+                     AND (module_type = 'financial'
+                          OR table_name IN (SELECT table_name FROM financial_tables)))
+         OR EXISTS(SELECT 1 FROM order_payments
+                   WHERE COALESCE(sync_status, '') <> 'synced'
+                      OR COALESCE(sync_state, '') <> 'applied')
+         OR EXISTS(SELECT 1 FROM payment_adjustments
+                   WHERE COALESCE(sync_state, '') <> 'applied')",
+        [],
+        |row| row.get(0),
+    ).map_err(|_| "UNSYNCED_QUEUE".to_string())?;
+    if pending {
+        return Err("UNSYNCED_QUEUE".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn clear_generic_operational_data_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<(), String> {
     transaction
@@ -335,6 +375,7 @@ fn clear_generic_operational_data_in_transaction(
         DELETE FROM parity_sync_queue;
         DELETE FROM sync_queue;
         DELETE FROM orders;
+        DELETE FROM local_settings WHERE setting_category = 'fiscal_admission_owed';
         ",
         )
         .map_err(|e| format!("clear operational data: {e}"))?;
@@ -405,21 +446,24 @@ fn clear_generic_operational_data(db: &db::DbState) -> Result<(), String> {
 /// and durable marker deletion. The keyring is not SQLite-transactional, so a
 /// pending replacement scope is published first; any later failure restores
 /// that pending scope and leaves the marker set for a fail-closed retry.
-pub(crate) fn finalize_operational_rebind<F>(
+pub(crate) fn finalize_operational_rebind<F, G>(
     db: &db::DbState,
     repair_transition: &crate::repairs::RepairTransitionGuard,
     marker_category: &str,
     marker_key: &str,
     candidate_key: &str,
-    after_clear_before_scope_publication: F,
+    before_clear: F,
+    after_clear_before_scope_publication: G,
 ) -> Result<(), String>
 where
-    F: FnOnce(),
+    F: FnOnce(&rusqlite::Connection) -> Result<(), String>,
+    G: FnOnce(),
 {
     let mut conn = db.conn.lock().map_err(|error| error.to_string())?;
     let transaction = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| format!("clear operational data: {error}"))?;
+    before_clear(&transaction)?;
     clear_generic_operational_data_in_transaction(&transaction)?;
     transaction
         .commit()
@@ -706,7 +750,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn clear_operational_data_removes_parity_and_recovery_rows_after_snapshot() {
+    fn diagnostics_clear_with_unsent_money_preserves_recovery_snapshot() {
         let _keyring = crate::tests::fake_keyring::install_empty();
         let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
         let database = crate::tests::harness::TestDb::open();
@@ -723,6 +767,14 @@ mod tests {
                 [],
             )
             .expect("seed parity queue");
+            conn.execute_batch(
+                "INSERT INTO orders (id, items, total_amount, status, created_at, updated_at)
+                 VALUES ('order-old', '[]', 1, 'completed', datetime('now'), datetime('now'));
+                 INSERT INTO order_payments (id, order_id, method, amount, created_at, updated_at)
+                 VALUES ('payment-old', 'order-old', 'cash', 1, datetime('now'), datetime('now'));
+                 INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+                 VALUES ('payment', 'payment-old', 'INSERT', '{}', 'payment-old', 'conflict');",
+            ).expect("seed unsent payment");
             conn.execute(
                 "INSERT INTO conflict_audit_log (
                     id, operation_type, entity_id, entity_type, local_version, server_version,
@@ -768,6 +820,8 @@ mod tests {
 
         let conn = db.conn.lock().expect("lock db");
         for table in [
+            "orders",
+            "order_payments",
             "parity_sync_queue",
             "conflict_audit_log",
             "recovery_action_log",
@@ -803,6 +857,133 @@ mod tests {
             points[0].kind,
             crate::recovery::RecoveryPointKind::PreClearOperationalData
         );
+        let snapshot = rusqlite::Connection::open_with_flags(
+            &points[0].snapshot_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open diagnostic recovery snapshot");
+        for table in [
+            "orders",
+            "order_payments",
+            "sync_queue",
+            "parity_sync_queue",
+        ] {
+            assert_eq!(
+                snapshot
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1,
+                "snapshot must retain {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_rebind_money_gate_ignores_stuck_non_financial_queue_rows() {
+        let database = crate::tests::harness::TestDb::open();
+        let mut conn = database.state.conn.lock().unwrap();
+        for status in [
+            "pending",
+            "processing",
+            "failed",
+            "conflict",
+            "synced",
+            "applied",
+        ] {
+            let tx = conn.transaction().unwrap();
+            tx.execute("INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status) VALUES ('menu_cache', 'menu', 'UPDATE', '{}', 'menu', ?1)", [status]).unwrap();
+            if !matches!(status, "synced" | "applied") {
+                tx.execute("INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id, status) VALUES ('menu', 'menu_cache', 'menu', 'UPDATE', '{}', 'org', ?1)", [status]).unwrap();
+            }
+            ensure_no_unsent_money(&tx).expect("non-financial work must not block a rebind");
+        }
+    }
+
+    #[test]
+    fn terminal_rebind_money_gate_covers_queues_and_unqueued_payments() {
+        let database = crate::tests::harness::TestDb::open();
+        let mut conn = database.state.conn.lock().unwrap();
+        for (table, entity_type) in [
+            ("orders", "order"),
+            ("payments", "payment"),
+            ("order_payments", "order_payment"),
+            ("payment_adjustments", "payment_adjustment"),
+            ("staff_shifts", "shift"),
+            ("staff_shifts", "staff_shift"),
+            ("cash_drawer_sessions", "cash_drawer"),
+            ("cash_drawer_sessions", "cash_drawer_session"),
+            ("shift_expenses", "shift_expense"),
+            ("staff_payments", "staff_payment"),
+            ("driver_earnings", "driver_earnings"),
+            ("driver_earning", "driver_earning"),
+            ("cash_drawer_events", "cash_drawer_event"),
+            ("staff_order_cash_returns", "staff_order_cash_return"),
+            ("z_reports", "z_report"),
+            ("financial_openings", "financial_opening"),
+            (
+                "gift_card_financial_closings",
+                "gift_card_financial_closing",
+            ),
+            ("loyalty_transactions", "loyalty_transaction"),
+            ("customer_loyalty_points", "customer_loyalty_point"),
+            ("coupons", "coupon"),
+            ("coupon_usage", "coupon_usage"),
+        ] {
+            for status in ["pending", "processing", "failed", "conflict"] {
+                let tx = conn.transaction().unwrap();
+                tx.execute("INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id, status) VALUES ('money-gate', ?1, 'missing-local-record', 'UPDATE', '{}', 'org', ?2)", [table, status]).unwrap();
+                assert_eq!(
+                    ensure_no_unsent_money(&tx),
+                    Err("UNSYNCED_QUEUE".into()),
+                    "{table}/{status}"
+                );
+                tx.execute("DELETE FROM parity_sync_queue", []).unwrap();
+                ensure_no_unsent_money(&tx).expect("acknowledged parity row permits rebind");
+                for legacy_type in [table, entity_type] {
+                    tx.execute("INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status) VALUES (?1, 'money', 'INSERT', '{}', 'legacy-money', ?2)", [legacy_type, status]).unwrap();
+                    assert_eq!(
+                        ensure_no_unsent_money(&tx),
+                        Err("UNSYNCED_QUEUE".into()),
+                        "{legacy_type}/{status}"
+                    );
+                    tx.execute("UPDATE sync_queue SET status='applied'", [])
+                        .unwrap();
+                    ensure_no_unsent_money(&tx).expect("acknowledged legacy row permits rebind");
+                    tx.execute("DELETE FROM sync_queue", []).unwrap();
+                }
+                tx.execute("INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id, status) VALUES ('money-gate', ?1, 'missing-local-record', 'UPDATE', '{}', 'org', ?2)", [table, status]).unwrap();
+                clear_generic_operational_data_in_transaction(&tx)
+                    .expect("diagnostics clear keeps its snapshot-based admission");
+                assert_eq!(
+                    tx.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| row
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+        {
+            let tx = conn.transaction().unwrap();
+            tx.execute("INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id, module_type, status) VALUES ('financial-module', 'custom_financial', 'money', 'UPDATE', '{}', 'org', 'financial', 'failed')", []).unwrap();
+            assert_eq!(ensure_no_unsent_money(&tx), Err("UNSYNCED_QUEUE".into()));
+        }
+        conn.execute_batch("INSERT INTO orders (id, items, total_amount, status, created_at, updated_at) VALUES ('unqueued-order', '[]', 1, 'completed', datetime('now'), datetime('now'));
+            INSERT INTO order_payments (id, order_id, method, amount, created_at, updated_at) VALUES ('unqueued-payment', 'unqueued-order', 'cash', 1, datetime('now'), datetime('now')); ").unwrap();
+        assert_eq!(ensure_no_unsent_money(&conn), Err("UNSYNCED_QUEUE".into()));
+        conn.execute(
+            "UPDATE order_payments SET sync_status='synced', sync_state='applied'",
+            [],
+        )
+        .unwrap();
+        ensure_no_unsent_money(&conn).expect("acknowledged payment permits rebind");
+        conn.execute("INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, created_at, updated_at) VALUES ('unqueued-adjustment', 'unqueued-payment', 'unqueued-order', 'refund', 1, 'test', datetime('now'), datetime('now'))", []).unwrap();
+        assert_eq!(ensure_no_unsent_money(&conn), Err("UNSYNCED_QUEUE".into()));
+        conn.execute("UPDATE payment_adjustments SET sync_state='applied'", [])
+            .unwrap();
+        ensure_no_unsent_money(&conn).expect("acknowledged money permits rebind");
+        conn.execute_batch("DROP TABLE sync_queue").unwrap();
+        assert_eq!(ensure_no_unsent_money(&conn), Err("UNSYNCED_QUEUE".into()));
     }
 
     #[test]

@@ -331,8 +331,8 @@ pub(crate) fn vault_from_directory(
         }
         let held = previous.and_then(|doc| doc.staff.get(staff_id));
         let hash = match entry.hash.as_deref().map(str::trim) {
-            Some(hash) if is_bcrypt_hash(hash) => Some(hash.to_string()),
             _ if entry.pin_removed => None,
+            Some(hash) if is_bcrypt_hash(hash) => Some(hash.to_string()),
             _ => held.map(|held| held.hash.clone()),
         };
         let Some(hash) = hash else {
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn a_directory_keeps_held_hashes_drops_removed_pins_and_unlisted_people() {
         let now = Utc::now();
-        let previous = vault_from_directory(
+        let mut previous = vault_from_directory(
             BRANCH,
             &[
                 person("kept", Some(hash("1111"))),
@@ -657,7 +657,14 @@ mod tests {
             None,
             now,
         );
-        let mut removed = person("removed", None);
+        previous.failures.insert(
+            "removed".into(),
+            FailureState {
+                count: 4,
+                locked_until: None,
+            },
+        );
+        let mut removed = person("removed", Some(hash("2222")));
         removed.pin_removed = true;
         let next = vault_from_directory(
             BRANCH,
@@ -667,6 +674,7 @@ mod tests {
         );
         assert_eq!(next.staff.keys().collect::<Vec<_>>(), vec!["kept"]);
         assert_eq!(next.staff["kept"].hash, previous.staff["kept"].hash);
+        assert!(!next.failures.contains_key("removed"));
 
         // Another branch's vault never lends its hashes.
         let other = vault_from_directory("branch-2", &[person("kept", None)], Some(&previous), now);

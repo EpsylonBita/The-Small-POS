@@ -1,9 +1,9 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useState, useEffect, useCallback } from 'react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { useTheme } from '../../contexts/theme-context';
-import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
+import { liquidGlassModalButton } from '../../styles/designSystem';
 import { getBridge } from '../../../lib';
 
 interface OrderItem {
@@ -36,8 +36,16 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
   onSave,
   onClose
 }) => {
+  
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const { t } = useTranslation();
-  const { resolvedTheme } = useTheme();
   const bridge = getBridge();
   const [items, setItems] = useState<OrderItem[]>(initialItems);
   const [orderNotes, setOrderNotes] = useState('');
@@ -186,17 +194,17 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
       size="lg"
       closeOnBackdrop={false}
       closeOnEscape={true}
-      className="max-w-2xl! max-h-[90vh]"
+      className="max-w-2xl! max-h-[90vh] [&_.liquid-glass-modal-header]:border-b-0!"
     >
       <p className="mb-6 liquid-glass-modal-text-muted">
         {t('modals.editOrderItems.message', { count: orderCount })}
       </p>
 
-      <div className="flex-1 overflow-y-auto space-y-4 mb-6 scrollbar-hide">
+      <div className="flex-1 overflow-y-auto space-y-3 mb-3 scrollbar-hide">
         {/* Order Items */}
         <div className="space-y-3">
-          {items.map((item) => (
-            <div key={item.id} className="border liquid-glass-modal-border rounded-2xl p-4 bg-gray-50/50 dark:bg-gray-800/50">
+          <AnimatePresence initial={false}>{items.map((item) => (
+            <motion.div {...revealMotion} key={item.id} className="pos-glass-form-card">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex-1">
                   <h4 className="font-medium liquid-glass-modal-text">{item.name}</h4>
@@ -209,7 +217,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
                     type="button"
                     onClick={() => updateItemQuantity(item.id, item.quantity - 1)}
                     aria-label={t('common.decrease', 'Decrease')}
-                    className="w-8 h-8 rounded-full bg-(--pos-s-surface-2) dark:bg-zinc-800 text-red-800 dark:text-red-400 active:bg-(--pos-s-surface-2) dark:active:bg-zinc-800 transition-transform duration-150 active:scale-95 flex items-center justify-center"
+                    className="pos-glass-field h-11 w-11 shrink-0 flex items-center justify-center"
                   >
                     -
                   </button>
@@ -218,7 +226,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
                     type="number"
                     value={item.quantity}
                     onChange={(e) => updateItemQuantity(item.id, parseInt(e.target.value) || 0)}
-                    className={`${inputBase(resolvedTheme)} w-16 text-center`}
+                    className={`liquid-glass-modal-input pos-glass-field min-h-touch w-16 text-center`}
                     min="0"
                   />
 
@@ -226,7 +234,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
                     type="button"
                     onClick={() => updateItemQuantity(item.id, item.quantity + 1)}
                     aria-label={t('common.increase', 'Increase')}
-                    className="w-8 h-8 rounded-full bg-(--pos-s-surface-2) dark:bg-zinc-800 text-green-800 dark:text-green-400 active:bg-(--pos-s-surface-2) dark:active:bg-zinc-800 transition-transform duration-150 active:scale-95 flex items-center justify-center"
+                    className="pos-glass-field h-11 w-11 shrink-0 flex items-center justify-center"
                   >
                     +
                   </button>
@@ -235,7 +243,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
                     type="button"
                     onClick={() => removeItem(item.id)}
                     aria-label={t('common.remove', 'Remove')}
-                    className="w-8 h-8 rounded-full bg-gray-500/20 active:bg-(--pos-s-surface-2) liquid-glass-modal-text active:text-red-600 transition-transform duration-150 active:scale-95 flex items-center justify-center"
+                    className="pos-glass-field h-11 w-11 shrink-0 flex items-center justify-center"
                   >
                     x
                   </button>
@@ -249,7 +257,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
                   value={item.notes || ''}
                   onChange={(e) => updateItemNotes(item.id, e.target.value)}
                   placeholder={t('modals.editOrderItems.itemNotesPlaceholder')}
-                  className={`${inputBase(resolvedTheme)} text-sm`}
+                  className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full text-sm`}
                 />
               </div>
 
@@ -259,38 +267,38 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
                   {t('modals.editOrderItems.subtotal')}: ${(item.total_price || ((item.unit_price || item.price || 0) * item.quantity)).toFixed(2)}
                 </span>
               </div>
-            </div>
-          ))}
+            </motion.div>
+          ))}</AnimatePresence>
           
           {/* Loading state */}
-          {isLoadingItems && (
-            <div className="flex items-center justify-center py-8">
+          <AnimatePresence initial={false}>{isLoadingItems && (
+            <motion.div {...revealMotion} className="flex items-center justify-center py-8">
               <svg className="animate-spin h-8 w-8 text-yellow-400" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>
               <span className="ml-2 liquid-glass-modal-text">{t('modals.editOrderItems.loading') || 'Loading items...'}</span>
-            </div>
-          )}
+            </motion.div>
+          )}</AnimatePresence>
           
           {/* Empty state */}
-          {!isLoadingItems && items.length === 0 && (
-            <div className="text-center py-8 liquid-glass-modal-text-muted">
+          <AnimatePresence initial={false}>{!isLoadingItems && items.length === 0 && (
+            <motion.div {...revealMotion} className="text-center py-8 liquid-glass-modal-text-muted">
               {t('modals.editOrderItems.noItems') || 'No items in this order'}
-            </div>
-          )}
+            </motion.div>
+          )}</AnimatePresence>
         </div>
 
         {/* Order Notes */}
-        <div className="border-t liquid-glass-modal-border pt-4">
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+        <div className="pos-glass-form-card">
+          <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-2">
             {t('modals.editOrderItems.orderNotes')}
           </label>
           <textarea
             value={orderNotes}
             onChange={(e) => setOrderNotes(e.target.value)}
             placeholder={t('modals.editOrderItems.orderNotesPlaceholder')}
-            className={`${inputBase(resolvedTheme)} resize-none`}
+            className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full resize-none`}
             rows={3}
             maxLength={500}
           />
@@ -301,7 +309,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
       </div>
 
       {/* Total and Actions */}
-      <div className="border-t liquid-glass-modal-border pt-4">
+      <div className="px-6 pb-5 pt-2">
         <div className="flex items-center justify-between mb-4">
           <span className="text-lg font-semibold liquid-glass-modal-text">
             {t('modals.editOrderItems.total')}: ${calculateTotal().toFixed(2)}
@@ -325,7 +333,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
             className={`${liquidGlassModalButton('primary')} flex-1 disabled:opacity-50 flex items-center justify-center gap-2`}
           >
             {isSaving && (
-              <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+              <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-current" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>

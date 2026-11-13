@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle, Clock, MapPin } from 'lucide-react';
 import toast from 'react-hot-toast';
@@ -9,6 +10,8 @@ import {
   ensureAddressOfflineRuntime,
   extractStreetNumber,
   getSuggestionStreetLabel,
+  formatAddressDistance,
+  locateTypedAddress,
   resolveAddressSuggestion,
   searchAddressSuggestions,
   upsertVerifiedLocalCandidate,
@@ -17,6 +20,7 @@ import {
   type DeliveryValidationResult,
   type ValidationStatus,
 } from '../../services/address-workflow';
+import { streetNamesDiffer } from '../../services/address-street-name';
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
 import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
 import { parseSpecialAddressInput } from '../../utils/specialAddress';
@@ -43,6 +47,9 @@ export interface EditCustomerInfoFormData {
   orderType?: string;
   expectedVersion?: number;
   expectedLocalVersion?: number;
+  placeId?: string;
+  resolvedStreetNumber?: string;
+  validationSource?: 'online' | 'offline_cache';
 }
 
 interface EditCustomerInfoModalProps {
@@ -65,7 +72,7 @@ interface AddressSelectionDetails {
 }
 
 const editCustomerInputClass =
-  'w-full px-4 py-2 rounded-lg border bg-gray-100 dark:bg-zinc-800/80 border-gray-300 dark:border-zinc-600 text-gray-900 dark:text-gray-100 placeholder:text-gray-500 dark:placeholder:text-gray-400 focus:outline-hidden focus:ring-2 focus:ring-gray-400/60 dark:focus:ring-white/30 focus:border-gray-500 dark:focus:border-white/50';
+  'liquid-glass-modal-input pos-glass-field min-h-touch w-full px-4 py-2.5';
 
 const editCustomerSaveButtonClass =
   'liquid-glass-modal-button liquid-glass-modal-success flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed';
@@ -77,7 +84,15 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   onSave,
   onClose,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  // Presentation only: preserve every existing reveal condition (founder 11/11/2026).
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
   const { hasModule } = useAcquiredModules();
   const hasDeliveryModule = hasModule(MODULE_IDS.DELIVERY);
   const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
@@ -94,6 +109,19 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   const [isValidatingDelivery, setIsValidatingDelivery] = useState(false);
   const [overrideApplied, setOverrideApplied] = useState(false);
   const [overrideReason, setOverrideReason] = useState('');
+  const [providerPostalCode, setProviderPostalCode] = useState<string | null>(null);
+  const [mapStreetName, setMapStreetName] = useState<string | null>(null);
+  const typedLocateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelPendingAddressWork = () => {
+    searchRequestRef.current += 1;
+    if (typedLocateTimerRef.current) clearTimeout(typedLocateTimerRef.current);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    setIsValidatingDelivery(false);
+    setIsLoadingAddresses(false);
+    setAddressSuggestions([]);
+    setProviderPostalCode(null);
+    setMapStreetName(null);
+  };
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchRequestRef = useRef(0);
   const sessionTokenRef = useRef<string | null>(null);
@@ -134,6 +162,15 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     searchRequestRef.current += 1;
     sessionTokenRef.current = null;
   }, [isOpen, initialCustomerInfo]);
+
+  useEffect(() => {
+    cancelPendingAddressWork();
+    destinationGenerationRef.current += 1;
+    return () => {
+      destinationGenerationRef.current += 1;
+      if (typedLocateTimerRef.current) clearTimeout(typedLocateTimerRef.current);
+    };
+  }, [isOpen, initialCustomerInfo, hasDeliveryPro]);
 
   const clearValidation = (addressValue: string) => {
     const parsedAddress = parseSpecialAddressInput(addressValue);
@@ -372,12 +409,15 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   const handleAddressSuggestionClick = async (suggestion: AddressSuggestion) => {
     editGenerationRef.current += 1;
     const generation = ++destinationGenerationRef.current;
+    cancelPendingAddressWork();
+    const sessionToken = sessionTokenRef.current;
+    sessionTokenRef.current = null;
     try {
       const creds = await getResolvedTerminalCredentials();
       if (generation !== destinationGenerationRef.current) return;
       const resolved = await resolveAddressSuggestion(suggestion, customerInfo.address, {
         branchId: creds.branchId || undefined,
-        sessionToken: sessionTokenRef.current || undefined,
+        sessionToken: sessionToken || undefined,
       });
       if (generation !== destinationGenerationRef.current) return;
 
@@ -413,6 +453,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
         postal_code: resolved.postalCode || prev.postal_code,
       }));
       setSelectedAddressDetails(details);
+      setMapStreetName(streetNamesDiffer(resolved.streetAddress, resolved.route) ? resolved.route! : null);
       setAddressCoordinates(details.coordinates || null);
       setAddressSuggestions([]);
       sessionTokenRef.current = null;
@@ -487,6 +528,11 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
         address: customerInfo.address.trim(),
         city: customerInfo.city,
         postal_code: customerInfo.postal_code?.trim() || undefined,
+        ...(!sameDestination ? {
+          placeId: selectedAddressDetails?.placeId,
+          resolvedStreetNumber: selectedAddressDetails?.resolvedStreetNumber,
+          validationSource: selectedAddressDetails?.validationSource,
+        } : {}),
         delivery_floor: customerInfo.delivery_floor?.trim() || undefined,
         name_on_ringer: customerInfo.name_on_ringer?.trim() || undefined,
         notes: customerInfo.notes?.trim() || undefined,
@@ -520,7 +566,33 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     setValidationSnapshot(null);
     setOverrideApplied(false);
     setOverrideReason('');
+    cancelPendingAddressWork();
     onClose();
+  };
+
+  const scheduleTypedLocation = (fields: { street: string; city?: string; postalCode?: string }) => {
+    if (!isOpen || !hasDeliveryPro || !navigator.onLine || !extractStreetNumber(fields.street)
+      || parseSpecialAddressInput(fields.street).shouldSkipZoneValidation) return;
+    const generation = destinationGenerationRef.current;
+    typedLocateTimerRef.current = setTimeout(async () => {
+      if (generation !== destinationGenerationRef.current || !navigator.onLine) return;
+      setIsValidatingDelivery(true);
+      try {
+        const creds = await getResolvedTerminalCredentials();
+        if (generation !== destinationGenerationRef.current) return;
+        const result = await locateTypedAddress(fields, { branchId: creds.branchId || undefined });
+        if (generation !== destinationGenerationRef.current || !navigator.onLine || !result.located) return;
+        setSelectedAddressDetails({ ...result.details, city: fields.city, postalCode: fields.postalCode });
+        setAddressCoordinates(result.details.coordinates || null);
+        setProviderPostalCode(result.postalCodeDiffers ? result.providerPostalCode || null : null);
+        setMapStreetName(streetNamesDiffer(fields.street, result.details.route) ? result.details.route! : null);
+        await runValidation(fields.street, result.details);
+      } catch {
+        // Keep requires_selection when the provider or an old server cannot locate it.
+      } finally {
+        if (generation === destinationGenerationRef.current) setIsValidatingDelivery(false);
+      }
+    }, 700);
   };
 
   const handleInputChange = (field: keyof EditCustomerInfoFormData, value: string) => {
@@ -531,13 +603,16 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     }));
 
     if (field === 'address') {
+      cancelPendingAddressWork();
       destinationGenerationRef.current += 1;
       scheduleAddressSearch(value);
       clearValidation(value);
     } else if (field === 'postal_code' || field === 'city') {
       destinationGenerationRef.current += 1;
-      searchRequestRef.current += 1;
+      cancelPendingAddressWork();
       clearValidation(customerInfo.address);
+      scheduleTypedLocation({ street: customerInfo.address, city: field === 'city' ? value : customerInfo.city,
+        postalCode: field === 'postal_code' ? value : customerInfo.postal_code });
     }
   };
 
@@ -559,10 +634,10 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       onClose={handleClose}
       title={t('modals.editCustomer.title')}
       size="xl"
-      className="max-w-3xl!"
+      className="max-w-3xl! pos-progressive-form [&_.liquid-glass-modal-header]:border-b-0!"
       footer={(
         /* Fixed action bar: rendered below the scroll body so Save/Cancel stay visible without scrolling. */
-        <div className="flex gap-3 border-t border-white/15 bg-white/5 px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-white/3">
+        <div className="flex gap-3 px-6 pb-5 pt-2">
           <button
             type="button"
             onClick={handleClose}
@@ -573,7 +648,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
           <button
             type="button"
             onClick={handleSave}
-            disabled={isSaving}
+            disabled={isSaving || isValidatingDelivery}
             className={editCustomerSaveButtonClass}
           >
             {isSaving ? t('modals.editCustomer.saving') : t('modals.editCustomer.saveChanges')}
@@ -581,13 +656,14 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
         </div>
       )}
     >
-        <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+        <p className="text-sm liquid-glass-modal-text-muted mb-4">
           {t('modals.editCustomer.updateMessage', { count: orderCount })}
         </p>
 
-        <div className="space-y-4 pb-1">
+        <div className="space-y-3 pb-1">
+          <div className="pos-glass-form-card grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>
-            <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
               {t('modals.editCustomer.customerName')}
             </label>
             <input
@@ -600,7 +676,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
           </div>
 
           <div>
-            <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
               {t('modals.editCustomer.phoneNumber')}
             </label>
             <input
@@ -612,12 +688,14 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
             />
           </div>
 
+          </div>
+          <div className="pos-glass-form-card space-y-3">
           <div className="relative">
-            <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
               {t('modals.editCustomer.address')}
             </label>
             <div className="relative">
-              <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-green-400" />
+              <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 liquid-glass-modal-field-icon" />
               <input
                 type="text"
                 value={customerInfo.address}
@@ -643,21 +721,22 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
             )}
 
             {hasDeliveryPro && addressSuggestions.length > 0 && (
-              <div className="absolute z-9999 w-full mt-1 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border rounded-2xl shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
+              <div className="absolute z-9999 w-full mt-1 pos-glass-form-card p-2! space-y-2 shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
                 {addressSuggestions.map((suggestion, index) => (
                   <button
                     key={suggestion.place_id || index}
                     onClick={() => handleAddressSuggestionClick(suggestion)}
-                    className="w-full px-4 py-3 text-left active:bg-gray-100 dark:active:bg-gray-700 transition-colors border-b border-gray-200 dark:border-gray-600 last:border-b-0"
+                    className="pos-glass-tap-card min-h-touch w-full px-4 py-3 text-left focus-visible:outline-2 focus-visible:outline-yellow-400"
                   >
                     <div className="flex items-start gap-2">
                       <MapPin className="w-4 h-4 text-gray-400 mt-1 shrink-0" />
                       <div>
-                        <p className="text-sm font-medium text-gray-900 dark:text-white">
+                        <p className="text-sm font-medium liquid-glass-modal-text">
                           {getSuggestionStreetLabel(suggestion)}
                         </p>
-                        <p className="text-xs text-gray-600 dark:text-gray-400">
+                        <p className="text-xs liquid-glass-modal-text-muted">
                           {suggestion.secondary_text || suggestion.formatted_address}
+                          {formatAddressDistance(suggestion.distance_meters, i18n?.resolvedLanguage || i18n?.language) && ` · ${formatAddressDistance(suggestion.distance_meters, i18n?.resolvedLanguage || i18n?.language)}`}
                         </p>
                       </div>
                     </div>
@@ -667,8 +746,12 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
             )}
           </div>
 
-          {hasDeliveryPro && validationResult && (
-            <div className="liquid-glass-modal-card space-y-3">
+          {mapStreetName && <p className="mt-1 text-xs liquid-glass-modal-text-muted">{t('modals.addCustomer.mapStreetNameDiffers', { street: mapStreetName })}</p>}
+
+          <AnimatePresence initial={false}>
+
+            {hasDeliveryPro && validationResult && (
+            <motion.div {...revealMotion} key="reveal-1" className="pos-glass-form-card space-y-3">
               <div className="text-sm font-medium liquid-glass-modal-text flex items-center gap-2">
                 <MapPin className="w-4 h-4" />
                 {t('modals.addCustomer.deliveryValidation')}
@@ -700,11 +783,14 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                 </div>
               )}
 
-              {(validationStatus === 'out_of_zone' || validationStatus === 'unverified_offline') && (
-                <div className="space-y-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
-                  <label className="flex items-center gap-2 text-sm text-orange-200">
+              <AnimatePresence initial={false}>
+
+                {(validationStatus === 'out_of_zone' || validationStatus === 'unverified_offline') && (
+                <motion.div {...revealMotion} key="reveal-5" className="pos-glass-form-card p-3! space-y-2">
+                  <label className="flex min-h-touch items-center gap-2 text-sm liquid-glass-modal-text">
                     <input
                       type="checkbox"
+                      className="h-5 w-5 shrink-0 accent-yellow-400"
                       checked={overrideApplied}
                       onChange={(e) => setOverrideApplied(e.target.checked)}
                     />
@@ -719,13 +805,15 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                     rows={2}
                     className={`${editCustomerInputClass} px-3 resize-none`}
                   />
-                </div>
-              )}
-            </div>
-          )}
+                </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
+            )}
+          </AnimatePresence>
 
           <div>
-            <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
               {t('modals.editCustomer.postalCode')}
               {customerInfo.postal_code && (
                 <span className="text-green-600 dark:text-green-400 text-xs ml-2">{t('modals.editCustomer.autoFilled')}</span>
@@ -738,11 +826,12 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
               placeholder={t('modals.editCustomer.postalCodePlaceholder')}
               className={editCustomerInputClass}
             />
+            {providerPostalCode && <p className="mt-1 text-xs liquid-glass-modal-text-muted">{t('modals.addCustomer.mapPostalCodeDiffers', { code: providerPostalCode })}</p>}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+              <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
                 {t('modals.addCustomer.floorLabel')}
               </label>
               <input
@@ -757,7 +846,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
             </div>
 
             <div>
-              <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+              <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
                 {t('modals.addCustomer.nameOnRingerLabel')}
               </label>
               <input
@@ -772,8 +861,9 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
             </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+          </div>
+          <div className="pos-glass-form-card">
+            <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
               {t('modals.editCustomer.specialNotes')}
             </label>
             <textarea

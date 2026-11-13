@@ -32,7 +32,7 @@ for (const [name, source] of [
   });
 }
 
-test('EditPaymentMethodModal: green save, soft-red cancel, amber/non-blue card, neutral-grey disabled save', () => {
+test('EditPaymentMethodModal: solid save/cancel actions, frosted method cards, yellow selection and neutral disabled save', () => {
   // Save = semantic green primary when enabled.
   assert.match(editPayment, /bg-\(--pos-s-yellow\) active:bg-yellow-500 text-black/);
   assert.doesNotMatch(editPayment, /bg-blue-500/);
@@ -49,20 +49,24 @@ test('EditPaymentMethodModal: green save, soft-red cancel, amber/non-blue card, 
   assert.match(editPayment, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\)/);
   assert.doesNotMatch(editPayment, /bg-red-50 text-red-700/);
 
-  // Card option is amber glass (cash stays green); neither uses blue.
+  // founder 11/11/2026: both methods are frosted tap cards with solid yellow selection.
+  assert.match(editPayment, /pos-glass-tap-card liquid-glass-modal-text/);
+  assert.match(editPayment, /min-h-touch w-full p-4 rounded-2xl border text-left/);
   assert.match(
     editPayment,
-    /selectedMethod === 'card'[\s\S]*?border-\(--pos-s-border\) dark:border-zinc-700 bg-\(--pos-s-surface-2\) dark:bg-zinc-800/,
+    /selectedMethod === 'card'[\s\S]*?bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)/,
   );
-  assert.match(editPayment, /active:bg-\(--pos-s-surface-2\) dark:active:bg-zinc-800/);
-  assert.match(editPayment, /selectedMethod === 'cash'[\s\S]*?border-\(--pos-s-border\)/);
+  // founder 11/11/2026: neutral options sink through the shared tap-card rule.
+  const css = readFileSync(path.join(projectRoot, 'src/renderer/styles/glassmorphism.css'), 'utf8');
+  assert.match(css, /\.pos-glass-tap-card:is\(:active, \[data-pressed\]\):not\(:disabled\)[\s\S]*?translate: 0 1px/);
+  assert.match(editPayment, /selectedMethod === 'cash'[\s\S]*?bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)/);
 
   // Touch-safe buttons: rounded smooth, centered, min touch height.
   assert.match(editPayment, /rounded-2xl font-medium flex items-center justify-center min-h-touch(?![\w.-])/); // save
   assert.match(editPayment, /rounded-2xl border font-medium flex items-center justify-center min-h-touch(?![\w.-])/); // cancel
 });
 
-test('Round 310: OrderCancellationModal uses the shared glass footer -- red confirm enabled, subdued when disabled, neutral safe close', () => {
+test('Round 310: OrderCancellationModal uses unframed footer actions -- red confirm enabled, subdued when disabled, neutral safe close', () => {
   // Actions live in the LiquidGlassModal footer prop (same fixed glass action bar as the newer form modals),
   // not a hand-rolled row inside the scroll body.
   const footerStart = cancellation.indexOf('footer={(');
@@ -72,9 +76,9 @@ test('Round 310: OrderCancellationModal uses the shared glass footer -- red conf
   assert.ok(footerEnd > footerStart, 'the footer prop must close before the modal body');
   const footer = cancellation.slice(footerStart, footerEnd);
 
-  // Subtle glass action bar: top divider + translucent bg + backdrop blur.
-  assert.match(footer, /border-t/);
-  assert.match(footer, /backdrop-blur/);
+  // founder 11/11/2026: actions sit on the shell, without a footer frame.
+  assert.match(footer, /flex gap-3 px-6 pb-5 pt-2/);
+  assert.doesNotMatch(footer, /border-t|backdrop-blur|bg-white/);
 
   // Safe close = neutral secondary glass (visually lighter than the destructive confirm), flex-1 + rounded.
   assert.match(footer, /onClick=\{handleClose\}/);

@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { getStoreCurrency } from '../../utils/store-currency';
 import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
@@ -35,6 +36,15 @@ export function LoyaltyRedeemModal({
   minRedemptionPoints,
   maxRedeemablePoints,
 }: LoyaltyRedeemModalProps) {
+  
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const cashierPortalProps = useCashierPortalProps();
   const { t } = useTranslation();
 
@@ -125,23 +135,23 @@ export function LoyaltyRedeemModal({
 
   const getTierColor = (t: string | undefined) => {
     switch (t?.toLowerCase()) {
-      case 'platinum': return 'bg-(--pos-s-surface-2) text-yellow-700 dark:text-yellow-200';
-      case 'gold': return 'bg-(--pos-s-surface-2) text-yellow-700 dark:text-yellow-200';
-      case 'silver': return 'bg-gray-400/20 text-gray-600 dark:text-gray-200';
-      default: return 'bg-(--pos-s-surface-2) text-amber-700 dark:text-amber-200';
+      case 'platinum': return 'text-yellow-700 dark:text-yellow-200';
+      case 'gold': return 'text-yellow-700 dark:text-yellow-200';
+      case 'silver': return 'liquid-glass-modal-text-muted';
+      default: return 'text-amber-700 dark:text-amber-200';
     }
   };
 
   if (!isOpen) return null;
 
-  const glassPanelClass = 'rounded-2xl border liquid-glass-modal-border bg-white/10 p-4 backdrop-blur-xl dark:bg-black/20';
-  const glassSubtlePanelClass = 'rounded-2xl border liquid-glass-modal-border bg-white/10 px-3 py-2 text-xs liquid-glass-modal-text-muted backdrop-blur-xl dark:bg-black/20';
-  const glassIconButtonClass = 'liquid-glass-modal-button min-h-0! p-2! transition-transform duration-150 active:scale-95 disabled:pointer-events-none disabled:opacity-30';
+  const glassPanelClass = 'pos-glass-form-card';
+  const glassSubtlePanelClass = 'pos-glass-form-card px-3! py-2! text-xs liquid-glass-modal-text-muted';
+  const glassIconButtonClass = 'pos-glass-field flex h-11 w-11 shrink-0 items-center justify-center p-2 disabled:pointer-events-none disabled:opacity-30';
   const glassQuickButtonClass = (active: boolean) =>
-    `flex-1 rounded-2xl border py-1.5 text-xs font-semibold transition-[transform,background-color,border-color] duration-150 active:scale-[0.98] ${
+    `min-h-touch flex-1 rounded-2xl border py-1.5 text-xs font-semibold transition-[transform,background-color,border-color] duration-150 ${
       active
-        ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-yellow-900 shadow-xs dark:bg-zinc-800 dark:text-yellow-100'
-        : 'liquid-glass-modal-border liquid-glass-modal-text-muted bg-white/10 dark:bg-black/20'
+        ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-[var(--pos-s-depth-card)] active:translate-y-px active:shadow-[var(--pos-s-depth-press)]'
+        : 'pos-glass-field'
     }`;
 
   const modal = (
@@ -149,9 +159,9 @@ export function LoyaltyRedeemModal({
       <div className="liquid-glass-modal-backdrop fixed! inset-0!" aria-hidden="true" />
       <div className="liquid-glass-modal-shell relative w-full max-w-md overflow-hidden">
         {/* Header */}
-        <div className="liquid-glass-modal-header px-5! py-4!">
+        <div className="liquid-glass-modal-header pos-glass-header--plain px-5! py-4!">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-(--pos-s-border) bg-yellow-400 text-black shadow-lg">
+            <div className="flex h-10 w-10 items-center justify-center liquid-glass-modal-text-muted">
               <Gift className="w-5 h-5" />
             </div>
             <h2 className="liquid-glass-modal-title text-lg!">
@@ -168,7 +178,7 @@ export function LoyaltyRedeemModal({
           </button>
         </div>
 
-        <div className="space-y-4 p-5">
+        <div className="space-y-3 p-5">
           {/* Customer Info */}
           <div className={glassPanelClass}>
           <div className="flex items-center justify-between mb-2">
@@ -187,7 +197,7 @@ export function LoyaltyRedeemModal({
               <span className="block text-xs liquid-glass-modal-text-muted">
                 {t('loyalty.availableBalance', 'Available balance')}
               </span>
-              <span className="font-bold text-yellow-700 dark:text-yellow-300">
+              <span className="font-bold liquid-glass-modal-text">
                 {pointsBalance.toLocaleString()} {t('loyalty.pointsShort', 'pts')}
               </span>
             </div>
@@ -195,7 +205,7 @@ export function LoyaltyRedeemModal({
               <span className="block text-xs liquid-glass-modal-text-muted">
                 {t('loyalty.maxRedeemable', 'Max redeemable')}
               </span>
-              <span className="font-bold text-green-500">
+              <span className="font-bold liquid-glass-modal-text">
                 {formatCurrency(maxRedeemableAmount)}
               </span>
             </div>
@@ -206,8 +216,8 @@ export function LoyaltyRedeemModal({
         </div>
 
         {/* Points Selector */}
-        <div>
-          <label className="text-sm mb-2 block liquid-glass-modal-text-muted">
+        <div className="pos-glass-form-card">
+          <label className="text-xs font-semibold mb-2 block liquid-glass-modal-text-muted">
             {t('loyalty.pointsToRedeem', 'Points to redeem')}
           </label>
           <div className="flex items-center gap-3">
@@ -225,7 +235,7 @@ export function LoyaltyRedeemModal({
               pattern="[0-9]*"
               value={pointsToRedeem}
               onChange={(e) => handlePointsChange(e.target.value)}
-              className="liquid-glass-modal-input flex-1 text-center text-2xl font-bold"
+              className="liquid-glass-modal-input pos-glass-field min-h-touch min-w-0 flex-1 text-center text-2xl font-bold"
             />
             <button
               type="button"
@@ -255,18 +265,18 @@ export function LoyaltyRedeemModal({
         </div>
 
         {/* Cash Amount Selector */}
-        <div>
-          <label className="text-sm mb-2 block liquid-glass-modal-text-muted">
+        <div className="pos-glass-form-card">
+          <label className="text-xs font-semibold mb-2 block liquid-glass-modal-text-muted">
             {t('loyalty.amountToRedeem', 'Discount amount')}
           </label>
-          <div className="liquid-glass-modal-input flex items-center px-3 py-2">
-            <span className="mr-2 font-semibold opacity-70">{getStoreCurrency() ?? '—'}</span>
+          <div className="relative flex items-center">
+            <span className="pointer-events-none absolute left-3 z-10 font-semibold liquid-glass-modal-text-muted">{getStoreCurrency() ?? '—'}</span>
             <CentsMoneyInput
               aria-label={t('loyalty.amountToRedeem', 'Discount amount')}
               value={amountInput}
               onValueChange={handleAmountChange}
               onBlur={normalizeAmountInput}
-              className="w-full bg-transparent text-2xl font-bold outline-hidden liquid-glass-modal-text"
+              className="liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-14! text-2xl font-bold"
             />
           </div>
           <div className="mt-2 flex items-center justify-between gap-3 text-xs liquid-glass-modal-text-muted">
@@ -284,24 +294,24 @@ export function LoyaltyRedeemModal({
         </div>
 
         {/* Discount Preview */}
-        <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4 backdrop-blur-xl">
+        <div className="pos-glass-form-card">
           <div className="flex items-center justify-between">
-            <span className="text-sm text-emerald-800 dark:text-emerald-300">
+            <span className="text-sm liquid-glass-modal-text-muted">
               {t('loyalty.discountPreview', { amount: formatCurrency(discountPreview) })}
             </span>
-            <span className="text-xl font-bold text-emerald-700 dark:text-emerald-400">{formatCurrency(discountPreview)}</span>
+            <span className="text-xl font-bold liquid-glass-modal-text">{formatCurrency(discountPreview)}</span>
           </div>
         </div>
 
         {/* Validation message */}
-        {pointsToRedeem < minRedemptionPoints && (
-          <p className="text-xs text-red-700 dark:text-red-400 mb-4">
+        <AnimatePresence initial={false}>{pointsToRedeem < minRedemptionPoints && (
+          <motion.p {...revealMotion} className="text-xs text-red-700 dark:text-red-400 mb-4">
             {t('loyalty.insufficientPoints', { min: minRedemptionPoints })}
-          </p>
-        )}
+          </motion.p>
+        )}</AnimatePresence>
 
         {/* Actions */}
-        <div className="flex gap-3">
+        <div className="flex gap-3 px-6 pb-5 pt-2">
           <button
             type="button"
             onClick={onClose}

@@ -38,6 +38,7 @@ export interface AddressSuggestion {
   displayLabel?: string;
   main_text?: string;
   secondary_text?: string;
+  distance_meters?: number;
   location?: { lat: number; lng: number };
   types?: string[];
   verified?: boolean;
@@ -47,6 +48,23 @@ export interface AddressSuggestion {
   resolved_street_number?: string;
   address_fingerprint?: string;
   validation_source?: 'online' | 'offline_cache';
+}
+
+/** Distance supplied by the server, displayed with the cashier's UI language. */
+export function formatAddressDistance(distanceMeters: number | undefined, language = 'en'): string {
+  if (typeof distanceMeters !== 'number' || !Number.isFinite(distanceMeters) || distanceMeters < 0) return '';
+  const kilometers = distanceMeters >= 1000;
+  return new Intl.NumberFormat(language, {
+    style: 'unit',
+    unit: kilometers ? 'kilometer' : 'meter',
+    unitDisplay: 'short',
+    minimumFractionDigits: kilometers ? 1 : 0,
+    maximumFractionDigits: kilometers ? 1 : 0,
+  }).format(kilometers ? distanceMeters / 1000 : Math.round(distanceMeters / 10) * 10);
+}
+
+function normalizeDistance(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 export interface ResolvedAddressDetails {
@@ -309,6 +327,7 @@ function normalizeOnlinePredictionSuggestions(raw: any): AddressSuggestion[] {
           || formattedAddress,
         formatted_address: formattedAddress,
         location: normalizeSuggestionLocation(prediction.location),
+        distance_meters: normalizeDistance(prediction.distance_meters),
         types: Array.isArray(prediction.types) ? prediction.types : [],
         source: 'online',
         validation_source: 'online',
@@ -341,6 +360,7 @@ function normalizeOnlinePlaceSuggestions(raw: any): AddressSuggestion[] {
           || formattedAddress,
         formatted_address: formattedAddress,
         location: normalizeSuggestionLocation(place.location),
+        distance_meters: normalizeDistance(place.distance_meters),
         types: Array.isArray(place.types) ? place.types : [],
         source: 'online',
         validation_source: 'online',
@@ -383,6 +403,7 @@ function normalizeLocalPlaces(raw: any): AddressSuggestion[] {
     city: sanitizeString(place.city),
     postal_code: sanitizeString(place.postal_code),
     location: normalizeSuggestionLocation(place.location),
+    distance_meters: normalizeDistance(place.distance_meters),
     types: Array.isArray(place.types) ? place.types : [],
     verified: place?.verified === true,
     source: 'offline_cache',
@@ -416,9 +437,11 @@ async function fetchOnlineSuggestions(
     if (response.success) {
       const normalized = selectPrimaryOnlineSuggestions(response.data);
       if (normalized.length > 0) {
-        return normalized
-          .sort((a, b) => scoreSuggestion(query, b) - scoreSuggestion(query, a))
-          .slice(0, options.limit || 5);
+        // Keep the server's distance ranking; older servers retain existing relevance sorting.
+        if (!normalized.some(candidate => candidate.distance_meters !== undefined)) {
+          normalized.sort((a, b) => scoreSuggestion(query, b) - scoreSuggestion(query, a));
+        }
+        return normalized.slice(0, options.limit || 5);
       }
     }
   } catch {
@@ -603,6 +626,43 @@ export async function resolveAddressSuggestion(
   }
 
   throw new Error('Unable to resolve suggestion details');
+}
+
+export type TypedAddressLocation =
+  | { located: true; details: ResolvedAddressDetails; postalCodeDiffers?: boolean; providerPostalCode?: string }
+  | { located: false; reason: string };
+
+/** A single debounced correction lookup; old servers fail closed without a visible error. */
+export async function locateTypedAddress(
+  address: { street: string; city?: string; postalCode?: string },
+  options: Pick<ResolveOptions, 'branchId'> = {}
+): Promise<TypedAddressLocation> {
+  if (parseSpecialAddressInput(address.street).shouldSkipZoneValidation) return { located: false, reason: 'custom_address' };
+  if (!extractStreetNumber(address.street)) return { located: false, reason: 'no_house_number' };
+  if (!isOnline()) return { located: false, reason: 'offline' };
+  try {
+    const response = await posApiPost<any>('pos/address/details', {
+      typed_address: { street: address.street, city: address.city, postal_code: address.postalCode },
+      language: resolveAddressLanguage(address.street, address.city),
+      branch_id: options.branchId || undefined,
+    });
+    const data = response.data;
+    if (!response.success || data?.success === false || data?.located !== true || !data.result || response.stale) {
+      return { located: false, reason: data?.reason || 'not_found' };
+    }
+    const details = buildResolvedAddressDetails({
+      place_id: sanitizeString(data.result.place_id), name: address.street,
+      formatted_address: address.street, source: 'online',
+    }, data.result);
+    if (!details.coordinates) return { located: false, reason: 'not_found' };
+    return {
+      located: true, details,
+      postalCodeDiffers: data.postal_code_differs === true,
+      providerPostalCode: sanitizeString(data.provider_postal_code) || undefined,
+    };
+  } catch {
+    return { located: false, reason: 'not_found' };
+  }
 }
 
 function normalizeDeliveryValidation(raw: any, fallbackSource: 'online' | 'offline_cache'): DeliveryValidationResult {

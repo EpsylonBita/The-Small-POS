@@ -248,6 +248,33 @@ describe('Wolt card is Admin-Dashboard-managed on the till', () => {
     expect(screen.getByRole('button', { name: 'Open Admin Dashboard' })).toBeInTheDocument()
   })
 
+  it.each([
+    [{ status: 'pending', is_active: false }, 'Pending'],
+    [{ status: 'error', is_active: false }, 'Pending'],
+    [{ status: 'connected', is_active: false }, 'Not Connected'],
+    [{ status: undefined, is_active: true }, 'Not Connected'],
+    [{ status: 'pending', is_active: false, is_enabled: false }, 'Not Connected'],
+  ])('does not mistake staged Wolt credentials for an active connection (%j)', async (state, label) => {
+    serve([woltItem(state)])
+    render(<IntegrationsPage />)
+    await screen.findByText('Wolt')
+    expect(cardInfo('Wolt').getByText(label)).toBeInTheDocument()
+    expectNoCredentialSurface()
+    expect(mocks.posApiPost).not.toHaveBeenCalled()
+  })
+
+  it('keeps the efood production connection unchanged', async () => {
+    serve([woltItem({
+      plugin_id: 'efood', provider: 'efood', name: 'efood',
+      status: 'production_connected', onboarding_status: 'production_connected',
+      is_active: true, is_enabled: true,
+    })])
+    render(<IntegrationsPage />)
+    await screen.findByRole('heading', { name: 'efood' })
+    expect(cardInfo('efood').getByText('production_connected')).toBeInTheDocument()
+    expect(mocks.posApiPost).not.toHaveBeenCalled()
+  })
+
   it('still treats Wolt as admin-managed when an older server reports it POS-configurable', async () => {
     // A server from before Wolt joined admin-dashboard-setup-plugins sends no
     // flag (or false): the local fallback set keeps the credential form away.

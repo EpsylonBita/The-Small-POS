@@ -27,7 +27,7 @@ const OnboardingPage: React.FC = () => {
     const reduceMotion = useReducedMotion();
     const [step, setStep] = useState(1);
     const [connectionString, setConnectionString] = useState('');
-    const [error, setError] = useState<{ message: string; syncing: boolean } | null>(null);
+    const [error, setError] = useState<{ message: string; syncing: boolean; unsyncedQueue?: boolean } | null>(null);
     const [phase, setPhase] = useState<ConnectionPhase>('idle');
     const [savingLanguage, setSavingLanguage] = useState(false);
     const [recoveryOpen, setRecoveryOpen] = useState(false);
@@ -113,8 +113,12 @@ const OnboardingPage: React.FC = () => {
             setPhase('complete');
             toast.success(t('onboarding.success', { defaultValue: 'Terminal configured successfully!' }));
         } catch (err: unknown) {
-            const message = getErrorMessage(err, t('onboarding.unexpectedError', { defaultValue: 'An unexpected error occurred' }));
-            setError({ message, syncing });
+            const nativeError = err as { code?: unknown; message?: unknown } | null;
+            const unsyncedQueue = err === 'UNSYNCED_QUEUE' || nativeError?.code === 'UNSYNCED_QUEUE' || nativeError?.message === 'UNSYNCED_QUEUE';
+            const message = unsyncedQueue
+                ? t('modals.connectionSettings.unsyncedQueue')
+                : getErrorMessage(err, t('onboarding.unexpectedError', { defaultValue: 'An unexpected error occurred' }));
+            setError({ message, syncing, unsyncedQueue });
             toast.error(message);
         } finally {
             // Keep the form locked during the brief success/reload transition.
@@ -131,7 +135,7 @@ const OnboardingPage: React.FC = () => {
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
             <div className="min-w-0">
                 <p className="wrap-break-word font-medium">{error.message}</p>
-                {step === 2 && <p className="mt-1 text-red-800 dark:text-red-200">{error.syncing
+                {step === 2 && !error.unsyncedQueue && <p className="mt-1 text-red-800 dark:text-red-200">{error.syncing
                     ? t('onboarding.syncRetryHint', { defaultValue: 'Check your internet connection and try again to finish syncing.' })
                     : t('onboarding.retryHint', { defaultValue: 'Check your internet connection and confirm the code is current, then try again.' })}</p>}
             </div>

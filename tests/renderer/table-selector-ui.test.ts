@@ -38,7 +38,9 @@ test('TableSelector renders on the shared glass modal shell with glass-token con
   assert.match(source, /liquid-glass-modal-input/);
   assert.match(source, /liquid-glass-modal-text\b/);
   assert.match(source, /liquid-glass-modal-text-muted/);
-  assert.match(source, /liquid-glass-modal-border/);
+  // founder 11/11/2026: shared frosted border and pressed depth.
+  assert.match(source, /pos-glass-field/);
+  assert.match(source, /pos-glass-tap-card/);
 
   // Stable markers for tests / live QA.
   assert.match(source, /data-table-selector\b/);
@@ -49,7 +51,9 @@ test('TableSelector renders on the shared glass modal shell with glass-token con
 test('TableSelector uses no hover utilities and no native title tooltips (touch-first)', () => {
   // Touch-first: no hover-only styling anywhere. Active/tap scale is allowed.
   assert.doesNotMatch(source, /hover:/);
-  assert.match(source, /active:scale-95/);
+  // founder 11/11/2026: kit depth supplies touch press feedback.
+  const css = readFileSync(path.join(projectRoot, 'src/renderer/styles/glassmorphism.css'), 'utf8');
+  assert.match(css, /\.pos-glass-tap-card:is\(:active, \[data-pressed\]\):not\(:disabled\)[\s\S]*?translate: 0 1px/);
 
   // The only `title=` is the LiquidGlassModal heading PROP (a visible heading, the approved exception) --
   // no native DOM title tooltips on any element.
@@ -60,12 +64,12 @@ test('TableSelector uses no hover utilities and no native title tooltips (touch-
 
 test('TableSelector keeps semantic green/amber status colours and drops the old blue accents', () => {
   // available -> green, reserved -> amber/yellow (status fill + legend dot). Not everything yellow.
-  assert.match(source, /available:\s*\{[\s\S]*?bgClass: 'border-green-600 bg-\(--pos-s-surface-2\)'/);
-  assert.match(source, /reserved:\s*\{[\s\S]*?bgClass: 'border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\)'/);
+  assert.match(source, /available:\s*\{[\s\S]*?textClass: 'text-green-800 dark:text-green-400'/);
+  assert.match(source, /reserved:\s*\{[\s\S]*?textClass: 'text-yellow-700 dark:text-yellow-400'/);
   assert.match(source, /status === 'available' \? 'bg-green-500' : 'bg-yellow-500'/);
 
   // The min-capacity active state is amber (the app accent), not the old blue button / blue focus ring.
-  assert.match(source, /border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\)/);
+  assert.match(source, /bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)/);
   assert.doesNotMatch(source, /bg-blue-600/);
   assert.doesNotMatch(source, /focus:ring-blue/);
   assert.doesNotMatch(source, /focus:border-blue/);
@@ -79,7 +83,7 @@ test('TableSelector capacity filter structure + table grid behaviour are preserv
   assert.match(source, /aria-pressed=\{selectedCapacity === 'all'\}/);
   assert.match(source, /aria-pressed=\{selectedCapacity === capacity\}/);
   // Large touch targets on the segmented buttons.
-  assert.match(source, /min-h-\[40px\]/);
+  assert.match(source, /min-h-touch/);
 
   // Data flow + filtering preserved: selection callback, status filtering, search.
   assert.match(source, /onTableSelect\(table\)/);
@@ -92,11 +96,11 @@ test('TableSelector capacity filter structure + table grid behaviour are preserv
 // min-capacity. The filters now stack vertically so search owns a full-width row (language-safe, no
 // locale-specific widths), with the floor + capacity segmented controls below it.
 test('TableSelector search has a full-width row stacked above the segmented filters (language-safe)', () => {
-  assert.match(source, /data-table-selector-filters className="space-y-3"/);
+  assert.match(source, /data-table-selector-filters className="pos-glass-form-card space-y-3"/);
   // The search wrapper is full-width, no longer squeezed into a shared flex row with min-capacity.
   assert.match(source, /<div className="relative w-full">/);
   assert.doesNotMatch(source, /relative min-w-\[200px\] flex-1/);
-  assert.match(source, /className="liquid-glass-modal-input w-full pl-10!"/);
+  assert.match(source, /className="liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-10!"/);
 });
 
 // Round 224 live-QA follow-up: cards show formatted display labels (e.g. "#TP03"), but search only checked
@@ -199,7 +203,7 @@ test('TableSelector floor labels are localized in every POS locale with {{floor}
 test('Round 332: TableSelector bounds the modal to the viewport and uses one hidden-scroll content region', () => {
   // Shell is bounded to the VISIBLE viewport (dvh -- avoids the WebView vh overshoot) with a safe margin,
   // as a flex column that hides its own overflow so only the content body scrolls.
-  assert.match(source, /className="flex flex-col overflow-hidden max-h-\[calc\(100dvh-2rem\)\]!"/);
+  assert.match(source, /className="flex flex-col overflow-hidden max-h-\[calc\(100dvh-2rem\)\]! \[&_\.liquid-glass-modal-header\]:border-b-0!"/);
   // A dynamic-viewport cap with a safe margin (not the unbounded shared default that overshoots the window).
   assert.match(source, /max-h-\[calc\(100dvh-2rem\)\]!/);
 
@@ -214,7 +218,7 @@ test('Round 332: TableSelector bounds the modal to the viewport and uses one hid
   // The viewport-bounding props sit on the same modal as the (fixed, shared-shell) title header.
   assert.match(
     source,
-    /<LiquidGlassModal[\s\S]*?title=\{t\('tableSelector\.title'[\s\S]*?className="flex flex-col overflow-hidden max-h-\[calc\(100dvh-2rem\)\]!"[\s\S]*?contentClassName="flex-1 min-h-0 overflow-y-auto scrollbar-hide pb-6 scroll-pb-6"/,
+    /<LiquidGlassModal[\s\S]*?title=\{t\('tableSelector\.title'[\s\S]*?className="flex flex-col overflow-hidden max-h-\[calc\(100dvh-2rem\)\]! \[&_\.liquid-glass-modal-header\]:border-b-0!"[\s\S]*?contentClassName="flex-1 min-h-0 overflow-y-auto scrollbar-hide pb-6 scroll-pb-6"/,
   );
 
   // Touch-first preserved: no hover utilities sneaked in with the viewport bound.

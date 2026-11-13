@@ -2,6 +2,7 @@ import { useSupportPaymentCritical } from '../../hooks/useSupportPaymentCritical
 import { getStoreCurrency } from '../../utils/store-currency';
 import { canChargeFolio } from '../../utils/folio-currency';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { Coins, AlertTriangle, BedDouble, HandCoins, Gift, Plus } from 'lucide-react';
 import { CardsIcon, CashHandIcon, SplitReceiptIcon } from '../icons/PaymentMethodIcons';
 import { useTranslation } from 'react-i18next';
@@ -162,7 +163,7 @@ type CashChangeBreakdownItem = {
 const CASH_CHANGE_DENOMINATIONS = [50, 20, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05];
 const QUICK_CASH_ROUNDING_STEPS = [1, 5, 10, 20, 50, 100];
 const CASH_CHANGE_CHIP_CLASS =
-  'inline-flex min-h-8 items-center gap-1.5 whitespace-nowrap rounded-full border border-slate-200/90 bg-white/90 px-2.5 py-1 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:shadow-none';
+  'pos-glass-form-card inline-flex min-h-8 items-center gap-1.5 whitespace-nowrap rounded-full! px-2.5! py-1! text-xs font-semibold liquid-glass-modal-text';
 
 // Module audit closure (2026-09-16): one rounding rule for the renderer. The local copy
 // rounded 1.005 down to 1.00 (1.005 * 100 is 100.49999999999999 in binary).
@@ -211,17 +212,15 @@ export const getCashInputVisualClasses = (
   hasEnoughCash: boolean,
 ): Record<string, string> => ({
   quickAmountsPanel:
-    'space-y-3 rounded-2xl border border-slate-200/80 bg-slate-50/70 p-3 dark:border-white/10 dark:bg-white/5',
-  quickAmountsLabel: 'text-slate-600 dark:text-slate-300',
+    'pos-glass-form-card space-y-3 p-3!',
+  quickAmountsLabel: 'liquid-glass-modal-text-muted',
   quickAmountSelected: 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)',
   quickAmountIdle:
-    'border-slate-200/90 bg-white/90 text-slate-900 shadow-xs active:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-white dark:shadow-none dark:active:bg-white/10',
+    'pos-glass-field',
   cashInput:
-    'border-slate-300/90 bg-white/90 text-slate-950 shadow-inner placeholder:text-slate-400 focus:border-yellow-400 focus:ring-2 focus:ring-(--pos-s-fg) dark:border-white/20 dark:bg-white/10 dark:text-white dark:placeholder:text-white/35',
-  summary: hasEnoughCash
-    ? 'border-slate-200/90 bg-white/80 dark:border-white/10 dark:bg-white/5 dark:shadow-none'
-    : 'border-(--pos-s-border) bg-(--pos-s-surface-2) dark:border-zinc-700 dark:bg-zinc-800',
-  summaryDivider: 'border-slate-200/80 dark:border-white/10',
+    'liquid-glass-modal-input pos-glass-field min-h-touch',
+  summary: 'pos-glass-form-card',
+  summaryDivider: 'space-y-2',
   // Founder 31/10: the change keeps its green; a short amount its red.
   changeTone: hasEnoughCash
     ? 'text-emerald-700 dark:text-emerald-300'
@@ -279,6 +278,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   onCancelOrder,
 }) => {
   const { t } = useTranslation();
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const supportPayment = useSupportPaymentCritical(isOpen);
   const onClose = () => { supportPayment.close(); onPaymentClose(); };
   const { isFeatureEnabled, isMobileWaiter, loading: isFeatureLoading } = useFeatures();
@@ -844,7 +851,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       onClose={handleClose}
       title={t('modals.payment.title')}
       size="md"
-      className="max-w-lg!"
+      className="max-w-lg! [&>.liquid-glass-modal-header]:border-b-0!"
       closeOnBackdrop={false}
       closeOnEscape={!isProcessingPayment}
       closeDisabled={isProcessingPayment}
@@ -852,7 +859,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       onEnterKey={handleModalEnter}
       enterKeyEnabled={!isProcessingPayment && !isFeatureLoading && canSubmitWithEnter}
       footer={pendingTwintReceipts.length ? undefined : currentStep === 'cash_input' ? (
-        <div className="liquid-glass-modal-border flex gap-3 border-t px-6 py-4">
+        <div className="flex gap-3 bg-(--pos-s-surface) px-6 pb-5 pt-2">
           <button onClick={handleBackToPaymentSelection} disabled={isProcessingPayment}
             className="liquid-glass-modal-button flex-1 font-medium liquid-glass-modal-text">
             {t('common.actions.back', 'Back')}
@@ -863,7 +870,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           </button>
         </div>
       ) : currentStep === 'gift' ? (
-        <div className="liquid-glass-modal-border flex gap-3 border-t px-6 py-4">
+        <div className="flex gap-3 bg-(--pos-s-surface) px-6 pb-5 pt-2">
           <button type="button" onClick={handleBackToPaymentSelection} disabled={isProcessingPayment}
             className="liquid-glass-modal-button flex-1 font-medium liquid-glass-modal-text">
             {t('common.actions.back', 'Back')}
@@ -875,49 +882,56 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       <div>
         {/* Order Total with Discount Breakdown */}
         <div className="text-center mb-8">
-          {(discountAmount > 0 || showDeliveryFee || tipAmount > 0) && (
-            <div className="mb-4 space-y-2 p-4 rounded-2xl bg-white/5 border border-white/10">
-              <div className="flex justify-between text-sm">
-                <span className="liquid-glass-modal-text-muted">
-                  {t('payment.fields.subtotal')}
-                </span>
-                <span className="liquid-glass-modal-text font-medium">
-                  {formatCurrency(subtotalBeforeDiscount)}
-                </span>
-              </div>
-              {discountAmount > 0 && (
-                <div className="flex justify-between text-sm">
-                  <span className="text-green-500 dark:text-green-400 font-medium">
-                    {t('modals.payment.discount')}
-                  </span>
-                  <span className="text-green-500 dark:text-green-400 font-medium">
-                    -{formatCurrency(discountAmount)}
-                  </span>
-                </div>
-              )}
-              {showDeliveryFee && (
+          <AnimatePresence initial={false}>
+            {(discountAmount > 0 || showDeliveryFee || tipAmount > 0) && (
+              <motion.div key="discountamount-0-showdeliveryfee-tipamount-0" {...revealMotion} className="pos-glass-form-card mb-4 space-y-2">
                 <div className="flex justify-between text-sm">
                   <span className="liquid-glass-modal-text-muted">
-                    {t('payment.fields.deliveryFee')}
+                    {t('payment.fields.subtotal')}
                   </span>
                   <span className="liquid-glass-modal-text font-medium">
-                    {formatCurrency(deliveryFee)}
+                    {formatCurrency(subtotalBeforeDiscount)}
                   </span>
                 </div>
-              )}
-              {tipAmount > 0 && (
-                <div className="flex justify-between text-sm">
-                  <span className="font-medium text-emerald-700 dark:text-emerald-400">
-                    {t('modals.payment.tip', 'Tip')}
-                  </span>
-                  <span className="font-medium text-emerald-700 dark:text-emerald-400">
-                    +{formatCurrency(tipAmount)}
-                  </span>
-                </div>
-              )}
-              <div className="border-t border-white/10 pt-2 mt-2"></div>
-            </div>
-          )}
+                <AnimatePresence initial={false}>
+                  {discountAmount > 0 && (
+                    <motion.div key="discountamount-0" {...revealMotion} className="flex justify-between text-sm">
+                      <span className="text-green-500 dark:text-green-400 font-medium">
+                        {t('modals.payment.discount')}
+                      </span>
+                      <span className="text-green-500 dark:text-green-400 font-medium">
+                        -{formatCurrency(discountAmount)}
+                      </span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                <AnimatePresence initial={false}>
+                  {showDeliveryFee && (
+                    <motion.div key="showdeliveryfee" {...revealMotion} className="flex justify-between text-sm">
+                      <span className="liquid-glass-modal-text-muted">
+                        {t('payment.fields.deliveryFee')}
+                      </span>
+                      <span className="liquid-glass-modal-text font-medium">
+                        {formatCurrency(deliveryFee)}
+                      </span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                <AnimatePresence initial={false}>
+                  {tipAmount > 0 && (
+                    <motion.div key="tipamount-0" {...revealMotion} className="flex justify-between text-sm">
+                      <span className="font-medium text-emerald-700 dark:text-emerald-400">
+                        {t('modals.payment.tip', 'Tip')}
+                      </span>
+                      <span className="font-medium text-emerald-700 dark:text-emerald-400">
+                        +{formatCurrency(tipAmount)}
+                      </span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </motion.div>
+            )}
+          </AnimatePresence>
           <p className="text-sm liquid-glass-modal-text-muted mb-2">
             {discountAmount > 0 ? t('modals.payment.finalAmount') : t('modals.payment.totalAmount')}
           </p>
@@ -928,292 +942,302 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         </div>
 
         {/* Step: Minimum Order Warning */}
-        {pendingTwintReceipts.length>0 && <div className="space-y-4" role="alert">
-          <p>{t('twintPayment.receiptRecovery','A TWINT receipt is confirmed but its payment is not saved. Save the original receipt before taking another payment.')}</p>
-          <button type="button" disabled={twintRecovering} className="liquid-glass-modal-button" onClick={async()=>supportPayment.run(async()=>{
-            if(twintRecovering)return; setTwintRecovering(true);
-            try {
-              if(await saveOriginalTwintReceipt(pendingTwintReceipts[0])) {
-                await useOrderStore.getState().silentRefresh().catch(()=>{});
-                toast.success(t('twintPayment.receiptSaved','The original TWINT receipt was saved.'));
-                onClose();
-              } else toast.error(t('twintPayment.saveFailed','The payment could not be saved. Check its status before trying again.'));
-            } catch { toast.error(t('twintPayment.saveFailed','The payment could not be saved. Check its status before trying again.')); }
-            finally {setTwintRecovering(false);}
-          })}>{t('twintPayment.saveOriginal','Save original TWINT receipt')}</button>
-        </div>}
-        {pendingTwintReceipts.length===0 && currentStep === 'minimum_warning' && (
-          <div className="space-y-4">
-            <div className="flex items-center gap-3 p-4 rounded-2xl bg-(--pos-s-warn-bg) border border-(--pos-s-warn)">
-              <AlertTriangle className="w-8 h-8 text-(--pos-s-warn) shrink-0" />
-              <div>
-                <h3 className="font-semibold text-(--pos-s-warn)">
-                  {t('modals.payment.belowMinimumTitle', 'Minimum Order Not Met')}
-                </h3>
-                <p className="text-sm text-(--pos-s-fg)">
-                  {t('modals.payment.belowMinimumMessage', 'Order amount is below minimum order amount of {{amount}}', { amount: formatCurrency(minimumOrderAmount) })}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                onClick={handleClose}
-                className="liquid-glass-modal-button flex-1 font-medium bg-gray-500/20 active:bg-gray-500/30 liquid-glass-modal-text"
-              >
-                {t('modals.payment.cancel')}
-              </button>
-              <button
-                onClick={handleSkipMinimumWarning}
-                className="liquid-glass-modal-button flex-1 font-medium bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-orange-800 dark:text-orange-300 border-(--pos-s-border)"
-              >
-                {t('modals.payment.skip', 'Skip')}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {pendingTwintReceipts.length===0 && currentStep === 'payment_selection' && (
-          <div className="relative">
-            {allowTips && <button
-              type="button"
-              onClick={() => setShowTipModal(true)}
-              disabled={isProcessingPayment}
-              data-depth="off"
-              // Founder 01/11: a glass card with the panel depth, like the payment choices under it; a tip already
-              // added keeps its green edge.
-              className={`payment-tip-row mb-4 flex min-h-14 w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left transition-colors ${
-                tipAmount > 0
-                  ? 'border-emerald-600'
-                  : 'border-(--modal-glass-card-border)'
-              } ${isProcessingPayment ? 'cursor-not-allowed opacity-50' : 'active:scale-[0.99]'}`}
-            >
-              <span className="flex items-center gap-3">
-                <HandCoins className="h-6 w-6 shrink-0 text-emerald-500 dark:text-emerald-300" aria-hidden="true" />
-                <span>
-                  <span className="block font-bold liquid-glass-modal-text">
-                    {tipAmount > 0
-                      ? t('modals.payment.editTip', 'Edit tip')
-                      : t('modals.payment.addTip', 'Add tip')}
-                  </span>
-                  <span className="block text-xs liquid-glass-modal-text-muted">
-                    {tipSelection
-                      ? tipSelection.recipientRole === 'staff'
-                        ? tipSelection.recipientStaffName || t('salonStaff.tipRecipient', 'Staff member')
-                        : t(`modals.tip.recipients.${tipSelection.recipientRole}`)
-                      : t('modals.payment.tipOptional', 'Optional — added before payment')}
-                  </span>
-                </span>
-              </span>
-              {tipAmount > 0 ? (
-                <span className="text-lg font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">{formatCurrency(tipAmount)}</span>
-              ) : (
-                <span aria-hidden="true" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-(--pos-s-border) bg-(--pos-s-surface) text-emerald-700 dark:text-emerald-400">
-                  <Plus className="h-5 w-5" />
-                </span>
-              )}
-            </button>}
-            {isFeatureLoading ? (
-              <div className="flex items-center gap-3 p-4 rounded-2xl bg-white/5 border border-white/10 w-full">
-                <div className="w-5 h-5 rounded-full border-2 border-white/20 border-t-white/70 animate-spin shrink-0" />
-                <div>
-                  <h3 className="font-semibold liquid-glass-modal-text">
-                    {t('modals.payment.loadingMethods', 'Loading payment methods')}
-                  </h3>
-                  <p className="text-sm liquid-glass-modal-text-muted">
-                    {t('modals.payment.loadingMethodsHint', 'Checking terminal payment configuration...')}
-                  </p>
-                </div>
-              </div>
-            ) : !hasAnyPaymentMethod ? (
-              <div className="flex items-center gap-3 p-4 rounded-2xl bg-(--pos-s-warn-bg) border border-(--pos-s-warn) w-full">
-                <AlertTriangle className="w-6 h-6 text-(--pos-s-warn) shrink-0" />
+        <AnimatePresence initial={false}>
+          {pendingTwintReceipts.length>0 && <motion.div key="twint" {...revealMotion} className="space-y-4" role="alert">
+            <p>{t('twintPayment.receiptRecovery','A TWINT receipt is confirmed but its payment is not saved. Save the original receipt before taking another payment.')}</p>
+            <button type="button" disabled={twintRecovering} className="liquid-glass-modal-button" onClick={async()=>supportPayment.run(async()=>{
+              if(twintRecovering)return; setTwintRecovering(true);
+              try {
+                if(await saveOriginalTwintReceipt(pendingTwintReceipts[0])) {
+                  await useOrderStore.getState().silentRefresh().catch(()=>{});
+                  toast.success(t('twintPayment.receiptSaved','The original TWINT receipt was saved.'));
+                  onClose();
+                } else toast.error(t('twintPayment.saveFailed','The payment could not be saved. Check its status before trying again.'));
+              } catch { toast.error(t('twintPayment.saveFailed','The payment could not be saved. Check its status before trying again.')); }
+              finally {setTwintRecovering(false);}
+            })}>{t('twintPayment.saveOriginal','Save original TWINT receipt')}</button>
+          </motion.div>}
+        </AnimatePresence>
+        <AnimatePresence initial={false}>
+          {pendingTwintReceipts.length===0 && currentStep === 'minimum_warning' && (
+            <motion.div key="currentstep-minimum_warning" {...revealMotion} className="space-y-4">
+              <div className="flex items-center gap-3 p-4 rounded-2xl bg-(--pos-s-warn-bg) border border-(--pos-s-warn)">
+                <AlertTriangle className="w-8 h-8 text-(--pos-s-warn) shrink-0" />
                 <div>
                   <h3 className="font-semibold text-(--pos-s-warn)">
-                    {t('settings.terminal.messages.noPaymentMethods', 'No payment methods available')}
+                    {t('modals.payment.belowMinimumTitle', 'Minimum Order Not Met')}
                   </h3>
                   <p className="text-sm text-(--pos-s-fg)">
-                    {t('settings.terminal.messages.contactManager', 'Contact your manager for configuration changes.')}
+                    {t('modals.payment.belowMinimumMessage', 'Order amount is below minimum order amount of {{amount}}', { amount: formatCurrency(minimumOrderAmount) })}
                   </p>
                 </div>
               </div>
-            ) : (
-              <div className={`grid ${paymentGridGapClass} ${paymentGridClass}`}>
-                {/* Cash Option */}
+
+              <div className="flex gap-3">
                 <button
-                  onClick={() => canUseCash && handlePaymentMethodSelect('cash')}
-                  disabled={!canUseCash || isProcessingPayment}
-                  className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
-                    ${cashVisualClasses.option}`}
+                  onClick={handleClose}
+                  className="liquid-glass-modal-button flex-1 font-medium bg-gray-500/20 active:bg-gray-500/30 liquid-glass-modal-text"
                 >
-                  {/* Founder 31/10: his glyphs -- a hand with notes for cash, two cards, a torn receipt. */}
-                  <CashHandIcon
-                    className={`w-14 h-14 mb-3 transition-all duration-300
-                      ${cashVisualClasses.icon}`}
-                  />
-
-                  <span className={`${paymentMethodLabelBaseClass}
-                    ${cashVisualClasses.label}`}
-                  >
-                    {t('modals.payment.cashSimple', 'Cash')}
-                  </span>
-
-                  {isMobileWaiter && !canUseCash && (
-                    <p className="text-xs text-amber-700 dark:text-amber-400 mt-2 text-center">
-                      {t('settings.terminal.messages.cashDrawerMainOnly', 'Cash handled by Main POS')}
-                    </p>
-                  )}
+                  {t('modals.payment.cancel')}
                 </button>
-
-                {/* Card Option */}
                 <button
-                  onClick={() => canUseCard && handlePaymentMethodSelect('card')}
-                  disabled={!canUseCard || isProcessingPayment}
-                  className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
-                    ${cardVisualClasses.option}`}
+                  onClick={handleSkipMinimumWarning}
+                  className="liquid-glass-modal-button flex-1 font-medium bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-orange-800 dark:text-orange-300 border-(--pos-s-border)"
                 >
-                  <CardsIcon
-                    className={`w-14 h-14 mb-3 transition-all duration-300
-                      ${cardVisualClasses.icon}`}
-                  />
-
-                  <span className={`${paymentMethodLabelBaseClass}
-                    ${cardVisualClasses.label}`}
-                  >
-                    {t('modals.payment.cardSimple', 'Card')}
-                  </span>
-
-                  {!canUseCard && (
-                    <p className="text-xs text-amber-700 dark:text-amber-400 mt-2 text-center">
-                      {t('settings.terminal.messages.featureDisabled', 'Feature disabled for this terminal')}
-                    </p>
-                  )}
+                  {t('modals.payment.skip', 'Skip')}
                 </button>
-
-                {canUseTwint && (
-                  <button type="button" disabled={isProcessingPayment || twintAdmitting} aria-busy={twintAdmitting} onClick={() => void handleTwintSelect()}
-                    className={`flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 border-(--pos-s-border) bg-(--pos-s-surface-2)`}>
-                    <img src={twintLogo} alt="" className="h-14 max-w-full mb-3 rounded-lg" />
-                    <span className={paymentMethodLabelBaseClass}>TWINT</span>
-                  </button>
-                )}
-                {roomChargeContext && !canChargeFolio(roomChargeContext.currency, getStoreCurrency()) && (
-                  <p role="alert" className="col-span-full text-sm text-amber-600">{t(roomChargeContext.currency ? 'guestBilling.errors.currencyMismatch' : 'guestBilling.errors.currencyUnavailable')}</p>
-                )}
-                {canUseRoomCharge && roomChargeContext && (
-                  <button
-                    onClick={() => handlePaymentMethodSelect('room_charge')}
-                    disabled={isProcessingPayment}
-                    className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
-                      ${isProcessingPayment
-                        ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                        : 'border-(--pos-s-border) active:scale-[0.98]'
-                      }`}
-                  >
-                    <BedDouble
-                      className={`w-14 h-14 mb-3 transition-all duration-300
-                        ${isProcessingPayment ? 'text-gray-400' : 'text-amber-700 dark:text-amber-400'}`}
-                      strokeWidth={1.5}
-                    />
-
-                    <span className={`${paymentMethodLabelBaseClass}
-                      ${isProcessingPayment ? 'text-gray-400' : 'text-amber-700 dark:text-amber-400'}`}
-                    >
-                      {t('modals.payment.roomChargeSimple', 'Room')}
-                    </span>
-                    <p className="mt-2 max-w-36 truncate text-center text-xs liquid-glass-modal-text-muted">
-                      {roomChargeContext.roomNumber
-                        ? t('modals.payment.roomChargeRoom', 'Room {{roomNumber}}', { roomNumber: roomChargeContext.roomNumber })
-                        : t('modals.payment.roomChargeLabel', 'Charge to room')}
-                    </p>
-                  </button>
-                )}
-
-                {/* Gift Card Option — existing orders only, for the whole outstanding balance */}
-                {canUseGiftCard && (
-                  <button
-                    type="button"
-                    onClick={handleGiftCardSelect}
-                    disabled={isProcessingPayment}
-                    className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
-                      ${isProcessingPayment
-                        ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                        : 'border-(--pos-s-border) active:scale-[0.98]'
-                      }`}
-                  >
-                    <Gift
-                      className={`w-14 h-14 mb-3 transition-all duration-300
-                        ${isProcessingPayment ? 'text-gray-400' : 'text-violet-400'}`}
-                      strokeWidth={1.5}
-                    />
-
-                    <span className={`${paymentMethodLabelBaseClass}
-                      ${isProcessingPayment ? 'text-gray-400' : 'text-violet-400'}`}
-                    >
-                      {t('giftCardCheckout.title', 'Gift card')}
-                    </span>
-                  </button>
-                )}
-
-                {/* Split Option — shown only when onSplitPayment callback is provided */}
-                {onSplitPayment && (
-                  <button
-                    onClick={() => { onSplitPayment(tipSelection); }}
-                    disabled={isProcessingPayment}
-                    className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
-                      ${splitVisualClasses.option}`}
-                  >
-                    <SplitReceiptIcon
-                      className={`w-14 h-14 mb-3 transition-all duration-300
-                        ${splitVisualClasses.icon}`}
-                    />
-
-                    <span className={`${paymentMethodLabelBaseClass}
-                      ${splitVisualClasses.label}`}
-                    >
-                      {t('modals.payment.splitSimple', 'Split')}
-                    </span>
-                  </button>
-                )}
               </div>
-            )}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-            {/* An unpaid order taken to payment can still be cancelled (the host's normal cancel): the kit's
-                raised button with red words. */}
-            {onCancelOrder && (
-              <button
+        <AnimatePresence initial={false}>
+
+          {pendingTwintReceipts.length===0 && currentStep === 'payment_selection' && (
+            <motion.div key="currentstep-payment_selection" {...revealMotion} className="relative">
+              {allowTips && <button
                 type="button"
-                data-testid="payment-cancel-order"
-                onClick={onCancelOrder}
+                onClick={() => setShowTipModal(true)}
                 disabled={isProcessingPayment}
-                className="pos-solid-btn pos-solid-btn--md pos-solid-btn--danger mt-4 w-full"
+                data-depth="off"
+                // Founder 01/11: a glass card with the panel depth, like the payment choices under it; a tip already
+                // added keeps its green edge.
+                className={`payment-tip-row mb-4 flex min-h-14 w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left transition-colors ${
+                  tipAmount > 0
+                    ? 'border-emerald-600'
+                    : 'border-(--modal-glass-card-border)'
+                } ${isProcessingPayment ? 'cursor-not-allowed opacity-50' : 'active:scale-[0.99]'}`}
               >
-                {t('modals.payment.cancelOrder', 'Cancel order')}
-              </button>
-            )}
+                <span className="flex items-center gap-3">
+                  <HandCoins className="h-6 w-6 shrink-0 text-emerald-500 dark:text-emerald-300" aria-hidden="true" />
+                  <span>
+                    <span className="block font-bold liquid-glass-modal-text">
+                      {tipAmount > 0
+                        ? t('modals.payment.editTip', 'Edit tip')
+                        : t('modals.payment.addTip', 'Add tip')}
+                    </span>
+                    <span className="block text-xs liquid-glass-modal-text-muted">
+                      {tipSelection
+                        ? tipSelection.recipientRole === 'staff'
+                          ? tipSelection.recipientStaffName || t('salonStaff.tipRecipient', 'Staff member')
+                          : t(`modals.tip.recipients.${tipSelection.recipientRole}`)
+                        : t('modals.payment.tipOptional', 'Optional — added before payment')}
+                    </span>
+                  </span>
+                </span>
+                {tipAmount > 0 ? (
+                  <span className="text-lg font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">{formatCurrency(tipAmount)}</span>
+                ) : (
+                  <span aria-hidden="true" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-(--pos-s-border) bg-(--pos-s-surface) text-emerald-700 dark:text-emerald-400">
+                    <Plus className="h-5 w-5" />
+                  </span>
+                )}
+              </button>}
+              <AnimatePresence initial={false}>
+                {isFeatureLoading ? (
+                  <motion.div key="isfeatureloading" {...revealMotion} className="pos-glass-form-card flex items-center gap-3 w-full">
+                    <div className="w-5 h-5 rounded-full border-2 border-(--pos-s-border) border-t-(--pos-s-muted) animate-spin shrink-0" />
+                    <div>
+                      <h3 className="font-semibold liquid-glass-modal-text">
+                        {t('modals.payment.loadingMethods', 'Loading payment methods')}
+                      </h3>
+                      <p className="text-sm liquid-glass-modal-text-muted">
+                        {t('modals.payment.loadingMethodsHint', 'Checking terminal payment configuration...')}
+                      </p>
+                    </div>
+                  </motion.div>
+                ) : !hasAnyPaymentMethod ? (
+                  <motion.div key="payment-view-1" {...revealMotion} className="flex items-center gap-3 p-4 rounded-2xl bg-(--pos-s-warn-bg) border border-(--pos-s-warn) w-full">
+                    <AlertTriangle className="w-6 h-6 text-(--pos-s-warn) shrink-0" />
+                    <div>
+                      <h3 className="font-semibold text-(--pos-s-warn)">
+                        {t('settings.terminal.messages.noPaymentMethods', 'No payment methods available')}
+                      </h3>
+                      <p className="text-sm text-(--pos-s-fg)">
+                        {t('settings.terminal.messages.contactManager', 'Contact your manager for configuration changes.')}
+                      </p>
+                    </div>
+                  </motion.div>
+                ) : (
+                  <motion.div key="payment-view-2" {...revealMotion} className={`grid ${paymentGridGapClass} ${paymentGridClass}`}>
+                    {/* Cash Option */}
+                    <button
+                      onClick={() => canUseCash && handlePaymentMethodSelect('cash')}
+                      disabled={!canUseCash || isProcessingPayment}
+                      className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                        ${cashVisualClasses.option}`}
+                    >
+                      {/* Founder 31/10: his glyphs -- a hand with notes for cash, two cards, a torn receipt. */}
+                      <CashHandIcon
+                        className={`w-14 h-14 mb-3 transition-all duration-300
+                          ${cashVisualClasses.icon}`}
+                      />
 
-            {/* Processing indicator */}
-            {isProcessingPayment && (
-              <div className="mt-4 text-center">
-                <p className="text-sm liquid-glass-modal-text-muted animate-pulse">
-                  {t('modals.payment.processing')}
-                </p>
-              </div>
-            )}
+                      <span className={`${paymentMethodLabelBaseClass}
+                        ${cashVisualClasses.label}`}
+                      >
+                        {t('modals.payment.cashSimple', 'Cash')}
+                      </span>
 
-            {roomChargeFallback && !isProcessingPayment && (
-              <div className="mt-4 flex items-center gap-3 rounded-2xl bg-(--pos-s-warn-bg) border border-(--pos-s-warn) p-4">
-                <AlertTriangle className="h-5 w-5 shrink-0 text-(--pos-s-warn)" />
-                <p className="text-sm text-(--pos-s-fg)">
-                  {t(
-                    'modals.payment.roomChargeFallback',
-                    'Room charge was not applied. Collect cash or card payment for this order.',
-                  )}
-                </p>
-              </div>
-            )}
-          </div>
-        )}
+                      {isMobileWaiter && !canUseCash && (
+                        <p className="text-xs text-amber-700 dark:text-amber-400 mt-2 text-center">
+                          {t('settings.terminal.messages.cashDrawerMainOnly', 'Cash handled by Main POS')}
+                        </p>
+                      )}
+                    </button>
+
+                    {/* Card Option */}
+                    <button
+                      onClick={() => canUseCard && handlePaymentMethodSelect('card')}
+                      disabled={!canUseCard || isProcessingPayment}
+                      className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                        ${cardVisualClasses.option}`}
+                    >
+                      <CardsIcon
+                        className={`w-14 h-14 mb-3 transition-all duration-300
+                          ${cardVisualClasses.icon}`}
+                      />
+
+                      <span className={`${paymentMethodLabelBaseClass}
+                        ${cardVisualClasses.label}`}
+                      >
+                        {t('modals.payment.cardSimple', 'Card')}
+                      </span>
+
+                      {!canUseCard && (
+                        <p className="text-xs text-amber-700 dark:text-amber-400 mt-2 text-center">
+                          {t('settings.terminal.messages.featureDisabled', 'Feature disabled for this terminal')}
+                        </p>
+                      )}
+                    </button>
+
+                    {canUseTwint && (
+                      <button type="button" disabled={isProcessingPayment || twintAdmitting} aria-busy={twintAdmitting} onClick={() => void handleTwintSelect()}
+                        className={`pos-glass-tap-card min-h-touch flex flex-col items-center justify-center ${paymentOptionPaddingClass}`}>
+                        <img src={twintLogo} alt="" className="h-14 max-w-full mb-3 rounded-lg" />
+                        <span className={paymentMethodLabelBaseClass}>TWINT</span>
+                      </button>
+                    )}
+                    <AnimatePresence initial={false}>
+                      {roomChargeContext && !canChargeFolio(roomChargeContext.currency, getStoreCurrency()) && (
+                        <motion.p key="roomchargecontext-canchargefolio-roomchargecontext-currency-getstorecurrency" {...revealMotion} role="alert" className="col-span-full text-sm text-amber-600">{t(roomChargeContext.currency ? 'guestBilling.errors.currencyMismatch' : 'guestBilling.errors.currencyUnavailable')}</motion.p>
+                      )}
+                    </AnimatePresence>
+                    {canUseRoomCharge && roomChargeContext && (
+                      <button
+                        onClick={() => handlePaymentMethodSelect('room_charge')}
+                        disabled={isProcessingPayment}
+                        className={`pos-glass-tap-card min-h-touch group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} transition-all duration-300 overflow-hidden
+                          ${isProcessingPayment ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      >
+                        <BedDouble
+                          className={`w-14 h-14 mb-3 transition-all duration-300
+                            ${isProcessingPayment ? 'text-gray-400' : 'text-amber-700 dark:text-amber-400'}`}
+                          strokeWidth={1.5}
+                        />
+
+                        <span className={`${paymentMethodLabelBaseClass}
+                          ${isProcessingPayment ? 'text-gray-400' : 'text-amber-700 dark:text-amber-400'}`}
+                        >
+                          {t('modals.payment.roomChargeSimple', 'Room')}
+                        </span>
+                        <p className="mt-2 max-w-36 truncate text-center text-xs liquid-glass-modal-text-muted">
+                          {roomChargeContext.roomNumber
+                            ? t('modals.payment.roomChargeRoom', 'Room {{roomNumber}}', { roomNumber: roomChargeContext.roomNumber })
+                            : t('modals.payment.roomChargeLabel', 'Charge to room')}
+                        </p>
+                      </button>
+                    )}
+
+                    {/* Gift Card Option — existing orders only, for the whole outstanding balance */}
+                    {canUseGiftCard && (
+                      <button
+                        type="button"
+                        onClick={handleGiftCardSelect}
+                        disabled={isProcessingPayment}
+                        className={`pos-glass-tap-card min-h-touch group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} transition-all duration-300 overflow-hidden
+                          ${isProcessingPayment ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      >
+                        <Gift
+                          className={`w-14 h-14 mb-3 transition-all duration-300
+                            ${isProcessingPayment ? 'text-gray-400' : 'text-violet-400'}`}
+                          strokeWidth={1.5}
+                        />
+
+                        <span className={`${paymentMethodLabelBaseClass}
+                          ${isProcessingPayment ? 'text-gray-400' : 'text-violet-400'}`}
+                        >
+                          {t('giftCardCheckout.title', 'Gift card')}
+                        </span>
+                      </button>
+                    )}
+
+                    {/* Split Option — shown only when onSplitPayment callback is provided */}
+                    {onSplitPayment && (
+                      <button
+                        onClick={() => { onSplitPayment(tipSelection); }}
+                        disabled={isProcessingPayment}
+                        className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                          ${splitVisualClasses.option}`}
+                      >
+                        <SplitReceiptIcon
+                          className={`w-14 h-14 mb-3 transition-all duration-300
+                            ${splitVisualClasses.icon}`}
+                        />
+
+                        <span className={`${paymentMethodLabelBaseClass}
+                          ${splitVisualClasses.label}`}
+                        >
+                          {t('modals.payment.splitSimple', 'Split')}
+                        </span>
+                      </button>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* An unpaid order taken to payment can still be cancelled (the host's normal cancel): the kit's
+                  raised button with red words. */}
+              {onCancelOrder && (
+                <button
+                  type="button"
+                  data-testid="payment-cancel-order"
+                  onClick={onCancelOrder}
+                  disabled={isProcessingPayment}
+                  className="pos-solid-btn pos-solid-btn--md pos-solid-btn--danger mt-4 w-full"
+                >
+                  {t('modals.payment.cancelOrder', 'Cancel order')}
+                </button>
+              )}
+
+              {/* Processing indicator */}
+              <AnimatePresence initial={false}>
+                {isProcessingPayment && (
+                  <motion.div key="isprocessingpayment" {...revealMotion} className="mt-4 text-center">
+                    <p className="text-sm liquid-glass-modal-text-muted animate-pulse">
+                      {t('modals.payment.processing')}
+                    </p>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <AnimatePresence initial={false}>
+
+                {roomChargeFallback && !isProcessingPayment && (
+                  <motion.div key="roomchargefallback-isprocessingpayment" {...revealMotion} className="mt-4 flex items-center gap-3 rounded-2xl bg-(--pos-s-warn-bg) border border-(--pos-s-warn) p-4">
+                    <AlertTriangle className="h-5 w-5 shrink-0 text-(--pos-s-warn)" />
+                    <p className="text-sm text-(--pos-s-fg)">
+                      {t(
+                        'modals.payment.roomChargeFallback',
+                        'Room charge was not applied. Collect cash or card payment for this order.',
+                      )}
+                    </p>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Step: Cash Input (only for pickup/in-store) */}
         {pendingTwintReceipts.length===0 && currentStep === 'twint' && twintConfiguration && (
@@ -1222,86 +1246,95 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             externalEnabled={hasModule('customer_display')} onConfirm={handleTwintConfirm}
             onCancel={handleTwintCancel} />
         )}
-        {pendingTwintReceipts.length===0 && currentStep === 'cash_input' && (
-          <div className="space-y-6">
-            {quickCashAmounts.length > 0 && (
-              <div className={cashInputVisualClasses.quickAmountsPanel}>
-                <p className={`text-sm font-semibold ${cashInputVisualClasses.quickAmountsLabel}`}>
-                  {t('modals.payment.quickAmounts', 'Quick Amounts')}
-                </p>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {quickCashAmounts.map((amount) => {
-                    const isSelected = hasMoneyAmount([cashAmount], amount);
-
-                    return (
-                      <button
-                        key={amount}
-                        type="button"
-                        onClick={() => handleQuickCashSelect(amount)}
-                        disabled={isProcessingPayment}
-                        className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-bold transition-all ${
-                          isSelected
-                            ? cashInputVisualClasses.quickAmountSelected
-                            : cashInputVisualClasses.quickAmountIdle
-                        } ${isProcessingPayment ? 'cursor-not-allowed opacity-50' : 'active:scale-[0.98]'}`}
-                      >
-                        {formatCurrency(amount)}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            <div className="text-center">
-              <p className="text-sm liquid-glass-modal-text-muted mb-2">
-                {t('modals.payment.enterCashReceived', 'Cash Received')}
-              </p>
-              <CentsMoneyInput
-                ref={cashInputRef}
-                aria-label={t('modals.payment.enterCashReceived', 'Cash Received')}
-                value={cashReceived}
-                onValueChange={setCashReceived}
-                placeholder="0,00"
-                autoFocus
-                className={`w-full rounded-xl border-2 p-4 text-center text-3xl font-bold outline-hidden transition-colors ${cashInputVisualClasses.cashInput}`}
-              />
-            </div>
-
-            {cashReceived && (
-              <div className={`rounded-2xl border-2 p-4 transition-colors ${cashInputVisualClasses.summary}`}>
-                {/* Founder 31/10: only what is new -- the total is at the top, the received amount in the field. */}
-                <div className="flex justify-between items-center">
-                  <span className={`font-semibold ${cashInputVisualClasses.changeTone}`}>
-                    {hasEnoughCash
-                      ? t('modals.payment.change', 'Change')
-                      : t('modals.payment.amountShort', 'Amount Short')}
-                  </span>
-                  <span className={`text-2xl font-bold ${cashInputVisualClasses.changeTone}`}>
-                    <ChangingValue value={hasEnoughCash ? formatCurrency(changeAmount) : formatCurrency(amountShort)} />
-                  </span>
-                </div>
-                {hasEnoughCash && changeAmount > 0 && changeBreakdown.length > 0 && (
-                  <div className={`mt-3 border-t pt-3 ${cashInputVisualClasses.summaryDivider}`}>
-                    <p className="mb-2 text-xs font-semibold tracking-normal liquid-glass-modal-text-muted">
-                      {t('modals.payment.suggestedChange', 'Suggested change')}
+        <AnimatePresence initial={false}>
+          {pendingTwintReceipts.length===0 && currentStep === 'cash_input' && (
+            <motion.div key="currentstep-cash_input" {...revealMotion} className="space-y-3">
+              <AnimatePresence initial={false}>
+                {quickCashAmounts.length > 0 && (
+                  <motion.div key="quickcashamounts-length-0" {...revealMotion} className={cashInputVisualClasses.quickAmountsPanel}>
+                    <p className={`text-sm font-semibold ${cashInputVisualClasses.quickAmountsLabel}`}>
+                      {t('modals.payment.quickAmounts', 'Quick Amounts')}
                     </p>
-                    <div className="flex flex-wrap gap-2">
-                      {changeBreakdown.map((item) => (
-                        <CashChangeChip
-                          key={item.value}
-                          item={item}
-                          formattedValue={formatCurrency(item.value)}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      {quickCashAmounts.map((amount) => {
+                        const isSelected = hasMoneyAmount([cashAmount], amount);
 
-          </div>
-        )}
+                        return (
+                          <button
+                            key={amount}
+                            type="button"
+                            onClick={() => handleQuickCashSelect(amount)}
+                            disabled={isProcessingPayment}
+                            className={`min-h-11 rounded-xl px-3 py-2 text-sm font-bold transition-all ${
+                              isSelected
+                                ? cashInputVisualClasses.quickAmountSelected
+                                : cashInputVisualClasses.quickAmountIdle
+                            } ${isProcessingPayment ? 'cursor-not-allowed opacity-50' : ''}`}
+                          >
+                            {formatCurrency(amount)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <div className="pos-glass-form-card text-center">
+                <p className="text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
+                  {t('modals.payment.enterCashReceived', 'Cash Received')}
+                </p>
+                <CentsMoneyInput
+                  ref={cashInputRef}
+                  aria-label={t('modals.payment.enterCashReceived', 'Cash Received')}
+                  value={cashReceived}
+                  onValueChange={setCashReceived}
+                  placeholder="0,00"
+                  autoFocus
+                  className={`w-full p-4 text-center text-3xl font-bold outline-hidden transition-colors ${cashInputVisualClasses.cashInput}`}
+                />
+              </div>
+
+              <AnimatePresence initial={false}>
+
+                {cashReceived && (
+                  <motion.div key="cashreceived" {...revealMotion} className={`transition-colors ${cashInputVisualClasses.summary}`}>
+                    {/* Founder 31/10: only what is new -- the total is at the top, the received amount in the field. */}
+                    <div className="flex justify-between items-center">
+                      <span className={`font-semibold ${cashInputVisualClasses.changeTone}`}>
+                        {hasEnoughCash
+                          ? t('modals.payment.change', 'Change')
+                          : t('modals.payment.amountShort', 'Amount Short')}
+                      </span>
+                      <span className={`text-2xl font-bold ${cashInputVisualClasses.changeTone}`}>
+                        <ChangingValue value={hasEnoughCash ? formatCurrency(changeAmount) : formatCurrency(amountShort)} />
+                      </span>
+                    </div>
+                    <AnimatePresence initial={false}>
+                      {hasEnoughCash && changeAmount > 0 && changeBreakdown.length > 0 && (
+                        <motion.div key="hasenoughcash-changeamount-0-changebreakdown-length-0" {...revealMotion} className={`mt-3 pt-3 ${cashInputVisualClasses.summaryDivider}`}>
+                          <p className="mb-2 text-xs font-semibold tracking-normal liquid-glass-modal-text-muted">
+                            {t('modals.payment.suggestedChange', 'Suggested change')}
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {changeBreakdown.map((item) => (
+                              <CashChangeChip
+                                key={item.value}
+                                item={item}
+                                formattedValue={formatCurrency(item.value)}
+                              />
+                            ))}
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Step: Gift card (existing order). The Tender owns the debit and its
             receipt action; it stays mounted after a payment until the user or

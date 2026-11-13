@@ -99,14 +99,20 @@ test('Appointment modal renders above the floating action button and hides nativ
   assert.ok(fabBlock.includes('<FloatingActionButton'), 'appointments FAB render block should exist');
   assert.ok(fabBlock.includes('!embedded && !showCreateModal && !showCustomerSearch'), 'FAB should be hidden while embedded or modal stack is open');
   // Keep the modal layer high for non-portal content as well.
-  assert.match(viewSource, /className=\{`fixed inset-0 z-1000 flex items-center justify-center backdrop-blur-xl/);
-  assert.match(viewSource, /max-h-\[calc\(100%-1\.5rem\)\] sm:max-h-\[calc\(100%-3rem\)\]/);
+  // Founder 11/11/2026: the dialog is anchored to the top and grows downward as its stages reveal.
+  assert.match(viewSource, /className=\{`fixed inset-0 z-1000 flex items-start justify-center backdrop-blur-xl/);
+  // Founder 11/11/2026: the shell is content-sized inside the padded overlay; `max-h-full` keeps it
+  // inside the viewport, so the pinned footer still never clips.
+  assert.match(viewSource, /px-3 pb-3 pt-\[4vh\] sm:px-6 sm:pb-6/);
+  assert.match(viewSource, /w-full max-w-3xl rounded-3xl border ring-1 [^`]*max-h-full flex flex-col overflow-hidden/);
   assert.doesNotMatch(viewSource, /className="fixed inset-0 z-50 flex items-center justify-center/);
   // Native white scrollbars are hidden while preserving scroll behavior.
   assert.match(viewSource, /h-full overflow-y-auto scrollbar-hide/);
   // Round 240: the scroll body also carries min-h-0 so it can shrink and scroll (footer reserved).
   assert.match(viewSource, /p-4 sm:p-6 overflow-y-auto flex-1 min-h-0 scrollbar-hide/);
-  assert.match(viewSource, /max-h-56 overflow-y-auto pr-1 scrollbar-hide/);
+  // Founder 11/11/2026: the slot grid fills the times card (which takes the calendar's height) and
+  // scrolls inside it, scrollbar hidden; stacked on narrow screens it keeps a bounded height.
+  assert.match(viewSource, /grid min-h-0 flex-1 auto-rows-min grid-cols-3 gap-2 overflow-y-auto p-1 scrollbar-hide max-md:max-h-64/);
   const hiddenScrollers = viewSource.match(/overflow-y-auto[^"']*scrollbar-hide/g) || [];
   assert.ok(hiddenScrollers.length >= 4, 'timeline, list, modal body and slot grid should hide native scrollbars');
 });
@@ -139,7 +145,7 @@ test('Appointment create modal seeds visible date/time state from formData.date 
   // The real time-slot grid stays gated on selectedDay (now seeded) and Create still requires a chosen
   // time — so the enabling state is the visible slot, not a hidden default. Round 307 nests that selectedDay
   // gate inside the staff+service branch (`) : selectedDay ? (`), so the grid still needs a seeded day.
-  assert.match(viewSource, /\) : selectedDay \? \(/);
+  assert.match(viewSource, /\{selectedDay && \(/);
   assert.match(
     viewSource,
     /disabled=\{isSubmitting \|\| !formData\.staffId \|\| !formData\.serviceId \|\| !formData\.startTime\}/,
@@ -376,16 +382,19 @@ test('Round 230: AppointmentsView icon buttons are named + touch-safe, with no h
   assert.match(prevMonth, /getMonth\(\) - 1/);
   // Round 266 (live QA): the chevron icon now has an explicit visible color in BOTH themes (it was
   // near-blank inheriting currentColor on the dark bg-zinc-950 button); button keeps no hover/title.
-  assert.match(prevMonth, /text-zinc-200/);
-  assert.match(prevMonth, /text-gray-700/);
+  // founder 11/11/2026: the shared field token supplies contrast in both themes.
+  assert.match(prevMonth, /pos-glass-field/);
+  const fieldCss = readFileSync(path.join(process.cwd(), 'src/renderer/styles/glassmorphism.css'), 'utf8');
+  assert.match(fieldCss, /color: var\(--field-glass-fg\) !important/);
+  assert.equal((fieldCss.match(/--field-glass-fg: #[0-9a-f]+;/g) || []).length, 2);
   assert.doesNotMatch(prevMonth, /hover:/);
   assert.doesNotMatch(prevMonth, /\btitle=/);
   const nextMonth = button("t('appointments.modal.nextMonth'");
   assert.match(nextMonth, /aria-label=\{t\('appointments\.modal\.nextMonth', 'Next month'\)\}/);
   assert.match(nextMonth, /h-11 w-11 items-center justify-center/);
   assert.match(nextMonth, /getMonth\(\) \+ 1/);
-  assert.match(nextMonth, /text-zinc-200/);
-  assert.match(nextMonth, /text-gray-700/);
+  assert.match(nextMonth, /pos-glass-field/);
+  assert.match(fieldCss, /\.dark[\s\S]*--field-glass-fg:/);
   assert.doesNotMatch(nextMonth, /hover:/);
   assert.doesNotMatch(nextMonth, /\btitle=/);
 });
@@ -422,7 +431,7 @@ test('Round 230: appointment date/month nav + reused refresh/close accessible na
 // --- Round 240 (live QA): the New Appointment modal is a glass, two-column booking flow whose
 // sticky footer never clips the availability guidance / time slots at short heights (1282x802). ---
 
-test('Round 240: the New Appointment modal is a glass two-column booking flow with a reserved footer', () => {
+test('Round 240: the New Appointment modal is a glass progressive booking flow with a reserved footer', () => {
   // The scroll body reserves footer space and can shrink/scroll (min-h-0) so nothing is clipped.
   assert.match(viewSource, /p-4 sm:p-6 overflow-y-auto flex-1 min-h-0 scrollbar-hide/);
 
@@ -433,20 +442,27 @@ test('Round 240: the New Appointment modal is a glass two-column booking flow wi
   assert.match(viewSource, /isDark \? 'bg-black\/55' : 'bg-black\/22'/);
 
   // Sectioned glass panels (translucent + blur) — the five form sections (Round 355: lighter, blur-xl).
-  const glassPanels = viewSource.match(/bg-zinc-900\/35 backdrop-blur-xl border-white\/10/g) || [];
+  // founder 11/11/2026: shared frosted cards replace per-panel colour classes.
+  const glassPanels = viewSource.match(/pos-glass-form-card/g) || [];
   assert.ok(glassPanels.length >= 5, `expected >=5 glass panels, found ${glassPanels.length}`);
-  const lightGlassPanels = viewSource.match(/bg-white\/14 backdrop-blur-xl border-white\/50/g) || [];
+  const lightGlassPanels = viewSource.match(/pos-glass-form-card/g) || [];
   assert.ok(lightGlassPanels.length >= 5, `expected >=5 light glass panels, found ${lightGlassPanels.length}`);
 
   // Two-column booking flow with section headers: left = customer/staff/service, right = date/time.
-  assert.match(viewSource, /xl:col-span-5 space-y-3/);
-  assert.match(viewSource, /xl:col-span-7 space-y-3/);
-  assert.match(viewSource, /t\('appointments\.modal\.sections\.guestService', 'Customer & Service'\)/);
+  // founder 11/11/2026: a stable one-column shell progressively reveals later stages.
+  assert.match(viewSource, /max-w-3xl/);
+  assert.match(viewSource, /flex flex-col gap-4/);
+  assert.doesNotMatch(viewSource, /xl:grid-cols-12|xl:col-span-/);
+  // founder 11/11/2026: reuse the existing staff/service labels for the new card title.
+  assert.match(viewSource, /slotsEmpty\.staffStep', 'Staff'\)\} &amp; \{t\('appointments\.modal\.slotsEmpty\.serviceStep'/);
   assert.match(viewSource, /t\('appointments\.modal\.sections\.dateTime', 'Date & Time'\)/);
 
   // The footer is a sticky glass bar (blurred + translucent), and the modal keeps its robust max-h.
-  assert.match(viewSource, /shrink-0 backdrop-blur-xl/);
-  assert.match(viewSource, /max-h-\[calc\(100%-1\.5rem\)\] sm:max-h-\[calc\(100%-3rem\)\]/);
+  assert.match(viewSource, /pos-progressive-form px-4 sm:px-6 pb-5 pt-2 shrink-0/);
+  // Founder 11/11/2026: the shell is content-sized inside the padded overlay; `max-h-full` keeps it
+  // inside the viewport, so the pinned footer still never clips.
+  assert.match(viewSource, /px-3 pb-3 pt-\[4vh\] sm:px-6 sm:pb-6/);
+  assert.match(viewSource, /w-full max-w-3xl rounded-3xl border ring-1 [^`]*max-h-full flex flex-col overflow-hidden/);
 
   // Touch POS: still no hover-only effects and no native title tooltips after the polish.
   assert.doesNotMatch(viewSource, /hover:/);
@@ -457,26 +473,38 @@ test('Round 240: the New Appointment modal is a glass two-column booking flow wi
 // system -- a more-translucent blurred shell with a subtle scale/opacity OPEN ANIMATION, semantic red Cancel +
 // green Create with a clear disabled state -- while preserving the openCreateSignal hub flow, Escape/dialog
 // semantics, GlassSelect, availability checks, and the hidden-scrollbar pattern (UI-only).
-test('Round 355: the appointment modal is an animated translucent glass dialog with red Cancel + green Create', () => {
+test('Round 355: the appointment modal is an animated translucent glass dialog with neutral Cancel + yellow Create', () => {
+  // founder 11/11/2026: reduced-motion opening and solid neutral/yellow actions.
   // The dialog panel is a motion.div with a subtle scale + fade-in open animation (matches LiquidGlassModal feel).
+  // Founder 11/11/2026: like every glass window it grows out of the control that was pressed, from
+  // the same small start as the shared keyframes, and is solid early so the growth is what shows.
   assert.match(
     viewSource,
-    /<motion\.div\s*\n\s*ref=\{dialogRef\}[\s\S]*?initial=\{\{ opacity: 0, scale: 0\.97 \}\}[\s\S]*?animate=\{\{ opacity: 1, scale: 1 \}\}/,
+    /<motion\.div\s*\n\s*ref=\{dialogRef\}[\s\S]*?initial=\{reduceMotion \? false : \{ opacity: 0, scale: 0\.6 \}\}[\s\S]*?transformOrigin: 'var\(--modal-origin-x, 50%\) var\(--modal-origin-y, 50%\)'[\s\S]*?animate=\{\{ opacity: 1, scale: 1 \}\}/,
     'the appointment dialog panel must animate open (scale + fade)',
   );
+  assert.match(
+    viewSource,
+    /transition=\{\{ duration: reduceMotion \? 0 : 0\.18, ease: \[0\.2, 0\.8, 0\.2, 1\], opacity: \{ duration: reduceMotion \? 0 : 0\.1 \} \}\}/,
+    'the appointment dialog opens on the shared 180 ms modal timing',
+  );
+  // The window reports when it is in the page, so the hub can hold the backdrop until then.
+  assert.match(viewSource, /if \(dialogRef\.current\) applyModalOrigin\(dialogRef\.current\);\s*onShownRef\.current\?\.\(\);/);
+  assert.match(viewSource, /onShown=\{handleCreateModalShown\}/);
+  assert.match(viewSource, /if \(zoneError && showCreateModal\) onCreateRequestSettledRef\.current\?\.\(\);/);
   // Rounded + ringed translucent blurred glass shell.
   assert.match(viewSource, /role="dialog"[\s\S]*?rounded-3xl border ring-1[\s\S]*?backdrop-blur-2xl/);
 
   // Cancel reads as soft destructive RED in both themes.
   assert.match(
     viewSource,
-    /onClick=\{onClose\} className=\{`px-5 py-2\.5 rounded-xl font-medium border[\s\S]*?border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\)[\s\S]*?: 'border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\)/,
+    /onClick=\{onClose\} className=\{`min-h-touch px-5 py-2\.5 rounded-xl font-medium border[\s\S]*?border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\)[\s\S]*?: 'border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\)/,
   );
   // Create reads as semantic GREEN and stays clearly DISABLED until staff + service + start time are chosen.
   assert.match(viewSource, /onClick=\{handleCreateAppointment\}[\s\S]*?bg-\(--pos-s-yellow\) text-black border border-\(--pos-s-yellow\)/);
   assert.match(
     viewSource,
-    /onClick=\{handleCreateAppointment\}\s*\n\s*disabled=\{isSubmitting \|\| !formData\.staffId \|\| !formData\.serviceId \|\| !formData\.startTime\}[\s\S]*?disabled:bg-zinc-400\/20[\s\S]*?disabled:cursor-not-allowed/,
+    /onClick=\{handleCreateAppointment\}\s*\n\s*disabled=\{isSubmitting \|\| !formData\.staffId \|\| !formData\.serviceId \|\| !formData\.startTime\}[\s\S]*?disabled:bg-\(--pos-s-surface-2\)[\s\S]*?disabled:cursor-not-allowed/,
   );
 
   // Behaviour preserved: the hub still opens Create via openCreateSignal; touch-first (no hover / native title).
@@ -485,7 +513,8 @@ test('Round 355: the appointment modal is an animated translucent glass dialog w
   assert.doesNotMatch(viewSource, /\btitle=/);
 });
 
-test('Round 240: modal Cancel is soft-destructive red, Create is green primary with a clear disabled state', () => {
+test('Round 240: modal Cancel is neutral, Create is yellow primary with a clear disabled state', () => {
+  // founder 11/11/2026: solid kit actions retain the original disabled and touch rules.
   // Cancel = red (both themes) with active tap feedback; the old neutral cancel fill is gone.
   assert.match(viewSource, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)/);
   assert.match(viewSource, /\{t\('appointments\.modal\.cancel', 'Cancel'\)\}/);
@@ -496,7 +525,7 @@ test('Round 240: modal Cancel is soft-destructive red, Create is green primary w
   // explicit neutral/muted glass; this guard only pins the enabled emerald + a disabled-* state.)
   assert.match(
     viewSource,
-    /onClick=\{handleCreateAppointment\}\s*disabled=\{[^}]*\}\s*className="pos-raised pos-raised--yellow px-5 py-2\.5 rounded-xl font-semibold bg-\(--pos-s-yellow\) text-black[^"]*disabled:cursor-not-allowed/,
+    /onClick=\{handleCreateAppointment\}\s*disabled=\{[^}]*\}\s*className="pos-raised pos-raised--yellow min-h-touch px-5 py-2\.5 rounded-xl font-semibold bg-\(--pos-s-yellow\) text-black[^"]*disabled:cursor-not-allowed/,
   );
   // Scope the negative check to the Create button (the old white/black slab also appears on unrelated
   // page action buttons, which are intentionally untouched).
@@ -535,7 +564,7 @@ test('Round 240: appointment modal section-header keys exist and are translated 
 // black/yellow/glass palette. They must use the core yellow/amber selected accent with black
 // text in both themes. The disabled Create button only dimmed its green (disabled:opacity-50),
 // still reading as a green submit; disabled Create must be clearly neutral/muted glass while
-// enabled Create stays emerald and Cancel stays red. No behaviour/i18n/sizing changes. ---
+// enabled Create stays yellow and Cancel stays red. No behaviour/i18n/sizing changes. ---
 
 test('Round 248: New Appointment availability controls use the yellow selected accent, not white/black slabs', () => {
   // Scope to the modal's availability region only (calendar + period + time slots), so the
@@ -569,7 +598,8 @@ test('Round 248: New Appointment availability controls use the yellow selected a
   assert.doesNotMatch(viewSource, /\btitle=/);
 });
 
-test('Round 248: disabled Create is neutral/muted glass while enabled Create stays emerald', () => {
+test('Round 248: disabled Create is neutral/muted glass while enabled Create stays yellow', () => {
+  // founder 11/11/2026: disabled actions use the opaque neutral kit tokens.
   const createBtn = viewSource.slice(
     viewSource.indexOf('onClick={handleCreateAppointment}'),
     viewSource.indexOf('appointments.modal.creating'),
@@ -581,9 +611,9 @@ test('Round 248: disabled Create is neutral/muted glass while enabled Create sta
 
   // Disabled state is explicit neutral/muted glass (translucent zinc fill + muted zinc text +
   // neutral border + no green shadow) — not a dimmed green.
-  assert.match(createBtn, /disabled:bg-zinc-400\/20/);
-  assert.match(createBtn, /disabled:text-zinc-400/);
-  assert.match(createBtn, /disabled:border-zinc-400\/30/);
+  assert.match(createBtn, /disabled:bg-\(--pos-s-surface-2\)/);
+  assert.match(createBtn, /disabled:text-\(--pos-s-muted\)/);
+  assert.match(createBtn, /disabled:border-\(--pos-s-border\)/);
   assert.match(createBtn, /disabled:shadow-none/);
 
   // The old dimmed-green disabled treatment is gone (it kept the button reading as green).
@@ -650,27 +680,21 @@ test('Round 249: page-level selected/primary controls use the yellow accent, not
 // yellow/black controls, and the Round 240 footer-reservation + slot-scroll contract are preserved. ---
 
 test('Round 255: the New Appointment Date & Time section is a side-by-side calendar/time grid (first-view availability)', () => {
-  // The robust fix: Calendar | Time Slots side-by-side on xl (stacked on mobile/tablet) so the
-  // time-slot grid is not pushed below the calendar/footer.
-  assert.match(viewSource, /<div className="grid grid-cols-1 gap-3 xl:grid-cols-2">/);
-  // The compacted panels live inside that shell (calendar panel padding + tighter header/grids/day cells).
-  assert.match(viewSource, /p-3 rounded-2xl border \$\{isDark \? 'bg-zinc-900\/35 backdrop-blur-xl border-white\/10'/);
+  // founder 11/11/2026: wide date/time row, generous calendar gaps and true 44px days.
+  assert.match(viewSource, /grid grid-cols-1 gap-4 md:grid-cols-\[minmax\(388px,1fr\)_1fr\]/);
+  assert.match(viewSource, /pos-glass-form-card min-w-0 overflow-x-auto scrollbar-hide/);
   assert.match(viewSource, /<div className="flex items-center justify-between mb-2">/);
-  assert.match(viewSource, /<div className="grid grid-cols-7 gap-1 mb-1\.5">/);
-  assert.match(viewSource, /<div className="grid grid-cols-7 gap-1">/);
-  assert.match(viewSource, /className=\{`h-9 rounded-xl text-sm transition-all border/);
-  // Time-slot panel padding + spacing compacted.
-  assert.match(viewSource, /p-3 rounded-2xl border space-y-2\.5 \$\{isDark/);
-
-  // The old roomier spacing is gone in the calendar / time section.
-  assert.doesNotMatch(viewSource, /className=\{`h-10 rounded-xl text-sm transition-all border/);
-  assert.doesNotMatch(viewSource, /grid grid-cols-7 gap-1\.5/);
-  assert.doesNotMatch(viewSource, /p-4 rounded-2xl border space-y-3 \$\{isDark/);
+  assert.match(viewSource, /grid min-w-\[356px\] grid-cols-7 gap-2 mb-2/);
+  assert.match(viewSource, /grid min-w-\[356px\] grid-cols-7 gap-2/);
+  assert.match(viewSource, /className=\{`h-11 min-w-11 rounded-xl text-sm font-medium/);
+  assert.match(viewSource, /pos-glass-form-card min-w-0/);
 
   // The Round 240 footer-reservation body + the slot grid's own scroll are preserved (compaction
   // never reintroduces clipping under the sticky footer).
   assert.match(viewSource, /p-4 sm:p-6 overflow-y-auto flex-1 min-h-0 scrollbar-hide/);
-  assert.match(viewSource, /max-h-56 overflow-y-auto pr-1 scrollbar-hide/);
+  // Founder 11/11/2026: the slot grid fills the times card (which takes the calendar's height) and
+  // scrolls inside it, scrollbar hidden; stacked on narrow screens it keeps a bounded height.
+  assert.match(viewSource, /grid min-h-0 flex-1 auto-rows-min grid-cols-3 gap-2 overflow-y-auto p-1 scrollbar-hide max-md:max-h-64/);
 
   // Selected calendar day / period / time slot = the kit selection (3 branches); no hover / native title.
   const kitSelected = viewSource.match(/border-\(--pos-s-sel-bg\) bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)|bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)/g) || [];
@@ -695,26 +719,28 @@ test('Round 278: the light New Appointment modal is warm glass (transparent shel
 
   // The five form section panels use warm white glass (translucent + blur + white border), not the
   // grey-admin bg-white/60 + border-gray-200.
-  const lightGlassPanels = viewSource.match(/bg-white\/14 backdrop-blur-xl border-white\/50/g) || [];
+  const lightGlassPanels = viewSource.match(/pos-glass-form-card/g) || [];
   assert.ok(lightGlassPanels.length >= 5, `expected >=5 light glass panels, found ${lightGlassPanels.length}`);
   assert.doesNotMatch(viewSource, /bg-white\/60 backdrop-blur-md border-gray-200/, 'no grey-admin section card remains');
 
   // Section eyebrows are normal readable case (multilingual UI is not shouted): the uppercase
   // tracking-wide eyebrow treatment is gone, replaced by a normal-case label.
   assert.doesNotMatch(viewSource, /font-semibold uppercase tracking-wide/, 'section eyebrows must not be uppercase');
-  assert.match(viewSource, /text-xs font-semibold \$\{isDark \? 'text-zinc-300' : 'text-gray-600'\}/);
+  // founder 11/11/2026: shared muted title token, readable in light and dark.
+  assert.match(viewSource, /text-xs font-semibold liquid-glass-modal-text-muted/);
   // The section labels still route through i18n (title-case translations), unchanged.
-  assert.match(viewSource, /t\('appointments\.modal\.sections\.guestService', 'Customer & Service'\)/);
+  // founder 11/11/2026: reuse the existing staff/service labels for the new card title.
+  assert.match(viewSource, /slotsEmpty\.staffStep', 'Staff'\)\} &amp; \{t\('appointments\.modal\.slotsEmpty\.serviceStep'/);
   assert.match(viewSource, /t\('appointments\.modal\.sections\.dateTime', 'Date & Time'\)/);
 
   // Dark theme glass is preserved (Round 240/255 dark panels untouched by the light-only polish).
-  const darkGlassPanels = viewSource.match(/bg-zinc-900\/35 backdrop-blur-xl border-white\/10/g) || [];
+  const darkGlassPanels = viewSource.match(/pos-glass-form-card/g) || [];
   assert.ok(darkGlassPanels.length >= 5, `dark glass panels must be preserved, found ${darkGlassPanels.length}`);
 
   // Button semantics preserved: Cancel red glass, Create emerald enabled / neutral-zinc disabled.
   assert.match(viewSource, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\) active:bg-\(--pos-s-surface-2\)/);
   assert.match(viewSource, /bg-\(--pos-s-yellow\) text-black border border-\(--pos-s-yellow\)/);
-  assert.match(viewSource, /disabled:bg-zinc-400\/20 disabled:text-zinc-400 disabled:border-zinc-400\/30/);
+  assert.match(viewSource, /disabled:bg-\(--pos-s-surface-2\) disabled:text-\(--pos-s-muted\) disabled:border-\(--pos-s-border\)/);
 
   // Touch/glass invariants: no hover-only effects, no native title tooltips, modal body scroll hidden.
   assert.doesNotMatch(viewSource, /hover:/);
@@ -729,32 +755,29 @@ test('Round 278: the light New Appointment modal is warm glass (transparent shel
 // the selected date/time/service). The light header divider, footer bar, and close button are now
 // translucent warm glass. Availability logic, handlers, dark theme, and touch/glass invariants unchanged. ---
 
-test('Round 279: Notes lives in the left column (not clipped under the right Date/Time column); Summary stays right', () => {
-  const leftStart = viewSource.indexOf('xl:col-span-5 space-y-3');
-  const rightStart = viewSource.indexOf('xl:col-span-7 space-y-3');
+test('Round 279: Notes and Summary share the revealed third stage without footer clipping', () => {
+  // founder 11/11/2026: Notes and Summary share stage 3, inside the scrolling body.
+  const stageStart = viewSource.indexOf('data-appointment-stage="3"');
   const bodyEnd = viewSource.indexOf('{/* Footer');
-  assert.ok(leftStart >= 0 && rightStart > leftStart && bodyEnd > rightStart, 'the two-column modal body must be found');
-  const leftColumn = viewSource.slice(leftStart, rightStart);
-  const rightColumn = viewSource.slice(rightStart, bodyEnd);
-
-  // Notes panel is in the LEFT (Customer & Service) column, not below the right Date/Time column.
-  assert.match(leftColumn, /appointments\.modal\.notesLabel/, 'Notes must live in the left column');
-  assert.doesNotMatch(rightColumn, /appointments\.modal\.notesLabel/, 'Notes must not sit below the right Date/Time column');
-
-  // Summary (date/time/service dependent) stays in the RIGHT (Date & Time) column.
-  assert.match(rightColumn, /formData\.startTime && selectedService && selectedDay/, 'Summary stays in the right column');
-  assert.doesNotMatch(leftColumn, /formData\.startTime && selectedService && selectedDay/);
+  assert.ok(stageStart >= 0 && bodyEnd > stageStart, 'stage 3 must precede the reserved footer');
+  const stage = viewSource.slice(stageStart, bodyEnd);
+  assert.match(stage, /appointments\.modal\.notesLabel/);
+  assert.match(stage, /formData\.startTime && selectedService && selectedDay/);
+  assert.match(viewSource, /showSummaryStage && \(/);
+  assert.match(viewSource, /overflow-y-auto flex-1 min-h-0 scrollbar-hide/);
 
   // Notes textarea state binding is preserved (the move is layout-only).
   assert.match(viewSource, /value=\{formData\.notes\}/);
   assert.match(viewSource, /setFormData\(prev => \(\{ \.\.\.prev, notes: e\.target\.value \}\)\)/);
 });
 
-test('Round 279: light modal header/footer/close are translucent warm glass, not grey-admin chrome', () => {
-  // Modal-only light branches now use translucent white (glass), not border-gray-200 / bg-white/70 /
-  // bg-gray-50 admin chrome.
-  assert.match(viewSource, /border-b shrink-0 \$\{isDark \? 'border-white\/10 bg-zinc-950\/25' : 'border-white\/40 bg-white\/12'\}/);
-  assert.match(viewSource, /border-t shrink-0 backdrop-blur-xl \$\{isDark \? 'border-white\/10 bg-zinc-950\/55' : 'border-white\/40 bg-white\/14'\}/);
+test('Round 279: light modal header/footer are plain and close remains touch-safe', () => {
+  // founder 11/11/2026: plain header and footer, without frames behind the actions.
+  assert.match(viewSource, /flex items-start justify-between px-4 sm:px-6 pt-4 pb-1 shrink-0/);
+  const footer = viewSource.slice(viewSource.indexOf('{/* Footer'));
+  assert.match(footer, /px-4 sm:px-6 pb-5 pt-2 shrink-0/);
+  assert.match(footer, /flex items-center justify-between gap-3/);
+  assert.doesNotMatch(footer, /border-t|backdrop-blur|bg-white|bg-zinc-950/);
 
   // The old grey-admin modal chrome is gone (these exact modal strings).
   assert.doesNotMatch(viewSource, /border-b shrink-0 \$\{isDark \? 'border-zinc-800' : 'border-gray-200'\}/);
@@ -762,7 +785,7 @@ test('Round 279: light modal header/footer/close are translucent warm glass, not
   assert.doesNotMatch(viewSource, /'bg-gray-50 border-gray-300 text-gray-700 active:bg-gray-100'/);
 
   // Dark theme header/footer glass is intact.
-  assert.match(viewSource, /border-white\/10 bg-zinc-950\/55/);
+  assert.match(viewSource, /bg-zinc-950\/55 backdrop-blur-2xl border-white\/10/);
 
   // Close button stays a 44x44 centered touch control with its accessible name.
   assert.match(
@@ -773,8 +796,8 @@ test('Round 279: light modal header/footer/close are translucent warm glass, not
   // Touch/glass invariants + the Round 240/278 panel-glass counts are preserved.
   assert.doesNotMatch(viewSource, /hover:/);
   assert.doesNotMatch(viewSource, /\btitle=/);
-  const darkPanels = viewSource.match(/bg-zinc-900\/35 backdrop-blur-xl border-white\/10/g) || [];
-  const lightPanels = viewSource.match(/bg-white\/14 backdrop-blur-xl border-white\/50/g) || [];
+  const darkPanels = viewSource.match(/pos-glass-form-card/g) || [];
+  const lightPanels = viewSource.match(/pos-glass-form-card/g) || [];
   assert.ok(darkPanels.length >= 5, `dark glass panels preserved (found ${darkPanels.length})`);
   assert.ok(lightPanels.length >= 5, `light glass panels preserved (found ${lightPanels.length})`);
 });
@@ -787,6 +810,7 @@ test('Round 279: light modal header/footer/close are translucent warm glass, not
 // + the Create disabled condition are unchanged. ---
 
 test('Round 285/307: New Appointment slots stay gated on staff + service (in-context selectable; pre-context is the Round 307 empty state)', () => {
+  // founder 11/11/2026: booked slots are bare and struck through; pending slots stay neutral.
   // Derived gate boolean.
   assert.match(viewSource, /const hasStaffAndService = Boolean\(formData\.staffId && formData\.serviceId\)/);
 
@@ -796,7 +820,7 @@ test('Round 285/307: New Appointment slots stay gated on staff + service (in-con
   assert.match(viewSource, /min-h-touch(?![\w.-])/);
   assert.match(viewSource, /disabled=\{booked\}/);
   assert.match(viewSource, /selected\s*\?\s*'bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)'/);
-  assert.match(viewSource, /bg-\(--pos-s-surface-2\) border-\(--pos-s-border\) text-red-800 dark:text-red-(?:200|300) line-through cursor-not-allowed/);
+  assert.match(viewSource, /border-transparent bg-transparent text-red-700 dark:text-red-300 line-through cursor-not-allowed/);
   // The old per-button pre-context muted-glass disabled slot is gone (the empty state replaces it).
   assert.doesNotMatch(viewSource, /disabled=\{booked \|\| !hasStaffAndService\}/);
   assert.doesNotMatch(viewSource, /bg-white\/3 border-white\/10 text-zinc-600 cursor-not-allowed/);
@@ -842,7 +866,8 @@ test('Round 285: the staff+service availability guidance key exists in every loc
 test('Round 307: pre-context Date & Time shows a warm-glass empty state + checklist, not a disabled slot grid', () => {
   const emptyIdx = viewSource.indexOf('data-appointment-slots-empty');
   assert.ok(emptyIdx > 0, 'a pre-context empty state must exist');
-  const inContextIdx = viewSource.indexOf(') : selectedDay ? (', emptyIdx);
+  // founder 11/11/2026: the same gate now mounts the entire date/time stage.
+  const inContextIdx = viewSource.indexOf('{hasStaffAndService && (', emptyIdx);
   assert.ok(inContextIdx > emptyIdx, 'the staff+service (in-context) branch must follow the empty state');
   const summaryIdx = viewSource.indexOf('{/* Summary */}', inContextIdx);
   assert.ok(summaryIdx > inContextIdx, 'the Summary marker must close the Date & Time region');
@@ -852,7 +877,7 @@ test('Round 307: pre-context Date & Time shows a warm-glass empty state + checkl
 
   // The Date & Time column branches on the staff+service gate FIRST (not selectedDay), so the empty state
   // shows immediately instead of a disabled grid seeded by the default selectedDay.
-  assert.match(viewSource, /\{!hasStaffAndService \? \(/);
+  assert.match(viewSource, /\{!hasStaffAndService && \(/);
 
   // Pre-context: NO slot grid / booked computation -- just the empty-state copy + a Staff/Service checklist.
   assert.doesNotMatch(preContext, /timeSlots\.map/, 'the pre-context empty state must not render the slot grid');
@@ -874,7 +899,7 @@ test('Round 307: pre-context Date & Time shows a warm-glass empty state + checkl
   assert.match(inContext, /timeSlots\.map/, 'the real slot grid must live in the staff+service branch');
   assert.match(inContext, /onClick=\{\(\) => handleTimeSelect\(slot\)\}/);
   assert.match(inContext, /selected\s*\?\s*'bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)'/);
-  assert.match(inContext, /bg-\(--pos-s-surface-2\) border-\(--pos-s-border\) text-red-800 dark:text-red-(?:200|300) line-through/);
+  assert.match(inContext, /border-transparent bg-transparent text-red-700 dark:text-red-300 line-through/);
   assert.match(inContext, /appointments\.modal\.periods\.morning/);
 });
 
@@ -957,6 +982,7 @@ test('Round 308: GlassSelect is a touch-first glass listbox (aria, 44px, truncat
 // the listbox's inner z. Fix (no portal, no native select): lift the Staff & Service card above Notes and
 // raise the open select's own stacking context + listbox so the dropdown overlays the panels below. ---
 test('Round 333: an open GlassSelect listbox overlays the Notes card (stacking fixed, still in-modal)', () => {
+  // founder 11/11/2026: shared frosted cards preserve the elevated, unclipped listbox layers.
   const glass = viewSource.slice(
     viewSource.indexOf('const GlassSelect:'),
     viewSource.indexOf('const CreateAppointmentModalContent'),
@@ -982,11 +1008,11 @@ test('Round 333: an open GlassSelect listbox overlays the Notes card (stacking f
   // The Notes card stays at a LOWER stacking level (z-10) than the staff/service card, so the open listbox
   // overlays it instead of rendering behind it.
   const notesBlock = viewSource.slice(
-    viewSource.indexOf('kept at a LOWER stacking level'),
+    viewSource.indexOf('<div className={`relative z-10 pos-glass-form-card'),
     viewSource.indexOf('appointments.modal.notesPlaceholder'),
   );
   assert.ok(notesBlock.length > 0, 'the Notes card block must be found');
-  assert.match(notesBlock, /<div className=\{`relative z-10 rounded-2xl border p-4 /);
+  assert.match(notesBlock, /<div className=\{`relative z-10 pos-glass-form-card/);
   assert.match(notesBlock, /appointments\.modal\.notesLabel/);
 
   // Touch-first invariants unchanged by the stacking fix: no hover-only utilities, no native title tooltips.

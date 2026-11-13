@@ -102,7 +102,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
   };
 
   const fieldClass =
-    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg) dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
+    'liquid-glass-modal-input pos-glass-field min-h-touch w-full px-4 py-2.5';
 
   return (
     <LiquidGlassModal
@@ -110,14 +110,35 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
       onClose={onClose}
       title={t('modals.editAddress.title')}
       size="md"
-      className="max-w-lg! max-h-[90vh]"
+      className="max-w-lg! max-h-[90vh] pos-progressive-form [&_.liquid-glass-modal-header]:border-b-0!"
+      footer={(
+              <div className="flex gap-3 px-6 pb-5 pt-2">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  disabled={isLoading}
+                  className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
+                >
+                  {t('modals.editAddress.cancel')}
+                </button>
+                <button
+                  type="submit"
+                  form="edit-address-form"
+                  disabled={isLoading}
+                  className="liquid-glass-modal-button liquid-glass-modal-success flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
+                >
+                  {isLoading ? t('modals.editAddress.updating') : t('modals.editAddress.updateAddress')}
+                </button>
+              </div>
+      )}
     >
       <div className="overflow-y-auto scrollbar-hide">
             {/* Form */}
-            <form onSubmit={handleSubmit} className="space-y-4">
+            <form onSubmit={handleSubmit} id="edit-address-form" className="space-y-3">
+              <div className="pos-glass-form-card space-y-3">
               {/* Address Field */}
               <div>
-                <label className="block text-sm font-medium mb-2 liquid-glass-modal-text">
+                <label className="block text-xs font-semibold mb-1.5 liquid-glass-modal-text-muted">
                   {t('modals.editAddress.streetAddress')}
                 </label>
                 <input
@@ -133,7 +154,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
 
               {/* Postal Code Field */}
               <div>
-                <label className="block text-sm font-medium mb-2 liquid-glass-modal-text">
+                <label className="block text-xs font-semibold mb-1.5 liquid-glass-modal-text-muted">
                   {t('modals.editAddress.postalCode')}
                 </label>
                 <input
@@ -148,7 +169,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
 
               {/* Floor Number Field */}
               <div>
-                <label className="block text-sm font-medium mb-2 liquid-glass-modal-text">
+                <label className="block text-xs font-semibold mb-1.5 liquid-glass-modal-text-muted">
                   {t('modals.editAddress.floorNumber')}
                 </label>
                 <input
@@ -169,7 +190,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
 
               {/* Address Type Field */}
               <div>
-                <label className="block text-sm font-medium mb-2 liquid-glass-modal-text">
+                <label className="block text-xs font-semibold mb-1.5 liquid-glass-modal-text-muted">
                   {t('modals.editAddress.addressType')}
                 </label>
                 <select
@@ -185,9 +206,10 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
                 </select>
               </div>
 
+              </div>
               {/* Notes Field */}
-              <div>
-                <label className="block text-sm font-medium mb-2 liquid-glass-modal-text">
+              <div className="pos-glass-form-card">
+                <label className="block text-xs font-semibold mb-1.5 liquid-glass-modal-text-muted">
                   {t('modals.editAddress.deliveryNotes')}
                 </label>
                 <textarea
@@ -201,37 +223,20 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
               </div>
 
               {/* Default Address Checkbox */}
-              <div className="flex items-center space-x-3">
+              <label className="pos-glass-form-card flex min-h-touch cursor-pointer items-center space-x-3">
                 <input
                   type="checkbox"
                   name="is_default"
                   checked={formData.is_default}
                   onChange={handleChange}
-                  className="h-5 w-5 rounded-xl border-gray-300 bg-gray-100 text-amber-500 accent-yellow-500 focus:ring-2 focus:ring-(--pos-s-fg)"
+                  className="h-5 w-5 shrink-0 rounded-xl accent-yellow-500 focus-visible:outline-2 focus-visible:outline-yellow-400"
                 />
-                <label className="text-sm font-medium liquid-glass-modal-text">
+                <span className="text-sm font-medium liquid-glass-modal-text">
                   {t('modals.editAddress.setDefault')}
-                </label>
-              </div>
+                </span>
+              </label>
 
-              {/* Action Buttons */}
-              <div className="flex gap-3 mt-8">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  disabled={isLoading}
-                  className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
-                >
-                  {t('modals.editAddress.cancel')}
-                </button>
-                <button
-                  type="submit"
-                  disabled={isLoading}
-                  className="liquid-glass-modal-button liquid-glass-modal-success flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
-                >
-                  {isLoading ? t('modals.editAddress.updating') : t('modals.editAddress.updateAddress')}
-                </button>
-              </div>
+
             </form>
       </div>
     </LiquidGlassModal>

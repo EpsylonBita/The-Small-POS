@@ -419,17 +419,18 @@ test('RoomsView detail quick-status buttons compare against getRoomEffectiveStat
   // No detail surface reads raw actionRoom.status anymore.
   assert.doesNotMatch(viewSource, /actionRoom\.status/);
 
-  // The quick status button disabled + active styling both compare effective status === status.
+  // founder 11/11/2026: frosted choices keep the effective-status selection and disabled gate.
   assert.match(viewSource, /disabled=\{getRoomEffectiveStatus\(actionRoom\) === status\}/);
   assert.match(
     viewSource,
-    /className=\{`py-2 px-2 rounded-2xl text-xs font-medium transition-transform active:scale-95 \$\{\s*getRoomEffectiveStatus\(actionRoom\) === status/,
+    /className=\{`min-h-11 py-2 px-2 rounded-2xl text-xs font-medium \$\{\s*getRoomEffectiveStatus\(actionRoom\) === status/,
   );
   // The old raw-status quick-status comparisons are gone.
   assert.doesNotMatch(viewSource, /disabled=\{actionRoom\.status === status\}/);
   assert.doesNotMatch(viewSource, /\{actionRoom\.status === status/);
 });
 
+// founder 11/11/2026: choices get glass depth; selected status remains yellow.
 test('Round 429: Rooms reservation controls stay on the yellow/amber system with smoother touch controls', () => {
   assert.match(viewSource, /reserved: \{ color: 'text-yellow-700 dark:text-yellow-400', bgClass: 'bg-\(--pos-s-surface-2\) border-\(--pos-s-border\)'/);
   assert.match(viewSource, /label=\{t\('roomsView\.newReservation'[\s\S]*?color="amber"/);
@@ -439,7 +440,7 @@ test('Round 429: Rooms reservation controls stay on the yellow/amber system with
   assert.match(viewSource, /<WorkspaceChips<RoomStatus \| 'all'>/);
   assert.match(viewSource, /<WorkspaceSelect/);
   assert.match(viewSource, /className="liquid-glass-modal-close[^"]*"/);
-  assert.match(viewSource, /className=\{`flex items-center justify-center gap-2 py-3 px-4 rounded-2xl font-medium transition-transform active:scale-95/);
+  assert.match(viewSource, /className=\{`pos-glass-tap-card flex min-h-11 items-center justify-center gap-2 py-3 px-4 font-medium/);
   assert.doesNotMatch(viewSource, /purple-/);
   assert.doesNotMatch(viewSource, /color="purple"/);
   assert.doesNotMatch(viewSource, /rounded-lg/);

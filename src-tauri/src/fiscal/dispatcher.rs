@@ -247,6 +247,23 @@ pub fn enqueue_for_order(conn: &Connection, order_id: &str) -> Result<(), String
     enqueue_fiscal_row(conn, order_id, &branch_id, &payload)
 }
 
+/// Retain admission intent before the best-effort handoff. Callers must keep
+/// fiscal failures separate from the already committed order/payment outcome.
+pub fn enqueue_with_admission_owed(conn: &Connection, order_id: &str) -> Result<(), String> {
+    if let Err(error) = super::admission_owed::mark_owed(conn, order_id) {
+        warn!(%order_id, %error, "Could not retain fiscal admission owed");
+    }
+    match enqueue_for_order(conn, order_id) {
+        Ok(()) => super::admission_owed::clear(conn, order_id),
+        Err(error) => {
+            if let Err(note_error) = super::admission_owed::note_failure(conn, order_id, &error) {
+                warn!(%order_id, %note_error, "Could not retain fiscal admission failure");
+            }
+            Err(error)
+        }
+    }
+}
+
 fn is_protected_repair_order(conn: &Connection, order_id: &str) -> Result<bool, String> {
     let has_context = conn
         .prepare("PRAGMA table_info(orders)")
@@ -360,6 +377,217 @@ mod tests {
             cutoff_at: None,
             lower_bound_inclusive: true,
         }
+    }
+
+    fn fail_fiscal_enqueue(conn: &Connection) {
+        conn.execute_batch("CREATE TRIGGER fail_fiscal_admission BEFORE INSERT ON parity_sync_queue
+            WHEN NEW.module_type = 'fiscal' BEGIN SELECT RAISE(ABORT, 'test fiscal enqueue failure'); END;")
+            .unwrap();
+    }
+
+    #[test]
+    fn admission_owed_survives_failure_and_retry_enqueues_exactly_once() {
+        let conn = migrated_conn();
+        seed_paid_order(&conn, "owed", "branch");
+        fail_fiscal_enqueue(&conn);
+        assert!(enqueue_with_admission_owed(&conn, "owed").is_err());
+        super::super::admission_owed::retry_owed(&conn);
+        assert_eq!(
+            super::super::admission_owed::list_owed(&conn, 25).unwrap(),
+            vec!["owed"]
+        );
+        let attempts: i64 = conn
+            .query_row(
+                "SELECT json_extract(setting_value, '$.attempts') FROM local_settings
+            WHERE setting_category='fiscal_admission_owed' AND setting_key='owed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 2);
+        conn.execute_batch("DROP TRIGGER fail_fiscal_admission")
+            .unwrap();
+        super::super::admission_owed::retry_owed(&conn);
+        super::super::admission_owed::retry_owed(&conn);
+        assert!(super::super::admission_owed::list_owed(&conn, 25)
+            .unwrap()
+            .is_empty());
+        assert_eq!(queued_fiscal_rows(&conn, "owed"), 1);
+    }
+
+    #[test]
+    fn admission_owed_success_and_protected_skip_clear_the_mark() {
+        let conn = migrated_conn();
+        seed_paid_order(&conn, "success", "branch");
+        enqueue_with_admission_owed(&conn, "success").unwrap();
+        assert_eq!(queued_fiscal_rows(&conn, "success"), 1);
+        seed_paid_order(&conn, "repair", "branch");
+        conn.execute(
+            "UPDATE orders SET order_context='repair_settlement' WHERE id='repair'",
+            [],
+        )
+        .unwrap();
+        enqueue_with_admission_owed(&conn, "repair").unwrap();
+        assert_eq!(queued_fiscal_rows(&conn, "repair"), 0);
+        seed_paid_order(&conn, "folio", "branch");
+        conn.execute(
+            "UPDATE orders SET order_context='folio_settlement',
+            ghost_metadata='{\"folio_settlement\":{\"fiscal_line_snapshot\":[]}}' WHERE id='folio'",
+            [],
+        )
+        .unwrap();
+        enqueue_with_admission_owed(&conn, "folio").unwrap();
+        assert_eq!(queued_fiscal_rows(&conn, "folio"), 0);
+        assert!(super::super::admission_owed::list_owed(&conn, 25)
+            .unwrap()
+            .is_empty());
+        conn.execute(
+            "DELETE FROM parity_sync_queue WHERE record_id='success'",
+            [],
+        )
+        .unwrap();
+        super::super::admission_owed::retry_owed(&conn);
+        assert_eq!(
+            queued_fiscal_rows(&conn, "success"),
+            0,
+            "an accepted/consumed queue row is not missing admission"
+        );
+    }
+
+    #[test]
+    fn admission_owed_mark_write_failure_does_not_prevent_enqueue() {
+        let conn = migrated_conn();
+        seed_paid_order(&conn, "unmarked", "branch");
+        conn.execute_batch("CREATE TRIGGER fail_mark BEFORE INSERT ON local_settings
+            WHEN NEW.setting_category='fiscal_admission_owed' BEGIN SELECT RAISE(ABORT, 'test mark failure'); END;")
+            .unwrap();
+        enqueue_with_admission_owed(&conn, "unmarked").unwrap();
+        assert_eq!(queued_fiscal_rows(&conn, "unmarked"), 1);
+    }
+
+    #[test]
+    fn admission_owed_retry_is_bounded_untried_first_and_continues_after_failure() {
+        use super::super::admission_owed;
+        let conn = migrated_conn();
+        for index in 0..26 {
+            let id = format!("owed-{index:02}");
+            seed_paid_order(&conn, &id, if index == 0 { "" } else { "branch" });
+            admission_owed::mark_owed(&conn, &id).unwrap();
+            conn.execute(
+                "UPDATE local_settings SET setting_value=json_set(setting_value, '$.since', ?1)
+                WHERE setting_category='fiscal_admission_owed' AND setting_key=?2",
+                params![format!("2026-09-29T11:05:{index:02}Z"), id],
+            )
+            .unwrap();
+        }
+        admission_owed::retry_owed(&conn);
+        assert_eq!(
+            admission_owed::list_owed(&conn, 25).unwrap(),
+            // The untried mark goes ahead of the one that already failed.
+            vec!["owed-25", "owed-00"]
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE module_type='fiscal'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            24
+        );
+        assert_eq!(queued_fiscal_rows(&conn, "owed-25"), 0);
+    }
+
+    #[test]
+    fn admission_owed_missing_order_is_cleared_without_a_receipt() {
+        let conn = migrated_conn();
+        super::super::admission_owed::mark_owed(&conn, "missing").unwrap();
+        super::super::admission_owed::retry_owed(&conn);
+        assert!(super::super::admission_owed::list_owed(&conn, 25)
+            .unwrap()
+            .is_empty());
+        assert_eq!(queued_fiscal_rows(&conn, "missing"), 0);
+    }
+
+    #[test]
+    fn admission_owed_retry_retains_the_order_window_and_rolls_back_if_clear_fails() {
+        use super::super::admission_owed;
+        let conn = migrated_conn();
+        seed_paid_order(&conn, "frozen", "branch");
+        admission_owed::mark_owed(&conn, "frozen").unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_clear BEFORE DELETE ON local_settings
+            WHEN OLD.setting_category='fiscal_admission_owed' BEGIN SELECT RAISE(ABORT, 'test clear failure'); END;")
+            .unwrap();
+        admission_owed::retry_owed(&conn);
+        assert_eq!(queued_fiscal_rows(&conn, "frozen"), 0);
+        assert_eq!(
+            admission_owed::list_owed(&conn, 25).unwrap(),
+            vec!["frozen"]
+        );
+        conn.execute_batch("DROP TRIGGER fail_clear").unwrap();
+        admission_owed::retry_owed(&conn);
+        let created_at: String = conn
+            .query_row(
+                "SELECT created_at FROM parity_sync_queue WHERE record_id='frozen'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(created_at, "2026-09-29T11:05:13Z");
+    }
+
+    #[test]
+    fn admission_owed_retry_rolls_back_a_commit_failure_without_leaving_a_transaction_open() {
+        use super::super::admission_owed;
+        let conn = migrated_conn();
+        seed_paid_order(&conn, "commit-failure", "branch");
+        admission_owed::mark_owed(&conn, "commit-failure").unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;
+            CREATE TABLE fiscal_commit_probe (order_id TEXT REFERENCES orders(id) DEFERRABLE INITIALLY DEFERRED);
+            CREATE TRIGGER fail_fiscal_commit AFTER INSERT ON parity_sync_queue
+            WHEN NEW.module_type='fiscal' BEGIN INSERT INTO fiscal_commit_probe VALUES ('missing-order'); END;").unwrap();
+        admission_owed::retry_owed(&conn);
+        assert!(conn.is_autocommit());
+        assert_eq!(queued_fiscal_rows(&conn, "commit-failure"), 0);
+        assert_eq!(
+            admission_owed::list_owed(&conn, 25).unwrap(),
+            vec!["commit-failure"]
+        );
+        conn.execute_batch("DROP TRIGGER fail_fiscal_commit")
+            .unwrap();
+        admission_owed::retry_owed(&conn);
+        assert_eq!(queued_fiscal_rows(&conn, "commit-failure"), 1);
+        assert!(admission_owed::list_owed(&conn, 25).unwrap().is_empty());
+    }
+
+    #[test]
+    fn admission_owed_is_durable_across_reopen_and_cleared_by_rebind() {
+        use super::super::admission_owed;
+        let directory = std::env::temp_dir().join(format!("fiscal-owed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("fiscal.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            crate::db::run_migrations_for_test(&conn);
+            seed_paid_order(&conn, "restart", "branch");
+            admission_owed::mark_owed(&conn, "restart").unwrap();
+        }
+        let mut conn = Connection::open(&path).unwrap();
+        admission_owed::retry_owed(&conn);
+        assert_eq!(queued_fiscal_rows(&conn, "restart"), 1);
+        assert!(admission_owed::list_owed(&conn, 25).unwrap().is_empty());
+        admission_owed::mark_owed(&conn, "old-scope").unwrap();
+        crate::db::set_setting(&conn, "local", "retained", "yes").unwrap();
+        let transaction = conn.transaction().unwrap();
+        crate::core_helpers::clear_generic_operational_data_in_transaction(&transaction).unwrap();
+        transaction.commit().unwrap();
+        assert!(admission_owed::list_owed(&conn, 25).unwrap().is_empty());
+        assert_eq!(
+            crate::db::get_setting(&conn, "local", "retained").as_deref(),
+            Some("yes")
+        );
+        drop(conn);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     /// Review of the 29/09/2026 fixes (decided for both POS apps): a store

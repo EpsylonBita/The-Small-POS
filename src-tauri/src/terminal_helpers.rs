@@ -1018,6 +1018,7 @@ pub(crate) fn credential_key_for_terminal_setting(setting_key: &str) -> Option<&
 
 pub(crate) fn is_sensitive_terminal_setting(setting_key: &str) -> bool {
     let key = setting_key.trim().to_ascii_lowercase();
+    let compact_key = key.replace('_', "");
     matches!(
         key.as_str(),
         "pos_api_key"
@@ -1040,6 +1041,9 @@ pub(crate) fn is_sensitive_terminal_setting(setting_key: &str) -> bool {
     ) || key.contains("service_role")
         || key.ends_with("_secret")
         || key.ends_with("_token")
+        || compact_key.contains("pinhash")
+        || compact_key.contains("pinverifier")
+        || compact_key.contains("pinfastverifier")
 }
 
 pub(crate) fn is_protected_terminal_setting(setting_key: &str) -> bool {
@@ -1107,7 +1111,12 @@ fn sensitive_local_rows(conn: &rusqlite::Connection) -> Result<Vec<(String, Stri
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
             .into_iter()
-            .filter(|(category, key)| is_sensitive_setting_path(category, key))
+            .filter(|(category, key)| {
+                // These are the native login verifiers, not credential shadows.
+                !(category == "staff"
+                    && matches!(key.as_str(), "admin_pin_hash" | "staff_pin_hash"))
+                    && is_sensitive_setting_path(category, key)
+            })
             .collect::<Vec<_>>()
     })
 }

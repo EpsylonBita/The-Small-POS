@@ -206,18 +206,13 @@ test('TableCheckManager loadSession clears the spinner on local lookup failure /
   assert.doesNotMatch(slice, /bridgeOrders = \(await fetchBridgeOrders\(\)\) as any\[\];/);
 });
 
-test('TableCheckManager item rows use explicit readable text colors (legible on the dark glass row)', () => {
-  // The item name must NOT rely on liquid-glass-modal-text (var(--modal-c-content),
-  // no dark-shell override) — that rendered near-invisible dark-on-dark.
-  assert.match(modalSource, /text-base font-semibold text-gray-900 dark:text-white">\{itemDisplayName/);
-  assert.doesNotMatch(modalSource, /font-semibold liquid-glass-modal-text">\{itemDisplayName/);
-
-  // Item details (qty / unpaid / discount) use an explicit muted-but-readable color.
-  assert.match(modalSource, /flex flex-wrap items-center gap-2 text-xs text-gray-600 dark:text-zinc-300/);
-
-  // Per-line Total and "each" amounts are readable too (no bare muted glass class).
-  assert.match(modalSource, /text-xs text-gray-600 dark:text-zinc-300">[\s\S]*?labels\.totalAmount/);
-  assert.match(modalSource, /text-xs text-gray-600 dark:text-zinc-300">[\s\S]*?labels\.eachAmount/);
+// founder 11/11/2026: frosted item choices use the shared theme-safe text tokens.
+test('TableCheckManager item rows keep theme-safe text on glass and selected yellow', () => {
+  assert.match(modalSource, /truncate text-base font-semibold liquid-glass-modal-text">\{itemDisplayName/);
+  assert.match(modalSource, /flex flex-wrap items-center gap-2 text-xs liquid-glass-modal-text-muted/);
+  assert.match(modalSource, /text-xs liquid-glass-modal-text-muted">[\s\S]*?labels\.totalAmount/);
+  assert.match(modalSource, /text-xs liquid-glass-modal-text-muted">[\s\S]*?labels\.eachAmount/);
+  assert.match(modalSource, /isSelectedForBatch \? 'bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)[^']*\[&_\.liquid-glass-modal-text\]:text-\(--pos-s-sel-fg\)! \[&_\.liquid-glass-modal-text-muted\]:text-\(--pos-s-sel-fg\)!' : 'pos-glass-tap-card'/);
 });
 
 // --- Table destination picker (dark-mode contrast) -----------------------
@@ -241,11 +236,10 @@ test('table-destination sheets render the dark-mode-safe TableDestinationPicker 
   assert.match(modalSource, /role="option"/);
   assert.match(modalSource, /aria-selected=\{selected\}/);
 
-  // Explicit readable colors for both themes: selected high-contrast, unselected
-  // legible on light AND dark glass (no reliance on the native popup styling).
-  assert.match(modalSource, /selected[\s\S]{0,40}'bg-blue-600 text-white/);
-  // UI audit wave 6: no hover on the touch tills; the unselected row keeps its readable text.
-  assert.match(modalSource, /: 'text-gray-900 dark:text-zinc-100 ?'/);
+  // founder 11/11/2026: table choices retain opaque neutral surfaces and solid yellow selection.
+  assert.match(modalSource, /selected[\s\S]{0,40}'bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)'/);
+  assert.match(modalSource, /: 'border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-\(--pos-s-fg\)'/);
+  assert.match(modalSource, /pos-raised flex min-h-11 w-full items-center justify-between/);
 
   // All four destination sheets are wired to the picker (3 target + 1 merge).
   const pickerUses = modalSource.match(/<TableDestinationPicker\b/g) || [];

@@ -104,7 +104,7 @@ pub struct QueuedFiscalRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FiscalQueueBlockers {
-    /// Queued fiscal rows of the branch inside the window, any status.
+    /// Queued fiscal rows (any status) plus admissions owed inside the window.
     pub count: i64,
     /// `active` / `inactive` / `unknown` — the verdict the guard applied.
     pub active_verdict: &'static str,
@@ -305,8 +305,9 @@ pub fn collect_fiscal_queue_blockers(
     } else {
         active_cache::closeout_verdict(scope.branch_id.trim())
     };
-    let count = count_queued_fiscal_in_window(conn, scope)?;
-    let rows = if count > 0 {
+    let queued_count = count_queued_fiscal_in_window(conn, scope)?;
+    let count = queued_count + super::admission_owed::count_owed_in_window(conn, scope)?;
+    let rows = if queued_count > 0 {
         list_queued_fiscal_in_window(conn, scope, FISCAL_BLOCKER_ROW_LIMIT)?
     } else {
         Vec::new()
@@ -337,8 +338,9 @@ pub fn fiscal_queue_evidence(conn: &Connection, scope: &FiscalCloseScope) -> Res
         cutoff_at: None,
         lower_bound_inclusive: true,
     };
-    let total = count_queued_fiscal_in_window(conn, &whole_branch)?;
-    let rows = if total > 0 {
+    let queued_total = count_queued_fiscal_in_window(conn, &whole_branch)?;
+    let total = queued_total + super::admission_owed::count_owed_in_window(conn, &whole_branch)?;
+    let rows = if queued_total > 0 {
         list_queued_fiscal_in_window(conn, &whole_branch, FISCAL_BLOCKER_ROW_LIMIT)?
     } else {
         Vec::new()
@@ -371,6 +373,7 @@ pub fn ensure_no_queued_fiscal_for_window(
     if let CacheVerdict::Inactive = verdict {
         return Ok(());
     }
+    super::admission_owed::retry_owed(conn);
     // A queue that cannot be read proves nothing was sent: fail closed.
     let blockers = collect_fiscal_queue_blockers(conn, scope).map_err(|error| {
         tracing::warn!(
@@ -403,6 +406,13 @@ mod audit_7_tests {
         // production schema so this isn't a tautological test.
         let conn = Connection::open_in_memory().expect("open in-memory");
         sync_queue::create_tables(&conn).expect("create_tables");
+        conn.execute_batch(
+            "CREATE TABLE local_settings (
+            setting_category TEXT, setting_key TEXT, setting_value TEXT, updated_at TEXT,
+            UNIQUE(setting_category, setting_key));
+            CREATE TABLE orders (id TEXT PRIMARY KEY, branch_id TEXT, created_at TEXT);",
+        )
+        .unwrap();
         conn
     }
 
@@ -432,6 +442,101 @@ mod audit_7_tests {
 
     fn day(branch_id: &str, iso: &str) -> FiscalCloseScope {
         FiscalCloseScope::utc_day(branch_id, iso)
+    }
+
+    fn seed_owed(conn: &Connection, id: &str, branch: &str, created_at: &str) {
+        conn.execute("INSERT INTO orders (id, organization_id, branch_id, items, total_amount,
+            total_amount_cents, status, payment_status, sync_status, created_at, updated_at, currency)
+            VALUES (?1, 'org', ?2, '[]', 10, 1000, 'completed', 'paid', 'synced', ?3, ?3, 'EUR')",
+            params![id, branch, created_at]).unwrap();
+        super::super::admission_owed::mark_owed(conn, id).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn owed_marks_preserve_inactive_exemption_and_active_unknown_window_blockers() {
+        active_cache::reset_for_tests();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations_for_test(&conn);
+        conn.execute_batch("CREATE TRIGGER fail_admission BEFORE INSERT ON parity_sync_queue
+            WHEN NEW.module_type='fiscal' BEGIN SELECT RAISE(ABORT, 'test admission failure'); END;").unwrap();
+        let scope = day("branch", "2026-09-29");
+        seed_owed(&conn, "in-window", "branch", "2026-09-29T12:00:00Z");
+        seed_owed(&conn, "other", "other-branch", "2026-09-29T12:00:00Z");
+        seed_owed(&conn, "before", "branch", "2026-09-28T12:00:00Z");
+        seed_owed(&conn, "after", "branch", "2026-09-30T00:00:00Z");
+        super::super::admission_owed::mark_owed(&conn, "missing").unwrap();
+        active_cache::update("branch", false);
+        assert!(ensure_no_queued_fiscal_for_window(&conn, &scope).is_ok());
+        assert_eq!(
+            super::super::admission_owed::count_owed_in_window(&conn, &scope).unwrap(),
+            1
+        );
+        for active in [false, true] {
+            active_cache::reset_for_tests();
+            if active {
+                active_cache::update("branch", true);
+            }
+            let blocked = ensure_no_queued_fiscal_for_window(&conn, &scope)
+                .unwrap_err()
+                .to_response();
+            assert_eq!(blocked["reason"], FISCAL_QUEUE_NOT_EMPTY_REASON);
+            assert_eq!(blocked["errorCode"], FISCAL_CLOSE_BLOCKED_ERROR_CODE);
+            assert_eq!(blocked["count"], 1);
+            assert_eq!(
+                blocked["activeVerdict"],
+                if active { "active" } else { "unknown" }
+            );
+        }
+        assert!(!super::super::admission_owed::list_owed(&conn, 25)
+            .unwrap()
+            .contains(&"missing".into()));
+        conn.execute(
+            "DELETE FROM local_settings WHERE setting_key='in-window'",
+            [],
+        )
+        .unwrap();
+        assert!(ensure_no_queued_fiscal_for_window(&conn, &scope).is_ok());
+        active_cache::reset_for_tests();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn owed_retry_before_close_counts_the_recovered_receipt_in_its_frozen_window() {
+        active_cache::reset_for_tests();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations_for_test(&conn);
+        seed_owed(&conn, "recovered", "branch", "2026-09-29T12:00:00Z");
+        let blocked = ensure_no_queued_fiscal_for_window(&conn, &day("branch", "2026-09-29"))
+            .unwrap_err()
+            .to_response();
+        assert_eq!(blocked["count"], 1);
+        assert_eq!(blocked["fiscalRows"][0]["orderId"], "recovered");
+        assert!(super::super::admission_owed::list_owed(&conn, 25)
+            .unwrap()
+            .is_empty());
+        active_cache::reset_for_tests();
+    }
+
+    #[test]
+    fn owed_window_bounds_use_the_same_julianday_rules_as_queue_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations_for_test(&conn);
+        seed_owed(&conn, "lower", "branch", "2026-09-29T02:00:00+02:00");
+        seed_owed(&conn, "upper", "branch", "2026-09-29T12:00:00Z");
+        let mut scope = FiscalCloseScope {
+            cutoff_at: Some("2026-09-29T12:00:00Z".into()),
+            ..day("branch", "2026-09-29")
+        };
+        assert_eq!(
+            super::super::admission_owed::count_owed_in_window(&conn, &scope).unwrap(),
+            2
+        );
+        scope.lower_bound_inclusive = false;
+        assert_eq!(
+            super::super::admission_owed::count_owed_in_window(&conn, &scope).unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -480,6 +585,12 @@ mod audit_7_tests {
         assert_eq!(
             active_cache::inactive_branch_ids(),
             vec!["no-plugin".to_string()]
+        );
+        conn.execute("INSERT INTO orders(id, branch_id, created_at) VALUES ('owed-inactive', 'no-plugin', '2026-10-20T12:00:00Z')", []).unwrap();
+        super::super::admission_owed::mark_owed(&conn, "owed-inactive").unwrap();
+        assert!(
+            ensure_no_queued_fiscal_for_window(&conn, &day("no-plugin", date)).is_ok(),
+            "durable last-confirmed inactive status also exempts owed admissions"
         );
         crate::fiscal::status::apply_fiscal_status_result(
             "no-plugin",

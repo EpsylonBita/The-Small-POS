@@ -26,6 +26,7 @@ const portalReview: Record<string, PortalReview> = {
   'components/support/SupportOnsiteSheet.tsx': { classification: 'recovery', reason: 'On-site confirmation root marks cashier recovery. Without a checked-in staff member holding pos.support.connect it shrinks to a pointer-events-none chip, so it never covers check-in.' },
   'components/support/SupportRestoreNotice.tsx': { classification: 'recovery', reason: 'Restore notice roots mark cashier recovery: the full-screen notice only covers a support restore in progress, and the outcome bar has no backdrop.' },
   'components/tables/TableCheckManagerModal.tsx':{ classification: 'gate-aware', reason: 'Main check and separate secondary sheets hide and suspend Escape while locked.' },
+  'components/ui/ModalBackdropBridge.tsx': { classification: 'gate-aware', reason: 'The backdrop held between two windows is not drawn at all while the cashier gate is locked, so it can never cover check-in or Health.' },
   'components/ui/FloatingActionButton.tsx': { classification: 'non-blocking', reason: 'Floating action button has no full-screen backdrop.' },
   'components/ui/pos-glass-components.tsx': { classification: 'gate-aware', reason: 'Both glass modals preserve drafts, hide operational portals and release isolation while locked.' },
   'pages/LoginPage.tsx': { classification: 'non-blocking', reason: 'App returns the login layer while logged out, before mounting GlobalCashierGate. Signed in, it mounts only as the brief sign-in / sign-out cover (loginExit), with no PIN entry left to fence.' },

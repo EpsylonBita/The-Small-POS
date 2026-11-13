@@ -11,7 +11,7 @@ const bridge = vi.hoisted(() => ({
   },
   settings: {
     getLocal: vi.fn().mockResolvedValue({
-      'staff.admin_pin_hash': 'configured',
+      'staff.admin_pin_configured': true,
       'terminal.legacy_pin_migrated': true,
     }),
     updateLocal: vi.fn().mockResolvedValue({ success: true }),
@@ -97,7 +97,7 @@ describe('LoginPage login deadlines', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     bridge.settings.getLocal.mockResolvedValue({
-      'staff.admin_pin_hash': 'configured',
+      'staff.admin_pin_configured': true,
       'terminal.legacy_pin_migrated': true,
     });
   });
@@ -233,8 +233,25 @@ describe('LoginPage without a sign-in button', () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    { 'staff.admin_pin_configured': true, 'staff.staff_pin_configured': false },
+    { staff: { admin_pin_configured: false, staff_pin_configured: true } },
+  ])('uses native PIN status booleans without receiving hashes: %j', async settings => {
+    const onLogin = await renderWith(settings);
+    expect(screen.queryByRole('button', { name: 'Create PIN' })).not.toBeInTheDocument();
+    press('123456');
+    await act(async () => { await Promise.resolve(); });
+    expect(onLogin).toHaveBeenCalledWith('123456');
+    expect(bridge.auth.setupPin).not.toHaveBeenCalled();
+  });
+
+  it('false native PIN statuses keep setup available', async () => {
+    await renderWith({ staff: { admin_pin_configured: false, staff_pin_configured: false } });
+    expect(screen.getByRole('button', { name: 'Create PIN' })).toBeInTheDocument();
+  });
+
   it('has no sign-in button and signs in by itself at six digits', async () => {
-    const onLogin = await renderWith({ 'staff.admin_pin_hash': 'h', 'staff.staff_pin_hash': 'h' });
+    const onLogin = await renderWith({ 'staff.admin_pin_configured': true, 'staff.staff_pin_configured': true });
     expect(screen.queryByRole('button', { name: 'Login' })).not.toBeInTheDocument();
     expect(screen.getByTestId('login-pin-dots').children).toHaveLength(6);
 
@@ -249,7 +266,7 @@ describe('LoginPage without a sign-in button', () => {
   });
 
   it('a wrong PIN empties the field, keeps the message and shakes the field', async () => {
-    await renderWith({ 'staff.admin_pin_hash': 'h' }, vi.fn().mockResolvedValue(false));
+    await renderWith({ 'staff.admin_pin_configured': true }, vi.fn().mockResolvedValue(false));
     press('123456');
     await act(async () => {
       await Promise.resolve();
@@ -261,8 +278,8 @@ describe('LoginPage without a sign-in button', () => {
 
   it('signs in by itself at four when every PIN the till knows has four digits', async () => {
     const onLogin = await renderWith({
-      'staff.admin_pin_hash': 'h',
-      'staff.staff_pin_hash': 'h',
+      'staff.admin_pin_configured': true,
+      'staff.staff_pin_configured': true,
       'terminal.login_pin_length_admin': 4,
       'terminal.login_pin_length_staff': 4,
     });
@@ -276,8 +293,8 @@ describe('LoginPage without a sign-in button', () => {
 
   it('a four-digit staff PIN beside a six-digit admin PIN gets the enter key at once, never a guess', async () => {
     const onLogin = await renderWith({
-      'staff.admin_pin_hash': 'h',
-      'staff.staff_pin_hash': 'h',
+      'staff.admin_pin_configured': true,
+      'staff.staff_pin_configured': true,
       'terminal.login_pin_length_admin': 6,
       'terminal.login_pin_length_staff': 4,
     });
@@ -295,7 +312,7 @@ describe('LoginPage without a sign-in button', () => {
 
   it('leaving after an accepted PIN rests the keypad and reports when the logo is in the middle', async () => {
     // jsdom has no layout, so the logo cannot fly: the screen reports at once instead of holding the till.
-    bridge.settings.getLocal.mockResolvedValue({ 'terminal.legacy_pin_migrated': true, 'staff.admin_pin_hash': 'h' });
+    bridge.settings.getLocal.mockResolvedValue({ 'terminal.legacy_pin_migrated': true, 'staff.admin_pin_configured': true });
     const onLeft = vi.fn();
     render(<LoginPage onLogin={vi.fn()} exitPhase="leaving" onLeft={onLeft} />);
     await act(async () => {
@@ -307,7 +324,7 @@ describe('LoginPage without a sign-in button', () => {
   });
 
   it('a shorter PIN the till does not know gets the enter key after a pause', async () => {
-    const onLogin = await renderWith({ 'staff.admin_pin_hash': 'h', 'staff.staff_pin_hash': 'h' });
+    const onLogin = await renderWith({ 'staff.admin_pin_configured': true, 'staff.staff_pin_configured': true });
     press('1234');
     expect(screen.queryByTestId('login-enter-key')).not.toBeInTheDocument();
     await act(async () => {

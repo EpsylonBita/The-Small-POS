@@ -60,7 +60,7 @@ test('force sync drains the parity queue so Z-report commit reaches admin', () =
   assert.match(sync, /async fn force_parity_sync_once/);
   assert.match(
     sync,
-    /let outcome = complete_native_background_sync_tick\([\s\S]*run_sync_cycle_with_auth_guard\(db, sync_state, app, "force_sync"\)\.await,[\s\S]*force_parity_sync_once\(/,
+    /let legacy = run_sync_cycle_with_auth_guard\(db, sync_state, app, "force_sync"\)\.await;[\s\S]*let outcome = complete_native_background_sync_tick\(legacy, [\s\S]*force_parity_sync_once\(/,
     'force sync must drain parity only through the guarded native background-tick boundary',
   );
   assert.match(
@@ -134,8 +134,11 @@ test('ZReportModal renders the closeout workbench with localized labels', () => 
     'handlePrintReport',
     'contentClassName={modalContentClassName}',
     'className={modalShellClassName}',
-    'modalContentClassName = isDarkTheme',
-    'modalShellClassName = isDarkTheme',
+    // founder 11/11/2026: semantic modal text follows both themes without surface pairs.
+    "modalContentClassName = 'z-report-glass-content overflow-hidden! p-4! liquid-glass-modal-text'",
+    "modalShellClassName = 'z-report-glass-shell",
+    'pos-glass-form-card',
+    'pos-glass-field',
     'z-report-glass-content',
     'z-report-glass-shell',
   ];
@@ -387,4 +390,33 @@ test('unsent money of the day refuses the close in plain words in every POS loca
     );
     assert.doesNotMatch(message, /\{\{|money_not_synced/, file);
   }
+});
+
+// founder 11/11/2026: pin the new glass look without changing closeout or export gates.
+test('Z report glass panels, fields and conditional reveals keep touch-safe solid actions', () => {
+  const modal = source(zReportModalPath);
+  const dialog = source(path.join(path.dirname(zReportModalPath), 'ZReportExportDialog.tsx'));
+  for (const component of [modal, dialog]) {
+    assert.match(component, /pos-glass-form-card/);
+    assert.match(component, /pos-glass-tap-card/);
+    assert.match(component, /useReducedMotion\(\)/);
+    assert.match(component, /<AnimatePresence initial=\{false\}>/);
+    assert.match(component, /initial: reduceMotion \? false as const : \{ opacity: 0, height: 0, y: 12, overflow: 'hidden' \}/);
+    assert.match(component, /animate: \{ opacity: 1, height: 'auto', y: 0, overflow: 'visible' \}/);
+    assert.match(component, /exit: reduceMotion \? \{ opacity: 0 \} : \{ opacity: 0, height: 0, overflow: 'hidden'/);
+    assert.match(component, /duration: reduceMotion \? 0 : 0\.24, ease: \[0\.2, 0\.8, 0\.2, 1\]/);
+    // Removed content cannot linger as a stale blocker/control during an exit animation.
+    assert.match(component, /aria-hidden=\{isPresent \? props\['aria-hidden'\] : true\}>\{isPresent \? children : null\}/);
+    assert.doesNotMatch(component, /hover:|title=\{action\./);
+  }
+  assert.match(modal, /liquid-glass-modal-input pos-glass-field min-h-touch w-full/g);
+  assert.match(modal, /className="flex items-center justify-end gap-1"/);
+  assert.match(modal, /className="grid flex-1 gap-1 sm:grid-cols-4"/);
+  assert.match(dialog, /\[&_\.liquid-glass-modal-header\]:border-b-0!/);
+  assert.match(dialog, /pos-glass-tap-card min-h-touch w-full p-3 text-left transition focus-visible/);
+  assert.doesNotMatch(dialog, /pos-glass-tap-card[^`]*active:scale/);
+  assert.match(dialog, /const secondaryButton = 'border-\(--pos-s-border\) bg-\(--pos-s-raised\) text-\(--pos-s-fg\)/);
+  assert.match(dialog, /const primaryButton = 'border-\(--pos-s-border\) bg-yellow-400 text-black/);
+  assert.match(modal, /tone: closeoutHasVariance \? 'text-rose-500' : moneyInTone/);
+  assert.match(dialog, /const varianceTone = varianceCents === null\s*\? 'text-amber-600 dark:text-amber-300'\s*: varianceCents === 0\s*\? 'text-emerald-600 dark:text-emerald-300'\s*: 'text-rose-500'/);
 });

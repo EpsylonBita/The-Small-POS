@@ -1948,7 +1948,8 @@
       "last5Days": "5 ditët e fundit",
       "last7Days": "7 ditët e fundit",
       "last30Days": "30 ditët e fundit",
-      "last90Days": "90 ditët e fundit"
+      "last90Days": "90 ditët e fundit",
+      "sinceLastZ": "Që nga Z-ja e fundit"
     },
     "sales": {
       "title": "Shitje",
@@ -5170,7 +5171,9 @@
         "releaseWrongPin": "Me këtë PIN nuk mund të lirohet. Një menaxher me të drejtë anulimi porosish fut PIN-in e vet.",
         "releaseFailed": "Dorëzimi nuk u lirua. Nuk ndryshoi asgjë; provo përsëri.",
         "released": "U lirua. Keshi i arkës dytësore nuk iu shtua këtij sirtari. Tani mund ta mbyllësh turnin."
-      }
+      },
+      "netCollections": "Arkëtime neto",
+      "ofWhichTips": "nga të cilat bakshishe"
     },
     "zReport": {
       "title": "Raporti Z - {{date}}",
@@ -5531,7 +5534,12 @@
       "heldEditClosed": "Korrigjimi u mbyll. Nuk u regjistruan para.",
       "heldEditCloseFailed": "Korrigjimi nuk u mbyll dot. Mbetet në pritje; nuk u regjistrua asgjë.",
       "unsavedSaved": "Pagesa u ruajt.",
-      "unsavedStillNotSaved": "Ende nuk është ruajtur në këtë arkë. Mos e debito përsëri. Provo sërish, ose ktheja paratë klientit dhe konfirmoje këtu."
+      "unsavedStillNotSaved": "Ende nuk është ruajtur në këtë arkë. Mos e debito përsëri. Provo sërish, ose ktheja paratë klientit dhe konfirmoje këtu.",
+      "tenderReconciliation": {
+        "received": "Arkëtuar",
+        "refunded": "Rimbursuar",
+        "kept": "Mbetur"
+      }
     },
     "expense": {
       "title": "Dalje nga arka",
@@ -5690,6 +5698,8 @@
       "managerApprovalSubtitle": "Anulimi i një porosie të paguar kërkon të drejtën e anulimit. Një menaxher që e ka fut PIN-in e vet. Nuk tarifohet asgjë."
     },
     "addCustomer": {
+      "mapStreetNameDiffers": "Harta e quan këtë rrugë «{{street}}». Kontrolloni që është rruga e duhur.",
+      "mapPostalCodeDiffers": "Harta jep kodin postar {{code}} për këtë adresë.",
       "title": "Shto klient të ri",
       "editTitle": "Ndrysho klientin",
       "addAddressTitle": "Shto adresë të re",
@@ -5965,6 +5975,7 @@
       "unknownError": "Gabim i panjohur"
     },
     "connectionSettings": {
+      "unsyncedQueue": "Kjo arkë ka ende lëvizje parash që nuk janë dërguar në server. Sinkronizo fillimisht, pastaj lidhe me dyqanin tjetër.",
       "pinSaveError": "PIN-i nuk u ruajt",
       "connectionSavedSyncing": "Lidhja u ruajt. Po sinkronizohen të dhënat…",
       "themeAutoDayNight": "Automatik (ditë / natë)",
@@ -6516,7 +6527,8 @@
     "addressValidationError": "Adresa nuk u verifikua",
     "orderCreated": "Porosia u krijua!",
     "markDeliveredFailed": "Porosia {{orderNumber}} nuk u shënua si e dorëzuar",
-    "pickupDelivered": "Porosi me vete të shënuara si të dorëzuara: {{count}}",
+    "pickupDelivered_one": "Porosia u dorëzua",
+    "pickupDelivered_other": "{{count}} porosi u dorëzuan",
     "platformReadySent": "U shënua gati",
     "platformReadyFailed": "Platforma nuk u njoftua për {{orderNumber}}",
     "deliveriesCompleted": "Porosi me dërgesë të përfunduara: {{count}}",
@@ -8947,6 +8959,7 @@
         "serviceStep": "Shërbimi"
       },
       "loadingSlots": "Duke u ngarkuar...",
+      "pickDay": "Zgjidh një ditë për të parë oraret",
       "availability": {
         "available": "Në dispozicion",
         "booked": "E zënë"
@@ -10347,6 +10360,18 @@
     "clearAttemptSubtitle": "Një menaxher fut PIN-in e vet. Nuk tarifohet dhe nuk kthehet asgjë."
   },
   "reservationForm": {
+    "today": "Sot",
+    "tomorrow": "Nesër",
+    "dayStrip": "Ditët e ardhshme",
+    "dayFree": "I lirë",
+    "dayReserved": "{{count}} rezervime",
+    "dayReserved_one": "{{count}} rezervim",
+    "dayReserved_other": "{{count}} rezervime",
+    "dayFull": "Plot",
+    "slotFree": "I lirë",
+    "slotTaken": "I rezervuar",
+    "pickDay": "Zgjidhni një ditë për të parë oraret",
+    "noTimesLeft": "Nuk ka më orare për këtë ditë. Zgjidhni një ditë tjetër ose shkruani një orar.",
     "toasts": {
       "created": "Rezervimi u krijua",
       "updated": "Rezervimi u përditësua",

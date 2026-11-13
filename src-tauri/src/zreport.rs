@@ -3124,6 +3124,40 @@ fn report_currency_from_staff(
         .collect()
 }
 
+fn z_report_uncounted_movement_sql(row: &str, ids_key: &str) -> String {
+    format!(
+        "{row}.id NOT IN (
+            SELECT counted.value FROM z_reports z,
+              json_each(CASE WHEN json_valid(z.report_json) THEN z.report_json ELSE '{{}}' END,
+                        '$.countedMovements.{ids_key}') counted
+            WHERE (?3='' OR z.branch_id=?3)
+              AND julianday(z.window_cutoff) <= julianday(?1)
+              AND counted.type='text'
+          )"
+    )
+}
+
+fn z_report_older_movement_scope_sql(
+    row: &str,
+    ids_key: &str,
+    lower_bound_mode: LowerBoundMode,
+) -> String {
+    let financial = business_day::order_financial_timestamp_expr("o");
+    let movement_start = lower_bound_mode.sql_predicate(&format!("{row}.created_at"), "?1");
+    let uncounted = z_report_uncounted_movement_sql(row, ids_key);
+    // An order of the window keeps all its rows, including clock skew. The
+    // frozen IDs distinguish those rows from money recorded after that Z.
+    format!(
+        "(julianday({financial}) <= julianday(?1)
+          AND {movement_start}
+          AND (?2 IS NULL OR julianday({row}.created_at) <= julianday(?2))
+          AND (?3='' OR o.branch_id=?3 OR o.branch_id IS NULL)
+          AND COALESCE(o.is_ghost,0)=0 AND COALESCE(o.is_test,0)=0
+          AND COALESCE(o.order_context,'')<>'repair_settlement'
+          AND {uncounted})"
+    )
+}
+
 /// Date reports also include platform/unassigned orders and expenses/drawers
 /// outside their staff list. Read the full scoped population, not the capped
 /// order detail list, so an unseen legacy or mixed row cannot acquire a label.
@@ -3140,6 +3174,13 @@ fn report_window_currency(
     let expense_start = lower_bound_mode.sql_predicate("created_at", "?1");
     let drawer_start = lower_bound_mode.sql_predicate("opened_at", "?1");
     let payout_start = lower_bound_mode.sql_predicate("sp.created_at", "?1");
+    let older_payment = z_report_older_movement_scope_sql("p", "paymentIds", lower_bound_mode);
+    let older_adjustment =
+        z_report_older_movement_scope_sql("a", "adjustmentIds", lower_bound_mode);
+    let history_terminal_id = db::get_setting(conn, "terminal", "terminal_id")
+        .or_else(|| storage::get_credential("terminal_id"))
+        .unwrap_or_default();
+    let returned_history_payment = returned_reconstructed_history_sql("p", &history_terminal_id);
     let sql = format!(
         "WITH scoped_orders AS (
            SELECT o.id,o.currency FROM orders o WHERE {financial_start}
@@ -3153,6 +3194,17 @@ fn report_window_currency(
            WHERE p.status IN ('completed','refunded')
          UNION ALL SELECT p.currency FROM payment_adjustments a JOIN scoped_orders o ON o.id=a.order_id
            LEFT JOIN order_payments p ON p.id=a.payment_id
+         UNION ALL SELECT p.currency FROM order_payments p JOIN orders o ON o.id=p.order_id
+           WHERE {older_payment} AND p.status='completed'
+             AND NOT (COALESCE(p.payment_origin,'')='sync_reconstructed' AND TRIM(COALESCE(p.remote_payment_id,''))='')
+             AND NOT {returned_history_payment}
+             AND (p.method<>'twint' OR p.currency='CHF')
+             AND (p.method='twint' OR o.status NOT IN ('cancelled','canceled','refunded'))
+         UNION ALL SELECT p.currency FROM payment_adjustments a JOIN orders o ON o.id=a.order_id
+           LEFT JOIN order_payments p ON p.id=a.payment_id
+           WHERE {older_adjustment} AND COALESCE(a.imported_remote,0)=0
+             AND a.adjustment_type IN ('refund','void')
+             AND o.status NOT IN ('cancelled','canceled','refunded')
          UNION ALL SELECT currency FROM shift_expenses WHERE {expense_start}
            AND (?2 IS NULL OR julianday(created_at) <= julianday(?2)) AND (?3='' OR branch_id=?3 OR branch_id IS NULL)
          UNION ALL SELECT currency FROM cash_drawer_sessions WHERE {drawer_start}
@@ -3652,6 +3704,8 @@ fn load_sales_by_type_for_period(
 ) -> Result<Value, String> {
     let financial_expr = business_day::order_financial_timestamp_expr("o");
     let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
+    let older_payment_scope =
+        z_report_older_movement_scope_sql("op", "paymentIds", lower_bound_mode);
     let history_terminal = db::get_setting(conn, "terminal", "terminal_id")
         .or_else(|| storage::get_credential("terminal_id"))
         .unwrap_or_default();
@@ -3668,8 +3722,9 @@ fn load_sales_by_type_for_period(
             COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0)
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
-         WHERE {financial_predicate}
-           AND (?2 IS NULL OR julianday({financial_expr}) <= julianday(?2))
+         WHERE (({financial_predicate}
+           AND (?2 IS NULL OR julianday({financial_expr}) <= julianday(?2)))
+           OR {older_payment_scope})
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND NOT {returned_history_payment}
            AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
@@ -4321,6 +4376,8 @@ fn build_staff_report(
     conn: &Connection,
     shift: &ReportStaffShift,
     cash_breakdown_lookup: &HashMap<String, Value>,
+    period_start: &str,
+    period_end: &str,
 ) -> Result<Value, String> {
     let display_name = display_staff_name(shift);
     let expense_items = load_staff_expense_items(conn, &shift.id)?;
@@ -4455,7 +4512,7 @@ fn build_staff_report(
     ).map_err(|e| format!("load staff TWINT payments: {e}"))?;
     orders_value["twintAmount"] = serde_json::json!(Cents::new(twint_cents).to_f64_dp2());
 
-    Ok(serde_json::json!({
+    let mut report = serde_json::json!({
         "staffShiftId": shift.id,
         "currency": common_report_currency(std::iter::once(report_shift_currency(conn, &shift.id)?)
             .chain(payment_items.iter().map(|row|row.get("currency").and_then(Value::as_str).map(str::to_owned)))),
@@ -4479,7 +4536,45 @@ fn build_staff_report(
         "driver": driver_value,
         "drawer": drawer_value,
         "returnedToDrawerAmount": returned_to_drawer_amount,
-    }))
+    });
+    let frozen = if shift.status == "closed" || shift.check_out_time.is_some() {
+        crate::shifts::load_frozen_net_collections(conn, &shift.id)?
+    } else {
+        None
+    };
+    let collections = match frozen {
+        Some(block) => Some(block),
+        None => {
+            // Intersect instants, because shift and Z offsets can differ.
+            let (start, end): (String, String) = conn
+                .query_row(
+                    "SELECT CASE WHEN julianday(?1)>julianday(?2) THEN ?1 ELSE ?2 END,
+                        CASE WHEN julianday(?3)<julianday(?4) THEN ?3 ELSE ?4 END",
+                    params![
+                        shift
+                            .check_in_time
+                            .as_deref()
+                            .unwrap_or(business_day::EPOCH_RFC3339),
+                        period_start,
+                        shift.check_out_time.as_deref().unwrap_or(period_end),
+                        period_end
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| format!("read staff collections window: {e}"))?;
+            crate::shifts::compute_shift_net_collections(
+                conn,
+                &shift.id,
+                &shift.role_type,
+                &start,
+                &end,
+            )?
+        }
+    };
+    if let Some(block) = collections {
+        report["netCollections"] = block;
+    }
+    Ok(report)
 }
 
 fn build_driver_summary(staff_reports: &[Value], unsettled_counts: &HashMap<String, i64>) -> Value {
@@ -5479,6 +5574,15 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         }
     }
 
+    let (tender_reconciliation, _, _) = load_tender_reconciliation(
+        &conn,
+        &format!("op.staff_shift_id=?1 AND (?2='' OR o.branch_id=?2 OR o.branch_id IS NULL) AND NOT {returned_history_payment}"),
+        params![shift_id,branch_id],
+        "COALESCE(pa.staff_shift_id,op.staff_shift_id,o.staff_shift_id)=?1 AND (?2='' OR o.branch_id=?2 OR o.branch_id IS NULL)",
+        params![shift_id,branch_id],
+        (repair_tender_sales,repair_cash_sales,repair_card_sales,repair_orders_count),
+    )?;
+
     // Adjustments: refunds and voids.
     //
     // Use COALESCE(op.staff_shift_id, o.staff_shift_id) so adjustments on
@@ -5872,6 +5976,12 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         &conn,
         &primary_shift,
         &cash_breakdown_lookup,
+        check_in_time
+            .as_deref()
+            .unwrap_or(business_day::EPOCH_RFC3339),
+        check_out_time
+            .as_deref()
+            .unwrap_or(&Utc::now().to_rfc3339()),
     )?];
     let driver_summary = build_driver_summary(
         &staff_reports,
@@ -5926,6 +6036,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         "presentation": presentation,
         "hotel": hotel,
         "paymentsBreakdown": payments_breakdown,
+        "tenderReconciliation": tender_reconciliation,
         "date": report_date,
         "shifts": shift_counts,
         "sales": {
@@ -6675,6 +6786,7 @@ fn load_reconciliation_explanations(
 fn build_z_integrity_block(
     order_turnover: f64,
     payment_coverage: f64,
+    older_payment_cents: i64,
     carried_over: &Value,
     unclassified_platforms: &[Value],
     refunded_orders: (i64, i64),
@@ -6722,11 +6834,10 @@ fn build_z_integrity_block(
     let coverage_cents = Cents::round_half_even(payment_coverage).as_i64();
     let difference_cents = turnover_cents - coverage_cents;
 
-    // The two sides count different populations on purpose (see
-    // `load_reconciliation_explanations`). Subtract what that accounts for;
-    // only the residual is a real break.
+    // Returned receipts leave coverage; later payments of older sales add
+    // coverage without adding turnover. Only the residual is a real break.
     let (refunded_order_count, refunded_order_cents) = refunded_orders;
-    let explained_cents = refunded_order_cents;
+    let explained_cents = refunded_order_cents - older_payment_cents;
     let unexplained_cents = difference_cents - explained_cents;
     // `reconciled` is the single flag the UI colours on and the operator
     // reads. It must mean "nothing here is wrong", not "the arithmetic is
@@ -6742,10 +6853,13 @@ fn build_z_integrity_block(
         "paymentCoverage_cents": coverage_cents,
         "difference": Cents::new(difference_cents).to_f64_dp2(),
         "difference_cents": difference_cents,
-        // Known returned money retained in gross turnover but excluded from
-        // completed-payment coverage, counted once per original receipt.
+        // Returned money excluded from coverage, less payments of older sales.
         "explainedDifference": Cents::new(explained_cents).to_f64_dp2(),
         "explainedDifference_cents": explained_cents,
+        "olderOrderPayments": {
+            "amount": Cents::new(older_payment_cents).to_f64_dp2(),
+            "amount_cents": older_payment_cents,
+        },
         "refundedOrders": {
             "orders": refunded_order_count,
             "amount": Cents::new(refunded_order_cents).to_f64_dp2(),
@@ -6772,6 +6886,146 @@ fn build_z_integrity_block(
         "unclassifiedPlatforms": unclassified_platforms.to_vec(),
         "reconciled": reconciled,
     })
+}
+
+fn reconciliation_tender(method: &str, platform_ref: &str) -> &'static str {
+    match method {
+        "cash" => "cash",
+        "card" => "card",
+        "twint" => "twint",
+        _ if platform_ref.starts_with("platform_settlement:online") => "platformOnline",
+        _ if platform_ref.starts_with("platform_settlement:cod") => "platformCod",
+        _ => "other",
+    }
+}
+
+// Gross receipts and payouts explain each other without changing sales or drawer math.
+fn load_tender_reconciliation(
+    conn: &Connection,
+    received_scope: &str,
+    received_params: impl rusqlite::Params,
+    refund_scope: &str,
+    refund_params: impl rusqlite::Params,
+    repair: (f64, f64, f64, i64),
+) -> Result<(Value, Vec<String>, Vec<String>), String> {
+    let mut buckets = std::collections::BTreeMap::<&str, [i64; 4]>::new();
+    let mut payment_ids = Vec::new();
+    let mut adjustment_ids = Vec::new();
+    let received_sql = format!(
+        "SELECT op.method, COALESCE(op.transaction_ref,''),
+                COALESCE(op.amount_cents,CAST(ROUND(op.amount*100) AS INTEGER),0), op.id
+         FROM order_payments op JOIN orders o ON o.id=op.order_id
+         WHERE {received_scope}
+           AND op.status IN ('completed','refunded','partially_refunded','voided')
+           AND NOT (COALESCE(op.payment_origin,'')='sync_reconstructed'
+                    AND TRIM(COALESCE(op.remote_payment_id,''))='')
+           AND COALESCE(o.is_ghost,0)=0 AND COALESCE(o.is_test,0)=0
+           AND COALESCE(o.order_context,'')<>'repair_settlement'
+           AND (op.method<>'twint' OR op.currency='CHF')"
+    );
+    let mut stmt = conn.prepare(&received_sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(received_params, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (method, reference, cents, id) = row.map_err(|e| e.to_string())?;
+        payment_ids.push(id);
+        let bucket = buckets
+            .entry(reconciliation_tender(&method, &reference))
+            .or_default();
+        bucket[0] += cents;
+        bucket[1] += 1;
+    }
+    let refund_sql = format!(
+        "SELECT COALESCE(NULLIF(TRIM(pa.refund_method),''),op.method,'other'),
+                COALESCE(op.transaction_ref,''),
+                COALESCE(pa.amount_cents,CAST(ROUND(pa.amount*100) AS INTEGER),0), pa.id
+         FROM payment_adjustments pa JOIN orders o ON o.id=pa.order_id
+         LEFT JOIN order_payments op ON op.id=pa.payment_id
+         WHERE {refund_scope}
+           AND pa.adjustment_type IN ('refund','void') AND COALESCE(pa.imported_remote,0)=0
+           AND COALESCE(o.is_ghost,0)=0 AND COALESCE(o.is_test,0)=0
+           AND COALESCE(o.order_context,'')<>'repair_settlement'"
+    );
+    let mut stmt = conn.prepare(&refund_sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(refund_params, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (method, reference, cents, id) = row.map_err(|e| e.to_string())?;
+        adjustment_ids.push(id);
+        let bucket = buckets
+            .entry(reconciliation_tender(&method, &reference))
+            .or_default();
+        bucket[2] += cents;
+        bucket[3] += 1;
+    }
+    let (total, cash, card, count) = repair;
+    let cash_only = cash.abs() > 0.000001 && card.abs() <= 0.000001;
+    let card_only = card.abs() > 0.000001 && cash.abs() <= 0.000001;
+    for (tender, amount, received_count) in [
+        ("cash", cash, if cash_only { count } else { 0 }),
+        ("card", card, if card_only { count } else { 0 }),
+        (
+            "other",
+            total - cash - card,
+            if !cash_only && !card_only { count } else { 0 },
+        ),
+    ] {
+        let cents = Cents::round_half_even(amount).as_i64();
+        if cents != 0 {
+            let bucket = buckets.entry(tender).or_default();
+            bucket[0] += cents;
+            bucket[1] += received_count;
+        }
+    }
+    let mut received = 0;
+    let mut refunded = 0;
+    let mut lines = Vec::new();
+    for tender in [
+        "cash",
+        "card",
+        "twint",
+        "other",
+        "platformOnline",
+        "platformCod",
+    ] {
+        let Some([taken, taken_count, returned, returned_count]) = buckets.get(tender).copied()
+        else {
+            continue;
+        };
+        if taken == 0 && returned == 0 {
+            continue;
+        }
+        received += taken;
+        refunded += returned;
+        lines.push(serde_json::json!({"tender":tender,
+            "received":Cents::new(taken).to_f64_dp2(),"receivedCents":taken,"receivedCount":taken_count,
+            "refunded":Cents::new(returned).to_f64_dp2(),"refundedCents":returned,"refundedCount":returned_count,
+            "kept":Cents::new(taken-returned).to_f64_dp2(),"keptCents":taken-returned}));
+    }
+    Ok((
+        serde_json::json!({"version":1,"lines":lines,"totals":{
+        "received":Cents::new(received).to_f64_dp2(),"receivedCents":received,
+        "refunded":Cents::new(refunded).to_f64_dp2(),"refundedCents":refunded,
+        "kept":Cents::new(received-refunded).to_f64_dp2(),"keptCents":received-refunded}}),
+        payment_ids,
+        adjustment_ids,
+    ))
 }
 
 /// Returned server mirrors are history, not this till's sale. A recorded
@@ -7011,7 +7265,7 @@ fn build_z_report_for_window(
         last_z_anchor.as_deref(),
     )?;
     let total_orders = ordinary_orders + repair_orders_count;
-    let hotel = hotel_report_totals(
+    let mut hotel = hotel_report_totals(
         &conn,
         &reportable_orders_from,
         params![period_start, cutoff_param, branch_id, last_z_anchor],
@@ -7022,6 +7276,12 @@ fn build_z_report_for_window(
     // --- Payments: breakdown by method across all shifts ---
     let payment_scope_expr = business_day::order_financial_timestamp_expr("o");
     let payment_scope_predicate = lower_bound_mode.sql_predicate(&payment_scope_expr, "?1");
+    let payment_order_window = format!(
+        "({payment_scope_predicate}
+          AND (?2 IS NULL OR julianday({payment_scope_expr}) <= julianday(?2)))"
+    );
+    let older_payment_scope =
+        z_report_older_movement_scope_sql("op", "paymentIds", lower_bound_mode);
     // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     // THE-437: platform-settled money (prepaid online, or COD collected by the
     // platform's own rider) is auto-recorded as method='other' with a
@@ -7029,7 +7289,7 @@ fn build_z_report_for_window(
     // `other` bucket so the Z shows it as its own line — revenue that arrives
     // by bank settlement and must never look like drawer cash.
     //
-    // Population parity with the turnover aggregate above (review item E,
+    // For orders of the window, population parity with turnover (review item E,
     // 16/09/2026). This query carries no `{reportable_order}` clause and does
     // not need one: BOTH halves of that predicate
     // (`open_unsettled_table_tab_expr`, `paid_order_swept_by_last_z_expr`)
@@ -7049,11 +7309,13 @@ fn build_z_report_for_window(
                      ELSE '' END AS platform_ref,
                 COUNT(*) as cnt,
                 COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0) as total,
-                    COALESCE(SUM(CASE WHEN op.method = 'twint' AND o.status IN ('cancelled','canceled','refunded') THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END),0) as retained_total
+                    COALESCE(SUM(CASE WHEN op.method = 'twint' AND o.status IN ('cancelled','canceled','refunded') THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END),0) as retained_total,
+                COALESCE(SUM(CASE WHEN {payment_order_window} THEN 0
+                    ELSE COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) END), 0),
+                json_group_array(op.id)
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
-         WHERE {payment_scope_predicate}
-           AND (?2 IS NULL OR julianday({payment_scope_expr}) <= julianday(?2))
+         WHERE ({payment_order_window} OR {older_payment_scope})
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND NOT {returned_history_payment}
            AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
@@ -7081,6 +7343,8 @@ fn build_z_report_for_window(
     let mut other_count = 0_i64;
     let mut platform_online_count = 0_i64;
     let mut platform_cod_count = 0_i64;
+    let mut older_payment_cents = 0_i64;
+    let mut counted_payment_ids = Vec::<String>::new();
 
     let pay_rows = pay_stmt
         .query_map(params![period_start, cutoff_param, branch_id], |row| {
@@ -7090,12 +7354,19 @@ fn build_z_report_for_window(
                 row.get::<_, i64>(2)?,
                 Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
                 Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
             ))
         })
         .map_err(|e| format!("query payments: {e}"))?;
 
     for row in pay_rows.flatten() {
-        let (method, platform_ref, count, total, retained_total) = row;
+        let (method, platform_ref, count, total, retained_total, older_cents, ids) = row;
+        older_payment_cents += older_cents;
+        counted_payment_ids.extend(
+            serde_json::from_str::<Vec<String>>(&ids)
+                .map_err(|e| format!("read counted Z payments: {e}"))?,
+        );
         match method.as_str() {
             "cash" => {
                 cash_sales += total;
@@ -7221,8 +7492,9 @@ fn build_z_report_for_window(
                                           CAST(ROUND(op.amount * 100) AS INTEGER))), 0)
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
-             WHERE {platform_scope_predicate}
-               AND (?2 IS NULL OR julianday({platform_scope_expr}) <= julianday(?2))
+             WHERE (({platform_scope_predicate}
+               AND (?2 IS NULL OR julianday({platform_scope_expr}) <= julianday(?2)))
+               OR {older_payment_scope})
                AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
                AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                AND op.method IN ('cash', 'card')
@@ -7276,47 +7548,144 @@ fn build_z_report_for_window(
         .collect();
 
     // --- Adjustments: refunds and voids across all shifts ---
-    let adjustment_scope_expr = business_day::order_financial_timestamp_expr("o");
-    let adjustment_scope_predicate = lower_bound_mode.sql_predicate(&adjustment_scope_expr, "?1");
+    let adjustment_scope_predicate = lower_bound_mode.sql_predicate("pa.created_at", "?1");
+    let uncounted_adjustment_scope = z_report_uncounted_movement_sql("pa", "adjustmentIds");
+    let uncounted_receipt_scope = z_report_uncounted_movement_sql("op", "paymentIds");
+    // A later return must not move the original receipt into its payout day.
+    let receipt_scope_expr = payment_scope_expr.replace(
+        "op_fin.status = 'completed'",
+        "op_fin.status IN ('completed','refunded','partially_refunded','voided')",
+    );
+    let receipt_scope_predicate = lower_bound_mode.sql_predicate(&receipt_scope_expr, "?1");
+    let (tender_reconciliation, reconciliation_payment_ids, reconciliation_adjustment_ids) = load_tender_reconciliation(
+        &conn,
+        &format!("(({receipt_scope_predicate} AND (?2 IS NULL OR julianday({receipt_scope_expr})<=julianday(?2)))
+                  OR {older_payment_scope}) AND {uncounted_receipt_scope}
+                  AND (?3='' OR o.branch_id=?3 OR o.branch_id IS NULL) AND NOT {returned_history_payment}"),
+        params![period_start,cutoff_param,branch_id],
+        &format!("{adjustment_scope_predicate} AND {uncounted_adjustment_scope}
+                  AND (?2 IS NULL OR julianday(pa.created_at)<=julianday(?2))
+                  AND (?3='' OR o.branch_id=?3 OR o.branch_id IS NULL)"),
+        params![period_start,cutoff_param,branch_id],
+        (repair_tender_sales,repair_cash_sales,repair_card_sales,repair_orders_count),
+    )?;
+
+    // Returned receipts keep the sale's original instant after its status changes.
+    let sale_scope_expr = format!(
+        "COALESCE((SELECT MIN(julianday(sale_payment.created_at)) FROM order_payments sale_payment
+                    WHERE sale_payment.order_id = o.id
+                      AND sale_payment.status IN ('completed', 'refunded', 'voided')),
+                  julianday({financial_expr}))"
+    );
+    let sale_start_predicate = lower_bound_mode.sql_predicate(&sale_scope_expr, "?1");
+    let sales_adjustment_predicate = format!(
+        "(o.status NOT IN ('cancelled', 'canceled', 'refunded') OR NOT ({sale_start_predicate}))"
+    );
     let adjustment_scope_sql = format!(
         // W4b-iii: cents-with-real-fallback shim (removed in 4e).
-        "SELECT pa.adjustment_type,
-                COALESCE(SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
+        "SELECT COALESCE(o.order_context, ''), COALESCE(o.items, '[]'),
+                COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0),
+                COALESCE(SUM(CASE WHEN pa.adjustment_type = 'refund'
+                    THEN COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER)) ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN pa.adjustment_type = 'void'
+                    THEN COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER)) ELSE 0 END), 0),
+                CASE WHEN {sales_adjustment_predicate} THEN 1 ELSE 0 END,
+                json_group_array(pa.id)
          FROM payment_adjustments pa
          JOIN orders o ON o.id = pa.order_id
          WHERE {adjustment_scope_predicate}
+           AND {uncounted_adjustment_scope}
            AND COALESCE(pa.imported_remote, 0) = 0
-           AND (?2 IS NULL OR julianday({adjustment_scope_expr}) <= julianday(?2))
+           AND (?2 IS NULL OR julianday(pa.created_at) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
-           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-         GROUP BY pa.adjustment_type"
+           AND ({sales_adjustment_predicate}
+                OR (o.order_context = 'folio_settlement' AND o.status = 'refunded'))
+         GROUP BY o.id"
     );
     let mut adj_stmt = conn
         .prepare(&adjustment_scope_sql)
         .map_err(|e| format!("prepare adjustment query: {e}"))?;
 
-    let mut refunds_total = 0.0_f64;
-    let mut voids_total = 0.0_f64;
+    // Tender-only returns still belong to the frozen movement ledger.
+    counted_payment_ids.extend(reconciliation_payment_ids);
+    let mut counted_adjustment_ids = reconciliation_adjustment_ids;
+    let (mut refunds_cents, mut voids_cents) = (0_i64, 0_i64);
+    let (mut transfer_refunds_cents, mut transfer_voids_cents) = (0_i64, 0_i64);
 
     let adj_rows = adj_stmt
         .query_map(params![period_start, cutoff_param, branch_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, bool>(5)?,
+                row.get::<_, String>(6)?,
             ))
         })
         .map_err(|e| format!("query adjustments: {e}"))?;
 
-    for row in adj_rows.flatten() {
-        let (adj_type, amount) = row;
-        match adj_type.as_str() {
-            "refund" => refunds_total = amount,
-            "void" => voids_total = amount,
-            _ => warn!("Unknown adjustment type: {adj_type}"),
+    for row in adj_rows {
+        let (context, items, total, refunds, voids, count_in_sales, ids) =
+            row.map_err(|e| format!("read adjustments: {e}"))?;
+        counted_adjustment_ids.extend(
+            serde_json::from_str::<Vec<String>>(&ids)
+                .map_err(|e| format!("read counted Z adjustments: {e}"))?,
+        );
+        if count_in_sales {
+            refunds_cents += refunds;
+            voids_cents += voids;
         }
+        if context == "folio_settlement" && total > 0 {
+            let lines: Vec<Value> = serde_json::from_str(&items)
+                .map_err(|e| format!("Invalid folio settlement lines: {e}"))?;
+            let transfers: i64 = lines
+                .iter()
+                .filter(|line| {
+                    line.get("folio_line_kind").and_then(Value::as_str) == Some("transfer")
+                })
+                .map(|line| {
+                    Cents::round_half_even(
+                        line.get("total_price")
+                            .or_else(|| line.get("line_total_gross"))
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                    )
+                    .as_i64()
+                })
+                .sum();
+            if transfers > 0 {
+                let share = |amount: i64| {
+                    ((amount as i128 * transfers as i128 + total as i128 / 2) / total as i128)
+                        as i64
+                };
+                transfer_refunds_cents += share(refunds);
+                transfer_voids_cents += share(refunds + voids) - share(refunds);
+            }
+        }
+    }
+    let refunds_total = Cents::new(refunds_cents).to_f64_dp2();
+    let voids_total = Cents::new(voids_cents).to_f64_dp2();
+    counted_payment_ids.sort_unstable();
+    counted_payment_ids.dedup();
+    counted_adjustment_ids.sort_unstable();
+    counted_adjustment_ids.dedup();
+    // Transfer returns follow this window too, without lowering revenue twice.
+    let transfer_gross_cents = hotel["transferGross_cents"].as_i64().unwrap_or(0);
+    for (key, cents) in [
+        ("transferRefundsTotal", transfer_refunds_cents),
+        ("transferVoidsTotal", transfer_voids_cents),
+        (
+            "roomChargesCollected",
+            transfer_gross_cents - transfer_refunds_cents - transfer_voids_cents,
+        ),
+    ] {
+        hotel[key] = serde_json::json!(Cents::new(cents).to_f64_dp2());
+        hotel[format!("{key}_cents")] = serde_json::json!(cents);
     }
 
     // --- Expenses (excluding staff_payment type) across all shifts ---
@@ -7758,7 +8127,15 @@ fn build_z_report_for_window(
     // --- Build per-staff reports ---
     let staff_reports: Vec<Value> = shifts
         .iter()
-        .map(|shift| build_staff_report(&conn, shift, &cash_breakdown_lookup))
+        .map(|shift| {
+            build_staff_report(
+                &conn,
+                shift,
+                &cash_breakdown_lookup,
+                &period_start,
+                &period_end,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let driver_summary = build_driver_summary(
         &staff_reports,
@@ -7852,6 +8229,7 @@ fn build_z_report_for_window(
     let integrity = build_z_integrity_block(
         total_sales,
         day_total,
+        older_payment_cents,
         &carried_over,
         &unclassified_platforms,
         refunded_orders,
@@ -7883,11 +8261,13 @@ fn build_z_report_for_window(
     )?;
     let mut report_json = serde_json::json!({
         "discardedCorrections": discarded_corrections,
+        "countedMovements": { "paymentIds": counted_payment_ids, "adjustmentIds": counted_adjustment_ids },
         "vatBreakdown": vat_breakdown,
         "currency": currency,
         "presentation": presentation,
         "hotel": hotel,
         "paymentsBreakdown": payments_breakdown,
+        "tenderReconciliation": tender_reconciliation,
         "date": date,
         "shifts": {
             "total": shifts_total,
@@ -10456,6 +10836,26 @@ pub fn generate_z_report_file(
         format!("Tel: {store_phone}<br/>")
     };
 
+    let payment_rows_html = if report_json["tenderReconciliation"]["version"] == 1
+        && report_json["tenderReconciliation"]["lines"].is_array()
+    {
+        let language =
+            db::get_setting(&conn, "general", "language").unwrap_or_else(|| "en".to_string());
+        let doc = crate::receipt_renderer::ZReportDoc {
+            tender_reconciliation: report_json["tenderReconciliation"].clone(),
+            ..Default::default()
+        };
+        crate::receipt_renderer::z_report_payment_display_rows(&doc, &language)
+            .into_iter()
+            .map(|(label, amount)| {
+                format!("<tr><td>{label}</td><td style=\"text-align:right;\">{amount:.2}</td></tr>")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        format!("<tr><td>Cash</td><td style=\"text-align:right;\">{cash_sales:.2}</td></tr>\n<tr><td>Card</td><td style=\"text-align:right;\">{card_sales:.2}</td></tr>")
+    };
+
     // Variance styling
     let variance_style = if cash_variance.abs() > 0.01 {
         "color:#c00;font-weight:bold;"
@@ -10489,8 +10889,7 @@ Currency: {currency}
 <hr style="border:none;border-top:1px dashed #000;"/>
 <div style="margin:4px 0;"><strong>PAYMENT BREAKDOWN</strong></div>
 <table style="width:100%;font-family:monospace;font-size:10px;">
-<tr><td>Cash</td><td style="text-align:right;">{cash_sales:.2}</td></tr>
-<tr><td>Card</td><td style="text-align:right;">{card_sales:.2}</td></tr>
+{payment_rows_html}
 </table>
 <hr style="border:none;border-top:1px dashed #000;"/>
 <div style="margin:4px 0;"><strong>ADJUSTMENTS</strong></div>
@@ -11986,6 +12385,744 @@ mod tests {
         ).expect("insert expense");
 
         shift_id.to_string()
+    }
+
+    fn rule10_staff_seed() -> DbState {
+        let db = test_db();
+        seed_closed_shift(&db);
+        db.conn.lock().unwrap().execute_batch(
+            "DELETE FROM payment_adjustments; DELETE FROM order_payments; DELETE FROM orders;
+             INSERT INTO staff_shifts(id,staff_id,staff_name,branch_id,terminal_id,role_type,status,
+               check_in_time,check_out_time,created_at,updated_at)
+             VALUES('collector-b','staff-b','B','branch-1','term-1','cashier','closed',
+               '2026-02-16T09:00:00Z','2026-02-16T18:00:00Z','now','now');
+             INSERT INTO orders(id,order_number,items,total_amount,total_amount_cents,status,order_type,
+               payment_status,staff_shift_id,branch_id,currency,created_at,updated_at)
+             VALUES('split','split','[]',100,10000,'completed','dine-in','paid','shift-zr-1',
+               'branch-1','EUR','2026-02-16T12:00:00Z','2026-02-16T12:00:00Z');
+             INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,staff_shift_id,
+               currency,created_at,updated_at)
+             VALUES('a','split','cash',40,4000,'completed','shift-zr-1','EUR','2026-02-16T12:00:00Z','now'),
+               ('b','split','card',60,6000,'completed','collector-b','EUR','2026-02-16T12:01:00Z','now');"
+        ).unwrap();
+        db
+    }
+
+    fn rule10_staff_block(report: &BuiltDateZReport, id: &str) -> Value {
+        report.report_json["staffReports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["staffShiftId"] == id)
+            .unwrap()["netCollections"]
+            .clone()
+    }
+
+    #[test]
+    fn rule10_staff_split_check_belongs_to_each_collector() {
+        let db = rule10_staff_seed();
+        let report = rule8_report(&db, &rule5_window(false));
+        assert_eq!(rule10_staff_block(&report, "shift-zr-1")["total"], 40.0);
+        assert_eq!(rule10_staff_block(&report, "collector-b")["total"], 60.0);
+        assert_eq!(report.gross_sales, 100.0);
+    }
+
+    #[test]
+    fn rule10_staff_refund_uses_collector_and_payout_tender() {
+        let db = rule10_staff_seed();
+        let before = rule8_report(&db, &rule5_window(false));
+        db.conn.lock().unwrap().execute_batch(
+            "INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,
+               reason,staff_shift_id,refund_method,created_at,updated_at)
+             VALUES('return','b','split','refund',10,1000,'return','collector-b','cash',
+               '2026-02-16T13:00:00Z','now');"
+        ).unwrap();
+        let after = rule8_report(&db, &rule5_window(false));
+        let block = rule10_staff_block(&after, "collector-b");
+        assert_eq!(block["refunded"], 10.0);
+        assert_eq!(block["total"], 50.0);
+        assert_eq!(block["tenders"][0]["tender"], "cash");
+        assert_eq!(block["tenders"][0]["received"], 0.0);
+        assert_eq!(rule10_staff_block(&after, "shift-zr-1")["total"], 40.0);
+        assert_eq!(after.gross_sales, before.gross_sales);
+        assert_eq!(after.cash_sales, before.cash_sales);
+        assert_eq!(after.card_sales, before.card_sales);
+        assert_eq!(
+            after.report_json["cashDrawer"],
+            before.report_json["cashDrawer"]
+        );
+    }
+
+    #[test]
+    fn rule10_staff_closed_shift_uses_exact_frozen_block() {
+        let db = rule10_staff_seed();
+        let frozen = serde_json::json!({"version":1,"tenders":[],"received":12.34,"receivedCents":1234,
+            "refunded":0,"refundedCents":0,"total":12.34,"totalCents":1234,"tips":2,"tipsCents":200,
+            "paymentCount":7,"refundCount":0});
+        db::set_setting(
+            &db.conn.lock().unwrap(),
+            "shift_net_collections_v1",
+            "collector-b",
+            &frozen.to_string(),
+        )
+        .unwrap();
+        let report = rule8_report(&db, &rule5_window(false));
+        assert_eq!(rule10_staff_block(&report, "collector-b"), frozen);
+    }
+
+    #[test]
+    fn rule10_staff_fallback_is_limited_to_the_z_window() {
+        let db = rule10_staff_seed();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("UPDATE staff_shifts SET status='active',check_out_time=NULL")
+            .unwrap();
+        let mut window = rule5_window(false);
+        window.cutoff_at = Some("2026-02-16T12:00:30Z".into());
+        let report = build_z_report_for_window(
+            &db,
+            &serde_json::json!({"branchId":"branch-1"}),
+            true,
+            Some(&window),
+        )
+        .unwrap();
+        assert_eq!(rule10_staff_block(&report, "shift-zr-1")["total"], 40.0);
+        assert_eq!(rule10_staff_block(&report, "collector-b")["total"], 0.0);
+    }
+
+    fn rule5_window(second: bool) -> EffectiveZReportWindow {
+        let (date, start, end) = if second {
+            (
+                "2026-02-16",
+                "2026-02-16T23:30:00+02:00",
+                "2026-02-17T23:30:00+02:00",
+            )
+        } else {
+            (
+                "2026-02-15",
+                "2026-02-15T23:30:00+02:00",
+                "2026-02-16T23:30:00+02:00",
+            )
+        };
+        EffectiveZReportWindow {
+            report_date: date.to_string(),
+            period_start_at: start.to_string(),
+            cutoff_at: Some(end.to_string()),
+            day_start_at: Some(start.to_string()),
+            pending: false,
+            frozen: false,
+            lower_bound_mode: LowerBoundMode::Exclusive,
+        }
+    }
+
+    fn rule5_seed_tab(db: &DbState) {
+        seed_closed_shift(db);
+        seed_table_tab_order_with(db, "2026-02-16T23:00:00+02:00", "active", None);
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch(
+            "UPDATE orders SET total_amount=40,total_amount_cents=4000,currency='EUR',
+               branch_id='branch-1' WHERE id='ord-open-tab';",
+        )
+        .unwrap();
+    }
+
+    fn rule5_settle_tab(db: &DbState) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch(
+            "INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,
+               currency,created_at,updated_at)
+             VALUES('rule5-payment','ord-open-tab','cash',40,4000,'completed','EUR',
+               '2026-02-17T09:00:00+02:00','2026-02-17T09:00:00+02:00');
+             UPDATE orders SET status='completed',payment_status='paid',
+               updated_at='2026-02-17T09:00:00+02:00' WHERE id='ord-open-tab';",
+        )
+        .unwrap();
+    }
+
+    fn rule5_has_order(report: &BuiltDateZReport, id: &str) -> bool {
+        report.report_json["dayOrders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|order| order["id"] == id)
+    }
+
+    #[test]
+    fn rule5_tab_opened_before_z_is_reported_only_where_paid() {
+        let db = test_db();
+        rule5_seed_tab(&db);
+        let unpaid = rule8_report(&db, &rule5_window(false));
+        assert!(!rule5_has_order(&unpaid, "ord-open-tab"));
+        rule5_settle_tab(&db);
+        let first = rule8_report(&db, &rule5_window(false));
+        let second = rule8_report(&db, &rule5_window(true));
+        assert!(!rule5_has_order(&first, "ord-open-tab"));
+        assert!(rule5_has_order(&second, "ord-open-tab"));
+        assert_eq!(
+            first.report_json["sales"]["grossSales"],
+            unpaid.report_json["sales"]["grossSales"]
+        );
+        assert_eq!(second.report_json["sales"]["grossSales"], 40.0);
+    }
+
+    #[test]
+    fn rule5_status_edit_after_z_does_not_move_a_paid_order() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "UPDATE orders SET status='delivered',updated_at='2026-02-17T09:00:00+02:00'
+                 WHERE id='ord-3';",
+            )
+            .unwrap();
+        }
+        let first = rule8_report(&db, &rule5_window(false));
+        let second = rule8_report(&db, &rule5_window(true));
+        assert!(rule5_has_order(&first, "ord-3"));
+        assert!(!rule5_has_order(&second, "ord-3"));
+        assert_eq!(first.report_json["sales"]["grossSales"], 100.0);
+        assert_eq!(second.report_json["sales"]["grossSales"], 0.0);
+    }
+
+    #[test]
+    fn rule5_live_tab_survives_cleanup_and_is_reported_when_settled() {
+        let db = test_db();
+        rule5_seed_tab(&db);
+        let first = rule8_report(&db, &rule5_window(false));
+        assert!(!rule5_has_order(&first, "ord-open-tab"));
+        apply_local_day_rollover(&db, "2026-02-15", "2026-02-16T23:30:00+02:00").unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let remaining: String = conn
+                .query_row("SELECT id FROM orders", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(remaining, "ord-open-tab");
+            db::set_setting(
+                &conn,
+                "system",
+                "last_z_report_timestamp",
+                "2026-02-16T23:30:00+02:00",
+            )
+            .unwrap();
+        }
+        rule5_settle_tab(&db);
+        let second = rule8_report(&db, &rule5_window(true));
+        assert!(rule5_has_order(&second, "ord-open-tab"));
+        assert_eq!(second.report_json["sales"]["grossSales"], 40.0);
+    }
+
+    #[test]
+    fn rule5_same_window_orders_keep_their_totals() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        let first = rule8_report(&db, &rule5_window(false));
+        assert_eq!(first.report_json["sales"]["grossSales"], 100.0);
+        assert_eq!(first.report_json["sales"]["totalOrders"], 3);
+        for id in ["ord-1", "ord-2", "ord-3"] {
+            assert!(rule5_has_order(&first, id));
+        }
+    }
+
+    #[test]
+    fn rule5_first_part_payment_dates_the_whole_check() {
+        let db = test_db();
+        rule5_seed_tab(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,
+                   currency,created_at,updated_at)
+                 VALUES('rule5-part','ord-open-tab','cash',10,1000,'completed','EUR',
+                   '2026-02-16T23:15:00+02:00','2026-02-16T23:15:00+02:00');",
+            )
+            .unwrap();
+        }
+        rule5_settle_tab(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "UPDATE order_payments SET amount=30,amount_cents=3000 WHERE id='rule5-payment';",
+            )
+            .unwrap();
+        }
+        let first = rule8_report(&db, &rule5_window(false));
+        let second = rule8_report(&db, &rule5_window(true));
+        assert!(rule5_has_order(&first, "ord-open-tab"));
+        assert!(!rule5_has_order(&second, "ord-open-tab"));
+        assert_eq!(first.report_json["sales"]["grossSales"], 140.0);
+        assert_eq!(second.report_json["sales"]["grossSales"], 0.0);
+    }
+
+    fn rule8_window(second: bool, lower_bound_mode: LowerBoundMode) -> EffectiveZReportWindow {
+        let (date, start, end) = if second {
+            ("2026-02-16", "2026-02-16T09:00:00Z", "2026-02-17T09:00:00Z")
+        } else {
+            ("2026-02-15", "2026-02-15T09:00:00Z", "2026-02-16T09:00:00Z")
+        };
+        EffectiveZReportWindow {
+            report_date: date.to_string(),
+            period_start_at: start.to_string(),
+            cutoff_at: Some(end.to_string()),
+            day_start_at: Some(start.to_string()),
+            pending: false,
+            frozen: false,
+            lower_bound_mode,
+        }
+    }
+
+    fn rule8_report(db: &DbState, window: &EffectiveZReportWindow) -> BuiltDateZReport {
+        build_z_report_for_window(
+            db,
+            &serde_json::json!({"branchId":"branch-1"}),
+            false,
+            Some(window),
+        )
+        .unwrap()
+    }
+
+    fn rule8_seed() -> DbState {
+        let db = test_db();
+        seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "terminal_id", "term-1").unwrap();
+            conn.execute_batch(
+                "DELETE FROM payment_adjustments;
+                 UPDATE orders SET branch_id='branch-1',currency='EUR';
+                 UPDATE orders SET total_amount=100,total_amount_cents=10000,
+                   created_at='2026-02-15T12:00:00Z',updated_at='2026-02-15T12:00:00Z'
+                   WHERE id='ord-1';
+                 UPDATE order_payments SET amount=100,amount_cents=10000,
+                   created_at='2026-02-15T12:00:00Z',updated_at='2026-02-15T12:00:00Z'
+                   WHERE id='pay-1';
+                 UPDATE cash_drawer_sessions SET total_cash_sales=35,total_cash_sales_cents=3500,
+                   total_refunds=0,total_refunds_cents=0,opened_at='2026-02-16T09:00:01Z';
+                 UPDATE staff_shifts SET check_in_time='2026-02-16T09:00:01Z';",
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    fn rule8_adjustment(db: &DbState, kind: &str, cents: i64, at: &str, imported: bool) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,
+               amount,amount_cents,reason,staff_shift_id,refund_method,cash_handler,
+               imported_remote,created_at,updated_at)
+             VALUES(?1,'pay-1','ord-1',?2,?3,?4,'customer return','shift-zr-1',
+               'cash','cashier_drawer',?5,?6,?6)",
+            params![
+                format!("rule8-{at}"),
+                kind,
+                Cents::new(cents).to_f64_dp2(),
+                cents,
+                imported,
+                at
+            ],
+        )
+        .unwrap();
+    }
+
+    fn rule7_line(report: &Value, tender: &str) -> Value {
+        report["tenderReconciliation"]["lines"]
+            .as_array()
+            .expect("Rule 7 reconciliation lines")
+            .iter()
+            .find(|line| line["tender"] == tender)
+            .cloned()
+            .expect("tender line")
+    }
+
+    #[test]
+    fn rule7_same_window_card_returns_preserve_existing_fields() {
+        for (status, returned, old_card, gross, net) in [
+            ("refunded", 10000, 0.0, 0.0, 0.0),
+            ("completed", 2000, 100.0, 100.0, 80.0),
+        ] {
+            let db = rule8_seed();
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute_batch(
+                    "DELETE FROM orders WHERE id<>'ord-1';
+                    UPDATE orders SET created_at='2026-02-16T12:00:00Z';
+                    UPDATE order_payments SET method='card',created_at='2026-02-16T12:00:00Z';",
+                )
+                .unwrap();
+                conn.execute("UPDATE orders SET status=?1", [status])
+                    .unwrap();
+                conn.execute("UPDATE order_payments SET status=?1", [status])
+                    .unwrap();
+            }
+            rule8_adjustment(&db, "refund", returned, "2026-02-16T13:00:00Z", false);
+            db.conn
+                .lock()
+                .unwrap()
+                .execute("UPDATE payment_adjustments SET refund_method=NULL", [])
+                .unwrap();
+            let report = rule8_report(&db, &rule8_window(true, LowerBoundMode::Exclusive));
+            assert_eq!(
+                (report.card_sales, report.gross_sales, report.net_sales),
+                (old_card, gross, net)
+            );
+            let line = rule7_line(&report.report_json, "card");
+            assert_eq!(
+                line,
+                serde_json::json!({"tender":"card","received":100.0,"receivedCents":10000,"receivedCount":1,
+                "refunded":returned as f64/100.0,"refundedCents":returned,"refundedCount":1,
+                "kept":(10000-returned) as f64/100.0,"keptCents":10000-returned})
+            );
+            assert_eq!(
+                report.report_json["tenderReconciliation"]["totals"]["keptCents"],
+                10000 - returned
+            );
+        }
+    }
+
+    #[test]
+    fn rule7_late_cash_return_keeps_stored_first_window_frozen() {
+        let db = rule8_seed();
+        db.conn.lock().unwrap().execute_batch("DELETE FROM orders WHERE id<>'ord-1'; UPDATE staff_shifts SET check_in_time='2026-02-15T10:00:00Z',check_out_time='2026-02-15T18:00:00Z';").unwrap();
+        let first = rule8_window(false, LowerBoundMode::Exclusive);
+        let generated = generate_z_report_for_window(
+            &db,
+            &serde_json::json!({"branchId":"branch-1"}),
+            Some(&first),
+            None,
+        )
+        .unwrap();
+        let id = generated["zReportId"].as_str().unwrap();
+        let lookup = serde_json::json!({"zReportId":id});
+        let saved = get_z_report(&db, &lookup).unwrap();
+        let synced = stored_z_report_sync_payload(&db.conn.lock().unwrap(), id).unwrap();
+        let original = rule7_line(&generated["report"]["reportJson"], "cash");
+        assert_eq!(original["receivedCents"], 10000);
+        rule8_adjustment(&db, "refund", 10000, "2026-02-16T13:00:00Z", false);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "UPDATE order_payments SET status='refunded';
+            UPDATE orders SET status='refunded',updated_at='2026-02-16T13:00:00Z';",
+            )
+            .unwrap();
+        let current = rule8_report(&db, &rule8_window(true, LowerBoundMode::Exclusive));
+        let line = rule7_line(&current.report_json, "cash");
+        assert_eq!(
+            (
+                line["receivedCents"].as_i64(),
+                line["refundedCents"].as_i64(),
+                line["keptCents"].as_i64()
+            ),
+            (Some(0), Some(10000), Some(-10000))
+        );
+        assert_eq!(get_z_report(&db, &lookup).unwrap(), saved);
+        assert_eq!(
+            stored_z_report_sync_payload(&db.conn.lock().unwrap(), id).unwrap(),
+            synced
+        );
+        print_z_report(&db, &lookup, &CountingPrintQueueInvalidator::default()).unwrap();
+        assert_eq!(get_z_report(&db, &lookup).unwrap(), saved);
+    }
+
+    #[test]
+    fn rule7_card_return_paid_out_in_cash_and_voids_use_payout_tender() {
+        for kind in ["refund", "void"] {
+            let db = rule8_seed();
+            db.conn
+                .lock()
+                .unwrap()
+                .execute_batch(
+                    "DELETE FROM orders WHERE id<>'ord-1';
+                UPDATE order_payments SET method='card',created_at='2026-02-16T12:00:00Z';
+                UPDATE orders SET created_at='2026-02-16T12:00:00Z';",
+                )
+                .unwrap();
+            rule8_adjustment(&db, kind, 2000, "2026-02-16T13:00:00Z", false);
+            let report = rule8_report(&db, &rule8_window(true, LowerBoundMode::Exclusive));
+            let cash = rule7_line(&report.report_json, "cash");
+            let card = rule7_line(&report.report_json, "card");
+            assert_eq!(cash["receivedCents"], 0);
+            assert_eq!(cash["refundedCents"], 2000);
+            assert_eq!(cash["keptCents"], -2000);
+            assert_eq!(card["receivedCents"], 10000);
+            assert_eq!(card["refundedCents"], 0);
+        }
+    }
+
+    #[test]
+    fn rule8_late_partial_refund_belongs_to_its_own_window() {
+        let db = rule8_seed();
+        let first = rule8_window(false, LowerBoundMode::Exclusive);
+        let second = rule8_window(true, LowerBoundMode::Exclusive);
+        let before = rule8_report(&db, &first);
+        assert_eq!(before.gross_sales, 100.0);
+        rule8_adjustment(&db, "refund", 2000, "2026-02-17T01:00:00+02:00", false);
+        let rebuilt = rule8_report(&db, &first);
+        assert_eq!(rebuilt.refunds_total, 0.0);
+        assert_eq!(rebuilt.net_sales, before.net_sales);
+        let current = rule8_report(&db, &second);
+        assert_eq!(current.refunds_total, 20.0);
+        assert_eq!(current.net_sales, 55.0);
+        assert_eq!(current.report_json["sales"]["refundsTotal_cents"], 2000);
+        assert_eq!(current.report_json["sales"]["revenueRefundsTotal"], 20.0);
+    }
+
+    #[test]
+    fn rule8_late_full_refund_counts_a_refunded_order() {
+        let db = rule8_seed();
+        rule8_adjustment(&db, "refund", 10000, "2026-02-16T13:00:00Z", false);
+        db.conn.lock().unwrap().execute_batch(
+            "UPDATE orders SET status='refunded',updated_at='2026-02-16T13:00:00Z' WHERE id='ord-1';
+             UPDATE order_payments SET status='refunded',updated_at='2026-02-16T13:00:00Z' WHERE id='pay-1';"
+        ).unwrap();
+        let report = rule8_report(&db, &rule8_window(true, LowerBoundMode::Exclusive));
+        assert_eq!(report.refunds_total, 100.0);
+        assert_eq!(report.net_sales, report.gross_sales - 100.0);
+    }
+
+    #[test]
+    fn rule8_late_void_counts_a_cancelled_order() {
+        let db = rule8_seed();
+        rule8_adjustment(&db, "void", 10000, "2026-02-16T13:00:00Z", false);
+        db.conn.lock().unwrap().execute_batch(
+            "UPDATE orders SET status='cancelled',updated_at='2026-02-16T13:00:00Z' WHERE id='ord-1';
+             UPDATE order_payments SET status='voided',updated_at='2026-02-16T13:00:00Z' WHERE id='pay-1';"
+        ).unwrap();
+        let report = rule8_report(&db, &rule8_window(true, LowerBoundMode::Exclusive));
+        assert_eq!(report.voids_total, 100.0);
+        assert_eq!(report.refunds_total, 0.0);
+        assert_eq!(report.net_sales, -25.0);
+    }
+
+    #[test]
+    fn rule8_same_window_refunds_keep_existing_netting() {
+        for status in ["completed", "refunded", "cancelled"] {
+            let db = rule8_seed();
+            db.conn.lock().unwrap().execute_batch(
+                "UPDATE orders SET created_at='2026-02-16T12:00:00Z',updated_at='2026-02-16T12:00:00Z' WHERE id='ord-1';
+                 UPDATE order_payments SET created_at='2026-02-16T12:00:00Z' WHERE id='pay-1';"
+            ).unwrap();
+            db.conn
+                .lock()
+                .unwrap()
+                .execute("UPDATE orders SET status=?1 WHERE id='ord-1'", [status])
+                .unwrap();
+            let window = rule8_window(true, LowerBoundMode::Exclusive);
+            let before = rule8_report(&db, &window);
+            rule8_adjustment(&db, "refund", 2000, "2026-02-16T13:00:00Z", false);
+            let after = rule8_report(&db, &window);
+            let expected = if status == "completed" { 20.0 } else { 0.0 };
+            assert_eq!(after.refunds_total, expected, "{status}");
+            assert_eq!(after.net_sales, before.net_sales - expected, "{status}");
+        }
+    }
+
+    #[test]
+    fn rule8_imported_remote_adjustments_stay_excluded() {
+        for kind in ["refund", "void"] {
+            let db = rule8_seed();
+            rule8_adjustment(&db, kind, 2000, "2026-02-16T13:00:00Z", true);
+            let report = rule8_report(&db, &rule8_window(true, LowerBoundMode::Exclusive));
+            assert_eq!(report.refunds_total, 0.0);
+            assert_eq!(report.voids_total, 0.0);
+            assert_eq!(report.net_sales, 75.0);
+        }
+    }
+
+    #[test]
+    fn rule8_adjustment_boundaries_compare_instants() {
+        for mode in [LowerBoundMode::Inclusive, LowerBoundMode::Exclusive] {
+            let db = rule8_seed();
+            rule8_adjustment(&db, "refund", 700, "2026-02-16T11:00:00+02:00", false);
+            rule8_adjustment(&db, "refund", 2000, "2026-02-17T11:00:00+02:00", false);
+            rule8_adjustment(&db, "refund", 300, "2026-02-17T09:00:01Z", false);
+            let report = rule8_report(&db, &rule8_window(true, mode));
+            assert_eq!(
+                report.refunds_total,
+                if mode == LowerBoundMode::Inclusive {
+                    27.0
+                } else {
+                    20.0
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn rule8_non_date_adjustment_exclusions_stay_intact() {
+        for exclusion in [
+            "is_ghost=1",
+            "is_test=1",
+            "order_context='repair_settlement'",
+            "branch_id='other-branch'",
+        ] {
+            let db = rule8_seed();
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    &format!("UPDATE orders SET {exclusion} WHERE id='ord-1'"),
+                    [],
+                )
+                .unwrap();
+            rule8_adjustment(&db, "refund", 2000, "2026-02-16T13:00:00Z", false);
+            let report = rule8_report(&db, &rule8_window(true, LowerBoundMode::Exclusive));
+            assert_eq!(report.refunds_total, 0.0, "{exclusion}");
+            assert_eq!(report.net_sales, 75.0, "{exclusion}");
+        }
+    }
+
+    #[test]
+    fn rule8_hotel_transfer_refunds_follow_the_adjustment_window() {
+        let db = rule8_seed();
+        db.conn.lock().unwrap().execute(
+            "UPDATE orders SET order_context='folio_settlement',items=?1 WHERE id='ord-1'",
+            [serde_json::json!([{"folio_line_kind":"transfer","total_price":60},{"total_price":40}]).to_string()]
+        ).unwrap();
+        let first = rule8_window(false, LowerBoundMode::Exclusive);
+        let before = rule8_report(&db, &first);
+        rule8_adjustment(&db, "refund", 2000, "2026-02-16T13:00:00Z", false);
+        let rebuilt = rule8_report(&db, &first);
+        assert_eq!(rebuilt.report_json["hotel"], before.report_json["hotel"]);
+        assert_eq!(rebuilt.net_sales, before.net_sales);
+        let current = rule8_report(&db, &rule8_window(true, LowerBoundMode::Exclusive));
+        assert_eq!(current.refunds_total, 20.0);
+        assert_eq!(current.report_json["hotel"]["transferRefundsTotal"], 12.0);
+        assert_eq!(current.report_json["sales"]["revenueRefundsTotal"], 8.0);
+        assert_eq!(current.net_sales, 67.0);
+    }
+
+    #[test]
+    fn rule8_same_window_hotel_returns_keep_existing_netting() {
+        for (status, amount) in [("completed", 2000), ("refunded", 10000)] {
+            let db = rule8_seed();
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute_batch(
+                    "UPDATE orders SET created_at='2026-02-16T12:00:00Z',updated_at='2026-02-16T13:00:00Z' WHERE id='ord-1';
+                     UPDATE order_payments SET created_at='2026-02-16T12:00:00Z' WHERE id='pay-1';"
+                ).unwrap();
+                conn.execute("UPDATE orders SET status=?1,order_context='folio_settlement',items=?2 WHERE id='ord-1'",
+                    params![status,serde_json::json!([{"folio_line_kind":"transfer","total_price":60},{"total_price":40}]).to_string()]).unwrap();
+                conn.execute(
+                    "UPDATE order_payments SET status=?1 WHERE id='pay-1'",
+                    [status],
+                )
+                .unwrap();
+            }
+            rule8_adjustment(&db, "refund", amount, "2026-02-16T13:00:00Z", false);
+            // The unchanged shift helper pins the existing same-window split.
+            let legacy = hotel_report_totals(
+                &db.conn.lock().unwrap(),
+                "FROM orders o WHERE o.id='ord-1'",
+                [],
+            )
+            .unwrap();
+            let report = rule8_report(&db, &rule8_window(true, LowerBoundMode::Exclusive));
+            assert_eq!(report.report_json["hotel"], legacy, "{status}");
+        }
+    }
+
+    #[test]
+    fn rule8_local_refund_of_restored_history_reaches_next_z() {
+        let db = rule8_seed();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("DELETE FROM orders WHERE id='ord-1'", [])
+                .unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM order_payments WHERE id='pay-1'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            conn.execute_batch(
+                "INSERT INTO orders(id,supabase_id,items,total_amount,total_amount_cents,status,
+                   payment_status,branch_id,currency,created_at,updated_at)
+                 VALUES('restored-order','remote-history','[]',100,10000,'completed','paid',
+                   'branch-1','EUR','2026-02-15T12:00:00Z','2026-02-16T12:00:00Z');",
+            )
+            .unwrap();
+            let remote = serde_json::json!({"id":"restored-payment","order_id":"remote-history",
+                "payment_method":"cash","amount":100,"currency":"EUR","status":"completed",
+                "created_at":"2026-02-15T12:00:00Z","updated_at":"2026-02-15T12:00:00Z","adjustments":[]});
+            crate::sync::sync_remote_payment_into_local_for_test(&conn, &remote).unwrap();
+        }
+        let payment_id: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM order_payments WHERE remote_payment_id='restored-payment'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        crate::refunds::refund_payment(
+            &db,
+            &serde_json::json!({"paymentId":payment_id,
+                "amount":20,"reason":"customer return","refundMethod":"cash",
+                "cashHandler":"cashier_drawer","staffShiftId":"shift-zr-1"}),
+        )
+        .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE payment_adjustments SET created_at='2026-02-16T13:00:00Z' WHERE order_id='restored-order'", []).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT imported_remote FROM payment_adjustments WHERE order_id='restored-order'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+        let report = rule8_report(&db, &rule8_window(true, LowerBoundMode::Exclusive));
+        assert_eq!(report.refunds_total, 20.0);
+        assert_eq!(report.net_sales, 55.0);
+        assert_eq!(report.report_json["cashDrawer"]["totalRefunds"], 20.0);
+    }
+
+    #[test]
+    fn rule8_stored_z_and_rebuilt_cutoff_ignore_later_refunds() {
+        let db = rule8_seed();
+        db.conn.lock().unwrap().execute_batch(
+            "UPDATE orders SET created_at='2026-02-16T12:00:00Z',updated_at='2026-02-16T12:00:00Z' WHERE id='ord-1';
+             UPDATE order_payments SET created_at='2026-02-16T12:00:00Z' WHERE id='pay-1';"
+        ).unwrap();
+        let window = rule8_window(true, LowerBoundMode::Exclusive);
+        let payload = serde_json::json!({"branchId":"branch-1"});
+        let generated = generate_z_report_for_window(&db, &payload, Some(&window), None).unwrap();
+        let id = generated["zReportId"].as_str().unwrap();
+        let lookup = serde_json::json!({"zReportId":id});
+        let stored_before = get_z_report(&db, &lookup).unwrap();
+        let queued_before = stored_z_report_sync_payload(&db.conn.lock().unwrap(), id).unwrap();
+        rule8_adjustment(&db, "refund", 2000, "2026-02-17T10:00:00Z", false);
+        // A stored report and its sync copy keep the exact original snapshot.
+        assert_eq!(get_z_report(&db, &lookup).unwrap(), stored_before);
+        let retried = generate_z_report_for_window(&db, &payload, Some(&window), None).unwrap();
+        assert_eq!(retried["zReportId"], id);
+        assert_eq!(get_z_report(&db, &lookup).unwrap(), stored_before);
+        assert_eq!(
+            stored_z_report_sync_payload(&db.conn.lock().unwrap(), id).unwrap(),
+            queued_before
+        );
+        let invalidator = CountingPrintQueueInvalidator::default();
+        assert_eq!(
+            print_z_report(&db, &lookup, &invalidator).unwrap()["success"],
+            true
+        );
+        assert_eq!(get_z_report(&db, &lookup).unwrap(), stored_before);
+        let rebuilt = rule8_report(&db, &window);
+        assert_eq!(rebuilt.refunds_total, 0.0);
+        assert_eq!(rebuilt.net_sales, 175.0);
     }
 
     #[test]
@@ -19925,8 +21062,21 @@ mod offline_week_tests {
         }
         let (prepared_two, z2) = close_locally(&db, "2026-10-21T02:30:00Z");
         assert!(must_close_behind_local_zs(&db, None).unwrap());
+        let next_window = movement_window("2026-10-21T02:30:00Z", "2026-10-22T02:30:00Z");
+        let next = build_z_report_for_window(&db, &payload(), false, Some(&next_window)).unwrap();
+        assert_eq!(
+            next.refunds_total, 0.0,
+            "the late refund belongs to Z2 only"
+        );
 
         let conn = db.conn.lock().unwrap();
+        let (report_one, _) = stored_and_queued(&conn, &z1);
+        let (report_two, _) = stored_and_queued(&conn, &z2);
+        assert_eq!(report_one["sales"]["refundsTotal_cents"], 0);
+        assert_eq!(report_two["sales"]["refundsTotal_cents"], 500);
+        assert_eq!(report_two["sales"]["grossSales_cents"], 1250);
+        assert_eq!(report_two["sales"]["netSales_cents"], 750);
+        assert_eq!(report_two["paymentsBreakdown"]["cash"]["total"], 12.5);
         let health = local_z_health(&conn).unwrap();
         assert_eq!(health["localZs"][0]["zReportId"], z1.as_str());
         assert_eq!(health["localZs"][1]["zReportId"], z2.as_str());
@@ -20040,6 +21190,252 @@ mod offline_week_tests {
             Some(prepared_two.rollover_timestamp.as_str())
         );
         assert_eq!(unconfirmed_local_z_count(&conn).unwrap(), 0);
+    }
+
+    fn movement_window(start: &str, end: &str) -> EffectiveZReportWindow {
+        EffectiveZReportWindow {
+            report_date: "2026-10-20".to_string(),
+            period_start_at: start.to_string(),
+            cutoff_at: Some(end.to_string()),
+            day_start_at: None,
+            pending: false,
+            frozen: false,
+            lower_bound_mode: LowerBoundMode::Exclusive,
+        }
+    }
+
+    #[test]
+    fn late_split_void_is_counted_once_without_reselling_the_order() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_one());
+            conn.execute(
+                "UPDATE order_payments SET amount=7.5,amount_cents=750 WHERE id='pay-ord-d1'",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,currency,created_at,updated_at)
+                VALUES ('split-d1','ord-d1','card',5,500,'completed','EUR','2026-10-19T20:00:00Z','2026-10-19T20:00:00Z')", []).unwrap();
+        }
+        let (_, z1) = close_locally(&db, "2026-10-20T02:30:00Z");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE order_payments SET status='voided' WHERE id='split-d1'",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,sync_state,created_at,updated_at)
+                VALUES ('late-void','split-d1','ord-d1','void',5,500,'late void','applied','2026-10-20T19:00:00Z','2026-10-20T19:00:00Z')", []).unwrap();
+            let (stored, _) = stored_and_queued(&conn, &z1);
+            assert_eq!(stored["sales"]["voidsTotal_cents"], 0);
+        }
+        let window = movement_window("2026-10-20T02:30:00Z", "2026-10-21T02:30:00Z");
+        let second = build_z_report_for_window(&db, &payload(), false, Some(&window)).unwrap();
+        assert_eq!(second.total_orders, 0);
+        assert_eq!(second.gross_sales, 0.0);
+        assert_eq!(second.voids_total, 5.0);
+        assert_eq!(second.net_sales, -5.0);
+        assert_eq!(second.cash_sales + second.card_sales, 0.0);
+        let third_window = movement_window("2026-10-21T02:30:00Z", "2026-10-22T02:30:00Z");
+        let third = build_z_report_for_window(&db, &payload(), false, Some(&third_window)).unwrap();
+        assert_eq!(third.voids_total, 0.0);
+        // The debit's original unit is evidence even without a current-day sale.
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            report_window_currency(
+                &conn,
+                BRANCH,
+                &window.period_start_at,
+                window.cutoff_at.as_deref(),
+                window.lower_bound_mode,
+                vec![]
+            )
+            .unwrap(),
+            Some("EUR".into())
+        );
+        conn.execute(
+            "UPDATE order_payments SET currency='' WHERE id='split-d1'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            report_window_currency(
+                &conn,
+                BRANCH,
+                &window.period_start_at,
+                window.cutoff_at.as_deref(),
+                window.lower_bound_mode,
+                vec![Some("EUR".into())]
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn late_payments_and_clock_skew_keep_their_movement_and_order_scopes() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_one());
+        }
+        let (_, z1) = close_locally(&db, "2026-10-20T02:30:00Z");
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_two());
+            // A second receipt belongs to the in-window order even just beyond cutoff.
+            conn.execute(
+                "UPDATE order_payments SET amount=10,amount_cents=1000 WHERE id='pay-ord-d2'",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,currency,created_at,updated_at)
+                VALUES ('skew-d2','ord-d2','card',2.5,250,'completed','EUR','2026-10-21T02:30:01Z','2026-10-21T02:30:01Z')", []).unwrap();
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,currency,created_at,updated_at)
+                VALUES ('late-d1','ord-d1','card',3,300,'completed','CHF','2026-10-20T19:00:00Z','2026-10-20T19:00:00Z')", []).unwrap();
+            conn.execute(
+                "UPDATE orders SET total_amount=15.5,total_amount_cents=1550,plugin='efood' WHERE id='ord-d1'",
+                [],
+            )
+            .unwrap();
+            conn.execute("UPDATE orders SET currency='EUR'", [])
+                .unwrap();
+            conn.execute("UPDATE staff_shifts SET currency='EUR'", [])
+                .unwrap();
+            conn.execute("UPDATE cash_drawer_sessions SET currency='EUR'", [])
+                .unwrap();
+            let (stored, _) = stored_and_queued(&conn, &z1);
+            assert_eq!(stored["paymentsBreakdown"]["card"]["total"], 0.0);
+        }
+        let window = movement_window("2026-10-20T02:30:00Z", "2026-10-21T02:30:00Z");
+        let second = build_z_report_for_window(&db, &payload(), false, Some(&window)).unwrap();
+        assert_eq!(second.total_orders, 1);
+        assert_eq!(second.gross_sales, 12.5);
+        assert_eq!(second.cash_sales, 10.0);
+        assert_eq!(second.card_sales, 5.5);
+        assert_eq!(second.payments_breakdown["card"]["count"], 2);
+        assert_eq!(
+            second.report_json["sales"]["byType"]["instore"]["card"]["total"],
+            5.5
+        );
+        assert_eq!(
+            second.report_json["sales"]["platforms"][0]["vendorCard_cents"],
+            300
+        );
+        assert_eq!(
+            second.report_json["sales"]["platforms"][0]["vendorOrders"],
+            0
+        );
+        assert_eq!(second.report_json["integrity"]["reconciled"], true);
+        assert_eq!(
+            second.report_json["integrity"]["paymentCoverage_cents"],
+            1550
+        );
+        assert_eq!(
+            second.report_json["integrity"]["olderOrderPayments"]["amount_cents"],
+            300
+        );
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE order_payments SET amount=7,amount_cents=700 WHERE id='pay-ord-d2'",
+                [],
+            )
+            .unwrap();
+        }
+        let missing_payment =
+            build_z_report_for_window(&db, &payload(), false, Some(&window)).unwrap();
+        assert_eq!(
+            missing_payment.report_json["integrity"]["reconciled"],
+            false
+        );
+        assert_eq!(
+            missing_payment.report_json["integrity"]["uncoveredAmount_cents"], 300,
+            "late receipts cannot cover a different order's gap"
+        );
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE order_payments SET amount=10,amount_cents=1000 WHERE id='pay-ord-d2'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            report_window_currency(
+                &conn,
+                BRANCH,
+                &window.period_start_at,
+                window.cutoff_at.as_deref(),
+                window.lower_bound_mode,
+                vec![]
+            )
+            .unwrap(),
+            None
+        );
+        conn.execute(
+            "UPDATE order_payments SET currency='EUR' WHERE id='late-d1'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            report_window_currency(
+                &conn,
+                BRANCH,
+                &window.period_start_at,
+                window.cutoff_at.as_deref(),
+                window.lower_bound_mode,
+                vec![]
+            )
+            .unwrap(),
+            Some("EUR".into())
+        );
+        drop(conn);
+        close_locally(&db, "2026-10-21T02:30:00Z");
+        let third_window = movement_window("2026-10-21T02:30:00Z", "2026-10-22T02:30:00Z");
+        let third = build_z_report_for_window(&db, &payload(), false, Some(&third_window)).unwrap();
+        assert_eq!(
+            third.cash_sales + third.card_sales,
+            0.0,
+            "clock skew must not count a listed receipt again"
+        );
+    }
+
+    #[test]
+    fn older_movements_respect_boundaries_branch_and_local_money_filters() {
+        let db = test_db();
+        let start = "2026-10-20T02:30:00Z";
+        let end = "2026-10-21T02:30:00Z";
+        {
+            let conn = db.conn.lock().unwrap();
+            for (id, branch, ghost, test, context, at, imported) in [
+                ("end", Some(BRANCH), 0, 0, "", end, 0),
+                ("null-branch", None, 0, 0, "", "2026-10-20T19:00:00Z", 0),
+                ("start", Some(BRANCH), 0, 0, "", start, 0),
+                ("after", Some(BRANCH), 0, 0, "", "2026-10-21T02:30:01Z", 0),
+                ("other-branch", Some("branch-2"), 0, 0, "", end, 0),
+                ("ghost", Some(BRANCH), 1, 0, "", end, 0),
+                ("test", Some(BRANCH), 0, 1, "", end, 0),
+                ("repair", Some(BRANCH), 0, 0, "repair_settlement", end, 0),
+                ("imported", Some(BRANCH), 0, 0, "", end, 1),
+            ] {
+                conn.execute("INSERT INTO orders(id,order_number,items,total_amount,total_amount_cents,status,order_type,payment_status,branch_id,is_ghost,is_test,order_context,created_at,updated_at)
+                    VALUES (?1,?1,'[]',2,200,'completed','pickup','paid',?2,?3,?4,?5,?6,?6)", params![id,branch,ghost,test,context,start]).unwrap();
+                conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,currency,created_at,updated_at)
+                    VALUES (?1,?1,'cash',1,100,'completed','EUR',?2,?2)", params![id,start]).unwrap();
+                conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,currency,created_at,updated_at,payment_origin)
+                    VALUES (?1,?2,'card',1,100,'completed','EUR',?3,?3,?4)", params![format!("late-{id}"),id,at,if imported==1 {"sync_reconstructed"} else {"manual"}]).unwrap();
+                conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,sync_state,created_at,updated_at,imported_remote)
+                    VALUES (?1,?1,?1,'refund',0.5,50,'late','applied',?2,?2,?3)", params![id,at,imported]).unwrap();
+            }
+        }
+        let window = movement_window(start, end);
+        let report = build_z_report_for_window(&db, &payload(), false, Some(&window)).unwrap();
+        assert_eq!(report.total_orders, 0);
+        assert_eq!(report.gross_sales, 0.0);
+        assert_eq!(report.cash_sales, 0.0);
+        assert_eq!(report.card_sales, 2.0);
+        assert_eq!(report.refunds_total, 1.0);
     }
 
     /// The online rollover never deletes over a local window the server has

@@ -43,10 +43,13 @@ test('ConfirmDialog keeps shared confirmation modals on the yellow glass palette
 
   // Touch-first confirmation checkbox row: tall, smooth radius, press feedback; the box itself
   // is readable on the light and the dark glass.
-  assert.match(source, /min-h-\[52px\][^"]*rounded-2xl[^"]*active:scale-\[0\.99\]/);
+  // founder 11/11/2026: tall checkbox row sinks via the shared tap-card rule.
+  assert.match(source, /pos-glass-tap-card flex min-h-\[52px\][^"]*rounded-2xl/);
+  const css = readFileSync(path.join(projectRoot, 'src/renderer/styles/glassmorphism.css'), 'utf8');
+  assert.match(css, /\.pos-glass-tap-card:is\(:active, \[data-pressed\]\):not\(:disabled\)[\s\S]*?box-shadow: var\(--pos-s-depth-press\)/);
   assert.match(
     source,
-    /'h-5 w-5 rounded-xl border-slate-400 bg-white focus:ring-2 focus:ring-offset-0 dark:border-zinc-400 dark:bg-zinc-900'/,
+    /'h-5 w-5 rounded-xl border-\(--field-glass-border\) bg-\(--field-glass\) focus:ring-2 focus:ring-offset-0'/,
   );
   assert.match(source, /<LiquidGlassModal/);
   assert.match(source, /ariaLabel=\{title\}/);

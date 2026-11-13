@@ -1948,7 +1948,8 @@
       "last5Days": "Last 5 Days",
       "last7Days": "Last 7 Days",
       "last30Days": "Last 30 Days",
-      "last90Days": "Last 90 Days"
+      "last90Days": "Last 90 Days",
+      "sinceLastZ": "Since the last Z"
     },
     "sales": {
       "title": "Sales",
@@ -5170,7 +5171,9 @@
         "releaseWrongPin": "That PIN can't release it. A manager with the right to cancel orders enters their own PIN.",
         "releaseFailed": "The handover couldn't be released. Nothing changed; try again.",
         "released": "Released. The satellite cash was not added to this drawer. You can close the shift now."
-      }
+      },
+      "netCollections": "Net collections",
+      "ofWhichTips": "of which tips"
     },
     "zReport": {
       "title": "Z Report - {{date}}",
@@ -5531,7 +5534,12 @@
       "heldEditClosed": "The correction was closed. No money was recorded.",
       "heldEditCloseFailed": "The correction could not be closed. It stays held; nothing was recorded.",
       "unsavedSaved": "Payment saved.",
-      "unsavedStillNotSaved": "Still not saved on this till. Do not charge again. Try again, or give the money back to the customer and confirm it here."
+      "unsavedStillNotSaved": "Still not saved on this till. Do not charge again. Try again, or give the money back to the customer and confirm it here.",
+      "tenderReconciliation": {
+        "received": "Received",
+        "refunded": "Refunded",
+        "kept": "Kept"
+      }
     },
     "expense": {
       "title": "Drawer Outflows",
@@ -5690,6 +5698,8 @@
       "managerApprovalSubtitle": "Cancelling a paid order needs the right to cancel. A manager who has it enters their own PIN. Nothing is charged."
     },
     "addCustomer": {
+      "mapStreetNameDiffers": "The map calls this street \"{{street}}\". Check that it is the right one.",
+      "mapPostalCodeDiffers": "The map gives postal code {{code}} for this address.",
       "title": "Add New Customer",
       "editTitle": "Edit Customer",
       "addAddressTitle": "Add New Address",
@@ -5965,6 +5975,7 @@
       "unknownError": "Unknown error"
     },
     "connectionSettings": {
+      "unsyncedQueue": "This till still has money that was not sent to the server. Sync first, then connect it to the other store.",
       "pinSaveError": "Failed to save PIN",
       "connectionSavedSyncing": "Connection saved. Syncing data…",
       "themeAutoDayNight": "Automatic (day / night)",
@@ -6516,7 +6527,8 @@
     "addressValidationError": "Failed to validate address",
     "orderCreated": "Order created successfully!",
     "markDeliveredFailed": "Failed to mark order {{orderNumber}} as delivered",
-    "pickupDelivered": "{{count}} pickup order(s) marked as delivered",
+    "pickupDelivered_one": "Order delivered",
+    "pickupDelivered_other": "{{count}} orders delivered",
     "platformReadySent": "Marked ready",
     "platformReadyFailed": "Failed to notify the platform for {{orderNumber}}",
     "deliveriesCompleted": "Completed {{count}} delivery order(s)",
@@ -8947,6 +8959,7 @@
         "serviceStep": "Service"
       },
       "loadingSlots": "Loading...",
+      "pickDay": "Pick a day to see the times",
       "availability": {
         "available": "Available",
         "booked": "Booked"
@@ -10347,6 +10360,18 @@
     "clearAttemptSubtitle": "A manager enters their own PIN. Nothing is charged or returned."
   },
   "reservationForm": {
+    "today": "Today",
+    "tomorrow": "Tomorrow",
+    "dayStrip": "Next days",
+    "dayFree": "Free",
+    "dayReserved": "{{count}} reservations",
+    "dayReserved_one": "{{count}} reservation",
+    "dayReserved_other": "{{count}} reservations",
+    "dayFull": "Full",
+    "slotFree": "Free",
+    "slotTaken": "Reserved",
+    "pickDay": "Pick a day to see the times",
+    "noTimesLeft": "No times are left for this day. Pick another day or type a time.",
     "toasts": {
       "created": "Reservation created successfully",
       "updated": "Reservation updated successfully",

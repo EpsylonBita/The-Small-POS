@@ -118,25 +118,25 @@ test('plugin setup modal explicitly protects its heading, close control and form
   );
 });
 
-test('Z report has distinct light and dark text, panel and control tokens', () => {
-  assert.match(
-    zReportModal,
-    /\? 'z-report-glass-content overflow-hidden! p-4! text-white'\s*:\s*'z-report-glass-content overflow-hidden! p-4! text-slate-950'/,
-  );
-  assert.match(zReportModal, /const strongTextClass = isDarkTheme \? 'text-white' : 'text-slate-950'/);
-  // Founder 31/10 («όχι μόνο το γυαλί»): the Z is glass like every modal -- the shared frost shell and
-  // frost cards on it, from the modal tokens (which follow the theme), never white panels piled up.
-  assert.match(zReportModal, /const modalInsetClassName = 'border-\(--modal-glass-card-border\) bg-\(--modal-glass-card\)';/);
+// founder 11/11/2026: shared semantic text and frosted panels follow both themes.
+test('Z report uses the shared glass text, panels and field tokens', () => {
+  assert.match(zReportModal, /const modalContentClassName = 'z-report-glass-content overflow-hidden! p-4! liquid-glass-modal-text';/);
+  assert.match(zReportModal, /const strongTextClass = 'liquid-glass-modal-text';/);
+  assert.match(zReportModal, /const mutedTextClass = 'liquid-glass-modal-text-muted';/);
+  assert.match(zReportModal, /const softTextClass = 'liquid-glass-modal-text-muted';/);
+  assert.match(zReportModal, /const modalInsetClassName = 'pos-glass-form-card';/);
+  assert.match(zReportModal, /const glassControlClass = 'pos-glass-field';/);
   assert.match(
     glassStyles,
     /\.liquid-glass-modal-shell\.z-report-glass-shell\s*\{[\s\S]*?background:\s*var\(--modal-glass\) !important/,
   );
 });
 
-test('generic confirmation and update dialogs use semantic modal text and inset surfaces', () => {
+test('generic confirmation and update dialogs use semantic modal text and themed panels', () => {
   assert.match(confirmDialog, /liquid-glass-modal-text/);
   assert.match(confirmDialog, /liquid-glass-modal-text-muted/);
-  assert.match(confirmDialog, /liquid-glass-modal-inset/);
+  // founder 11/11/2026: confirmation details use the frosted form panel.
+  assert.match(confirmDialog, /pos-glass-form-card/);
   assert.match(updateDialog, /liquid-glass-modal-text/);
   assert.match(updateDialog, /liquid-glass-modal-text-muted/);
   assert.match(updateDialog, /liquid-glass-modal-inset/);

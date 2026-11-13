@@ -1,6 +1,6 @@
 /** Open portals must yield to check-in when a remote checkout locks the till. */
 import React from 'react';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GlobalCashierGate } from '../GlobalCashierGate';
 import { FinancialSyncPanel } from '../FinancialSyncPanel';
@@ -67,7 +67,8 @@ describe('portals through the real cashier gate', () => {
     expect(root).toHaveStyle({ visibility: 'hidden' });
     model.locked = false;
     rerender(<Till>{surface}</Till>);
-    expect(close).toBeVisible();
+    // The glass window fades in; under a loaded CI runner its opening opacity can still apply.
+    await waitFor(() => expect(close).toBeVisible());
     expect(close.closest('[inert]')).toBeNull();
   });
 

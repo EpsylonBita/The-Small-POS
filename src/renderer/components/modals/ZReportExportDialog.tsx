@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { AnimatePresence, motion, useIsPresent, useReducedMotion, type HTMLMotionProps } from 'framer-motion';
 import { AlertTriangle, CalendarDays, Download, RefreshCw } from 'lucide-react';
 import { getBridge } from '../../../lib';
 import type { StoredZReportRow } from '../../../lib/ipc-contracts';
-import { useTheme } from '../../contexts/theme-context';
 import type { ZReportData } from '../../types/reports';
 import { parseLocalDateString, toLocalDateString } from '../../utils/date';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
@@ -21,6 +21,14 @@ import { resolvePersistedZReportId } from '../../utils/zReport';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { zReportRowCents, zReportTableRows } from '../../../../../shared/reports/z-report-export';
 import { zReportLabel } from '../../../../../shared/reports/z-report-labels';
+
+// Keep stale messages and controls out of the DOM while their empty glass panel collapses.
+// This preserves the original removal timing, including blockers that have just been resolved.
+function ZReportReveal({ as = 'div', children, ...props }: HTMLMotionProps<'div'> & { as?: 'div' | 'section' | 'p' | 'ul' }) {
+  const isPresent = useIsPresent();
+  const Surface = motion[as] as typeof motion.div;
+  return <Surface {...props} aria-hidden={isPresent ? props['aria-hidden'] : true}>{isPresent ? children : null}</Surface>;
+}
 
 export type ZReportExportKind = 'report' | 'orders';
 
@@ -91,26 +99,25 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
   const bridge = getBridge();
   const { t, i18n } = useTranslation();
   const language = i18n?.language;
-  const { resolvedTheme } = useTheme();
-  const isDarkTheme = resolvedTheme === 'dark';
-  const shellClassName = isDarkTheme
-    ? 'z-report-glass-shell border-(--pos-s-border) text-white shadow-2xl shadow-black/40'
-    : 'z-report-glass-shell border-(--pos-s-border) text-slate-950 shadow-2xl shadow-slate-950/20';
-  const contentClassName = isDarkTheme ? 'z-report-glass-content p-4! text-white' : 'z-report-glass-content p-4! text-slate-950';
-  const insetClass = isDarkTheme
-    ? 'border-(--pos-s-border) bg-black/30 shadow-xs shadow-black/20 backdrop-blur-xl'
-    : 'border-(--pos-s-border) bg-white/70 shadow-xs shadow-slate-950/10 backdrop-blur-xl';
-  const tileClass = isDarkTheme
-    ? 'border-white/12 bg-white/8 text-white'
-    : 'border-slate-900/12 bg-white/80 text-slate-950';
-  const strongText = isDarkTheme ? 'text-white' : 'text-slate-950';
-  const mutedText = isDarkTheme ? 'text-white/85' : 'text-slate-700';
-  const softText = isDarkTheme ? 'text-white/60' : 'text-slate-500';
-  const secondaryButton = isDarkTheme
-    ? 'border-(--pos-s-border) bg-black/30 text-white active:bg-white/12'
-    : 'border-(--pos-s-border) bg-white/80 text-slate-900 active:bg-white';
+  const shellClassName = 'z-report-glass-shell [&_.liquid-glass-modal-header]:border-b-0! border-(--pos-s-border) liquid-glass-modal-text shadow-2xl shadow-slate-950/20 dark:shadow-black/40';
+  const contentClassName = 'z-report-glass-content p-4! liquid-glass-modal-text';
+  // founder 11/11/2026: frosted panels and deep tappable rows, solid export actions.
+  const insetClass = 'pos-glass-form-card';
+  const tileClass = 'pos-glass-form-card liquid-glass-modal-text';
+  const strongText = 'liquid-glass-modal-text';
+  const mutedText = 'liquid-glass-modal-text-muted';
+  const softText = 'liquid-glass-modal-text-muted';
+  const secondaryButton = 'border-(--pos-s-border) bg-(--pos-s-raised) text-(--pos-s-fg) shadow-(--pos-s-depth) active:bg-(--pos-s-raised-press) active:scale-[0.99]';
   const primaryButton = 'border-(--pos-s-border) bg-yellow-400 text-black shadow-lg active:bg-yellow-300';
   const buttonBase = 'inline-flex min-h-touch items-center justify-center gap-2 rounded-xl border px-4 text-sm font-black transition disabled:cursor-not-allowed disabled:opacity-50';
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
 
   const listTitleId = useId();
   const previewTitleId = useId();
@@ -305,10 +312,10 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
     const isSelected = view.id === selectedId;
     const varianceCents = zReportRowCents(view.document, 'drawer.variance', 'cashDrawer');
     const varianceTone = varianceCents === null
-      ? softText
+      ? 'text-amber-600 dark:text-amber-300'
       : varianceCents === 0
         ? 'text-emerald-600 dark:text-emerald-300'
-        : 'text-amber-600 dark:text-amber-300';
+        : 'text-rose-500';
     return (
       <button
         key={view.id}
@@ -323,36 +330,36 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
         data-z-report-id={view.id}
         data-z-report-export-row
         onClick={() => selectRow(view.id)}
-        className={`w-full rounded-2xl border p-3 text-left transition active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 ${
-          isSelected ? 'border-(--pos-s-sel-bg) bg-(--pos-s-surface-2) ring-2 ring-(--pos-s-sel-bg)' : tileClass
+        className={`pos-glass-tap-card min-h-touch w-full p-3 text-left transition focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 ${
+          isSelected ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)' : strongText
         }`}
       >
         <div className="flex items-start justify-between gap-2">
-          <span className={`min-w-0 truncate text-sm font-black ${strongText}`}>
+          <span className={`min-w-0 truncate text-sm font-black ${isSelected ? 'text-(--pos-s-sel-fg)' : strongText}`}>
             {identity.terminalName || identity.terminalId || '—'}
           </span>
           {view.id === shownZReportId && (
-            <span className="shrink-0 rounded-full border border-(--pos-s-border) bg-(--pos-s-surface-2) px-2 py-0.5 text-[11px] font-black text-emerald-700 dark:text-emerald-200">
+            <span className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-black text-emerald-700 dark:text-emerald-200">
               {t('modals.zReport.exportDialog.shownNow')}
             </span>
           )}
         </div>
-        <div className={`mt-1 flex items-center gap-1.5 text-xs font-bold ${mutedText}`}>
+        <div className={`mt-1 flex items-center gap-1.5 text-xs font-bold ${isSelected ? 'text-(--pos-s-sel-fg)' : mutedText}`}>
           <CalendarDays className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           <span className="wrap-break-word">{formatBusinessDate(identity.reportDate)}</span>
         </div>
-        <div className={`mt-0.5 wrap-break-word text-[11px] font-semibold ${softText}`}>
+        <div className={`mt-0.5 wrap-break-word text-[11px] font-semibold ${isSelected ? 'text-(--pos-s-sel-fg)' : softText}`}>
           {formatPeriod(identity.periodStart, identity.periodEnd)}
         </div>
         <div className="mt-2 grid grid-cols-2 gap-2">
           <div className="min-w-0">
-            <div className={`truncate text-[11px] font-bold ${softText}`}>{t('modals.zReport.exportDialog.gross')}</div>
-            <div className={`truncate text-sm font-black tabular-nums ${strongText}`}>
+            <div className={`truncate text-[11px] font-bold ${isSelected ? 'text-(--pos-s-sel-fg)' : softText}`}>{t('modals.zReport.exportDialog.gross')}</div>
+            <div className={`truncate text-sm font-black tabular-nums ${isSelected ? 'text-(--pos-s-sel-fg)' : strongText}`}>
               {money(zReportRowCents(view.document, 'sales.gross', 'sales'), currency)}
             </div>
           </div>
           <div className="min-w-0">
-            <div className={`truncate text-[11px] font-bold ${softText}`}>{t('modals.zReport.exportDialog.variance')}</div>
+            <div className={`truncate text-[11px] font-bold ${isSelected ? 'text-(--pos-s-sel-fg)' : softText}`}>{t('modals.zReport.exportDialog.variance')}</div>
             <div className={`truncate text-sm font-black tabular-nums ${varianceTone}`}>{money(varianceCents, currency, true)}</div>
           </div>
         </div>
@@ -373,24 +380,24 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
       className={shellClassName}
       contentClassName={contentClassName}
     >
-      <div ref={rootRef} data-z-report-export-dialog className="flex flex-col gap-4">
+      <div ref={rootRef} data-z-report-export-dialog className="flex flex-col gap-3">
         <p className={`text-sm font-semibold leading-5 ${mutedText}`}>{t('modals.zReport.exportDialog.subtitle')}</p>
 
-        <div className="flex min-h-0 flex-col gap-4 lg:flex-row">
-          <section aria-labelledby={listTitleId} className={`flex min-w-0 flex-col rounded-2xl border p-3 lg:w-88 lg:shrink-0 ${insetClass}`}>
+        <div className="flex min-h-0 flex-col gap-3 lg:flex-row">
+          <section aria-labelledby={listTitleId} className={`flex min-w-0 flex-col rounded-2xl border p-3! lg:w-88 lg:shrink-0 ${insetClass}`}>
             <h3 id={listTitleId} className={`text-base font-black ${strongText}`}>{t('modals.zReport.exportDialog.listTitle')}</h3>
             <p className={`mt-0.5 text-[11px] font-semibold ${softText}`}>{t('modals.zReport.exportDialog.listHint')}</p>
             <div className="mt-3 min-h-0">
-              {list.status === 'loading' && (
-                <div role="status" className={`flex items-center gap-2 rounded-xl border px-3 py-3 text-sm font-bold ${tileClass}`}>
+              <AnimatePresence initial={false}>{list.status === 'loading' && (
+                <ZReportReveal as="div" key="z-reveal-1" {...revealMotion} role="status" className={`flex items-center gap-2 rounded-xl border px-3! py-3! text-sm font-bold ${tileClass}`}>
                   <RefreshCw className="h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
                   {t('modals.zReport.exportDialog.loading')}
-                </div>
-              )}
-              {list.status === 'error' && (
-                <div role="alert" data-z-report-export-list-error className="rounded-xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-3 text-sm font-bold text-rose-700 dark:text-rose-200">
+                </ZReportReveal>
+              )}</AnimatePresence>
+              <AnimatePresence initial={false}>{list.status === 'error' && (
+                <ZReportReveal as="div" key="z-reveal-2" {...revealMotion} role="alert" data-z-report-export-list-error className="rounded-xl border border-(--pos-s-bad) bg-(--pos-s-bad-bg) p-3 text-sm font-bold text-rose-700 dark:text-rose-200">
                   <div>{t('modals.zReport.exportDialog.loadFailed')}</div>
-                  {list.detail && <div className={`mt-1 wrap-break-word text-[11px] font-semibold ${softText}`}>{list.detail}</div>}
+                  <AnimatePresence initial={false}>{list.detail && <ZReportReveal as="div" key="z-reveal-3" {...revealMotion} className={`mt-1 wrap-break-word text-[11px] font-semibold ${softText}`}>{list.detail}</ZReportReveal>}</AnimatePresence>
                   <button
                     type="button"
                     onClick={() => setReloadKey((current) => current + 1)}
@@ -399,27 +406,27 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
                     <RefreshCw className="h-4 w-4" aria-hidden="true" />
                     {t('modals.zReport.exportDialog.retry')}
                   </button>
-                </div>
-              )}
-              {list.status === 'ready' && list.rows.length === 0 && (
-                <div data-z-report-export-empty className={`rounded-xl border border-dashed p-4 text-center text-sm font-semibold ${tileClass}`}>
+                </ZReportReveal>
+              )}</AnimatePresence>
+              <AnimatePresence initial={false}>{list.status === 'ready' && list.rows.length === 0 && (
+                <ZReportReveal as="div" key="z-reveal-4" {...revealMotion} data-z-report-export-empty className={`rounded-xl border border-dashed p-4! text-center text-sm font-semibold ${tileClass}`}>
                   {t('modals.zReport.exportDialog.empty')}
-                </div>
-              )}
-              {views.length > 0 && (
-                <div
+                </ZReportReveal>
+              )}</AnimatePresence>
+              <AnimatePresence initial={false}>{views.length > 0 && (
+                <ZReportReveal as="div" key="z-reveal-5" {...revealMotion}
                   role="radiogroup"
                   aria-labelledby={listTitleId}
                   onKeyDown={handleListKeyDown}
                   className="flex max-h-[52vh] flex-col gap-2 overflow-y-auto scrollbar-hide p-0.5"
                 >
                   {views.map(renderRow)}
-                </div>
-              )}
+                </ZReportReveal>
+              )}</AnimatePresence>
             </div>
           </section>
 
-          <section aria-labelledby={previewTitleId} className={`flex min-w-0 flex-1 flex-col rounded-2xl border p-3 ${insetClass}`}>
+          <section aria-labelledby={previewTitleId} className={`flex min-w-0 flex-1 flex-col rounded-2xl border p-3! ${insetClass}`}>
             <h3 id={previewTitleId} className={`text-base font-black ${strongText}`}>{t('modals.zReport.exportDialog.previewTitle')}</h3>
             {selected ? (
               <>
@@ -437,13 +444,13 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
                           <th
                             colSpan={2}
                             scope="colgroup"
-                            className="border-t border-slate-900/10 bg-(--pos-s-surface-2) px-3 py-1.5 text-left text-xs font-black dark:border-white/10"
+                            className="px-3 pt-4 pb-2 text-left text-xs font-black liquid-glass-modal-text"
                           >
                             {section.rows[0]?.section}
                           </th>
                         </tr>
                         {section.rows.map((row, index) => (
-                          <tr key={`${row.rowKey}-${index}`} className="border-t border-slate-900/6 dark:border-white/6">
+                          <tr key={`${row.rowKey}-${index}`} className="align-top">
                             <td className={`wrap-break-word px-3 py-1.5 font-semibold ${mutedText}`}>{row.line}</td>
                             <td className={`whitespace-nowrap px-3 py-1.5 text-right font-black tabular-nums ${strongText}`}>{row.text || '—'}</td>
                           </tr>
@@ -452,12 +459,12 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
                     ))}
                   </table>
                 </div>
-                {selected.document.hasMissingValues && (
-                  <p className={`mt-2 text-[11px] font-semibold ${softText}`}>{zReportLabel(language, 'report.notRecorded')}</p>
-                )}
+                <AnimatePresence initial={false}>{selected.document.hasMissingValues && (
+                  <ZReportReveal as="p" key="z-reveal-6" {...revealMotion} className={`mt-2 text-[11px] font-semibold ${softText}`}>{zReportLabel(language, 'report.notRecorded')}</ZReportReveal>
+                )}</AnimatePresence>
               </>
             ) : (
-              <div className={`mt-3 rounded-xl border border-dashed p-6 text-center text-sm font-semibold ${tileClass}`}>
+              <div className={`mt-3 rounded-xl border border-dashed p-6! text-center text-sm font-semibold ${tileClass}`}>
                 {t('modals.zReport.exportDialog.previewEmpty')}
               </div>
             )}
@@ -486,20 +493,20 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
                 {busyLabel('orders', t('modals.zReport.exportDialog.exportOrders'))}
               </button>
             </div>
-            {selected && selected.orders.length === 0 && (
-              <p className={`mt-2 text-[11px] font-semibold ${softText}`}>{t('modals.zReport.exportDialog.noOrders')}</p>
-            )}
-            {selected && selected.ordersTruncated && (
-              <p className={`mt-2 text-[11px] font-semibold ${softText}`}>{t('modals.zReport.exportDialog.ordersTruncated')}</p>
-            )}
+            <AnimatePresence initial={false}>{selected && selected.orders.length === 0 && (
+              <ZReportReveal as="p" key="z-reveal-7" {...revealMotion} className={`mt-2 text-[11px] font-semibold ${softText}`}>{t('modals.zReport.exportDialog.noOrders')}</ZReportReveal>
+            )}</AnimatePresence>
+            <AnimatePresence initial={false}>{selected && selected.ordersTruncated && (
+              <ZReportReveal as="p" key="z-reveal-8" {...revealMotion} className={`mt-2 text-[11px] font-semibold ${softText}`}>{t('modals.zReport.exportDialog.ordersTruncated')}</ZReportReveal>
+            )}</AnimatePresence>
           </section>
         </div>
 
-        {liveView && (
-          <section
+        <AnimatePresence initial={false}>{liveView && (
+          <ZReportReveal as="section" key="z-reveal-9" {...revealMotion}
             aria-labelledby={provisionalTitleId}
             data-z-report-export-provisional
-            className="rounded-2xl border border-dashed border-(--pos-s-yellow) bg-(--pos-s-surface-2) p-4"
+            className="pos-glass-form-card"
           >
             <div className="flex items-start gap-3">
               <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" aria-hidden="true" />
@@ -534,26 +541,26 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
                 {t('modals.zReport.exportDialog.exportProvisionalOrders')}
               </button>
             </div>
-            {liveView.orders.length === 0 && (
-              <p className={`mt-2 text-[11px] font-semibold ${softText}`}>{t('modals.zReport.exportDialog.provisionalNoOrders')}</p>
-            )}
-          </section>
-        )}
+            <AnimatePresence initial={false}>{liveView.orders.length === 0 && (
+              <ZReportReveal as="p" key="z-reveal-10" {...revealMotion} className={`mt-2 text-[11px] font-semibold ${softText}`}>{t('modals.zReport.exportDialog.provisionalNoOrders')}</ZReportReveal>
+            )}</AnimatePresence>
+          </ZReportReveal>
+        )}</AnimatePresence>
 
-        {notice && (
-          <div
+        <AnimatePresence initial={false}>{notice && (
+          <ZReportReveal as="div" key="z-reveal-11" {...revealMotion}
             role={notice.tone === 'error' ? 'alert' : 'status'}
             data-z-report-export-notice={notice.tone}
-            className={`rounded-2xl border p-3 text-sm font-bold ${
+            className={`rounded-2xl border p-3! text-sm font-bold ${
               notice.tone === 'error'
                 ? 'border-(--pos-s-bad) bg-(--pos-s-bad-bg) text-rose-700 dark:text-rose-200'
-                : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-200'
+                : 'pos-glass-form-card p-3! text-emerald-800 dark:text-emerald-200'
             }`}
           >
             <div className="wrap-break-word">{notice.text}</div>
-            {notice.detail && <div className={`mt-1 wrap-break-word text-[11px] font-semibold ${softText}`}>{notice.detail}</div>}
-          </div>
-        )}
+            <AnimatePresence initial={false}>{notice.detail && <ZReportReveal as="div" key="z-reveal-12" {...revealMotion} className={`mt-1 wrap-break-word text-[11px] font-semibold ${softText}`}>{notice.detail}</ZReportReveal>}</AnimatePresence>
+          </ZReportReveal>
+        )}</AnimatePresence>
       </div>
     </LiquidGlassModal>
   );

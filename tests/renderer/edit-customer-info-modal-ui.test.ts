@@ -14,13 +14,12 @@ const source = readFileSync(modalPath, 'utf8');
 // footer (the footer prop, rendered flex-shrink-0 below the body) -- so Cancel/Save are visible on first
 // open. UI/layout-only: onSave, validation, payload shape, address workflow, and gating are untouched.
 
-test('Round 309: EditCustomerInfoModal keeps grey fields + green address pin (palette preserved)', () => {
+test('EditCustomerInfoModal frosts fields and preserves the address bindings', () => {
   assert.match(source, /const editCustomerInputClass =/);
-  assert.match(source, /bg-gray-100 dark:bg-zinc-800\/80/);
-  assert.match(source, /border-gray-300 dark:border-zinc-600/);
-  assert.match(source, /focus:ring-gray-400\/60 dark:focus:ring-white\/30/);
-  // Green address pin preserved.
-  assert.match(source, /w-5 h-5 text-green-400/);
+  // founder 11/11/2026: the shared frosted field supplies theme-aware focus.
+  assert.match(source, /liquid-glass-modal-input pos-glass-field min-h-touch w-full px-4 py-2\.5/);
+  // founder 11/11/2026: decorative field icons share the calm neutral token.
+  assert.match(source, /w-5 h-5 liquid-glass-modal-field-icon/);
   assert.match(source, /className=\{editCustomerInputClass\}/);
   // No form field was removed (name / phone / address / postal / floor / ringer / notes still bound).
   for (const field of ['name', 'phone', 'address', 'postal_code', 'delivery_floor', 'name_on_ringer', 'notes']) {
@@ -38,15 +37,16 @@ test('Round 309: Save/Cancel live in a fixed, visible footer (not inside the scr
   assert.ok(footerEnd > footerStart, 'the footer prop must close before the modal body');
   const footer = source.slice(footerStart, footerEnd);
 
-  // Subtle glass divider/background bar.
-  assert.match(footer, /border-t/);
-  assert.match(footer, /backdrop-blur/);
+  // founder 11/11/2026: buttons sit directly on the glass shell.
+  assert.match(footer, /flex gap-3 px-6 pb-5 pt-2/);
+  assert.doesNotMatch(footer, /border-t|backdrop-blur|bg-white/);
 
   // Cancel = red (error glass), Save = green (success glass); both flex-1 (same height/visual weight).
   assert.match(footer, /onClick=\{handleClose\}/);
   assert.match(footer, /liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl/);
   assert.match(footer, /onClick=\{handleSave\}/);
-  assert.match(footer, /disabled=\{isSaving\}/);
+  // Saving also waits for a corrected address to finish locating/zone checking.
+  assert.match(footer, /disabled=\{isSaving \|\| isValidatingDelivery\}/);
   assert.match(footer, /className=\{editCustomerSaveButtonClass\}/);
 });
 
@@ -85,4 +85,14 @@ test('Round 309: touch-first + on-palette (no hover, no native title tooltip, no
   assert.doesNotMatch(source, /\b(?:bg|text|border|from|to|ring)-(?:blue|cyan|sky|purple|violet|indigo)-/);
   assert.match(source, /border-\(--pos-s-border\) border-t-amber-500/);
   assert.match(source, /text-amber-500 text-sm/);
+});
+
+// founder 11/11/2026: meaning-based groups, unclipped floating suggestions and animated validation.
+test('EditCustomerInfoModal uses frosted groups and preserves suggestion overlay geometry', () => {
+  assert.match(source, /pos-glass-form-card grid grid-cols-1 gap-3 sm:grid-cols-2/);
+  assert.match(source, /absolute z-9999 w-full mt-1 pos-glass-form-card p-2! space-y-2 shadow-lg max-h-48 overflow-y-auto scrollbar-hide/);
+  assert.match(source, /pos-glass-tap-card min-h-touch w-full px-4 py-3 text-left focus-visible:outline-2/);
+  assert.match(source, /hasDeliveryPro && validationResult && \(\s*<motion.div/);
+  assert.match(source, /useReducedMotion\(\)/);
+  assert.match(source, /duration: reduceMotion \? 0 : 0\.24/);
 });

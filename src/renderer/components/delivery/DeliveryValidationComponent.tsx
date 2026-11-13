@@ -231,7 +231,7 @@ export function DeliveryValidationComponent({
             placeholder={t('forms.placeholders.enterAddress')}
             required
             aria-required="true"
-            className="w-full rounded-2xl border border-gray-300 bg-white/80 py-2.5 pl-10 pr-4 text-gray-900 outline-hidden backdrop-blur-sm transition-shadow focus:border-amber-400 focus:ring-2 focus:ring-(--pos-s-fg) dark:border-white/10 dark:bg-zinc-950/70 dark:text-white"
+            className="pos-glass-field w-full py-2.5 pl-10 pr-4"
           />
         </div>
       </div>
@@ -249,7 +249,7 @@ export function DeliveryValidationComponent({
 
       {/* Validation Details */}
       {uiState.validationResult && (
-        <div className="space-y-3 rounded-[22px] border border-gray-200/80 bg-white/72 p-4 backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/62 dark:shadow-[0_18px_42px_rgba(0,0,0,0.34)]">
+        <div className="pos-glass-form-card space-y-3">
           {/* Zone Information */}
           {uiState.validationResult.zone && (
             <div className="grid grid-cols-2 gap-4 text-sm">
@@ -291,7 +291,7 @@ export function DeliveryValidationComponent({
 
           {/* Override Information */}
           {uiState.validationResult.override?.applied && (
-            <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="pos-glass-form-card p-3!">
               <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200">
                 <Shield className="w-4 h-4" />
                 <span className="font-medium">Delivery Override Applied</span>
@@ -352,7 +352,7 @@ export function DeliveryValidationComponent({
             <p className="text-gray-600 dark:text-gray-400 mb-4">
               This address is outside the normal delivery area. Are you sure you want to proceed with delivery?
             </p>
-            <div className="mb-4 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3 dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="pos-glass-form-card mb-4 p-3!">
               <div className="text-sm text-amber-900 dark:text-amber-200">
                 <span className="inline-flex items-center gap-2"><AlertTriangle className="w-4 h-4" aria-hidden="true" />This action will be logged for review.</span>
               </div>

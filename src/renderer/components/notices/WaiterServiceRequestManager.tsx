@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { LiquidGlassModal } from '../ui/pos-glass-components'
@@ -12,6 +13,15 @@ import { posApiPost } from '../../utils/api-helpers'
 import { MainServiceResolutionActions } from './MainServiceResolutionActions'
 
 export function WaiterServiceRequestManager({ enabled }: { enabled: boolean }) {
+  
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const inbox = useWaiterServiceInbox(enabled), { t } = useTranslation()
   const [overview, setOverview] = useState(false)
   const [recipients,setRecipients]=useState<Record<string,string>>({})
@@ -41,36 +51,36 @@ export function WaiterServiceRequestManager({ enabled }: { enabled: boolean }) {
       await setSecureSession({ ...original, sessionId: result.data.session_id })
     } catch { if (epoch === authEpoch.current) setSignInFailed(true) } finally { if (epoch === authEpoch.current) setSigningIn(false) }
   }
-  const details = (r: WaiterServiceRequest) => <div key={r.id} className="space-y-2 rounded-xl border border-gray-300 p-4 dark:border-gray-700">
+  const details = (r: WaiterServiceRequest) => <motion.div {...revealMotion} key={r.id} className="pos-glass-form-card space-y-2">
     <p className="font-bold">{t('waiterService.table', { table: r.summary.table_number })} · {serviceRequestOrderLabel(r.summary)}</p>
     <p>{t(r.assignment_required?'waiterService.qrRequest':`waiterService.kind.${r.kind}`)}</p>
     <p>{r.summary.requester_name}{r.summary.recipient_name&&<> → {r.summary.recipient_name}</>}</p>
-    {r.summary.customer_notes&&<p>{r.summary.customer_notes}</p>}
-    {r.summary.destination_table && <p>{t('waiterService.destination', { table: r.summary.destination_table })}</p>}
-    {r.summary.items.map((line,i) => <div key={i}><p>{line.quantity} × {line.name}</p>{line.notes && <p>{line.notes}</p>}
+    <AnimatePresence initial={false}>{r.summary.customer_notes&&<motion.p {...revealMotion}>{r.summary.customer_notes}</motion.p>}</AnimatePresence>
+    <AnimatePresence initial={false}>{r.summary.destination_table && <motion.p {...revealMotion}>{t('waiterService.destination', { table: r.summary.destination_table })}</motion.p>}</AnimatePresence>
+    {r.summary.items.map((line,i) => <div key={i}><p>{line.quantity} × {line.name}</p><AnimatePresence initial={false}>{line.notes && <motion.p {...revealMotion}>{line.notes}</motion.p>}</AnimatePresence>
       {serviceRequestModifiers(line.customizations).map((name,j) => <p key={j}>{name}</p>)}</div>)}
-    {r.assignment_required&&!inbox.isMain&&<div className="space-y-3">
+    <AnimatePresence initial={false}>{r.assignment_required&&!inbox.isMain&&<motion.div {...revealMotion} className="space-y-3">
       <p>{t('waiterService.awaitingAssignment')}</p>
       {inbox.assignments?.[r.id]?<p role="status">{t('waiterService.awaitingDelivery')}</p>:<>
         <select data-testid={`waiter-intake-recipient-${r.id}`} aria-label={t('waiterService.chooseWaiter')} value={recipients[r.id]||''}
           disabled={inbox.busy||inbox.stale||!inbox.canAssign} onChange={event=>setRecipients(value=>({...value,[r.id]:event.target.value}))}
-          className="min-h-12 w-full rounded-lg border border-gray-300 bg-white px-3 text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-white">
+          className="pos-glass-field min-h-12 w-full px-3">
           <option value="">{t('waiterService.chooseWaiter')}</option>
           {(inbox.waiters||[]).map(waiter=><option key={waiter.id} value={waiter.id}>{waiter.name}</option>)}
         </select>
-        {!inbox.waiters?.length&&<p>{t('waiterService.noActiveWaiters')}</p>}
+        <AnimatePresence initial={false}>{!inbox.waiters?.length&&<motion.p {...revealMotion}>{t('waiterService.noActiveWaiters')}</motion.p>}</AnimatePresence>
         <button data-testid={`waiter-intake-assign-${r.id}`} disabled={inbox.busy||inbox.stale||!inbox.canAssign||!inbox.waiters?.some(waiter=>waiter.id===recipients[r.id])}
           onClick={()=>{void inbox.assign(r.id,recipients[r.id])}} className="min-h-12 w-full rounded-lg bg-blue-700 px-4 py-3 text-white disabled:opacity-50">{t('waiterService.assign')}</button>
       </>}
-    </div>}
-    {!current&&!r.assignment_required&&<p className="font-semibold">{inbox.decisions[r.id] ? t('waiterService.awaitingDelivery') : t(`waiterService.status.${r.status}`)}</p>}
+    </motion.div>}</AnimatePresence>
+    <AnimatePresence initial={false}>{!current&&!r.assignment_required&&<motion.p {...revealMotion} className="font-semibold">{inbox.decisions[r.id] ? t('waiterService.awaitingDelivery') : t(`waiterService.status.${r.status}`)}</motion.p>}</AnimatePresence>
     {inbox.isMain&&(r.resolution_required||r.assignment_required)&&<MainServiceResolutionActions key={r.id} request={r} inbox={inbox}/>}
-    {!inbox.isMain && !current && rejections.some(notice => notice.id === r.id) && <div className="space-y-2">
+    <AnimatePresence initial={false}>{!inbox.isMain && !current && rejections.some(notice => notice.id === r.id) && <motion.div {...revealMotion} className="space-y-2">
       <p>{t(r.intake_id ? 'waiterService.rejectedQrHelp' : 'waiterService.rejectedChangeHelp')}</p>
       <button data-testid={`waiter-service-ack-${r.id}`} disabled={inbox.busy} onClick={() => { void inbox.acknowledgeRejection(r.id) }}
         className="min-h-12 rounded-lg border border-gray-400 px-4 py-2">{t('waiterService.acknowledgeRejection')}</button>
-    </div>}
-  </div>
+    </motion.div>}</AnimatePresence>
+  </motion.div>
   if (!enabled || !inbox.available) return null
   return <>
     {inbox.actionable && <div className="fixed bottom-5 left-5 z-9000 flex max-w-sm flex-col gap-2">
@@ -84,29 +94,29 @@ export function WaiterServiceRequestManager({ enabled }: { enabled: boolean }) {
         {t('waiterService.requests')} · {inbox.requests.filter(r => r.status === 'pending').length}</button>
     </div>}
     <LiquidGlassModal isOpen={blocking || overview} onClose={blocking ? () => {} : () => setOverview(false)} closeOnBackdrop={!blocking} closeOnEscape={!blocking}
-      title={t(current ? 'waiterService.incoming' : mainCurrent ? 'waiterService.mainResolutionTitle' : 'waiterService.requests')} size="lg" closeDisabled={blocking} closeMode={blocking ? 'request' : undefined}>
-      <div className="space-y-4 text-gray-900 dark:text-gray-100" data-testid="waiter-service-dialog">
-        <div key={current?.id ?? mainCurrent?.id ?? 'overview'} className="max-h-[55vh] space-y-4 overflow-y-auto">{current ? details(current) : mainCurrent ? details(mainCurrent) : (inbox.overviewRequests || inbox.requests).map(details)}
-          {!current&&!mainCurrent&&(inbox.resolutionHistory||[]).map(receipt=><div key={receipt.id} className="space-y-2 rounded-xl border border-gray-300 p-4 dark:border-gray-700" data-testid="main-service-resolution-history">
+      className="[&_.liquid-glass-modal-header]:border-b-0!" title={t(current ? 'waiterService.incoming' : mainCurrent ? 'waiterService.mainResolutionTitle' : 'waiterService.requests')} size="lg" closeDisabled={blocking} closeMode={blocking ? 'request' : undefined}>
+      <div className="space-y-3 liquid-glass-modal-text" data-testid="waiter-service-dialog">
+        <div key={current?.id ?? mainCurrent?.id ?? 'overview'} className="max-h-[55vh] space-y-3 overflow-y-auto"><AnimatePresence initial={false}>{current ? details(current) : mainCurrent ? details(mainCurrent) : (inbox.overviewRequests || inbox.requests).map(details)}
+          {!current&&!mainCurrent&&(inbox.resolutionHistory||[]).map(receipt=><motion.div {...revealMotion} key={receipt.id} className="pos-glass-form-card space-y-2" data-testid="main-service-resolution-history">
             <p className="font-bold">{t(`waiterService.resolutionStatus.${receipt.action}`)}</p>
-            {receipt.summary&&<><p>{t('waiterService.table',{table:receipt.summary.table_number})} · {serviceRequestOrderLabel(receipt.summary)}</p>
-              {receipt.summary.items.map((item,i)=><p key={i}>{item.quantity} × {item.name}{item.notes?` · ${item.notes}`:''}</p>)}</>}
-            <p>{receipt.actor_name}</p>{receipt.reason&&<p>{receipt.reason}</p>}
-          </div>)}
-          {!current && !inbox.requests.length && !inbox.resolutionHistory?.length && !inbox.stale && <p>{t('waiterService.empty')}</p>}</div>
-        {inbox.stale && !loginRequired && <p role="alert" className="text-amber-700 dark:text-amber-300">{t('waiterService.stale')}</p>}
-        {inbox.noticeFailure && <p role="alert" className="text-amber-700 dark:text-amber-300">{t('waiterService.noticeSaveFailed')}</p>}
-        {retained && <p role="alert">{t('waiterService.awaitingDelivery')}</p>}
-        {loginRequired && <div className="space-y-3"><p>{t('waiterService.signIn')}{inbox.mainLogin?.name ? ` · ${inbox.mainLogin.name}` : ''}</p>
+            <AnimatePresence initial={false}>{receipt.summary&&<motion.div {...revealMotion}><><p>{t('waiterService.table',{table:receipt.summary.table_number})} · {serviceRequestOrderLabel(receipt.summary)}</p>
+              {receipt.summary.items.map((item,i)=><p key={i}>{item.quantity} × {item.name}{item.notes?` · ${item.notes}`:''}</p>)}</></motion.div>}</AnimatePresence>
+            <p>{receipt.actor_name}</p><AnimatePresence initial={false}>{receipt.reason&&<motion.p {...revealMotion}>{receipt.reason}</motion.p>}</AnimatePresence>
+          </motion.div>)}
+          <AnimatePresence initial={false}>{!current && !inbox.requests.length && !inbox.resolutionHistory?.length && !inbox.stale && <motion.p {...revealMotion}>{t('waiterService.empty')}</motion.p>}</AnimatePresence></AnimatePresence></div>
+        <AnimatePresence initial={false}>{inbox.stale && !loginRequired && <motion.p {...revealMotion} role="alert" className="text-amber-700 dark:text-amber-300">{t('waiterService.stale')}</motion.p>}</AnimatePresence>
+        <AnimatePresence initial={false}>{inbox.noticeFailure && <motion.p {...revealMotion} role="alert" className="text-amber-700 dark:text-amber-300">{t('waiterService.noticeSaveFailed')}</motion.p>}</AnimatePresence>
+        <AnimatePresence initial={false}>{retained && <motion.p {...revealMotion} role="alert">{t('waiterService.awaitingDelivery')}</motion.p>}</AnimatePresence>
+        <AnimatePresence initial={false}>{loginRequired && <motion.div {...revealMotion} className="pos-glass-form-card space-y-3"><p>{t('waiterService.signIn')}{inbox.mainLogin?.name ? ` · ${inbox.mainLogin.name}` : ''}</p>
           <input data-testid="waiter-service-pin" type="password" inputMode="numeric" value={pin} maxLength={8} disabled={signingIn}
-            aria-label={t('waiterService.pin')} onChange={event => setPin(event.target.value.replace(/\D/g,''))} className="w-full rounded-lg border p-3 dark:bg-gray-800" />
+            aria-label={t('waiterService.pin')} onChange={event => setPin(event.target.value.replace(/\D/g,''))} className="liquid-glass-modal-input pos-glass-field min-h-touch w-full p-3" />
           <button disabled={signingIn || pin.length < 4} onClick={() => { void renewLogin() }} className="rounded-lg bg-blue-700 px-4 py-3 text-white">{t('waiterService.signIn')}</button>
-          {signInFailed && <p role="alert">{t('waiterService.signInFailed')}</p>}</div>}
-        {current && !retained && !loginRequired && <div className="flex justify-between gap-4">
+          <AnimatePresence initial={false}>{signInFailed && <motion.p {...revealMotion} role="alert">{t('waiterService.signInFailed')}</motion.p>}</AnimatePresence></motion.div>}</AnimatePresence>
+        <AnimatePresence initial={false}>{current && !retained && !loginRequired && <motion.div {...revealMotion} className="flex justify-between gap-4 px-6 pb-5 pt-2">
           <button data-testid="waiter-service-reject" disabled={inbox.busy} onClick={() => { void inbox.choose(current.id,'rejected') }} className="rounded-lg bg-red-700 px-5 py-3 text-white">{t('waiterService.reject')}</button>
           <button data-testid="waiter-service-accept" disabled={inbox.busy} onClick={() => { void inbox.choose(current.id,'accepted') }} className="pos-raised pos-raised--yellow rounded-lg bg-(--pos-s-yellow) px-5 py-3 text-black">{t('waiterService.accept')}</button>
-        </div>}
-        {(inbox.stale || retained) && <button onClick={() => { void inbox.retry() }} className="rounded-lg border px-4 py-2">{t('common.retry')}</button>}
+        </motion.div>}</AnimatePresence>
+        <AnimatePresence initial={false}>{(inbox.stale || retained) && <motion.div {...revealMotion}><button onClick={() => { void inbox.retry() }} className="pos-glass-field min-h-touch px-4 py-2">{t('common.retry')}</button></motion.div>}</AnimatePresence>
       </div>
     </LiquidGlassModal>
   </>

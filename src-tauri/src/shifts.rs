@@ -1377,6 +1377,17 @@ pub(crate) fn close_shift_with_support(
         let variance_cents = Cents::round_half_even(variance).as_i64();
 
         let shift_currency = recorded_operating_currency(&conn, "staff_shifts", &shift_id)?;
+        let net_collections = compute_shift_net_collections(
+            &conn, &shift_id, &role_type, &shift_check_in_time, &now,
+        )?;
+        // Keep the headline with its close, even after the Z removes payments.
+        if let Some(collections) = &net_collections {
+            conn.execute(
+                "INSERT OR IGNORE INTO local_settings(setting_category,setting_key,setting_value,updated_at)
+                 VALUES('shift_net_collections_v1',?1,?2,?3)",
+                params![shift_id, collections.to_string(), now],
+            ).map_err(|e| format!("freeze shift collections: {e}"))?;
+        }
         // The shift-close sync payload, shared by the ordinary close and the
         // prospective gift-bound original.
         let close_sync_payload = |totals: (i64, f64, f64, f64), cash_drawer: Option<Value>| {
@@ -1405,6 +1416,7 @@ pub(crate) fn close_shift_with_support(
                 "paymentAmount": persisted_payment_amount,
             });
             if let Some(currency) = &shift_currency { sync_payload["currency"] = Value::String(currency.clone()); }
+            if let Some(collections) = &net_collections { sync_payload["netCollections"] = collections.clone(); }
             if let Some(drawer_snapshot) = cash_drawer {
                 sync_payload["cashDrawer"] = drawer_snapshot;
             }
@@ -1701,7 +1713,7 @@ pub(crate) fn close_shift_with_support(
 
             info!(shift_id = %shift_id, variance = %variance, "Shift closed");
 
-            Ok(serde_json::json!({
+            let mut response = serde_json::json!({
                 "success": true,
                 "shiftId": shift_id,
                 "variance": variance,
@@ -1709,7 +1721,11 @@ pub(crate) fn close_shift_with_support(
                 "closing": closing_cash,
                 "currency": shift_summary_currency(&conn, &shift_id)?,
                 "message": format!("Shift closed. Variance: {:.2}", variance)
-            }))
+            });
+            if let Some(collections) = load_frozen_net_collections(&conn, &shift_id)? {
+                response["netCollections"] = collections;
+            }
+            Ok(response)
         }
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
@@ -2874,31 +2890,40 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                 .filter_map(|r| r.ok())
                 .collect();
 
+            let mut backfilled = 0;
             for (oid, _total, del_fee, tip, bid) in &backfill_rows {
-                let (_, cash, card, _total_paid) =
-                    compute_shift_payment_totals_for_order(&conn, oid)?;
-                let payment_method = if cash > 0.0 && card > 0.0 {
-                    "mixed".to_string()
-                } else if card > 0.0 {
-                    "card".to_string()
-                } else {
-                    "cash".to_string()
-                };
-                let shift_unit = recorded_operating_currency(&conn, "staff_shifts", shift_id)?;
-                let order_unit = recorded_operating_currency(&conn, "orders", oid)?;
-                let original_currency = match (&shift_unit, &order_unit) {
-                    (Some(shift), Some(order)) if shift == order => Some(shift.clone()),
-                    _ => None,
-                };
-                let eid = uuid::Uuid::new_v4().to_string();
-                let delivery_fee_cents = Cents::round_half_even(*del_fee).as_i64();
-                let tip_cents = Cents::round_half_even(*tip).as_i64();
-                let total_earning = *del_fee + *tip;
-                let total_earning_cents = Cents::round_half_even(total_earning).as_i64();
-                let cash_cents = Cents::round_half_even(cash).as_i64();
-                let card_cents = Cents::round_half_even(card).as_i64();
-                let _ = conn.execute(
-                    "INSERT OR IGNORE INTO driver_earnings (
+                // Summary reads must keep working when one earning cannot be queued.
+                // A savepoint also works if the caller already owns a transaction.
+                if let Err(error) = conn.execute_batch("SAVEPOINT driver_earning_backfill") {
+                    tracing::warn!(order_id = %oid, %error, "Could not start driver earning backfill");
+                    continue;
+                }
+                let result = (|| -> Result<usize, String> {
+                    let (_, cash, card, _total_paid) =
+                        compute_shift_payment_totals_for_order(&conn, oid)?;
+                    let payment_method = if cash > 0.0 && card > 0.0 {
+                        "mixed".to_string()
+                    } else if card > 0.0 {
+                        "card".to_string()
+                    } else {
+                        "cash".to_string()
+                    };
+                    let shift_unit = recorded_operating_currency(&conn, "staff_shifts", shift_id)?;
+                    let order_unit = recorded_operating_currency(&conn, "orders", oid)?;
+                    let original_currency = match (&shift_unit, &order_unit) {
+                        (Some(shift), Some(order)) if shift == order => Some(shift.clone()),
+                        _ => None,
+                    };
+                    let eid = uuid::Uuid::new_v4().to_string();
+                    let delivery_fee_cents = Cents::round_half_even(*del_fee).as_i64();
+                    let tip_cents = Cents::round_half_even(*tip).as_i64();
+                    let total_earning = *del_fee + *tip;
+                    let total_earning_cents = Cents::round_half_even(total_earning).as_i64();
+                    let cash_cents = Cents::round_half_even(cash).as_i64();
+                    let card_cents = Cents::round_half_even(card).as_i64();
+                    let inserted = conn
+                        .execute(
+                            "INSERT OR IGNORE INTO driver_earnings (
                         id, driver_id, staff_shift_id, order_id, branch_id,
                         delivery_fee, delivery_fee_cents,
                         tip_amount, tip_amount_cents,
@@ -2914,33 +2939,56 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                         ?12, ?13, ?14, ?15, ?16, ?13, ?14,
                         0, ?17, ?17, ?18
                     )",
-                    params![
-                        eid,
-                        driver_staff_id,
-                        shift_id,
-                        oid,
-                        bid,
-                        del_fee,
-                        delivery_fee_cents,
-                        tip,
-                        tip_cents,
-                        total_earning,
-                        total_earning_cents,
-                        payment_method,
-                        cash,
-                        cash_cents,
-                        card,
-                        card_cents,
-                        now,
-                        original_currency
-                    ],
-                );
+                            params![
+                                eid,
+                                driver_staff_id,
+                                shift_id,
+                                oid,
+                                bid,
+                                del_fee,
+                                delivery_fee_cents,
+                                tip,
+                                tip_cents,
+                                total_earning,
+                                total_earning_cents,
+                                payment_method,
+                                cash,
+                                cash_cents,
+                                card,
+                                card_cents,
+                                now,
+                                original_currency
+                            ],
+                        )
+                        .map_err(|e| format!("insert backfilled driver earning: {e}"))?;
+                    if inserted > 0 {
+                        let payload =
+                            order_ownership::build_driver_earning_sync_payload(&conn, &eid)?;
+                        order_ownership::enqueue_or_refresh_driver_earning_sync_row(
+                            &conn, &eid, &payload,
+                        )?;
+                    }
+                    Ok(inserted)
+                })()
+                .and_then(|inserted| {
+                    conn.execute_batch("RELEASE driver_earning_backfill")
+                        .map_err(|e| format!("release driver earning backfill: {e}"))?;
+                    Ok(inserted)
+                });
+                match result {
+                    Ok(inserted) => backfilled += inserted,
+                    Err(error) => {
+                        if let Err(rollback_error) = conn.execute_batch(
+                            "ROLLBACK TO driver_earning_backfill; RELEASE driver_earning_backfill",
+                        ) {
+                            tracing::warn!(order_id = %oid, %rollback_error, "Could not roll back driver earning backfill");
+                        }
+                        tracing::warn!(order_id = %oid, %error, "Could not backfill and queue driver earning");
+                    }
+                }
             }
-            if !backfill_rows.is_empty() {
-                info!(
-                    "Backfilled {} driver_earnings for shift {shift_id}",
-                    backfill_rows.len()
-                );
+            if backfilled > 0 {
+                info!("Backfilled {backfilled} driver_earnings for shift {shift_id}");
             }
         }
 
@@ -3134,6 +3182,17 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         let cash = cashier_cash_totals(&conn, shift_id, &check_in_time, shift_end_param)?;
         result["cashRefunds"] = serde_json::json!(Cents::new(cash.refunds_cents).to_f64_dp2());
         result["cashierCash"] = cash.as_json();
+    }
+
+    let net_collections = if cashier_check_out_time.is_some()
+        || result["shift"]["status"] == "closed"
+    {
+        load_frozen_net_collections(&conn, shift_id)?
+    } else {
+        compute_shift_net_collections(&conn, shift_id, &role_type, &check_in_time, &summary_now)?
+    };
+    if let Some(collections) = net_collections {
+        result["netCollections"] = collections;
     }
 
     Ok(result)
@@ -3933,6 +3992,9 @@ fn build_shift_update_sync_payload_from_db(
     }
 
     append_recorded_operating_currency(conn, "staff_shifts", shift_id, &mut payload)?;
+    if let Some(collections) = load_frozen_net_collections(conn, shift_id)? {
+        payload["netCollections"] = collections;
+    }
     Ok(payload.to_string())
 }
 
@@ -4587,6 +4649,130 @@ fn role_order_type_filter_sql(role_type: &str, order_alias: &str) -> String {
         "server" => format!("AND COALESCE({order_alias}.order_type, 'dine-in') != 'delivery'"),
         _ => String::new(),
     }
+}
+
+pub(crate) fn load_frozen_net_collections(
+    conn: &Connection,
+    shift_id: &str,
+) -> Result<Option<Value>, String> {
+    crate::db::get_setting(conn, "shift_net_collections_v1", shift_id)
+        .map(|saved| {
+            serde_json::from_str(&saved).map_err(|e| format!("read frozen shift collections: {e}"))
+        })
+        .transpose()
+}
+
+pub(crate) fn compute_shift_net_collections(
+    conn: &Connection,
+    shift_id: &str,
+    role_type: &str,
+    window_start: &str,
+    window_end: &str,
+) -> Result<Option<Value>, String> {
+    let platform = crate::payments::platform_settlement_row_sql("op");
+    let set_aside = crate::payment_review::set_aside_payment_sql("op");
+    let role_filter = role_order_type_filter_sql(role_type, "o");
+    // A receipt counts whatever happens to its order later: a cancelled order's
+    // refund or void counts on the refunded side, so receipt and return net to zero.
+    let received_sql = format!(
+        "SELECT LOWER(TRIM(op.method)),
+                COALESCE(op.amount_cents,CAST(ROUND(op.amount*100) AS INTEGER),0),
+                COALESCE(op.tip_amount_cents,CAST(ROUND(op.tip_amount*100) AS INTEGER),0)
+         FROM order_payments op JOIN orders o ON o.id=op.order_id
+         JOIN staff_shifts ss ON ss.id=?1 AND ss.branch_id=o.branch_id
+         WHERE COALESCE(NULLIF(TRIM(op.staff_shift_id),''),o.staff_shift_id)=?1
+           AND (?4<>'driver' OR op.staff_shift_id=?1)
+           AND op.status IN ('completed','refunded','partially_refunded','voided')
+           AND NOT (COALESCE(op.payment_origin,'')='sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id,''))='')
+           AND NOT {platform} AND NOT {set_aside}
+           AND COALESCE(o.is_ghost,0)=0 AND COALESCE(o.is_test,0)=0 {role_filter}
+           AND julianday(op.created_at)>=julianday(?2) AND julianday(op.created_at)<=julianday(?3)"
+    );
+    let mut buckets = BTreeMap::<String, [i64; 2]>::new();
+    let tender_key = |method: &str| match method {
+        "cash" => "cash",
+        "card" => "card",
+        "twint" => "twint",
+        _ => "other",
+    };
+    let mut payment_count = 0;
+    let mut tips = 0;
+    let mut stmt = conn
+        .prepare(&received_sql)
+        .map_err(|e| format!("prepare shift collections: {e}"))?;
+    let rows = stmt
+        .query_map(
+            params![shift_id, window_start, window_end, role_type],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("read shift collections: {e}"))?;
+    for row in rows {
+        let (method, amount, tip) = row.map_err(|e| e.to_string())?;
+        buckets.entry(tender_key(&method).to_string()).or_default()[0] += amount;
+        tips += tip;
+        payment_count += 1;
+    }
+    // Driver custody is separate unless a receipt names this driver's shift.
+    if role_type == "driver" && payment_count == 0 {
+        return Ok(None);
+    }
+    let refund_sql = format!(
+        "SELECT LOWER(TRIM(COALESCE(NULLIF(TRIM(pa.refund_method),''),op.method,'other'))),
+                COALESCE(pa.amount_cents,CAST(ROUND(pa.amount*100) AS INTEGER),0)
+         FROM payment_adjustments pa JOIN orders o ON o.id=pa.order_id
+         JOIN order_payments op ON op.id=pa.payment_id AND op.order_id=o.id
+         JOIN staff_shifts ss ON ss.id=?1 AND ss.branch_id=o.branch_id
+         WHERE COALESCE(NULLIF(TRIM(pa.staff_shift_id),''),NULLIF(TRIM(op.staff_shift_id),''),o.staff_shift_id)=?1
+           AND pa.adjustment_type IN ('refund','void') AND COALESCE(pa.imported_remote,0)=0
+           AND NOT (COALESCE(op.payment_origin,'')='sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id,''))='')
+           AND NOT {platform} AND NOT {set_aside}
+           AND COALESCE(o.is_ghost,0)=0 AND COALESCE(o.is_test,0)=0 {role_filter}
+           AND julianday(pa.created_at)>=julianday(?2) AND julianday(pa.created_at)<=julianday(?3)"
+    );
+    let mut refund_count = 0;
+    let mut stmt = conn
+        .prepare(&refund_sql)
+        .map_err(|e| format!("prepare shift returns: {e}"))?;
+    let rows = stmt
+        .query_map(params![shift_id, window_start, window_end], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| format!("read shift returns: {e}"))?;
+    for row in rows {
+        let (method, amount) = row.map_err(|e| e.to_string())?;
+        buckets.entry(tender_key(&method).to_string()).or_default()[1] += amount;
+        refund_count += 1;
+    }
+    let mut received = 0;
+    let mut refunded = 0;
+    let tenders: Vec<Value> = ["cash", "card", "twint", "other"]
+        .iter()
+        .filter_map(|tender| {
+            let [incoming, outgoing] = *buckets.get(*tender)?;
+            received += incoming;
+            refunded += outgoing;
+            Some(json!({
+                "tender":tender,
+                "received":Cents::new(incoming).to_f64_dp2(),"receivedCents":incoming,
+                "refunded":Cents::new(outgoing).to_f64_dp2(),"refundedCents":outgoing,
+                "kept":Cents::new(incoming-outgoing).to_f64_dp2(),"keptCents":incoming-outgoing,
+            }))
+        })
+        .collect();
+    Ok(Some(json!({
+        "version":1,"tenders":tenders,
+        "received":Cents::new(received).to_f64_dp2(),"receivedCents":received,
+        "refunded":Cents::new(refunded).to_f64_dp2(),"refundedCents":refunded,
+        "total":Cents::new(received-refunded).to_f64_dp2(),"totalCents":received-refunded,
+        "tips":Cents::new(tips).to_f64_dp2(),"tipsCents":tips,
+        "paymentCount":payment_count,"refundCount":refund_count,
+    })))
 }
 
 /// Collections are gross: refund payouts are deducted separately by the drawer.
@@ -5756,6 +5942,173 @@ mod tests {
     use serde_json::Value;
 
     const TEST_MANAGER_UUID: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn rule10_fixture() -> (DbState, String, String) {
+        let (db, a, at) = cashier_cancellation_ledger_fixture();
+        let b = "rule10-b".to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,branch_id,terminal_id,role_type,status,check_in_time,opening_cash_amount,currency,created_at,updated_at) VALUES(?1,'b','cash-ledger-branch','cash-ledger-terminal','cashier','active',?2,0,'EUR',?2,?2)", params![b, at]).unwrap();
+            conn.execute("INSERT INTO orders(id,branch_id,items,order_type,total_amount,total_amount_cents,status,payment_status,staff_shift_id,currency,created_at,updated_at) VALUES('rule10-order','cash-ledger-branch','[]','dine-in',100,10000,'completed','paid',?1,'EUR',?2,?2)", params![a, at]).unwrap();
+            for (id, shift, method, cents) in [
+                ("rule10-a", &a, "cash", 4000),
+                ("rule10-b", &b, "card", 6000),
+            ] {
+                conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,staff_shift_id,currency,created_at,updated_at) VALUES(?1,'rule10-order',?2,?3,?4,'completed',?5,'EUR',?6,?6)", params![id,method,cents as f64 / 100.0,cents,shift,at]).unwrap();
+            }
+        }
+        (db, a, b)
+    }
+
+    #[test]
+    fn rule10_split_check_belongs_to_each_collector() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, a, b) = rule10_fixture();
+        for (shift, total, tender) in [(&a, 40.0, "cash"), (&b, 60.0, "card")] {
+            let summary = get_shift_summary(&db, shift).unwrap();
+            assert_eq!(summary["netCollections"]["total"], total);
+            assert_eq!(summary["netCollections"]["tenders"][0]["tender"], tender);
+            assert_eq!(summary["netCollections"]["paymentCount"], 1);
+        }
+    }
+
+    #[test]
+    fn rule10_refund_belongs_to_refunding_shift_on_its_own_time() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, a, b) = rule10_fixture();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE orders SET created_at='2020-01-01T00:00:00Z',updated_at='2020-01-01T00:00:00Z'", []).unwrap();
+            conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,staff_shift_id,refund_method,created_at,updated_at) SELECT 'rule10-refund','rule10-a','rule10-order','refund',10,1000,'return',id,'cash',check_in_time,check_in_time FROM staff_shifts WHERE id=?1", [&b]).unwrap();
+        }
+        let summary = get_shift_summary(&db, &b).unwrap();
+        assert_eq!(summary["netCollections"]["refunded"], 10.0);
+        assert_eq!(summary["netCollections"]["total"], 50.0);
+        assert_eq!(summary["netCollections"]["refundCount"], 1);
+        assert_eq!(
+            get_shift_summary(&db, &a).unwrap()["netCollections"]["total"],
+            40.0
+        );
+    }
+
+    /// Codex on #435: a receipt dropped out when its order was later cancelled,
+    /// while its return still counted (received 0, refunded 10, total -10).
+    #[test]
+    fn rule10_cancelled_order_receipt_and_return_net_to_zero() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, _, b) = rule10_fixture();
+        {
+            let conn = db.conn.lock().unwrap();
+            let at: String = conn
+                .query_row(
+                    "SELECT check_in_time FROM staff_shifts WHERE id=?1",
+                    [&b],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            conn.execute("INSERT INTO orders(id,branch_id,items,order_type,total_amount,total_amount_cents,status,payment_status,staff_shift_id,currency,created_at,updated_at) VALUES('rule10-gone','cash-ledger-branch','[]','pickup',10,1000,'cancelled','refunded',?1,'EUR',?2,?2)", params![b, at]).unwrap();
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,staff_shift_id,currency,created_at,updated_at) VALUES('rule10-gone-cash','rule10-gone','cash',10,1000,'refunded',?1,'EUR',?2,?2)", params![b, at]).unwrap();
+            conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,staff_shift_id,refund_method,created_at,updated_at) VALUES('rule10-gone-refund','rule10-gone-cash','rule10-gone','refund',10,1000,'return',?1,'cash',?2,?2)", params![b, at]).unwrap();
+        }
+        let collections = &get_shift_summary(&db, &b).unwrap()["netCollections"];
+        assert_eq!(collections["received"], 70.0);
+        assert_eq!(collections["refunded"], 10.0);
+        assert_eq!(collections["total"], 60.0);
+        let cash = collections["tenders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tender| tender["tender"] == "cash")
+            .unwrap();
+        assert_eq!(cash["kept"], 0.0);
+    }
+
+    #[test]
+    fn rule10_tip_is_included_once_and_shown_apart() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, a, _) = rule10_fixture();
+        db.conn.lock().unwrap().execute("UPDATE order_payments SET amount=45,amount_cents=4500,tip_amount=5,tip_amount_cents=500 WHERE id='rule10-a'", []).unwrap();
+        let summary = get_shift_summary(&db, &a).unwrap();
+        assert_eq!(summary["netCollections"]["total"], 45.0);
+        assert_eq!(summary["netCollections"]["tips"], 5.0);
+        assert_eq!(summary["netCollections"]["tipsCents"], 500);
+    }
+
+    #[test]
+    fn rule10_twint_and_other_remain_distinct() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, a, b) = rule10_fixture();
+        db.conn.lock().unwrap().execute("UPDATE order_payments SET method=CASE WHEN id='rule10-a' THEN 'twint' ELSE 'other' END", []).unwrap();
+        for (shift, tender) in [(&a, "twint"), (&b, "other")] {
+            let summary = get_shift_summary(&db, shift).unwrap();
+            assert_eq!(summary["netCollections"]["tenders"][0]["tender"], tender);
+        }
+    }
+
+    #[test]
+    fn rule10_existing_sales_and_drawer_are_unchanged() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, a, _) = rule10_fixture();
+        let summary = get_shift_summary(&db, &a).unwrap();
+        assert_eq!(summary["breakdown"]["overall"]["totalAmount"], 100.0);
+        assert_eq!(summary["cashierCash"]["cashCollections"], 40.0);
+        let closed =
+            close_shift(&db, &serde_json::json!({"shiftId": a, "closingCash": 40})).unwrap();
+        assert_eq!(closed["expected"], 40.0);
+        let conn = db.conn.lock().unwrap();
+        let existing: (i64, i64, i64, i64) = conn.query_row("SELECT total_sales_amount_cents,total_cash_sales_cents,total_card_sales_cents,expected_cash_amount_cents FROM staff_shifts WHERE id=?1", [&a], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!(existing, (10000, 4000, 0, 4000));
+    }
+
+    #[test]
+    fn rule10_close_freezes_collections_and_syncs_same_block() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, a, _) = rule10_fixture();
+        close_shift(&db, &serde_json::json!({"shiftId": a, "closingCash": 40})).unwrap();
+        let frozen = get_shift_summary(&db, &a).unwrap()["netCollections"].clone();
+        assert_eq!(frozen["total"], 40.0);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE order_payments SET amount=999,amount_cents=99900 WHERE id='rule10-a'",
+                [],
+            )
+            .unwrap();
+            let mut stmt = conn.prepare("SELECT data FROM parity_sync_queue WHERE record_id=?1 AND table_name='staff_shifts'").unwrap();
+            let bodies = stmt.query_map([&a], |r| r.get::<_, String>(0)).unwrap();
+            let close = bodies
+                .map(|r| serde_json::from_str::<Value>(&r.unwrap()).unwrap())
+                .find(|v| v["checkOutTime"].is_string())
+                .unwrap();
+            assert_eq!(close["netCollections"], frozen);
+            let rebuilt: Value =
+                serde_json::from_str(&build_shift_update_sync_payload_from_db(&conn, &a).unwrap())
+                    .unwrap();
+            assert_eq!(rebuilt["netCollections"], frozen);
+        }
+        assert_eq!(
+            get_shift_summary(&db, &a).unwrap()["netCollections"],
+            frozen
+        );
+    }
+
+    #[test]
+    fn rule10_legacy_closed_shift_does_not_gain_collections() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, a, _) = rule10_fixture();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE staff_shifts SET status='closed',check_out_time=check_in_time WHERE id=?1",
+                [&a],
+            )
+            .unwrap();
+        assert!(get_shift_summary(&db, &a)
+            .unwrap()
+            .get("netCollections")
+            .is_none());
+    }
 
     #[test]
     fn cancellation_waiter_history_retains_original_and_excludes_refunded_sale() {
@@ -9710,6 +10063,228 @@ mod tests {
         .expect("close inherited driver shift");
         assert_eq!(close_driver["expected"], 67.20);
         assert_eq!(close_driver["variance"], 0.0);
+    }
+
+    fn driver_backfill_db() -> DbState {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            crate::commands::orders::driver_restore_tests::paid_delivery_order(&conn);
+            conn.execute_batch(
+                "UPDATE orders SET driver_id='driver-1',staff_shift_id='driver-shift';
+                 UPDATE order_payments SET staff_shift_id='driver-shift';",
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    #[test]
+    fn driver_backfill_queues_canonical_payload_once() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = driver_backfill_db();
+        let first = get_shift_summary(&db, "driver-shift").unwrap();
+        let second = get_shift_summary(&db, "driver-shift").unwrap();
+        assert_eq!(first["driverDeliveries"], second["driverDeliveries"]);
+        assert_eq!(first["driverDeliveries"].as_array().unwrap().len(), 1);
+        let conn = db.conn.lock().unwrap();
+        let earning_id: String = conn
+            .query_row("SELECT id FROM driver_earnings", [], |row| row.get(0))
+            .unwrap();
+        let expected =
+            order_ownership::build_driver_earning_sync_payload(&conn, &earning_id).unwrap();
+        let rows: Vec<(String, String, String, String)> = conn
+            .prepare("SELECT record_id,operation,module_type,data FROM parity_sync_queue WHERE table_name='driver_earnings'")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, earning_id);
+        assert_eq!(rows[0].1, "INSERT");
+        assert_eq!(rows[0].2, "financial");
+        assert_eq!(serde_json::from_str::<Value>(&rows[0].3).unwrap(), expected);
+        assert_eq!(expected["currency"], "EUR");
+        assert_eq!(expected["tip_amount_cents"], 75);
+        assert_eq!(expected["card_amount_cents"], 1075);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM driver_earnings", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+
+        let assignment_conn = crate::commands::orders::driver_restore_tests::test_conn();
+        crate::commands::orders::driver_restore_tests::paid_delivery_order(&assignment_conn);
+        crate::commands::orders::assign_driver_locally(
+            &assignment_conn,
+            crate::commands::orders::driver_restore_tests::ORDER,
+            "driver-1",
+            None,
+            "2026-10-07T18:10:00Z",
+        )
+        .unwrap();
+        let raw: String = assignment_conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE table_name='driver_earnings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut assigned: Value = serde_json::from_str(&raw).unwrap();
+        let mut backfilled = expected;
+        for key in ["id", "createdAt", "updatedAt"] {
+            assigned.as_object_mut().unwrap().remove(key);
+            backfilled.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(backfilled, assigned);
+    }
+
+    #[test]
+    fn driver_backfill_queue_failure_rolls_back_and_retries_on_next_summary() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = driver_backfill_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_driver_backfill_queue BEFORE INSERT ON parity_sync_queue
+                 WHEN NEW.table_name='driver_earnings'
+                 BEGIN SELECT RAISE(ABORT, 'injected driver backfill queue failure'); END;",
+            )
+            .unwrap();
+        }
+        let summary =
+            get_shift_summary(&db, "driver-shift").expect("backfill failure must not fail summary");
+        assert!(summary["driverDeliveries"].as_array().unwrap().is_empty());
+        {
+            let conn = db.conn.lock().unwrap();
+            assert!(conn.is_autocommit());
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM driver_earnings", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            conn.execute_batch("DROP TRIGGER fail_driver_backfill_queue")
+                .unwrap();
+        }
+        let retried = get_shift_summary(&db, "driver-shift").unwrap();
+        assert_eq!(retried["driverDeliveries"].as_array().unwrap().len(), 1);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM driver_earnings", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name='driver_earnings'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn driver_backfill_ignored_insert_never_queues_a_generated_id() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = driver_backfill_db();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER ignore_driver_backfill BEFORE INSERT ON driver_earnings
+             BEGIN SELECT RAISE(IGNORE); END;",
+            )
+            .unwrap();
+        get_shift_summary(&db, "driver-shift").unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert!(conn.is_autocommit());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM driver_earnings", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn driver_backfill_preserves_outer_transaction_and_does_not_requeue_existing_rows() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = driver_backfill_db();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("BEGIN IMMEDIATE")
+            .unwrap();
+        get_shift_summary(&db, "driver-shift").unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            assert!(!conn.is_autocommit());
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name='driver_earnings'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            conn.execute_batch("ROLLBACK").unwrap();
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM driver_earnings", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        get_shift_summary(&db, "driver-shift").unwrap();
+        // A missing supabase_id is not proof of an unsent earning: its write
+        // on acknowledgement is best-effort, while the queue row is consumed.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DELETE FROM parity_sync_queue")
+            .unwrap();
+        get_shift_summary(&db, "driver-shift").unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM driver_earnings WHERE supabase_id IS NULL",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

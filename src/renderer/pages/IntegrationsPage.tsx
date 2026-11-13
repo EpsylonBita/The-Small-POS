@@ -614,7 +614,14 @@ const mapRemoteStatus = (integration: RemoteIntegrationPayload): IntegrationWith
   if (isPaymentSetupPlugin(getRemoteIntegrationId(integration))) {
     return resolvePaymentPluginSetup(integration.payment_setup).status;
   }
-  if (integration.is_enabled === false || integration.is_active === false) return 'disconnected';
+  if (integration.is_enabled === false) return 'disconnected';
+  if (getRemoteIntegrationId(integration) === 'wolt') {
+    // Prepared Wolt credentials stay inactive while authorization is pending.
+    if (integration.status === 'pending' || integration.status === 'error') return 'pending';
+    return integration.status === 'connected' && integration.is_active !== false
+      ? 'connected' : 'disconnected';
+  }
+  if (integration.is_active === false) return 'disconnected';
   if (getRemoteIntegrationId(integration) === 'fiscalization_gr') {
     return integration.is_enabled === true && integration.status === 'connected'
       ? 'connected' : integration.status === 'pending' || integration.status === 'error' ? 'pending' : 'disconnected';

@@ -2,7 +2,7 @@ import React, { memo, useState, useMemo, useEffect, useCallback, useRef, useId }
 import { createPortal } from 'react-dom';
 import { useCashierPortalProps } from '../../../contexts/cashier-gate-context';
 import { useTranslation } from 'react-i18next';
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useTheme } from '../../../contexts/theme-context';
 import {
   AlertCircle,
@@ -238,6 +238,14 @@ const MINUTES = ['00', '15', '30', '45'];
 
 export const StaffScheduleView: React.FC = memo(() => {
   const { t } = useTranslation();
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const { resolvedTheme } = useTheme();
   const { getSetting } = useTerminalSettings();
 
@@ -1034,7 +1042,7 @@ export const StaffScheduleView: React.FC = memo(() => {
   const softPanelClass = 'border-(--pos-s-border) bg-(--pos-s-surface-2)';
   const modalPanelClass = 'liquid-glass-modal-shell text-(--pos-s-fg)';
   const mutedTextClass = 'text-(--pos-s-muted)';
-  const inputClass = 'min-h-[48px] w-full rounded-xl border border-(--pos-s-control) bg-(--pos-s-surface) px-3 text-base font-semibold text-(--pos-s-fg) outline-hidden transition-colors placeholder:font-normal placeholder:text-zinc-400 focus:border-(--pos-s-yellow) dark:placeholder:text-zinc-500';
+  const inputClass = 'liquid-glass-modal-input pos-glass-field min-h-[48px] w-full px-3 text-base font-semibold placeholder:font-normal';
   const iconButtonClass = 'pos-icon-btn';
   const primaryButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';
   const secondaryButtonClass = 'pos-solid-btn pos-solid-btn--md';
@@ -1373,7 +1381,7 @@ export const StaffScheduleView: React.FC = memo(() => {
             aria-labelledby={previewTitleId}
             className={`relative flex max-h-[calc(100vh-2rem)] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border ${modalPanelClass}`}
           >
-            <div className={`flex items-start justify-between gap-3 border-b p-4 md:p-5 ${isDark ? 'border-zinc-800' : 'border-slate-200'}`}>
+            <div className="flex items-start justify-between gap-3 p-4 md:p-5">
               <div className="min-w-0">
                 <h3 id={previewTitleId} className="text-xl font-semibold md:text-2xl">
                   {t('staffSchedule.previewWeek.title', 'Week preview')}
@@ -1394,14 +1402,14 @@ export const StaffScheduleView: React.FC = memo(() => {
 
             <div className="min-h-0 overflow-y-auto scrollbar-hide p-4 md:p-5">
               {weeklyPreviewRows.length === 0 ? (
-                <div className={`flex min-h-48 items-center justify-center rounded-2xl border border-dashed text-center text-sm ${isDark ? 'border-zinc-700 text-zinc-400' : 'border-slate-300 text-slate-600'}`}>
+                <div className="pos-glass-form-card flex min-h-48 items-center justify-center text-center text-sm liquid-glass-modal-text-muted">
                   {t('staffSchedule.previewWeek.empty', 'No active staff are scheduled for this week.')}
                 </div>
               ) : (
-                <div className="overflow-x-auto scrollbar-hide rounded-xl border border-inherit">
-                  <div className="min-w-max">
-                    <div className={`grid grid-cols-[180px_repeat(7,minmax(104px,1fr))] border-b text-xs font-semibold uppercase ${isDark ? 'bg-zinc-900 border-zinc-800 text-zinc-400' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
-                      <div className={`border-r p-3 ${isDark ? 'border-zinc-800' : 'border-slate-200'}`}>
+                <div className="overflow-x-auto scrollbar-hide">
+                  <div className="min-w-max space-y-3">
+                    <div className={`grid grid-cols-[180px_repeat(7,minmax(104px,1fr))] pos-glass-form-card p-0! text-xs font-semibold uppercase liquid-glass-modal-text-muted`}>
+                      <div className={`p-3`}>
                         {t('staffSchedule.fields.staff', 'Staff')}
                       </div>
                       {weekDays.map(day => {
@@ -1410,7 +1418,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                         return (
                           <div
                             key={`preview-header-${dayKey}`}
-                            className={`border-r p-3 last:border-r-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'} ${isToday ? (isDark ? 'text-yellow-200' : 'text-yellow-700') : ''}`}
+                            className={`p-3 ${isToday ? 'liquid-glass-modal-text' : ''}`}
                           >
                             <div>{getDayLabel(day)}</div>
                             <div className="mt-0.5 font-normal normal-case">
@@ -1424,9 +1432,9 @@ export const StaffScheduleView: React.FC = memo(() => {
                     {weeklyPreviewRows.map(row => (
                       <div
                         key={row.staff.id}
-                        className={`grid grid-cols-[180px_repeat(7,minmax(104px,1fr))] border-b last:border-b-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'}`}
+                        className={`grid grid-cols-[180px_repeat(7,minmax(104px,1fr))] pos-glass-form-card p-0!`}
                       >
-                        <div className={`border-r p-3 ${isDark ? 'border-zinc-800 bg-zinc-950/60' : 'border-slate-200 bg-white'}`}>
+                        <div className={`p-3`}>
                           <p className="truncate text-sm font-semibold">{row.staff.name}</p>
                           <p className={`mt-1 truncate text-xs ${mutedTextClass}`}>
                             {translateRoleName(t, row.staff.role?.name || 'staff', row.staff.role?.displayName)}
@@ -1444,11 +1452,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                           return (
                             <div
                               key={`${row.staff.id}-${dayKey}`}
-                              className={`min-h-24 border-r last:border-r-0 ${isDark ? 'border-zinc-800' : 'border-slate-200'} ${
-                                dayShifts.length === 0
-                                  ? isDark ? 'bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2)'
-                                  : isDark ? 'bg-zinc-950/30' : 'bg-white'
-                              }`}
+                              className={`min-h-24`}
                             >
                               {dayShifts.length === 0 ? (
                                 <div className={`flex h-full min-h-24 w-full items-center justify-center px-2 text-center text-sm font-bold uppercase tracking-wide ${
@@ -1461,7 +1465,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                                   {dayShifts.map(shift => (
                                     <div
                                       key={`preview-${shift.id}`}
-                                      className={`rounded-2xl border-l-4 px-2 py-2 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-slate-50 border-slate-200'}`}
+                                      className={`pos-glass-form-card border-l-4 px-2! py-2!`}
                                       style={{ borderLeftColor: shift.roleColor }}
                                     >
                                       <p className="text-base font-bold leading-tight">{formatTimeRange(shift.start, shift.end, timeZone)}</p>
@@ -1497,10 +1501,10 @@ export const StaffScheduleView: React.FC = memo(() => {
             aria-labelledby={createTitleId}
             className={`relative flex max-h-[calc(100vh-3.5rem)] w-full max-w-3xl flex-col overflow-hidden ${modalPanelClass}`}
           >
-            <div className="flex items-start justify-between gap-3 shrink-0 border-b border-(--modal-glass-line) p-5 md:p-6">
+            <div className="flex items-start justify-between gap-3 shrink-0 p-5 md:p-6">
               <div>
                 <h3 id={createTitleId} className="text-2xl font-semibold">{t(confirmDelete ? 'staffSchedule.workflow.delete' : editingShiftId ? 'staffSchedule.workflow.edit' : 'staffSchedule.addShift', confirmDelete ? 'Delete shift' : editingShiftId ? 'Edit shift' : 'Add Shift')}</h3>
-                <p className="mt-1 text-sm text-(--pos-s-muted)">
+                <p className="mt-1 text-sm liquid-glass-modal-text-muted">
                   {formatDate(createModalDate, { weekday: 'long', day: '2-digit', month: 'short' })}
                 </p>
               </div>
@@ -1514,10 +1518,10 @@ export const StaffScheduleView: React.FC = memo(() => {
               </button>
             </div>
 
-            <fieldset disabled={confirmDelete || creatingShift} className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto scrollbar-hide p-5 md:p-6">
-              {confirmDelete && <p role="alert" className="pos-notice pos-notice--bad">{t('staffSchedule.workflow.deleteConfirm', 'Delete this planned shift? Review the staff member and times below before confirming.')}</p>}
-              <label className="block">
-                <span className="mb-1 block text-sm font-semibold text-(--pos-s-fg)">
+            <fieldset disabled={confirmDelete || creatingShift} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto scrollbar-hide p-5 md:p-6">
+              <AnimatePresence initial={false}>{confirmDelete && <motion.div key="glass-reveal-1" {...revealMotion}><p role="alert" className="pos-notice pos-notice--bad">{t('staffSchedule.workflow.deleteConfirm', 'Delete this planned shift? Review the staff member and times below before confirming.')}</p></motion.div>}</AnimatePresence>
+              <label className="pos-glass-form-card block">
+                <span className="mb-1 block text-sm font-semibold liquid-glass-modal-text-muted">
                   {t('staffSchedule.fields.staff', 'Staff')}
                 </span>
                 <select
@@ -1541,111 +1545,113 @@ export const StaffScheduleView: React.FC = memo(() => {
                     type="button"
                     onClick={() => applyTimePreset(preset)}
                     aria-pressed={isPresetActive(preset)}
-                    className={`pos-choice${isPresetActive(preset) ? ' is-selected' : ''}`}
+                    className={`min-h-11 rounded-xl px-4 py-2 text-sm font-semibold ${isPresetActive(preset) ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)' : 'pos-glass-field'}`}
                   >
                     {t(`staffSchedule.presets.${preset.key}`, preset.key)}
                   </button>
                 ))}
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <div className="pos-card p-4">
-                  <p className="mb-3 text-sm font-semibold text-(--pos-s-fg)">
-                    {t('staffSchedule.fields.startDateTime', 'Start (date & time)')}
-                  </p>
-                  <div className="flex flex-col gap-3">
-                    <KitDateField
-                      type="date" required
-                      value={createStartDate}
-                      onChange={e => setCreateStartDate(e.target.value)}
-                      className={inputClass}
-                    />
-                    <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-                      <select
-                        value={createStartHour}
-                        onChange={e => setCreateStartHour(e.target.value)}
+              <div className="pos-glass-form-card space-y-3">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  <div>
+                    <p className="mb-3 text-sm font-semibold liquid-glass-modal-text-muted">
+                      {t('staffSchedule.fields.startDateTime', 'Start (date & time)')}
+                    </p>
+                    <div className="flex flex-col gap-3">
+                      <KitDateField
+                        type="date" required
+                        value={createStartDate}
+                        onChange={e => setCreateStartDate(e.target.value)}
                         className={inputClass}
-                      >
-                        {HOURS.map(hour => <option key={`start-hour-${hour}`} value={hour}>{hour}</option>)}
-                      </select>
-                      <span className="text-xl font-bold text-(--pos-s-muted)">:</span>
-                      <select
-                        value={createStartMinute}
-                        onChange={e => setCreateStartMinute(e.target.value)}
+                      />
+                      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+                        <select
+                          value={createStartHour}
+                          onChange={e => setCreateStartHour(e.target.value)}
+                          className={inputClass}
+                        >
+                          {HOURS.map(hour => <option key={`start-hour-${hour}`} value={hour}>{hour}</option>)}
+                        </select>
+                        <span className="text-xl font-bold liquid-glass-modal-text-muted">:</span>
+                        <select
+                          value={createStartMinute}
+                          onChange={e => setCreateStartMinute(e.target.value)}
+                          className={inputClass}
+                        >
+                          {MINUTES.map(minute => <option key={`start-minute-${minute}`} value={minute}>{minute}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+  
+                  <div>
+                    <p className="mb-3 text-sm font-semibold liquid-glass-modal-text-muted">
+                      {t('staffSchedule.fields.endDateTime', 'End (date & time)')}
+                    </p>
+                    <div className="flex flex-col gap-3">
+                      <KitDateField
+                        type="date" required
+                        value={createEndDate}
+                        onChange={e => setCreateEndDate(e.target.value)}
                         className={inputClass}
+                      />
+                      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+                        <select
+                          value={createEndHour}
+                          onChange={e => setCreateEndHour(e.target.value)}
+                          className={inputClass}
+                        >
+                          {HOURS.map(hour => <option key={`end-hour-${hour}`} value={hour}>{hour}</option>)}
+                        </select>
+                        <span className="text-xl font-bold liquid-glass-modal-text-muted">:</span>
+                        <select
+                          value={createEndMinute}
+                          onChange={e => setCreateEndMinute(e.target.value)}
+                          className={inputClass}
+                        >
+                          {MINUTES.map(minute => <option key={`end-minute-${minute}`} value={minute}>{minute}</option>)}
+                        </select>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!createStartDate) return;
+                          // Only roll the end date forward for a genuine overnight wrap
+                          // (end time at/before start time). A same-day shift keeps its
+                          // end date so the shortcut can't create a 24h+ shift.
+                          const rollToNextDay = shouldRollEndToNextDay(
+                            createStartHour,
+                            createStartMinute,
+                            createEndHour,
+                            createEndMinute,
+                          );
+                          const endDay = new Date(`${createStartDate}T00:00:00`);
+                          if (rollToNextDay) {
+                            endDay.setDate(endDay.getDate() + 1);
+                          }
+                          setCreateEndDate(toDateInputValue(endDay));
+                        }}
+                        className="pos-glass-field min-h-11 w-full px-3 py-2 font-semibold"
                       >
-                        {MINUTES.map(minute => <option key={`start-minute-${minute}`} value={minute}>{minute}</option>)}
-                      </select>
+                        {t('staffSchedule.nextDayShortcut', 'Set end date to next day')}
+                      </button>
                     </div>
                   </div>
                 </div>
-
-                <div className="pos-card p-4">
-                  <p className="mb-3 text-sm font-semibold text-(--pos-s-fg)">
-                    {t('staffSchedule.fields.endDateTime', 'End (date & time)')}
-                  </p>
-                  <div className="flex flex-col gap-3">
-                    <KitDateField
-                      type="date" required
-                      value={createEndDate}
-                      onChange={e => setCreateEndDate(e.target.value)}
-                      className={inputClass}
-                    />
-                    <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-                      <select
-                        value={createEndHour}
-                        onChange={e => setCreateEndHour(e.target.value)}
-                        className={inputClass}
-                      >
-                        {HOURS.map(hour => <option key={`end-hour-${hour}`} value={hour}>{hour}</option>)}
-                      </select>
-                      <span className="text-xl font-bold text-(--pos-s-muted)">:</span>
-                      <select
-                        value={createEndMinute}
-                        onChange={e => setCreateEndMinute(e.target.value)}
-                        className={inputClass}
-                      >
-                        {MINUTES.map(minute => <option key={`end-minute-${minute}`} value={minute}>{minute}</option>)}
-                      </select>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!createStartDate) return;
-                        // Only roll the end date forward for a genuine overnight wrap
-                        // (end time at/before start time). A same-day shift keeps its
-                        // end date so the shortcut can't create a 24h+ shift.
-                        const rollToNextDay = shouldRollEndToNextDay(
-                          createStartHour,
-                          createStartMinute,
-                          createEndHour,
-                          createEndMinute,
-                        );
-                        const endDay = new Date(`${createStartDate}T00:00:00`);
-                        if (rollToNextDay) {
-                          endDay.setDate(endDay.getDate() + 1);
-                        }
-                        setCreateEndDate(toDateInputValue(endDay));
-                      }}
-                      className="pos-solid-btn pos-solid-btn--sm w-full"
-                    >
-                      {t('staffSchedule.nextDayShortcut', 'Set end date to next day')}
-                    </button>
-                  </div>
+  
+                {/* The preview is a plain fact (neutral); a problem is a kit warn notice. */}
+                <div className={shiftPreview.valid ? 'pos-glass-form-card px-3! py-2!' : 'pos-notice pos-notice--warn pos-notice--stack'}>
+                  <p className="text-sm font-semibold liquid-glass-modal-text-muted">{shiftPreview.valid ? t('staffSchedule.preview', 'Preview') : t('staffSchedule.validationLabel', 'Validation')}</p>
+                  <p className="mt-0.5 text-base font-semibold liquid-glass-modal-text">{shiftPreview.message}</p>
                 </div>
+                <p className="text-sm liquid-glass-modal-text-muted">
+                  {t('staffSchedule.overnightHint', 'For overnight shifts, choose the next day as end date.')}
+                </p>
               </div>
 
-              {/* The preview is a plain fact (neutral); a problem is a kit warn notice. */}
-              <div className={shiftPreview.valid ? 'pos-frost rounded-xl border px-3 py-2' : 'pos-notice pos-notice--warn pos-notice--stack'}>
-                <p className="text-sm font-semibold text-(--pos-s-muted)">{shiftPreview.valid ? t('staffSchedule.preview', 'Preview') : t('staffSchedule.validationLabel', 'Validation')}</p>
-                <p className="mt-0.5 text-base font-semibold text-(--pos-s-fg)">{shiftPreview.message}</p>
-              </div>
-              <p className="text-sm text-(--pos-s-muted)">
-                {t('staffSchedule.overnightHint', 'For overnight shifts, choose the next day as end date.')}
-              </p>
-
-              <label className="block">
-                <span className="mb-1 block text-sm font-semibold text-(--pos-s-fg)">
+              <label className="pos-glass-form-card block">
+                <span className="mb-1 block text-sm font-semibold liquid-glass-modal-text-muted">
                   {t('staffSchedule.fields.notes', 'Notes')}
                 </span>
                 <textarea
@@ -1658,7 +1664,7 @@ export const StaffScheduleView: React.FC = memo(() => {
               </label>
             </fieldset>
 
-            <div className="flex items-center justify-end gap-3 shrink-0 border-t border-(--modal-glass-line) p-5 md:p-6">
+            <div className="flex items-center justify-end gap-3 shrink-0 px-6 pb-5 pt-2">
               <button
                 type="button"
                 onClick={closeCreateModal}

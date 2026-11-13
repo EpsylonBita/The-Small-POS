@@ -214,6 +214,38 @@ afterEach(() => {
 });
 
 describe('ZReportModal phone shifts', () => {
+  it('shows the stored per-collector block in the staff card', async () => {
+    serveReport(liveReport({ staffReports: [{ staffShiftId: 'b', staffId: 'b', staffName: 'Collector B', role: 'cashier',
+      orders: { count: 1, totalAmount: 100, cashAmount: 0, cardAmount: 60 },
+      netCollections: { version: 1, total: 50, totalCents: 5000, refunded: 10, refundedCents: 1000,
+        tips: 5, tipsCents: 500, tenders: [{ tender: 'card', received: 60, receivedCents: 6000 },
+          { tender: 'cash', received: 0, receivedCents: 0 }] } }] }));
+    renderModal();
+    await waitFor(() => expect(mocks.bridge.reports.generateZReport).toHaveBeenCalled());
+    openStaffTab();
+    const card = await screen.findByText('Collector B');
+    const section = card.closest('article')!;
+    expect(within(section).getByText('Net collections')).toBeTruthy();
+    expect(within(section).getByText('of which tips')).toBeTruthy();
+    expect(section.textContent).toContain(formatCurrency(50, 'EUR'));
+    expect(section.textContent).toContain(formatCurrency(-10, 'EUR'));
+    expect(within(section).queryByText('modals.zReport.sales')).toBeNull();
+    expect(within(section).queryByText('modals.zReport.cash')).toBeNull();
+  });
+
+  it('keeps a staff card without the block on its stored legacy figures', async () => {
+    serveReport(liveReport({ staffReports: [{ staffShiftId: 'a', staffId: 'a', staffName: 'Legacy A', role: 'cashier',
+      orders: { count: 1, totalAmount: 100, cashAmount: 40, cardAmount: 60 } }] }));
+    renderModal();
+    await waitFor(() => expect(mocks.bridge.reports.generateZReport).toHaveBeenCalled());
+    openStaffTab();
+    const section = (await screen.findByText('Legacy A')).closest('article')!;
+    expect(within(section).getByText('modals.zReport.sales')).toBeTruthy();
+    expect(within(section).getByText('modals.zReport.cash')).toBeTruthy();
+    expect(within(section).queryByText('Net collections')).toBeNull();
+    expect(section.textContent).toContain(formatCurrency(100, 'EUR'));
+  });
+
   it('adds the personal PIN hint only with an enabled work card and keeps the Z blocked', async () => {
     mocks.workCardEnabled = true;
     serveReport(liveReport());

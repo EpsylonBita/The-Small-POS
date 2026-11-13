@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
@@ -33,6 +34,14 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
   onClose,
   onConfirm,
 }) => {
+  const reduceMotion = useReducedMotion();
+  // Choice results contain dropdowns: reveal without height/overflow clipping.
+  const resultsMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, y: 12 },
+    animate: { opacity: 1, y: 0 },
+    exit: { opacity: 0 },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const },
+  };
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { language } = useI18n();
@@ -146,14 +155,12 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
 
   const comboName = language === 'el' && combo.name_el ? combo.name_el : combo.name_en;
   const footer = (
-    <div className={`border-t p-4 ${
-      isDark ? 'border-white/10' : 'border-black/10'
-    }`}>
+    <div className="px-6 pb-5 pt-2">
       <button
         type="button"
         onClick={handleConfirm}
         disabled={!allChoicesFilled}
-        className={`w-full rounded-2xl border py-3 font-semibold transition-transform duration-150 ${
+        className={`min-h-touch w-full rounded-2xl border py-3 font-semibold transition-transform duration-150 ${
           allChoicesFilled
             ? 'border-(--pos-s-yellow) bg-(--pos-s-yellow) text-black active:scale-[0.98] active:bg-yellow-500'
             : isDark
@@ -172,17 +179,17 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
       onClose={onClose}
       title={comboName}
       size="sm"
-      className="max-w-lg"
+      className="max-w-lg [&_.liquid-glass-modal-header]:border-b-0!"
       contentClassName="max-h-[60vh] overflow-y-auto p-4 scrollbar-hide"
       footer={footer}
     >
       <div className="space-y-3">
-          {loading ? (
-            <div className="flex items-center justify-center py-8">
+          <AnimatePresence initial={false}>{loading ? (
+            <motion.div key="loading" {...resultsMotion} className="flex items-center justify-center py-8">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-yellow-400 border-t-transparent" />
-            </div>
+            </motion.div>
           ) : (
-            comboItems.map((item, index) => {
+            <motion.div key="choices" {...resultsMotion} className="space-y-3">{comboItems.map((item, index) => {
               const isChoice = item.selection_type === 'category_choice' && item.category_id;
               const chosen = choices[index];
 
@@ -192,13 +199,9 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                   ? (language === 'el' && item.subcategory.name_el ? item.subcategory.name_el : item.subcategory.name || item.subcategory.name_en || '')
                   : '';
                 return (
-                  <div key={index} className={`flex items-center gap-3 rounded-2xl border p-3 backdrop-blur-sm ${
-                    isDark ? 'border-white/10 bg-white/5' : 'border-black/10 bg-white/70'
-                  }`}>
+                  <div key={index} className="pos-glass-form-card p-3! flex items-center gap-3">
                     <Check className="w-4 h-4 text-emerald-500 shrink-0" />
-                    <span className={`font-medium flex-1 ${
-                      isDark ? 'text-white' : 'text-gray-900'
-                    }`}>
+                    <span className="font-medium flex-1 liquid-glass-modal-text">
                       {item.quantity > 1 && `${item.quantity}x `}{name}
                     </span>
                   </div>
@@ -212,10 +215,8 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                 : '';
 
               return (
-                <div key={index} className="space-y-1">
-                  <label className={`text-xs font-semibold tracking-wide ${
-                    isDark ? 'text-yellow-300' : 'text-amber-800'
-                  }`}>
+                <div key={index} className="pos-glass-form-card space-y-1">
+                  <label className="mb-1.5 block text-xs font-semibold liquid-glass-modal-text-muted">
                     {item.quantity > 1 && `${item.quantity}x `}
                     {t('menu.combos.choice.pickFrom', { category: catName, defaultValue: `Pick from ${catName}` })}
                   </label>
@@ -223,35 +224,18 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                     <button
                       type="button"
                       onClick={() => setOpenDropdown(openDropdown === index ? null : index)}
-                      className={`flex w-full items-center justify-between rounded-2xl border p-3 text-left transition-transform duration-150 active:scale-[0.99] ${
-                        chosen
-                          ? isDark
-                            ? 'border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg) bg-(--pos-s-surface-2)'
-                            : 'border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg) bg-(--pos-s-surface-2)'
-                          : isDark
-                            ? 'border-white/12 bg-black/20 active:border-white/25 active:bg-white/6'
-                            : 'border-black/12 bg-white/60 active:border-black/20 active:bg-white/90'
-                      }`}
+                      className="pos-glass-field min-h-touch flex w-full items-center justify-between p-3 text-left"
                     >
-                      <span className={chosen
-                        ? isDark ? 'text-white font-medium' : 'text-gray-900 font-medium'
-                        : isDark ? 'text-gray-400' : 'text-gray-500'
-                      }>
+                      <span className={chosen ? 'liquid-glass-modal-text font-medium' : 'liquid-glass-modal-text-muted'}>
                         {chosen ? chosen.name : t('menu.combos.choice.selectItem', 'Select an item...')}
                       </span>
-                      <ChevronDown className={`w-4 h-4 transition-transform ${openDropdown === index ? 'rotate-180' : ''} ${
-                        isDark ? 'text-gray-400' : 'text-gray-500'
-                      }`} />
+                      <ChevronDown className={`w-4 h-4 transition-transform liquid-glass-modal-text-muted ${openDropdown === index ? 'rotate-180' : ''}`} />
                     </button>
 
                     {openDropdown === index && (
-                      <div className={`absolute left-0 right-0 z-10 mt-1 max-h-48 overflow-y-auto rounded-2xl border shadow-lg backdrop-blur-xl scrollbar-hide ${
-                        isDark ? 'border-white/10 bg-zinc-950/95' : 'border-black/10 bg-white/95'
-                      }`}>
+                      <div className="pos-glass-form-card p-1! absolute left-0 right-0 z-10 mt-1 max-h-48 overflow-y-auto shadow-lg backdrop-blur-xl scrollbar-hide space-y-1">
                         {catItems.length === 0 ? (
-                          <div className={`p-3 text-sm ${
-                            isDark ? 'text-gray-400' : 'text-gray-500'
-                          }`}>
+                          <div className="p-3 text-sm liquid-glass-modal-text-muted">
                             {t('menu.combos.choice.noItems', 'No items available')}
                           </div>
                         ) : (
@@ -264,22 +248,12 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                                 type="button"
                                 key={menuItem.id}
                                 onClick={() => handleSelectItem(index, item, menuItem)}
-                                className={`flex w-full items-center justify-between p-3 text-left transition-transform duration-150 active:scale-[0.99] ${
-                                  isSelected
-                                    ? isDark
-                                      ? 'bg-(--pos-s-surface-2)'
-                                      : 'bg-(--pos-s-surface-2)'
-                                    : isDark
-                                      ? 'active:bg-white/6'
-                                      : 'active:bg-black/4'
-                                }`}
+                                className={`min-h-touch flex w-full items-center justify-between rounded-2xl border p-3 text-left ${isSelected ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-[var(--pos-s-depth-card)] active:translate-y-px active:shadow-[var(--pos-s-depth-press)]' : 'pos-glass-tap-card liquid-glass-modal-text'}`}
                               >
-                                <span className={isDark ? 'text-white' : 'text-gray-900'}>
+                                <span className="font-medium">
                                   {itemName}
                                 </span>
-                                <span className={`text-sm ${
-                                  isDark ? 'text-gray-400' : 'text-gray-500'
-                                }`}>
+                                <span className={`text-sm ${isSelected ? 'text-(--pos-s-sel-fg)' : 'liquid-glass-modal-text-muted'}`}>
                                   {formatCurrency(getItemPrice(menuItem))}
                                 </span>
                               </button>
@@ -291,8 +265,8 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                   </div>
                 </div>
               );
-            })
-          )}
+            })}</motion.div>
+          )}</AnimatePresence>
       </div>
     </LiquidGlassModal>
   );

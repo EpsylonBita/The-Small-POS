@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { formatCurrency } from '../../utils/format';
@@ -32,6 +33,15 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
   onSave,
   onClose,
 }) => {
+  
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const { t } = useTranslation();
   const [selectedMethod, setSelectedMethod] = useState<EditablePaymentMethod>(currentMethod);
   const [selectedPaymentId, setSelectedPaymentId] = useState<string | null>(null);
@@ -73,7 +83,7 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
       }}
       title={orderNumber ? `${t('modals.editPaymentMethod.title')} - #${orderNumber}` : t('modals.editPaymentMethod.title')}
       size="md"
-      className="max-w-lg!"
+      className="max-w-lg! [&_.liquid-glass-modal-header]:border-b-0!"
       closeOnBackdrop={!isSaving}
       closeOnEscape={!isSaving}
       closeDisabled={isSaving}
@@ -82,8 +92,8 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
         {t('modals.editPaymentMethod.message')}
       </p>
 
-      {payments.length > 1 && (
-        <div className="mb-6">
+      <AnimatePresence initial={false}>{payments.length > 1 && (
+        <motion.div {...revealMotion} className="pos-glass-form-card mb-3">
           <p className="liquid-glass-modal-text mb-3 text-sm font-semibold">
             {t('modals.editPaymentMethod.selectPayment')}
           </p>
@@ -96,21 +106,21 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
                   type="button"
                   onClick={() => selectPayment(payment)}
                   disabled={isSaving}
-                  className={`w-full rounded-2xl border p-3 text-left transition-colors ${
+                  className={`min-h-touch w-full rounded-2xl border p-3 text-left transition-colors focus-visible:outline-2 focus-visible:outline-yellow-400 ${
                     isSelected
-                      ? 'border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg) bg-(--pos-s-surface-2) dark:bg-zinc-800'
-                      : 'border-zinc-300/70 bg-white/65 active:bg-zinc-100 dark:border-white/15 dark:bg-white/6 dark:active:bg-white/10'
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-[var(--pos-s-depth-card)] active:translate-y-px active:shadow-[var(--pos-s-depth-press)]'
+                      : 'pos-glass-tap-card'
                   } ${isSaving ? 'cursor-not-allowed opacity-70' : ''}`}
                 >
                   <div className="flex items-center justify-between gap-3">
-                    <span className="liquid-glass-modal-text font-medium">
+                    <span className={`font-medium ${isSelected ? 'text-(--pos-s-sel-fg)' : 'liquid-glass-modal-text'}`}>
                       {t('modals.editPaymentMethod.paymentNumber', { number: index + 1 })}
                     </span>
-                    <span className="liquid-glass-modal-text font-semibold">
+                    <span className={`font-semibold ${isSelected ? 'text-(--pos-s-sel-fg)' : 'liquid-glass-modal-text'}`}>
                       {formatCurrency(payment.amount, payment.currency ?? null)}
                     </span>
                   </div>
-                  <div className="liquid-glass-modal-text-muted mt-1 text-sm">
+                  <div className={`mt-1 text-sm ${isSelected ? 'text-(--pos-s-sel-fg)' : 'liquid-glass-modal-text-muted'}`}>
                     {t(`modals.editPaymentMethod.methods.${payment.method}`)}
                     {payment.transactionRef ? ` · ${payment.transactionRef}` : ''}
                   </div>
@@ -118,18 +128,18 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
               );
             })}
           </div>
-        </div>
-      )}
+        </motion.div>
+      )}</AnimatePresence>
 
-      <div className="space-y-3 mb-6">
+      <div className="pos-glass-form-card space-y-3 mb-3">
         <button
           type="button"
           onClick={() => setSelectedMethod('cash')}
           disabled={isSaving}
-          className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 liquid-glass-modal-text ${
+          className={`min-h-touch w-full p-4 rounded-2xl border text-left transition-all duration-200 focus-visible:outline-2 focus-visible:outline-yellow-400 ${
             selectedMethod === 'cash'
-              ? 'border-(--pos-s-border) dark:border-zinc-700 bg-(--pos-s-surface-2) dark:bg-zinc-800'
-              : 'border-(--pos-s-border) dark:border-zinc-700 bg-(--pos-s-surface-2) dark:bg-zinc-800 active:bg-(--pos-s-surface-2) dark:active:bg-zinc-800'
+              ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-[var(--pos-s-depth-card)] active:translate-y-px active:shadow-[var(--pos-s-depth-press)]'
+              : 'pos-glass-tap-card liquid-glass-modal-text'
           } ${isSaving ? 'opacity-70 cursor-not-allowed' : ''}`}
         >
           <div className="font-medium">{t('modals.editPaymentMethod.methods.cash')}</div>
@@ -139,17 +149,17 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
           type="button"
           onClick={() => setSelectedMethod('card')}
           disabled={isSaving}
-          className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 liquid-glass-modal-text ${
+          className={`min-h-touch w-full p-4 rounded-2xl border text-left transition-all duration-200 focus-visible:outline-2 focus-visible:outline-yellow-400 ${
             selectedMethod === 'card'
-              ? 'border-(--pos-s-border) dark:border-zinc-700 bg-(--pos-s-surface-2) dark:bg-zinc-800'
-              : 'border-(--pos-s-border) dark:border-zinc-700 bg-(--pos-s-surface-2) dark:bg-zinc-800 active:bg-(--pos-s-surface-2) dark:active:bg-zinc-800'
+              ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-[var(--pos-s-depth-card)] active:translate-y-px active:shadow-[var(--pos-s-depth-press)]'
+              : 'pos-glass-tap-card liquid-glass-modal-text'
           } ${isSaving ? 'opacity-70 cursor-not-allowed' : ''}`}
         >
           <div className="font-medium">{t('modals.editPaymentMethod.methods.card')}</div>
         </button>
       </div>
 
-      <div className="flex gap-3">
+      <div className="flex gap-3 px-6 pb-5 pt-2">
         <button
           type="button"
           onClick={onClose}

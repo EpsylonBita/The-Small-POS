@@ -1088,10 +1088,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         array.findIndex((existing) => existing.toLowerCase() === note.toLowerCase()) === index,
     );
   const isDarkTheme = resolvedTheme === 'dark';
+  // Every surface is the kit's neutral frosted card (founder, 11/11/2026): no opaque white panels.
   const shellPanelClass =
-    'rounded-[30px] border border-zinc-200/80 bg-white/90 dark:border-white/10 dark:bg-[rgba(12,14,20,0.88)]';
+    'rounded-[30px] border border-[var(--modal-glass-card-border)] bg-[var(--modal-glass-card)]';
   const insetPanelClass =
-    'rounded-2xl border border-zinc-200/70 bg-white/70 dark:border-white/10 dark:bg-white/4';
+    'rounded-2xl border border-[var(--modal-glass-card-border)] bg-[var(--modal-glass-card)]';
   const mutedEyebrowClass =
     'text-[11px] font-semibold liquid-glass-modal-text-muted';
 
@@ -1466,7 +1467,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   };
 
   const modalFooter = (
-    <div className="shrink-0 border-t liquid-glass-modal-border bg-white/85 px-6 py-4 backdrop-blur-xl dark:bg-black/30">
+    <div className="shrink-0 px-6 py-4">
       <div className={`grid gap-3 ${footerGridCols}`}>
         {onPrintReceipt && (
           <button
@@ -1716,7 +1717,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                             event.stopPropagation();
                             void copyCustomerDetails(orderCustomerFallback);
                           }}
-                          className="inline-flex h-9 items-center gap-2 rounded-xl border border-zinc-200/70 bg-white/70 px-3 text-xs font-semibold text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/6 dark:text-zinc-200"
+                          className="pos-glass-field inline-flex min-h-11 items-center gap-2 px-3 text-xs font-semibold"
                         >
                           <Copy className="h-3.5 w-3.5" />
                           {t('modals.orderDetails.copyCustomer', { defaultValue: 'Copy' })}
@@ -1774,7 +1775,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                               t('modals.orderDetails.addressCopied', { defaultValue: 'Address copied' }),
                             );
                           }}
-                          className="inline-flex h-9 items-center gap-2 rounded-xl border border-zinc-200/70 bg-white/70 px-3 text-xs font-semibold text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/6 dark:text-zinc-200"
+                          className="pos-glass-field inline-flex min-h-11 items-center gap-2 px-3 text-xs font-semibold"
                         >
                           <Copy className="h-3.5 w-3.5" />
                           {t('modals.orderDetails.copyAddress', { defaultValue: 'Copy' })}
@@ -1825,7 +1826,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       </div>
                       <div className="space-y-2">
                         {serviceNotes.map((note) => (
-                          <div key={note} className="rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm liquid-glass-modal-text dark:border-white/10 dark:bg-white/5">
+                          <div key={note} className="rounded-2xl border border-[var(--modal-glass-card-border)] bg-[var(--modal-glass-card)] px-4 py-3 text-sm liquid-glass-modal-text">
                             {note}
                           </div>
                         ))}
@@ -1842,7 +1843,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       <Package className="w-4 h-4" />
                       {t('modals.orderDetails.orderItems') || 'Items'}
                     </h4>
-                    <span className="rounded-full border border-zinc-200/70 bg-white/70 px-3 py-1 text-xs font-semibold liquid-glass-modal-text dark:border-white/10 dark:bg-white/4">
+                    <span className="rounded-full border border-[var(--modal-glass-card-border)] bg-[var(--modal-glass-card)] px-3 py-1 text-xs font-semibold liquid-glass-modal-text">
                       {totalItemCount}
                     </span>
                   </div>
@@ -1872,7 +1873,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                             className={`rounded-[24px] border px-4 py-4 transition-colors ${
                               shouldShowItemPaymentState && isItemPaid
                                 ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
-                                : 'border-zinc-200/70 bg-white/70 dark:border-white/10 dark:bg-white/4'
+                                : 'border-[var(--modal-glass-card-border)] bg-[var(--modal-glass-card)]'
                             }`}
                           >
                             {/* Item Header */}
@@ -1897,11 +1898,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                       <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
                                         isItemPaid
                                           ? itemPaymentPresentation === 'card'
-                                            ? 'bg-slate-500/15 text-slate-300 border border-slate-500/30'
+                                            ? 'pos-glass-form-card px-2! py-0.5! liquid-glass-modal-text-muted'
                                             : itemPaymentPresentation === 'split'
-                                              ? 'bg-slate-500/15 text-slate-300 border border-slate-500/30'
-                                              : 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-200 border border-(--pos-s-border)'
-                                          : 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border border-(--pos-s-border)'
+                                              ? 'pos-glass-form-card px-2! py-0.5! liquid-glass-modal-text-muted'
+                                              : 'pos-glass-form-card px-2! py-0.5! text-green-800 dark:text-green-200'
+                                          : 'pos-glass-form-card px-2! py-0.5! text-amber-800 dark:text-amber-200'
                                       }`}>
                                         {isItemPaid
                                           ? `${t('modals.orderDetails.paid', { defaultValue: 'Paid' })}${itemPaymentPresentation ? ` • ${getPaymentMethodLabel(itemPaymentPresentation).toUpperCase()}` : ''}`
@@ -1916,8 +1917,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                             >
                                               <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold uppercase tracking-wide ${
                                                 entry.method === 'card'
-                                                  ? 'border border-slate-500/30 bg-slate-500/15 text-slate-300'
-                                                  : 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-green-800 dark:text-green-200'
+                                                  ? 'pos-glass-form-card px-2! py-0.5! liquid-glass-modal-text-muted'
+                                                  : 'pos-glass-form-card px-2! py-0.5! text-green-800 dark:text-green-200'
                                               }`}>
                                                 {getPaymentMethodLabel(entry.method)}
                                               </span>
@@ -2000,7 +2001,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                           <div
                             key={`box-line-${index}`}
                             data-testid="order-details-box-display-line"
-                            className="rounded-[24px] border border-zinc-200/70 bg-white/70 px-4 py-4 dark:border-white/10 dark:bg-white/4"
+                            className="rounded-[24px] border border-[var(--modal-glass-card-border)] bg-[var(--modal-glass-card)] px-4 py-4"
                           >
                             <div className="flex items-start justify-between mb-2">
                               <div className="flex items-start gap-3 flex-1">
@@ -2144,7 +2145,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                         return (
                           <div
                             key={`${historyOrder.id || historyOrder.order_number || historyOrder.orderNumber}-${historyOrder.created_at || historyOrder.createdAt || ''}`}
-                            className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 dark:border-white/10 dark:bg-white/5"
+                            className="flex items-center justify-between gap-3 rounded-2xl border border-[var(--modal-glass-card-border)] bg-[var(--modal-glass-card)] px-4 py-3"
                           >
                             <div className="min-w-0">
                               <div className="truncate text-sm font-semibold liquid-glass-modal-text">
@@ -2258,7 +2259,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                 <button
                   type="button"
                   onClick={() => void copyCustomerDetails()}
-                  className="inline-flex min-h-11 items-center gap-2 rounded-2xl bg-amber-500 px-4 text-sm font-bold text-black active:bg-amber-400"
+                  className="pos-glass-field inline-flex min-h-11 items-center gap-2 px-4 text-sm font-bold"
                 >
                   <Copy className="h-4 w-4" />
                   {t('modals.orderDetails.copyCustomer', { defaultValue: 'Copy customer' })}
@@ -2300,7 +2301,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                 );
                               }}
                               aria-label={t('modals.orderDetails.copyAddress', { defaultValue: 'Copy address' })}
-                              className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-200/70 bg-white/70 text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/6 dark:text-zinc-200"
+                              className="pos-glass-field inline-flex h-11 w-11 items-center justify-center"
                             >
                               <Copy className="h-4 w-4" />
                             </button>

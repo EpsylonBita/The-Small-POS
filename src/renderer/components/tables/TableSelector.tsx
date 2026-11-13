@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 /**
  * TableSelector Component
  * 
@@ -95,6 +96,15 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
   isOpen,
   filterStatuses = DEFAULT_FILTER_STATUSES
 }) => {
+  
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const { t } = useI18n();
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -149,35 +159,29 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
   }, [selectableTables]);
 
   // Status configuration
-  const statusConfig: Record<TableStatus, { label: string; bgClass: string; textClass: string }> = {
+  const statusConfig: Record<TableStatus, { label: string; textClass: string }> = {
     available: {
       label: t('tableSelector.status.available', { defaultValue: 'Available' }),
-      bgClass: 'border-green-600 bg-(--pos-s-surface-2)',
       textClass: 'text-green-800 dark:text-green-400'
     },
     reserved: {
       label: t('tableSelector.status.reserved', { defaultValue: 'Reserved' }),
-      bgClass: 'border-(--pos-s-yellow) bg-(--pos-s-surface-2)',
       textClass: 'text-yellow-700 dark:text-yellow-400'
     },
     occupied: {
       label: t('tableSelector.status.occupied', { defaultValue: 'Occupied' }),
-      bgClass: 'border-blue-500 bg-(--pos-s-surface-2)',
       textClass: 'text-blue-500'
     },
     cleaning: {
       label: t('tableSelector.status.cleaning', { defaultValue: 'Cleaning' }),
-      bgClass: 'border-gray-500 bg-(--pos-s-surface-2)',
       textClass: 'text-gray-500'
     },
     maintenance: {
       label: t('tableSelector.status.maintenance', { defaultValue: 'Maintenance' }),
-      bgClass: 'border-orange-500 bg-(--pos-s-surface-2)',
       textClass: 'text-orange-700 dark:text-orange-400'
     },
     unavailable: {
       label: t('tableSelector.status.unavailable', { defaultValue: 'Unavailable' }),
-      bgClass: 'border-slate-500 bg-(--pos-s-surface-2)',
       textClass: 'text-slate-500'
     }
   };
@@ -199,14 +203,14 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
          content body below becomes the single hidden-scroll region with bottom + scroll padding so the final
          row clears the rounded bottom. Scoped to this modal via className/contentClassName -- no global
          change to LiquidGlassModal. */
-      className="flex flex-col overflow-hidden max-h-[calc(100dvh-2rem)]!"
+      className="flex flex-col overflow-hidden max-h-[calc(100dvh-2rem)]! [&_.liquid-glass-modal-header]:border-b-0!"
       contentClassName="flex-1 min-h-0 overflow-y-auto scrollbar-hide pb-6 scroll-pb-6"
     >
       {/* Glass surface (LiquidGlassModal) keeps TableSelector consistent with the Settings + Order Type
           modals: translucent blurred shell, soft amber edge/glow, rounded edges, open/close animation,
           and hidden scrollbars on the scrolling content. The inner controls reuse the same glass tokens
           plus restrained green (available) / amber (reserved) semantic accents. */}
-      <div data-table-selector className="space-y-4">
+      <div data-table-selector className="space-y-3">
         {/* Available count */}
         <p className="text-sm liquid-glass-modal-text-muted">
           {t('tableSelector.subtitle', {
@@ -218,7 +222,7 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
         {/* Filters: a FULL-WIDTH glass search row (language-safe -- the EN/EL/DE/FR/IT placeholders never
             clip, no locale-specific widths) with the floor + min-capacity segmented controls stacked
             below, each on its own row so long localized labels never squeeze the search field. */}
-        <div data-table-selector-filters className="space-y-3">
+        <div data-table-selector-filters className="pos-glass-form-card space-y-3">
           {/* Search -- own full-width row */}
           <div className="relative w-full">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 liquid-glass-modal-text-muted" />
@@ -228,13 +232,13 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               aria-label={t('tableSelector.searchPlaceholder', { defaultValue: 'Search by table number...' })}
-              className="liquid-glass-modal-input w-full pl-10!"
+              className="liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-10!"
             />
           </div>
 
           {/* Floor (segmented) -- shown whenever the selectable tables span any floor data */}
-          {floorOptions.length > 0 && (
-            <div data-table-selector-floor className="flex flex-wrap items-center gap-2">
+          <AnimatePresence initial={false}>{floorOptions.length > 0 && (
+            <motion.div {...revealMotion} data-table-selector-floor className="flex flex-wrap items-center gap-2">
               <span className="text-sm liquid-glass-modal-text-muted">
                 {t('tableSelector.floor', { defaultValue: 'Floor' })}
               </span>
@@ -243,10 +247,10 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
                   type="button"
                   onClick={() => setSelectedFloor('all')}
                   aria-pressed={selectedFloor === 'all'}
-                  className={`inline-flex min-h-[40px] items-center justify-center rounded-full border px-3.5 text-sm font-medium transition active:scale-95 ${
+                  className={`inline-flex min-h-touch items-center justify-center rounded-full border px-3.5 text-sm font-medium transition ${
                     selectedFloor === 'all'
-                      ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 dark:text-amber-100'
-                      : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text dark:bg-black/20'
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                      : 'pos-glass-field'
                   }`}
                 >
                   {t('tableSelector.allFloors', { defaultValue: 'All floors' })}
@@ -257,18 +261,18 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
                     type="button"
                     onClick={() => setSelectedFloor(floor)}
                     aria-pressed={selectedFloor === floor}
-                    className={`inline-flex min-h-[40px] items-center justify-center rounded-full border px-3.5 text-sm font-medium transition active:scale-95 ${
+                    className={`inline-flex min-h-touch items-center justify-center rounded-full border px-3.5 text-sm font-medium transition ${
                       selectedFloor === floor
-                        ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 dark:text-amber-100'
-                        : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text dark:bg-black/20'
+                        ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                        : 'pos-glass-field'
                     }`}
                   >
                     {t('tableSelector.floorNumber', { defaultValue: 'Floor {{floor}}', floor })}
                   </button>
                 ))}
               </div>
-            </div>
-          )}
+            </motion.div>
+          )}</AnimatePresence>
 
           {/* Min capacity (segmented) -- own row */}
           <div data-table-selector-capacity className="flex flex-wrap items-center gap-2">
@@ -280,10 +284,10 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
                 type="button"
                 onClick={() => setSelectedCapacity('all')}
                 aria-pressed={selectedCapacity === 'all'}
-                className={`inline-flex min-h-[40px] items-center justify-center rounded-full border px-3.5 text-sm font-medium transition active:scale-95 ${
+                className={`inline-flex min-h-touch items-center justify-center rounded-full border px-3.5 text-sm font-medium transition ${
                   selectedCapacity === 'all'
-                    ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 dark:text-amber-100'
-                    : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text dark:bg-black/20'
+                    ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                    : 'pos-glass-field'
                 }`}
               >
                 {t('tableSelector.all', { defaultValue: 'All' })}
@@ -294,10 +298,10 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
                   type="button"
                   onClick={() => setSelectedCapacity(capacity)}
                   aria-pressed={selectedCapacity === capacity}
-                  className={`inline-flex min-h-[40px] items-center justify-center rounded-full border px-3.5 text-sm font-medium transition active:scale-95 ${
+                  className={`inline-flex min-h-touch items-center justify-center rounded-full border px-3.5 text-sm font-medium transition ${
                     selectedCapacity === capacity
-                      ? 'border-(--pos-s-yellow) bg-(--pos-s-surface-2) text-amber-900 dark:text-amber-100'
-                      : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text dark:bg-black/20'
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                      : 'pos-glass-field'
                   }`}
                 >
                   {capacity}+
@@ -321,8 +325,8 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
 
         {/* Tables grid */}
         <div data-table-selector-grid className="min-h-[280px]">
-          {filteredTables.length === 0 ? (
-            <div className="flex min-h-[280px] items-center justify-center liquid-glass-modal-text-muted">
+          <AnimatePresence initial={false}>{filteredTables.length === 0 ? (
+            <motion.div key="empty" {...revealMotion} className="flex min-h-[280px] items-center justify-center liquid-glass-modal-text-muted">
               <div className="text-center">
                 <LayoutGrid className="mx-auto mb-4 h-16 w-16 opacity-50" />
                 <p className="text-lg font-medium liquid-glass-modal-text">
@@ -334,15 +338,15 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
                     : t('tableSelector.allTablesOccupied', { defaultValue: 'All tables are currently occupied or being cleaned' })}
                 </p>
               </div>
-            </div>
+            </motion.div>
           ) : (
-            <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+            <motion.div key="tables" {...revealMotion} className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
               {filteredTables.map((table) => (
                 <button
                   key={table.id}
                   type="button"
                   onClick={() => handleTableClick(table)}
-                  className={`aspect-square rounded-2xl border p-3 backdrop-blur-md transition active:scale-95 ${statusConfig[table.status].bgClass}`}
+                  className="pos-glass-tap-card aspect-square min-h-touch p-3 transition focus-visible:outline-2 focus-visible:outline-yellow-400"
                 >
                   <div className="flex h-full flex-col items-center justify-center text-center">
                     <LayoutGrid className={`mb-1 h-6 w-6 ${statusConfig[table.status].textClass}`} />
@@ -359,8 +363,9 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
                   </div>
                 </button>
               ))}
-            </div>
+            </motion.div>
           )}
+</AnimatePresence>
         </div>
       </div>
     </LiquidGlassModal>

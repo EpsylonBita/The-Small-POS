@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useState, useEffect } from 'react';
 import { AlertTriangle, Info, XCircle, CheckCircle } from 'lucide-react';
 import { LiquidGlassModal, POSGlassButton, POSGlassInput } from './pos-glass-components';
@@ -35,7 +36,16 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
     details,
     isLoading = false
 }) => {
-    const { t } = useTranslation();
+    
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
+  const { t } = useTranslation();
     const [typedValue, setTypedValue] = useState('');
     const [isChecked, setIsChecked] = useState(false);
 
@@ -90,11 +100,11 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             isOpen={isOpen}
             onClose={onClose}
             size="sm"
-            className="max-w-md! border-none"
+            className="max-w-md! border-none [&_.liquid-glass-modal-header]:border-b-0!"
             ariaLabel={title}
         >
-            <div className="flex flex-col gap-6">
-                <div className="flex items-center gap-4">
+            <div className="flex flex-col gap-3">
+                <div className="pos-glass-form-card flex items-center gap-4">
                     <Icon className={cn("h-7 w-7 shrink-0", config.color)} />
                     <div>
                         <h3 className="liquid-glass-modal-text text-xl font-bold mb-1">{title}</h3>
@@ -102,44 +112,44 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
                     </div>
                 </div>
 
-                {details && (
-                    <div className="liquid-glass-modal-inset rounded-2xl p-4 text-sm">
+                <AnimatePresence initial={false}>{details && (
+                    <motion.div {...revealMotion} className="pos-glass-form-card text-sm">
                         <div className={config.detailsColor}>{details}</div>
-                    </div>
-                )}
+                    </motion.div>
+                )}</AnimatePresence>
 
-                {typeToConfirm && (
-                    <div className="space-y-2">
-                        <label className="liquid-glass-modal-text-muted text-sm block">
+                <AnimatePresence initial={false}>{typeToConfirm && (
+                    <motion.div {...revealMotion} className="pos-glass-form-card space-y-2">
+                        <label className="liquid-glass-modal-text-muted text-xs font-semibold block">
                             {t('common.actions.typeToConfirm', { value: typeToConfirm })}
                         </label>
                         <POSGlassInput
                             value={typedValue}
                             onChange={(e) => setTypedValue(e.target.value)}
                             placeholder={typeToConfirm}
-                            className="w-full font-mono text-center"
+                            className="pos-glass-field min-h-touch w-full font-mono text-center"
                             disabled={isLoading}
                         />
-                    </div>
-                )}
+                    </motion.div>
+                )}</AnimatePresence>
 
-                {requireCheckbox && (
-                    <label className="liquid-glass-modal-inset flex min-h-[52px] cursor-pointer items-center gap-3 rounded-2xl p-3 transition-transform active:scale-[0.99]">
+                <AnimatePresence initial={false}>{requireCheckbox && (
+                    <motion.div {...revealMotion}><label className="pos-glass-tap-card flex min-h-[52px] cursor-pointer items-center gap-3 rounded-2xl p-3">
                         <input
                             type="checkbox"
                             checked={isChecked}
                             onChange={(e) => setIsChecked(e.target.checked)}
                             disabled={isLoading}
                             className={cn(
-                                'h-5 w-5 rounded-xl border-slate-400 bg-white focus:ring-2 focus:ring-offset-0 dark:border-zinc-400 dark:bg-zinc-900',
+                                'h-5 w-5 rounded-xl border-(--field-glass-border) bg-(--field-glass) focus:ring-2 focus:ring-offset-0',
                                 config.checkboxColor,
                             )}
                         />
                         <span className="liquid-glass-modal-text text-sm select-none">{requireCheckbox}</span>
-                    </label>
-                )}
+                    </label></motion.div>
+                )}</AnimatePresence>
 
-                <div className="flex justify-end gap-3 mt-2">
+                <div className="flex justify-end gap-3 px-6 pb-5 pt-2">
                     <POSGlassButton
                         variant="secondary"
                         onClick={onClose}

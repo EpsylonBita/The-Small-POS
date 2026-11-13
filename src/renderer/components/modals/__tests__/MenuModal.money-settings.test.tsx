@@ -2,6 +2,16 @@ import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// founder 11/11/2026: exercise the same behavior with motion reduced and exits synchronous.
+vi.mock('framer-motion', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('framer-motion')>();
+  return {
+    ...actual,
+    useReducedMotion: () => true,
+    AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  };
+});
+
 // Item H, fix review 30/09/2026 (the same decision as Android). While the
 // store's discount cap cannot be read, the order menu used to cap discounts
 // on an assumed 30% and go on to payment. Now checkout pauses with a clear

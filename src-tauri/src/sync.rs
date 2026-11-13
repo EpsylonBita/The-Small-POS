@@ -911,6 +911,8 @@ struct SyncCycleReport {
     /// The pre-claim pulls that failed on their own while the cycle still
     /// claimed and sent its queued rows (log text only, never shown).
     pull_error: Option<String>,
+    /// The bounded order pull stopped with more history or backpressure.
+    orders_pull_incomplete: bool,
 }
 
 /// What one legacy sync cycle needs from the app: its events and the print
@@ -3762,6 +3764,7 @@ fn run_recurring_sync_recovery(db: &DbState) -> RecurringSyncRecoverySummary {
 
     match db.conn.lock() {
         Ok(conn) => {
+            crate::fiscal::admission_owed::retry_owed(&conn);
             match requeue_failed_order_insert_parent_blockers(&conn) {
                 Ok(requeued) => {
                     summary.missing_parent_order_insert_requeues += requeued;
@@ -5687,9 +5690,22 @@ async fn force_sync_once_scoped(
     let _ = run_recurring_sync_recovery(db);
 
     let cancellation = app.try_state::<tokio_util::sync::CancellationToken>();
-    let outcome = complete_native_background_sync_tick(
-        run_sync_cycle_with_auth_guard(db, sync_state, app, "force_sync").await,
-        |auth_attempt| {
+    let outcome = complete_native_forced_sync_tick(scope, || async {
+        let pull_checkpoint = || {
+            [
+                "orders_since",
+                "orders_page_cursor",
+                "orders_deleted_cursor",
+            ]
+            .map(|key| local_setting_get(db, "sync", key))
+        };
+        let before_pull = (scope == Z_CLOSEOUT_PARITY_SCOPE).then(pull_checkpoint);
+        let legacy = run_sync_cycle_with_auth_guard(db, sync_state, app, "force_sync").await;
+        let orders_pull_incomplete = matches!(
+            &legacy,
+            RemoteAuthExecutionOutcome::Success(report, _) if report.orders_pull_incomplete
+        );
+        let outcome = complete_native_background_sync_tick(legacy, |auth_attempt| {
             force_parity_sync_once(
                 db,
                 sync_state,
@@ -5699,8 +5715,11 @@ async fn force_sync_once_scoped(
                 auth_attempt,
                 scope,
             )
-        },
-    )
+        })
+        .await;
+        let pull_progress = before_pull.is_some_and(|before| before != pull_checkpoint());
+        (outcome, orders_pull_incomplete, pull_progress)
+    })
     .await;
 
     let total_synced = force_sync_pass_result(outcome)?;
@@ -5726,6 +5745,37 @@ async fn force_sync_once_scoped(
     }
 
     Ok(total_synced)
+}
+
+// A bounded background pull can succeed before history is exhausted. Only
+// closeout must finish it, including cursor-only pages filtered for this branch.
+async fn complete_native_forced_sync_tick<RunPass, PassFuture>(
+    scope: ParityFailureScope,
+    mut run_pass: RunPass,
+) -> NativeSyncTickOutcome
+where
+    RunPass: FnMut() -> PassFuture,
+    PassFuture: Future<Output = (NativeSyncTickOutcome, bool, bool)>,
+{
+    let mut total_synced = 0usize;
+    for round in 0..CLOSEOUT_SYNC_DRAIN_MAX_PASSES {
+        let (outcome, orders_pull_incomplete, pull_progress) = run_pass().await;
+        let synced = match outcome {
+            NativeSyncTickOutcome::Success(synced) => synced,
+            other => return other,
+        };
+        total_synced = total_synced.saturating_add(synced);
+        if scope != Z_CLOSEOUT_PARITY_SCOPE || !orders_pull_incomplete {
+            return NativeSyncTickOutcome::Success(total_synced);
+        }
+        if (synced == 0 && !pull_progress) || round + 1 == CLOSEOUT_SYNC_DRAIN_MAX_PASSES {
+            break;
+        }
+    }
+    NativeSyncTickOutcome::Partial {
+        synced: total_synced,
+        error: REMOTE_PULL_FAILED.to_string(),
+    }
 }
 
 /// Only a full tick passes a forced sync. A partial tick is an error, so a
@@ -10443,6 +10493,38 @@ pub(crate) fn upsert_payment_sync_queue_row(
 // same dispatcher routing `prepare_adjustment_request` → POST
 // /api/pos/payments/adjustments/sync.
 
+pub(crate) fn mark_local_payment_applied_if_tender_unchanged(
+    conn: &Connection,
+    payment_id: &str,
+    synced_at: &str,
+    remote_payment_id: Option<&str>,
+    sent: &Value,
+) -> Result<bool, String> {
+    crate::db::with_immediate_admission(conn, || {
+        let unchanged = conn.query_row(
+            "SELECT method = ?2
+                 AND (?3 IS NULL OR COALESCE(NULLIF(TRIM(payment_origin), ''), 'manual') = ?3)
+                 AND (?4 IS NULL OR COALESCE(cash_received_cents, CAST(ROUND(cash_received * 100) AS INTEGER), 0) = ?4)
+                 AND (?5 IS NULL OR COALESCE(change_given_cents, CAST(ROUND(change_given * 100) AS INTEGER), 0) = ?5)
+             FROM order_payments WHERE id = ?1",
+            params![
+                payment_id,
+                str_any(sent, &["method", "paymentMethod", "payment_method"]).unwrap_or_else(|| "other".into()),
+                str_any(sent, &["paymentOrigin", "payment_origin"]),
+                json_money_cents_any(sent, &["cash_received_cents", "cashReceivedCents"], &["cashReceived", "cash_received"]),
+                json_money_cents_any(sent, &["change_given_cents", "changeGivenCents"], &["changeGiven", "change_given"]),
+            ],
+            |row| row.get::<_, bool>(0),
+        ).optional().map_err(|error| format!("compare acknowledged payment tender: {error}"))?.unwrap_or(false);
+        if unchanged {
+            mark_local_payment_applied(conn, payment_id, synced_at, remote_payment_id)?;
+        }
+        // The dispatcher consumes its own processing row. A newer tender keeps
+        // its pending payment state and queue row for the next pass.
+        Ok(unchanged)
+    })
+}
+
 pub(crate) fn mark_local_payment_applied(
     conn: &Connection,
     payment_id: &str,
@@ -14457,6 +14539,8 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                         conn,
                         &local_id,
                         remote_items_json,
+                        num_any(&remote_order, &["total_amount", "totalAmount"]),
+                        Some(status),
                     ) {
                         Ok(items) => items,
                         Err(error) => {
@@ -15226,22 +15310,45 @@ async fn retire_verified_closed_payment_parents(
                 continue;
             }
         }
+        let (rows, other_terminal_unit) = match fetch_order_payment_ledger_with_scope(
+            admin_url,
+            api_key,
+            &parent,
+            Duration::from_secs(3),
+        )
+        .await
+        {
+            Ok(rows) => rows,
+            Err(_) => {
+                defer_retained_remote_payment(db, &id)?;
+                continue;
+            }
+        };
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if other_terminal_unit {
+            let local_parent: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM orders WHERE id=?1 OR supabase_id=?1)",
+                    [&parent],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if local_parent {
+                warn!(remote_payment_id=%id, parent_id=%parent, "Foreign payment scope contradicts a local parent; canonical payment stays retained");
+                drop(conn);
+                defer_retained_remote_payment(db, &id)?;
+            } else {
+                conn.execute("DELETE FROM unresolved_remote_payments WHERE id=?1", [&id])
+                    .map_err(|e| e.to_string())?;
+                info!(remote_payment_id=%id, parent_id=%parent, "Retained canonical payment belongs to another terminal unit; removed unresolved snapshot");
+            }
+            continue;
+        }
         // A paused original is reviewed or explicitly retried by the operator;
-        // periodic read-only closure checks never restart its application cycle.
+        // periodic read-only closure/scope checks never restart its application cycle.
         if attempts >= 6 {
             continue;
         }
-        let rows =
-            match fetch_order_payment_ledger(admin_url, api_key, &parent, Duration::from_secs(3))
-                .await
-            {
-                Ok(rows) => rows,
-                Err(_) => {
-                    defer_retained_remote_payment(db, &id)?;
-                    continue;
-                }
-            };
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
         if let Some(fresh) = rows.iter().find(|row| {
             str_any(row, &["id", "payment_id", "paymentId"]).as_deref() == Some(id.as_str())
         }) {
@@ -15970,6 +16077,12 @@ pub(crate) fn sync_remote_order_snapshot_into_local_scoped(
         conn,
         local_order_id,
         items_json,
+        num_any(remote_order, &["total_amount", "totalAmount"]),
+        remote_order
+            .get("status")
+            .and_then(Value::as_str)
+            .map(normalize_order_status_for_sync)
+            .as_deref(),
     )?;
     let total_amount = num_any(remote_order, &["total_amount", "totalAmount"]);
     let tax_amount = num_any(remote_order, &["tax_amount", "taxAmount"]);
@@ -17252,6 +17365,17 @@ pub(crate) async fn fetch_order_payment_ledger(
     remote_order_id: &str,
     timeout: Duration,
 ) -> Result<Vec<Value>, String> {
+    fetch_order_payment_ledger_with_scope(admin_url, api_key, remote_order_id, timeout)
+        .await
+        .map(|(rows, _)| rows)
+}
+
+async fn fetch_order_payment_ledger_with_scope(
+    admin_url: &str,
+    api_key: &str,
+    remote_order_id: &str,
+    timeout: Duration,
+) -> Result<(Vec<Value>, bool), String> {
     let path = format!(
         "/api/pos/payments?limit=200&order_id={}",
         percent_encode(remote_order_id)
@@ -17261,11 +17385,14 @@ pub(crate) async fn fetch_order_payment_ledger(
     )
     .await
     .map_err(|error| format!("read the server payment ledger: {error}"))?;
-    response
+    let rows = response
         .get("payments")
         .and_then(Value::as_array)
         .cloned()
-        .ok_or_else(|| "the server payment ledger answer carried no payments".to_string())
+        .ok_or_else(|| "the server payment ledger answer carried no payments".to_string())?;
+    let other_terminal_unit =
+        response.get("order_scope").and_then(Value::as_str) == Some("other_terminal_unit");
+    Ok((rows, other_terminal_unit))
 }
 
 /// Aborts the spawned ledger fetch when the waiting caller gives up.
@@ -17947,6 +18074,9 @@ async fn run_sync_cycle<H: SyncCycleHost>(
         PreClaimPull::Orders,
         reconcile_remote_orders(db, &admin_url, &api_key, app).await,
     )?;
+    let orders_pull_incomplete = reconciled_orders
+        .as_ref()
+        .is_some_and(|outcome| !outcome.history_complete);
     if let Some(reconciled_orders) = &reconciled_orders {
         total_progress += reconciled_orders.reconciled;
     }
@@ -18020,6 +18150,7 @@ async fn run_sync_cycle<H: SyncCycleHost>(
         return Ok(SyncCycleReport {
             synced: total_progress,
             pull_error,
+            orders_pull_incomplete,
         });
     }
 
@@ -18219,6 +18350,7 @@ async fn run_sync_cycle<H: SyncCycleHost>(
     Ok(SyncCycleReport {
         synced: total_progress,
         pull_error,
+        orders_pull_incomplete,
     })
 }
 
@@ -26208,6 +26340,222 @@ mod tests {
         );
     }
 
+    fn retained_scope_payment_fixture(attempts: i64) -> DbState {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            apply_or_retain_remote_payment(
+                &conn,
+                &serde_json::json!({"id":"scope-receipt","order_id":"scope-parent","amount":10,"payment_method":"cash"}),
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE unresolved_remote_payments SET retry_count=?1,last_error=?2,next_retry_at=datetime('now','-1 day')",
+                params![attempts, "Original retained error\nwith review context"],
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    fn retained_scope_payment_state(db: &DbState) -> (String, i64, String, String) {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT payload,retry_count,last_error,updated_at FROM unresolved_remote_payments WHERE id='scope-receipt'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+    }
+
+    async fn assert_foreign_retained_scope_payment_dropped(attempts: i64) {
+        let db = retained_scope_payment_fixture(attempts);
+        let before = renderer_boundary_fingerprint(&db);
+        let (url, seen) = spawn_routed_json_server(|request| {
+            if request.starts_with("GET /api/pos/orders/sync?order_id=scope-parent&limit=1 ") {
+                (200, r#"{"orders":[]}"#)
+            } else if request.starts_with("GET /api/pos/payments?limit=200&order_id=scope-parent ")
+            {
+                (
+                    200,
+                    r#"{"success":true,"payments":[],"order_scope":"other_terminal_unit"}"#,
+                )
+            } else {
+                (500, r#"{"error":"unexpected request"}"#)
+            }
+        });
+        retire_verified_closed_payment_parents(&db, &url, "fixture-key")
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert_eq!(renderer_boundary_fingerprint(&db), before);
+        let conn = db.conn.lock().unwrap();
+        for table in [
+            "unresolved_remote_payments",
+            "orders",
+            "order_payments",
+            "sync_queue",
+        ] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "{table}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unresolved_scope_signal_drops_only_retained_foreign_payment() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-scope-check")]);
+        assert_foreign_retained_scope_payment_dropped(1).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unresolved_scope_signal_drops_paused_foreign_payment() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-scope-check")]);
+        assert_foreign_retained_scope_payment_dropped(6).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unresolved_scope_absent_keeps_missing_receipt_review() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-scope-check")]);
+        let db = retained_scope_payment_fixture(1);
+        let before = renderer_boundary_fingerprint(&db);
+        let (url, seen) = spawn_routed_json_server(|_| (200, r#"{"orders":[],"payments":[]}"#));
+        retire_verified_closed_payment_parents(&db, &url, "fixture-key")
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        let (_, attempts, error, _) = retained_scope_payment_state(&db);
+        assert_eq!(attempts, 6);
+        assert_eq!(
+            error,
+            "Canonical receipt absent from fresh order ledger; review required"
+        );
+        assert_eq!(renderer_boundary_fingerprint(&db), before);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unresolved_scope_absent_preserves_paused_original() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-scope-check")]);
+        let db = retained_scope_payment_fixture(6);
+        let original = retained_scope_payment_state(&db);
+        let before = renderer_boundary_fingerprint(&db);
+        let (url, seen) = spawn_routed_json_server(|_| (200, r#"{"orders":[],"payments":[]}"#));
+        retire_verified_closed_payment_parents(&db, &url, "fixture-key")
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert_eq!(retained_scope_payment_state(&db), original);
+        assert_eq!(renderer_boundary_fingerprint(&db), before);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unresolved_scope_signal_with_local_parent_keeps_original() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-scope-check")]);
+        for (local_id, remote_id) in [
+            ("scope-parent", None),
+            ("local-scope-parent", Some("scope-parent")),
+        ] {
+            let db = retained_scope_payment_fixture(1);
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "INSERT INTO orders(id,supabase_id,items,total_amount,status,created_at,updated_at) VALUES(?1,?2,'[]',10,'completed','now','now')",
+                    params![local_id, remote_id],
+                )
+                .unwrap();
+            }
+            let original = retained_scope_payment_state(&db);
+            let before = renderer_boundary_fingerprint(&db);
+            let (url, seen) = spawn_routed_json_server(|_| {
+                (
+                    200,
+                    r#"{"orders":[],"payments":[],"order_scope":"other_terminal_unit"}"#,
+                )
+            });
+            retire_verified_closed_payment_parents(&db, &url, "fixture-key")
+                .await
+                .unwrap();
+            assert_eq!(seen.lock().unwrap().len(), 2);
+            {
+                let conn = db.conn.lock().unwrap();
+                assert_eq!(retry_unresolved_remote_payments(&conn).unwrap(), 0);
+            }
+            assert_eq!(retained_scope_payment_state(&db), original);
+            assert_eq!(renderer_boundary_fingerprint(&db), before);
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unresolved_scope_failed_lookup_preserves_original() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-scope-check")]);
+        for attempts in [1, 6] {
+            let db = retained_scope_payment_fixture(attempts);
+            let original = retained_scope_payment_state(&db);
+            let before = renderer_boundary_fingerprint(&db);
+            let (url, seen) = spawn_routed_json_server(|request| {
+                if request.contains("/api/pos/payments?") {
+                    (
+                        500,
+                        r#"{"error":"unavailable","order_scope":"other_terminal_unit"}"#,
+                    )
+                } else {
+                    (200, r#"{"orders":[]}"#)
+                }
+            });
+            retire_verified_closed_payment_parents(&db, &url, "fixture-key")
+                .await
+                .unwrap();
+            assert_eq!(seen.lock().unwrap().len(), 2);
+            assert_eq!(retained_scope_payment_state(&db), original);
+            assert_eq!(renderer_boundary_fingerprint(&db), before);
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unresolved_scope_timed_out_lookup_preserves_original() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-scope-check")]);
+        for attempts in [1, 6] {
+            let db = retained_scope_payment_fixture(attempts);
+            let original = retained_scope_payment_state(&db);
+            let before = renderer_boundary_fingerprint(&db);
+            let requests = std::sync::atomic::AtomicUsize::new(0);
+            let server = crate::tests::fake_http::MockServer::new_with_request_hook(
+                r#"{"orders":[],"payments":[],"order_scope":"other_terminal_unit"}"#,
+                move || {
+                    if requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                        std::thread::sleep(Duration::from_millis(3500));
+                    }
+                },
+            );
+            retire_verified_closed_payment_parents(&db, &server.url, "fixture-key")
+                .await
+                .unwrap();
+            assert_eq!(server.count(), 2);
+            assert_eq!(retained_scope_payment_state(&db), original);
+            assert_eq!(renderer_boundary_fingerprint(&db), before);
+        }
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn operator_retry_reads_fresh_canonical_payment_instead_of_stale_payload() {
@@ -27343,6 +27691,7 @@ mod tests {
                 SyncCycleReport {
                     synced: 2,
                     pull_error: None,
+                    orders_pull_incomplete: false,
                 },
                 auth_attempt,
             ),
@@ -30309,6 +30658,47 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn k2a_apply_remote_orders_page_empty_items_preserves_nonzero_orders() {
+        for (total, status, omit_total, expected_empty) in [
+            (10.0, "confirmed", false, false),
+            (10.0, "confirmed", true, false),
+            (0.0, "confirmed", false, true),
+            (10.0, "cancelled", false, true),
+        ] {
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let items = r#"[{"name":"Coffee","quantity":1,"price":10}]"#;
+            conn.execute(
+                "INSERT INTO orders (id, supabase_id, plugin, items, total_amount, total_amount_cents,
+                     status, payment_status, sync_status, created_at, updated_at)
+                 VALUES ('empty-items', 'remote-empty-items', 'pos', ?1, 10, 1000,
+                     'pending', 'pending', 'synced', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [items],
+            ).unwrap();
+            let mut remote = serde_json::json!({
+                "id": "remote-empty-items", "items": [], "total_amount": total,
+                "status": status, "payment_status": "pending", "updated_at": "2026-01-02T00:00:00Z"
+            });
+            if omit_total {
+                remote.as_object_mut().unwrap().remove("total_amount");
+            }
+            let applied = apply_remote_orders_page(&conn, vec![remote]);
+            assert!(applied.error.is_none(), "{:?}", applied.error);
+            assert_eq!(applied.reconciled, 1);
+            let stored: (String, f64, String) = conn
+                .query_row(
+                    "SELECT items, total_amount, status FROM orders WHERE id='empty-items'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(stored.0, if expected_empty { "[]" } else { items });
+            assert_eq!(stored.1, if omit_total { 10.0 } else { total });
+            assert_eq!(stored.2, status);
+        }
     }
 
     #[test]
@@ -36931,6 +37321,68 @@ mod tests {
         assert!(state.remaining_blockers_summary.is_empty());
     }
 
+    #[tokio::test]
+    async fn k2b_closeout_sync_drain_requires_complete_order_pull_even_with_clean_queue() {
+        for incomplete in [true, false] {
+            let result = drain_z_closeout(
+                |scope| async move {
+                    force_sync_pass_result(
+                        complete_native_forced_sync_tick(scope, || async move {
+                            (NativeSyncTickOutcome::Success(0), incomplete, false)
+                        })
+                        .await,
+                    )
+                },
+                || Ok(snapshot(0, "")),
+            )
+            .await;
+            if incomplete {
+                assert_eq!(result.unwrap_err(), REMOTE_PULL_FAILED);
+            } else {
+                assert_eq!(result.unwrap().passes_executed, 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn k2b_closeout_sync_drain_continues_progressing_order_pulls_and_bounds_rounds() {
+        for (complete_on_round, row_progress, cursor_progress, expected_rounds, expected_ok) in [
+            (Some(3), 2, false, 3, true),
+            (Some(3), 0, true, 3, true),
+            (None, 2, false, CLOSEOUT_SYNC_DRAIN_MAX_PASSES, false),
+            (None, 0, true, CLOSEOUT_SYNC_DRAIN_MAX_PASSES, false),
+            (Some(2), 0, false, 1, false),
+        ] {
+            let rounds = std::cell::Cell::new(0);
+            let result = drain_z_closeout(
+                |scope| {
+                    let rounds = &rounds;
+                    async move {
+                        force_sync_pass_result(
+                            complete_native_forced_sync_tick(scope, || {
+                                rounds.set(rounds.get() + 1);
+                                std::future::ready((
+                                    NativeSyncTickOutcome::Success(row_progress),
+                                    complete_on_round != Some(rounds.get()),
+                                    cursor_progress,
+                                ))
+                            })
+                            .await,
+                        )
+                    }
+                },
+                || Ok(snapshot(0, "")),
+            )
+            .await;
+            assert_eq!(rounds.get(), expected_rounds);
+            if expected_ok {
+                assert_eq!(result.unwrap().passes_executed, 1);
+            } else {
+                assert_eq!(result.unwrap_err(), REMOTE_PULL_FAILED);
+            }
+        }
+    }
+
     #[test]
     fn test_closeout_sync_drain_handles_post_submission_z_report_and_child_adjustment() {
         let mut pass_results = vec![Ok(1usize), Ok(1usize)];
@@ -37997,6 +38449,32 @@ mod tests {
         assert_eq!(sync_status, "pending");
         assert_eq!(parsed_payload["reportDate"], report_date);
         assert_eq!(parsed_payload["periodStartAt"], period_start_at);
+    }
+
+    #[test]
+    fn closeout_recurring_recovery_keeps_fiscal_admission_failure_best_effort() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,sync_status,
+                created_at,updated_at) VALUES ('owed-recovery','[]',10,1000,'pending','synced','now','now')", []).unwrap();
+            crate::fiscal::admission_owed::mark_owed(&conn, "owed-recovery").unwrap();
+        }
+        let _summary = run_recurring_sync_recovery(&db);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            crate::fiscal::admission_owed::list_owed(&conn, 25).unwrap(),
+            vec!["owed-recovery"]
+        );
+        let attempts: i64 = conn
+            .query_row(
+                "SELECT json_extract(setting_value, '$.attempts') FROM local_settings
+            WHERE setting_category='fiscal_admission_owed' AND setting_key='owed-recovery'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 1);
     }
 
     #[test]
@@ -39190,7 +39668,30 @@ mod tests {
         SyncCycleReport {
             synced,
             pull_error: Some("orders: Admin dashboard server error (HTTP 500)".to_string()),
+            orders_pull_incomplete: false,
         }
+    }
+
+    #[tokio::test]
+    async fn k2b_background_tick_with_incomplete_order_pull_still_succeeds() {
+        let sync_state = SyncState::new();
+        let outcome = complete_native_background_sync_tick(
+            RemoteAuthExecutionOutcome::Success(
+                SyncCycleReport {
+                    synced: 2,
+                    pull_error: None,
+                    orders_pull_incomplete: true,
+                },
+                sync_state.begin_remote_auth_attempt().unwrap(),
+            ),
+            |_| async {
+                let mut summary = empty_parity_summary();
+                summary.processed = 1;
+                ParitySyncExecutionOutcome::Complete(summary)
+            },
+        )
+        .await;
+        assert_eq!(outcome, NativeSyncTickOutcome::Success(3));
     }
 
     #[tokio::test]
@@ -39508,6 +40009,54 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn k2b_z_closeout_force_sync_pass_rejects_successful_incomplete_order_pull() {
+        let (admin_url, seen) = spawn_routed_json_server(|request| {
+            if request.starts_with("GET /api/pos/orders/sync") {
+                (
+                    200,
+                    r#"{"orders":[],"has_more":true,"sync_timestamp":"2026-11-11T00:00:00Z"}"#,
+                )
+            } else if request.starts_with("GET /api/pos/payments") {
+                (200, r#"{"payments":[],"has_more":false}"#)
+            } else {
+                (404, r#"{"error":"Not found"}"#)
+            }
+        });
+        let _keyring = cycle_test_keyring(&admin_url);
+        let db = test_db();
+        let report = run_sync_cycle(&db, &NoopTerminalEventSink).await.unwrap();
+        assert!(report.orders_pull_incomplete, "{report:?}");
+        assert!(report.pull_error.is_none(), "{report:?}");
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.starts_with("GET /api/pos/orders/sync"))
+                .count(),
+            4
+        );
+        let sync_state = SyncState::new();
+        let outcome = complete_native_forced_sync_tick(Z_CLOSEOUT_PARITY_SCOPE, || async {
+            let incomplete = report.orders_pull_incomplete;
+            let outcome = complete_native_background_sync_tick(
+                RemoteAuthExecutionOutcome::Success(
+                    report.clone(),
+                    sync_state.begin_remote_auth_attempt().unwrap(),
+                ),
+                |_| async { ParitySyncExecutionOutcome::Complete(empty_parity_summary()) },
+            )
+            .await;
+            (outcome, incomplete, false)
+        })
+        .await;
+        assert_eq!(
+            force_sync_pass_result(outcome),
+            Err(REMOTE_PULL_FAILED.into())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -42637,6 +43186,142 @@ mod tests {
         let synced = sync_payment_items(&mock_url, api_key, "term-table-sync", &db, &items).await;
         assert_eq!(synced, 1);
         server_handle.join().expect("join mock server");
+    }
+
+    #[test]
+    fn k4b_mark_local_payment_applied_accepts_missing_null_and_legacy_tender_keys() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO orders (id,items,total_amount,total_amount_cents,status,sync_status,created_at,updated_at)
+            VALUES ('optional-tender-order','[]',10,1000,'completed','synced',datetime('now'),datetime('now'))", []).unwrap();
+        conn.execute("INSERT INTO order_payments (id,order_id,method,amount,amount_cents,status,payment_origin,sync_status,sync_state,created_at,updated_at)
+            VALUES ('optional-tender-payment','optional-tender-order','cash',10,1000,'completed','terminal','pending','pending',datetime('now'),datetime('now'))", []).unwrap();
+        for (cash, change, sent, expected) in [
+            (Some(0), Some(0), serde_json::json!({"method":"cash"}), true),
+            (
+                Some(2000),
+                Some(1000),
+                serde_json::json!({"paymentMethod":"cash"}),
+                true,
+            ),
+            (
+                Some(2000),
+                Some(1000),
+                serde_json::json!({"method":"cash", "paymentOrigin":null, "cashReceived":null, "cash_received_cents":null, "changeGiven":null, "change_given_cents":null}),
+                true,
+            ),
+            (
+                None,
+                None,
+                serde_json::json!({"payment_method":"cash", "payment_origin":"terminal", "cash_received":0, "change_given":0}),
+                true,
+            ),
+            (
+                Some(2000),
+                Some(1000),
+                serde_json::json!({"payment_method":"cash", "payment_origin":"terminal", "cash_received":20, "change_given":10}),
+                true,
+            ),
+            (
+                Some(2000),
+                Some(1000),
+                serde_json::json!({"paymentMethod":"cash", "paymentOrigin":"terminal", "cashReceivedCents":2000, "changeGivenCents":1000}),
+                true,
+            ),
+            (
+                Some(2000),
+                Some(1000),
+                serde_json::json!({"method":"card"}),
+                false,
+            ),
+            (
+                Some(2000),
+                Some(1000),
+                serde_json::json!({"method":"cash", "payment_origin":"manual"}),
+                false,
+            ),
+            (
+                Some(2000),
+                Some(1000),
+                serde_json::json!({"method":"cash", "cash_received":10}),
+                false,
+            ),
+            (
+                Some(2000),
+                Some(1000),
+                serde_json::json!({"method":"cash", "change_given":0}),
+                false,
+            ),
+        ] {
+            conn.execute("UPDATE order_payments SET cash_received=?1 / 100.0,cash_received_cents=?1,change_given=?2 / 100.0,change_given_cents=?2,sync_status='pending',sync_state='pending' WHERE id='optional-tender-payment'", params![cash, change]).unwrap();
+            assert_eq!(
+                mark_local_payment_applied_if_tender_unchanged(
+                    &conn,
+                    "optional-tender-payment",
+                    "2026-11-11T01:00:00Z",
+                    Some("remote-optional-tender"),
+                    &sent,
+                )
+                .unwrap(),
+                expected,
+                "cash={cash:?}, change={change:?}, sent={sent}"
+            );
+            let state: String = conn
+                .query_row(
+                    "SELECT sync_state FROM order_payments WHERE id='optional-tender-payment'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(state, if expected { "applied" } else { "pending" });
+        }
+    }
+
+    #[test]
+    fn k2c_mark_local_payment_applied_tender_guard_ignores_metadata_but_checks_cash_fields() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO orders (id,items,total_amount,total_amount_cents,status,sync_status,created_at,updated_at)
+            VALUES ('tender-order','[]',10,1000,'completed','synced',datetime('now'),datetime('now'))", []).unwrap();
+        conn.execute("INSERT INTO order_payments (id,order_id,method,amount,amount_cents,cash_received,cash_received_cents,
+            change_given,change_given_cents,status,payment_origin,sync_status,sync_state,created_at,updated_at)
+            VALUES ('tender-payment','tender-order','cash',10,1000,20,2000,10,1000,'completed','manual','pending','pending',datetime('now'),datetime('now'))", []).unwrap();
+        let sent: Value = serde_json::from_str(
+            &crate::payments::build_payment_sync_payload_for_payment(&conn, "tender-payment")
+                .unwrap(),
+        )
+        .unwrap();
+        conn.execute("UPDATE order_payments SET cash_received=10,cash_received_cents=1000,change_given=0,change_given_cents=0 WHERE id='tender-payment'", []).unwrap();
+        assert!(!mark_local_payment_applied_if_tender_unchanged(
+            &conn,
+            "tender-payment",
+            "2026-11-11T01:00:00Z",
+            Some("remote-tender"),
+            &sent
+        )
+        .unwrap());
+        let sent: Value = serde_json::from_str(
+            &crate::payments::build_payment_sync_payload_for_payment(&conn, "tender-payment")
+                .unwrap(),
+        )
+        .unwrap();
+        conn.execute("UPDATE order_payments SET metadata='{\"receipt\":\"new\"}', updated_at='2026-11-11T00:59:00Z' WHERE id='tender-payment'", []).unwrap();
+        assert!(mark_local_payment_applied_if_tender_unchanged(
+            &conn,
+            "tender-payment",
+            "2026-11-11T01:00:00Z",
+            Some("remote-tender"),
+            &sent
+        )
+        .unwrap());
+        let state: (String, String) = conn
+            .query_row(
+                "SELECT sync_state,remote_payment_id FROM order_payments WHERE id='tender-payment'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, ("applied".into(), "remote-tender".into()));
     }
 
     #[test]

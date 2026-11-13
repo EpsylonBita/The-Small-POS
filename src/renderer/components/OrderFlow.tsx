@@ -263,7 +263,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   }, [salonSale]);
   const [selectedAddress, setSelectedAddress] = useState<any>(null);
   const [deliveryZoneInfo, setDeliveryZoneInfo] = useState<DeliveryBoundaryValidationResponse | null>(null);
-  const [isTransitioning, setIsTransitioning] = useState(false);
   const [isProcessingOrder, setIsProcessingOrder] = useState(false);
   // The store's tax rate, or null while it cannot be read (item H).
   const [taxRatePercentage, setTaxRatePercentage] = useState<number | null>(null);
@@ -483,7 +482,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setSelectedCustomer(null);
     setSelectedAddress(null);
     setDeliveryZoneInfo(null);
-    setIsTransitioning(false);
     setShowZoneAlert(false);
     setOverrideApproved(false);
   }, [dismissCheckoutRequestId]);
@@ -575,14 +573,12 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   }, [resetFlow]);
 
   const handleSelectOrderType = useCallback(async (type: 'pickup' | 'delivery' | 'dine-in') => {
-    setIsTransitioning(true);
     if (type !== 'dine-in') {
       setSelectedOrderType(type);
     }
 
-    // Smooth transition with loading state
-    await new Promise(resolve => setTimeout(resolve, 300));
-
+    // Founder 11/11/2026: hand over to the next window in the same step. The 300 ms
+    // "Setting up order…" spinner swapped the cards out and back in: it read as a flash.
     setIsOrderTypeModalOpen(false);
 
     if (type === 'pickup') {
@@ -603,8 +599,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       // For table orders, show table selector
       setShowTableSelector(true);
     }
-
-    setIsTransitioning(false);
   }, [t]);
 
   const handleCustomerSelected = useCallback((customer: Customer) => {
@@ -2108,12 +2102,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         contentClassName="p-0! overflow-visible!"
       >
         <div className="p-2">
-          {isTransitioning ? (
-            <div className="flex items-center justify-center py-8">
-              <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-b-yellow-500 dark:border-white/20 dark:border-b-yellow-400"></div>
-              <span className="ml-3 liquid-glass-modal-text-muted">{t('orderFlow.settingUpOrder')}</span>
-            </div>
-          ) : (
+          {(
             <div className={`grid gap-4 sm:gap-5 ${orderTypeGridColsClass}`}>
               {/* Delivery Button - Yellow (only if Delivery module acquired) */}
               {hasDeliveryModule && (

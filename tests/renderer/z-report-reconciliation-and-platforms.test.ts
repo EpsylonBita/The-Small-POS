@@ -157,9 +157,10 @@ test('the Z modal shows the reconciliation and blocks the close on real findings
   // Review item C (16/09/2026): a legitimate refund leaves a real, non-zero
   // `difference`. The panel must colour on what is UNEXPLAINED, or a normal
   // day with a refund reads red while `reconciled` says it is fine.
+  // founder 11/11/2026: wrong money uses rose-500, without a coloured wash.
   assert.match(
     source,
-    /Math\.abs\(integrity\.unexplainedDifference \?\? integrity\.difference \?\? 0\) >= 0\.01\n?\s*\? 'text-rose-600 dark:text-rose-300'/,
+    /Math\.abs\(integrity\.unexplainedDifference \?\? integrity\.difference \?\? 0\) >= 0\.01\n?\s*\? 'text-rose-500'/,
   );
   assert.ok(
     !/Math\.abs\(integrity\.difference \?\? 0\) >= 0\.01\s*\n?\s*\? 'text-rose/.test(source),

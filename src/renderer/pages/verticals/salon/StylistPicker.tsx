@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Scissors, UserX } from 'lucide-react';
@@ -66,22 +67,31 @@ interface StylistPickerProps {
 }
 
 const choiceClass =
-  'flex min-h-12 w-full items-center gap-3 rounded-xl border border-slate-200/90 bg-white/90 px-3 py-2 text-left font-semibold liquid-glass-modal-text transition-all active:translate-y-px dark:border-white/10 dark:bg-white/5';
+  'pos-glass-tap-card flex min-h-12 w-full items-center gap-3 px-3 py-2 text-left font-semibold liquid-glass-modal-text focus-visible:outline-2 focus-visible:outline-yellow-400';
 
 export function StylistPicker({ isOpen, serviceName, stylists, loading = false, onPick, onClose }: StylistPickerProps) {
+  
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const { t } = useTranslation();
   return (
-    <LiquidGlassModal isOpen={isOpen} onClose={onClose} size="sm" className="max-w-md!" closeOnBackdrop={false}
+    <LiquidGlassModal isOpen={isOpen} onClose={onClose} size="sm" className="max-w-md! [&_.liquid-glass-modal-header]:border-b-0!" closeOnBackdrop={false}
       title={t('salonStaff.pickerTitle', 'Who does this service?')}>
       <div className="space-y-2" data-testid="salon-stylist-picker">
-        {serviceName && <p className="text-sm liquid-glass-modal-text-muted">{serviceName}</p>}
-        {loading && stylists.length === 0 && <p role="status" className="text-sm liquid-glass-modal-text-muted">{t('common.loading', 'Loading...')}</p>}
-        {stylists.map(stylist => (
-          <button key={stylist.id} type="button" className={choiceClass} onClick={() => onPick(stylist)}>
+        <AnimatePresence initial={false}>{serviceName && <motion.p {...revealMotion} className="text-sm liquid-glass-modal-text-muted">{serviceName}</motion.p>}</AnimatePresence>
+        <AnimatePresence initial={false}>{loading && stylists.length === 0 && <motion.p {...revealMotion} role="status" className="text-sm liquid-glass-modal-text-muted">{t('common.loading', 'Loading...')}</motion.p>}</AnimatePresence>
+        <AnimatePresence initial={false}>{stylists.map(stylist => (
+          <motion.div key={stylist.id} {...revealMotion}><button key={stylist.id} type="button" className={choiceClass} onClick={() => onPick(stylist)}>
             <Scissors className="h-5 w-5 shrink-0 text-amber-500" />
             <span className="min-w-0 truncate">{stylist.name}</span>
-          </button>
-        ))}
+          </button></motion.div>
+        ))}</AnimatePresence>
         <button type="button" className={choiceClass} onClick={() => onPick(null)}>
           <UserX className="h-5 w-5 shrink-0 liquid-glass-modal-text-muted" />
           <span>{t('salonStaff.noStylist', 'No stylist')}</span>

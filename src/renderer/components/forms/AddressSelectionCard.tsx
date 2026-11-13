@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { formatCurrency } from '../../utils/format';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -49,6 +50,14 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
   className = ''
 }) => {
   const { t } = useTranslation();
+  // Presentation only: preserve every existing reveal condition (founder 11/11/2026).
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
   const { resolvedTheme } = useTheme();
 
   // Get validation status icon and color
@@ -87,50 +96,39 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
   const validationIndicator = getValidationIndicator();
 
   return (
-    <div className={`relative rounded-3xl border p-6 backdrop-blur-xl transition-transform duration-150 active:scale-[0.99] ${
-      resolvedTheme === 'dark'
-        ? 'border-white/12 bg-black/25 active:bg-black/35'
-        : 'border-black/10 bg-white/55 active:bg-white/75'
-    } ${!validationResult?.deliveryAvailable && validationResult ? 'opacity-75' : ''} ${className}`}>
+    <div className={`pos-glass-tap-card relative p-6 ${!validationResult?.deliveryAvailable && validationResult ? 'opacity-75' : ''} ${className}`}>
       {/* Validation Status Badge (top) */}
-      {validationResult?.zone && orderType === 'delivery' && (
-        <div className="mb-3">
-          <div className={`inline-flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-semibold ${
-            resolvedTheme === 'dark'
-              ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 border border-(--pos-s-border)'
-              : 'bg-(--pos-s-surface-2) text-green-700 border border-(--pos-s-border)'
-          }`}>
+      <AnimatePresence initial={false}>
+        {validationResult?.zone && orderType === 'delivery' && (
+        <motion.div {...revealMotion} key="reveal-1" className="mb-3">
+          <div className="inline-flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-semibold text-green-700 dark:text-green-300">
             <MapPin className="w-3 h-3" />
             <span>{validationResult.zone.name}</span>
           </div>
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Address Header */}
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center space-x-3">
-          <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
-            resolvedTheme === 'dark' ? 'bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2)'
-          }`}>
-            <MapPin className={resolvedTheme === 'dark' ? 'h-5 w-5 text-yellow-300' : 'h-5 w-5 text-yellow-700'} />
+          <div className="flex h-11 w-11 items-center justify-center rounded-2xl liquid-glass-modal-text-muted">
+            <MapPin className="h-5 w-5 liquid-glass-modal-text-muted" />
           </div>
           <div>
-            <h3 className={`font-semibold ${
-              resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-            }`}>
+            <h3 className="font-semibold liquid-glass-modal-text">
               {t('delivery.address.header')}
             </h3>
-            <p className={`text-sm ${
-              resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-            }`}>
+            <p className="text-sm liquid-glass-modal-text-muted">
               {customer.name}
             </p>
           </div>
         </div>
 
         {/* Action Buttons */}
-        {(onEdit || onDelete) && (
-          <div className="flex space-x-2">
+        <AnimatePresence initial={false}>
+          {(onEdit || onDelete) && (
+          <motion.div {...revealMotion} key="reveal-2" className="flex space-x-2">
             {onEdit && (
               <button
                 type="button"
@@ -139,11 +137,7 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
                   e.stopPropagation();
                   onEdit(address);
                 }}
-                className={`rounded-2xl p-2 transition-transform duration-150 active:scale-95 ${
-                  resolvedTheme === 'dark'
-                    ? 'text-gray-300 active:bg-white/10'
-                    : 'text-gray-700 active:bg-black/10'
-                }`}
+                className="pos-glass-field inline-flex min-h-touch min-w-touch items-center justify-center rounded-2xl p-2"
               >
                 <Edit className="h-4 w-4" aria-hidden="true" />
               </button>
@@ -156,135 +150,121 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
                   e.stopPropagation();
                   onDelete(address);
                 }}
-                className={`rounded-2xl p-2 transition-transform duration-150 active:scale-95 ${
-                  resolvedTheme === 'dark'
-                    ? 'text-red-800 dark:text-red-200 active:bg-(--pos-s-surface-2)'
-                    : 'text-red-600 active:bg-(--pos-s-surface-2)'
-                }`}
+                className="pos-solid-btn pos-solid-btn--danger min-h-touch min-w-touch rounded-2xl p-2"
               >
                 <Trash2 className="h-4 w-4" aria-hidden="true" />
               </button>
             )}
-          </div>
-        )}
+          </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Address Details */}
       <div className="space-y-2">
-        <div className={`font-medium ${
-          resolvedTheme === 'dark' ? 'text-gray-200' : 'text-gray-800'
-        }`}>
+        <div className="font-medium liquid-glass-modal-text">
           {address.street_address}
         </div>
 
-        {address.city && (
-          <div className={`text-sm ${
-            resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
-          }`}>
+        <AnimatePresence initial={false}>
+
+          {address.city && (
+          <motion.div {...revealMotion} key="reveal-3" className="text-sm liquid-glass-modal-text-muted">
             {t('delivery.address.city')} {address.city}
-          </div>
-        )}
+          </motion.div>
+          )}
+        </AnimatePresence>
 
-        {address.postal_code && (
-          <div className={`text-sm ${
-            resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
-          }`}>
+        <AnimatePresence initial={false}>
+
+          {address.postal_code && (
+          <motion.div {...revealMotion} key="reveal-4" className="text-sm liquid-glass-modal-text-muted">
             {t('delivery.address.postalCode')} {address.postal_code}
-          </div>
-        )}
+          </motion.div>
+          )}
+        </AnimatePresence>
 
-        {address.floor_number && (
-          <div className={`text-sm ${
-            resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
-          }`}>
+        <AnimatePresence initial={false}>
+
+          {address.floor_number && (
+          <motion.div {...revealMotion} key="reveal-5" className="text-sm liquid-glass-modal-text-muted">
             {t('delivery.address.floor')} {address.floor_number}
-          </div>
-        )}
+          </motion.div>
+          )}
+        </AnimatePresence>
 
-        {address.address_type && (
-          <div className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${
-            address.is_default
-              ? resolvedTheme === 'dark'
-                ? 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300'
-                : 'bg-(--pos-s-surface-2) text-green-700'
-              : resolvedTheme === 'dark'
-                ? 'bg-white/10 text-gray-200'
-                : 'bg-gray-100 text-gray-700'
+        <AnimatePresence initial={false}>
+
+          {address.address_type && (
+          <motion.div {...revealMotion} key="reveal-6" className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${
+            address.is_default ? 'text-green-700 dark:text-green-300' : 'liquid-glass-modal-text-muted'
           }`}>
             {address.address_type} {address.is_default && t('delivery.address.default')}
-          </div>
-        )}
+          </motion.div>
+          )}
+        </AnimatePresence>
 
-        {address.notes && (
-          <div className={`text-sm ${
-            resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-          }`}>
+        <AnimatePresence initial={false}>
+
+          {address.notes && (
+          <motion.div {...revealMotion} key="reveal-7" className="text-sm liquid-glass-modal-text-muted">
             {t('delivery.address.notes')} {address.notes}
-          </div>
-        )}
+          </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Zone Information */}
-      {validationResult?.zone && orderType === 'delivery' && (
-        <div className="mt-4 pt-4 border-t border-gray-200/20">
+      <AnimatePresence initial={false}>
+        {validationResult?.zone && orderType === 'delivery' && (
+        <motion.div {...revealMotion} key="reveal-8" className="mt-3 pos-glass-form-card p-3!">
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <div className={`text-xs ${
-                resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-              }`}>
+              <div className="text-xs liquid-glass-modal-text-muted">
                 {t('delivery.address.deliveryFee')}
               </div>
-              <div className={`text-sm font-semibold mt-1 ${
-                resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-              }`}>
+              <div className="text-sm font-semibold mt-1 liquid-glass-modal-text">
                 {formatCurrency(validationResult.zone.deliveryFee)}
               </div>
             </div>
             <div>
-              <div className={`text-xs ${
-                resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-              }`}>
+              <div className="text-xs liquid-glass-modal-text-muted">
                 {t('delivery.address.estimatedTime')}
               </div>
-              <div className={`text-sm font-semibold mt-1 ${
-                resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-              }`}>
+              <div className="text-sm font-semibold mt-1 liquid-glass-modal-text">
                 {validationResult.zone.estimatedTime
                   ? `${validationResult.zone.estimatedTime.min}-${validationResult.zone.estimatedTime.max} min`
                   : 'N/A'}
               </div>
             </div>
-            {validationResult.zone.minimumOrderAmount > 0 && (
-              <div>
-                <div className={`text-xs ${
-                  resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-                }`}>
+            <AnimatePresence initial={false}>
+              {validationResult.zone.minimumOrderAmount > 0 && (
+              <motion.div {...revealMotion} key="reveal-9">
+                <div className="text-xs liquid-glass-modal-text-muted">
                   {t('delivery.address.minimumOrder')}
                 </div>
-                <div className={`text-sm font-semibold mt-1 ${
-                  resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-                }`}>
+                <div className="text-sm font-semibold mt-1 liquid-glass-modal-text">
                   {formatCurrency(validationResult.zone.minimumOrderAmount)}
                 </div>
-              </div>
-            )}
+              </motion.div>
+              )}
+            </AnimatePresence>
           </div>
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Out of Zone Warning */}
-      {!validationResult?.deliveryAvailable && validationResult && orderType === 'delivery' && (
-        <div className="mt-4 pt-4 border-t border-gray-200/20">
-          <div className={`flex items-center space-x-2 rounded-2xl px-3 py-2 ${
-            resolvedTheme === 'dark'
-              ? 'bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-300'
-              : 'bg-(--pos-s-surface-2) text-yellow-700'
-          }`}>
+      <AnimatePresence initial={false}>
+        {!validationResult?.deliveryAvailable && validationResult && orderType === 'delivery' && (
+        <motion.div {...revealMotion} key="reveal-10" className="mt-3 pos-glass-form-card p-3!">
+          <div className="flex items-center space-x-2 rounded-2xl px-3 py-2 text-yellow-700 dark:text-yellow-300">
             <AlertTriangle className="h-4 w-4" aria-hidden="true" />
             <span className="text-sm font-medium">{t('delivery.validation.outsideArea')}</span>
           </div>
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Validation Indicator */}
       {validationIndicator && orderType === 'delivery' && (
@@ -296,10 +276,8 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
       )}
 
       {/* Selection Indicator */}
-      <div className="mt-4 pt-4 border-t border-gray-200/20">
-        <div className={`text-center text-sm font-medium ${
-          resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-700'
-        }`}>
+      <div className="mt-3 pos-glass-form-card p-3!">
+        <div className="text-center text-sm font-medium liquid-glass-modal-text-muted">
           {t('delivery.address.clickToSelect')}
         </div>
       </div>

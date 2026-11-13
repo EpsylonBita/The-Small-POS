@@ -151,9 +151,6 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
           'Check-in needs an existing room reservation. If no rooms appear here, create a reservation first, then come back to check the guest in.',
       })
     : null;
-  const accentClass = isCheckin
-    ? 'border-(--pos-s-border)'
-    : 'border-(--pos-s-border)';
   const EmptyIcon = isCheckin ? UserCheck : CalendarPlus;
 
   // Floor filter narrows the displayed room cards. Reset to "all" each time the picker reopens
@@ -188,7 +185,7 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
                 <p className="liquid-glass-modal-text-muted text-sm">{t('roomsView.noRooms', { defaultValue: 'No rooms found' })}</p>
               </div>
             ) : (
-              <div className="grid max-h-[60vh] grid-cols-1 gap-2 overflow-y-auto scrollbar-hide pb-2 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="grid max-h-[60vh] grid-cols-1 gap-3 overflow-y-auto scrollbar-hide p-1 pb-4 sm:grid-cols-2 lg:grid-cols-3">
                 {visibleRooms.map((room) => {
                   const guest = roomGuestName(room);
                   const typeLabel = translateRoomType(t, room.roomType);
@@ -201,7 +198,7 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
                         room: room.roomNumber,
                         defaultValue: 'Room {{room}}',
                       })}
-                      className={`flex flex-col gap-1 rounded-2xl border-2 px-4 py-3 text-left transition-transform duration-150 active:scale-95 ${accentClass}`}
+                      className="pos-glass-tap-card flex min-h-touch-xl flex-col gap-1 px-4 py-3 text-left"
                     >
                       <span className="liquid-glass-modal-text text-base font-bold">
                         {t('orderFlow.roomOrderSelectRoom', {
@@ -213,7 +210,7 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
                       {isCheckin
                         ? guest && <span className="liquid-glass-modal-text-muted text-sm">{guest}</span>
                         : room.ratePerNight != null && (
-                            <span className="text-xs font-semibold text-purple-700 dark:text-purple-200">
+                            <span className="liquid-glass-modal-text text-sm font-semibold">
                               {formatCurrency(room.ratePerNight || 0)}
                             </span>
                           )}

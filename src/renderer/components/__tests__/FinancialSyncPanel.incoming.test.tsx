@@ -2,6 +2,16 @@ import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 
+// founder 11/11/2026: exercise the same behavior with motion reduced and exits synchronous.
+vi.mock('framer-motion', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('framer-motion')>();
+  return {
+    ...actual,
+    useReducedMotion: () => true,
+    AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  };
+});
+
 const mocks=vi.hoisted(()=>({
   status:vi.fn(), retry:vi.fn(), items:vi.fn(), snapshot:vi.fn(),
 }));

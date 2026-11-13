@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, CheckCircle, Clock, Home, Mail, MapPin, User } from 'lucide-react';
@@ -8,6 +9,8 @@ import {
   ensureAddressOfflineRuntime,
   extractStreetNumber,
   getSuggestionStreetLabel,
+  formatAddressDistance,
+  locateTypedAddress,
   resolveAddressSuggestion,
   searchAddressSuggestions,
   upsertVerifiedLocalCandidate,
@@ -16,6 +19,7 @@ import {
   type DeliveryValidationResult,
   type ValidationStatus,
 } from '../../services/address-workflow';
+import { streetNamesDiffer } from '../../services/address-street-name';
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
 import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
 import { getBridge } from '../../../lib';
@@ -70,7 +74,15 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   customer,
   onAddressAdded,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  // Presentation only: preserve every existing reveal condition (founder 11/11/2026).
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
   const bridge = useRef(getBridge()).current;
   const { hasModule } = useAcquiredModules();
   const hasDeliveryModule = hasModule(MODULE_IDS.DELIVERY);
@@ -93,14 +105,29 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   const [isValidatingDelivery, setIsValidatingDelivery] = useState(false);
   const [overrideApplied, setOverrideApplied] = useState(false);
   const [overrideReason, setOverrideReason] = useState('');
+  const [providerPostalCode, setProviderPostalCode] = useState<string | null>(null);
+  const [mapStreetName, setMapStreetName] = useState<string | null>(null);
+  const typedLocateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const invalidateAddressWork = () => {
+    searchRequestRef.current += 1;
+    if (typedLocateTimerRef.current) clearTimeout(typedLocateTimerRef.current);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    setIsValidatingDelivery(false);
+    setIsLoadingAddresses(false);
+    setSuggestions([]);
+    setProviderPostalCode(null);
+    setMapStreetName(null);
+  };
+  const handleClose = () => { invalidateAddressWork(); onClose(); };
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchRequestRef = useRef(0);
+  const selectedCityRef = useRef<string | undefined>(undefined);
   const sessionTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose();
+        handleClose();
       }
     };
 
@@ -139,7 +166,17 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
     }
     searchRequestRef.current += 1;
     sessionTokenRef.current = null;
-  }, [isOpen]);
+  }, [isOpen, customer.id]);
+
+  useEffect(() => {
+    invalidateAddressWork();
+    selectedCityRef.current = undefined;
+    return () => {
+      searchRequestRef.current += 1;
+      if (typedLocateTimerRef.current) clearTimeout(typedLocateTimerRef.current);
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+  }, [isOpen, customer.id, hasDeliveryPro]);
 
   const clearValidation = (addressValue: string) => {
     const parsedAddress = parseSpecialAddressInput(addressValue);
@@ -176,6 +213,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
     address: string,
     details?: AddressSelectionDetails | null
   ): Promise<DeliveryValidationResult | null> => {
+    const generation = searchRequestRef.current;
     const trimmedAddress = address.trim();
     if (!trimmedAddress) {
       return null;
@@ -205,6 +243,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
     }
 
     const creds = await getResolvedTerminalCredentials();
+    if (generation !== searchRequestRef.current) return null;
     const coords = details?.coordinates || addressCoordinates || undefined;
     const fallbackFingerprint = buildAddressFingerprint(trimmedAddress, coords);
 
@@ -221,6 +260,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
         validationSource: details?.validationSource,
       });
 
+      if (generation !== searchRequestRef.current) return null;
       setValidationResult(result);
       setValidationStatus(result.validation_status);
       setValidationSnapshot(result.address_fingerprint || fallbackFingerprint);
@@ -236,6 +276,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
 
       return result;
     } catch (error) {
+      if (generation !== searchRequestRef.current) return null;
       console.error('[AddNewAddressModal] validation error:', error);
       const fallback: DeliveryValidationResult = {
         success: false,
@@ -250,7 +291,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       setValidationStatus('unverified_offline');
       return fallback;
     } finally {
-      setIsValidatingDelivery(false);
+      if (generation === searchRequestRef.current) setIsValidatingDelivery(false);
     }
   };
 
@@ -371,13 +412,19 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   };
 
   const handleSuggestionClick = async (suggestion: AddressSuggestion) => {
+    invalidateAddressWork();
+    const generation = searchRequestRef.current;
+    const sessionToken = sessionTokenRef.current;
+    sessionTokenRef.current = null;
     try {
       const creds = await getResolvedTerminalCredentials();
+      if (generation !== searchRequestRef.current) return;
       const resolved = await resolveAddressSuggestion(suggestion, formData.address, {
         branchId: creds.branchId || undefined,
-        sessionToken: sessionTokenRef.current || undefined,
+        sessionToken: sessionToken || undefined,
       });
 
+      if (generation !== searchRequestRef.current) return;
       void upsertVerifiedLocalCandidate({
         place_id: resolved.placeId || suggestion.place_id,
         branch_id: creds.branchId || undefined,
@@ -408,13 +455,16 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
         address: resolved.streetAddress,
         postalCode: resolved.postalCode || prev.postalCode,
       }));
+      selectedCityRef.current = details.city;
       setSelectedAddressDetails(details);
+      setMapStreetName(streetNamesDiffer(resolved.streetAddress, resolved.route) ? resolved.route! : null);
       setAddressCoordinates(details.coordinates || null);
       setSuggestions([]);
       sessionTokenRef.current = null;
 
       await runValidation(resolved.streetAddress, details);
     } catch (error) {
+      if (generation !== searchRequestRef.current) return;
       console.error('[AddNewAddressModal] details error:', error);
       const fallback =
         getSuggestionStreetLabel(suggestion) ||
@@ -428,12 +478,44 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
     }
   };
 
+  const scheduleTypedLocation = (fields: { street: string; city?: string; postalCode: string }) => {
+    if (!isOpen || !hasDeliveryPro || !navigator.onLine || !extractStreetNumber(fields.street)
+      || parseSpecialAddressInput(fields.street).shouldSkipZoneValidation) return;
+    const generation = searchRequestRef.current;
+    typedLocateTimerRef.current = setTimeout(async () => {
+      if (generation !== searchRequestRef.current || !navigator.onLine) return;
+      setIsValidatingDelivery(true);
+      try {
+        const creds = await getResolvedTerminalCredentials();
+        if (generation !== searchRequestRef.current) return;
+        const result = await locateTypedAddress(fields, { branchId: creds.branchId || undefined });
+        if (generation !== searchRequestRef.current || !navigator.onLine || !result.located) return;
+        setSelectedAddressDetails({ ...result.details, city: fields.city, postalCode: fields.postalCode });
+        setAddressCoordinates(result.details.coordinates || null);
+        setProviderPostalCode(result.postalCodeDiffers ? result.providerPostalCode || null : null);
+        setMapStreetName(streetNamesDiffer(fields.street, result.details.route) ? result.details.route! : null);
+        await runValidation(fields.street, result.details);
+      } catch {
+        // Keep requires_selection when the provider or an old server cannot locate it.
+      } finally {
+        if (generation === searchRequestRef.current) setIsValidatingDelivery(false);
+      }
+    }, 700);
+  };
+
   const handleInputChange = (field: string, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
 
     if (field === 'address') {
+      selectedCityRef.current = undefined;
+      invalidateAddressWork();
       scheduleAddressSearch(value);
       clearValidation(value);
+    } else if (field === 'postalCode') {
+      const city = selectedAddressDetails?.city || selectedCityRef.current;
+      invalidateAddressWork();
+      clearValidation(formData.address);
+      scheduleTypedLocation({ street: formData.address, city, postalCode: value });
     }
   };
 
@@ -453,7 +535,9 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       return;
     }
 
+    const generation = searchRequestRef.current;
     const validation = await ensureValidationForSubmit();
+    if (generation !== searchRequestRef.current) return;
     const decisionError = evaluateValidationDecision(validation);
     if (decisionError) {
       alert(decisionError);
@@ -515,7 +599,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
         formData.notes.trim() || undefined
       );
 
-      onClose();
+      handleClose();
     } catch (error) {
       console.error('Error adding new address:', error);
       // Never a native error's raw text: the refusal's own message, else the generic one.
@@ -532,25 +616,26 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   };
 
   const fieldClass =
-    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg) dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
+    'liquid-glass-modal-input pos-glass-field min-h-touch w-full px-4 py-2.5';
   const addressFieldClass = `${fieldClass} pl-10`;
 
   return (
     <LiquidGlassModal
       isOpen={isOpen}
-      onClose={onClose}
+      onClose={handleClose}
       title={t('modals.addNewAddress.title')}
       size="lg"
-      className="max-w-2xl!"
+      className="max-w-2xl! pos-progressive-form [&_.liquid-glass-modal-header]:border-b-0!"
+
     >
-      <div className="p-6">
-        <p className="liquid-glass-modal-text-muted mb-6">
+      <div className="space-y-3">
+        <p className="liquid-glass-modal-text-muted text-sm">
           {t('modals.addNewAddress.subtitle', { name: customer.name })}
         </p>
 
-        <div className="mb-6 rounded-3xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4">
+        <div className="pos-glass-form-card">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-yellow-400 text-black">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl liquid-glass-modal-text-muted">
               <User className="w-5 h-5" />
             </div>
             <div>
@@ -566,9 +651,10 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
           </div>
         </div>
 
-        <div className="space-y-4">
+        <div className="space-y-3">
+          <div className="pos-glass-form-card space-y-3">
           <div className="relative">
-            <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
               {t('modals.addNewAddress.address')}
             </label>
             <div className="relative">
@@ -600,13 +686,13 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
             )}
 
             {hasDeliveryPro && suggestions.length > 0 && (
-              <div className="absolute z-10 w-full mt-1 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm border liquid-glass-modal-border rounded-2xl shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
+              <div className="absolute z-10 w-full mt-1 pos-glass-form-card p-2! space-y-2 shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
                 {suggestions.map((suggestion, index) => (
                   <button
                     type="button"
                     key={suggestion.place_id || index}
                     onClick={() => handleSuggestionClick(suggestion)}
-                    className="w-full px-4 py-3 text-left active:bg-white/10 dark:active:bg-white/5 transition-colors border-b border-gray-200/20 dark:border-gray-700/20 last:border-b-0"
+                    className="pos-glass-tap-card min-h-touch w-full px-4 py-3 text-left focus-visible:outline-2 focus-visible:outline-yellow-400"
                   >
                     <div className="flex items-start gap-2">
                       <MapPin className="w-4 h-4 text-gray-400 mt-1 shrink-0" />
@@ -616,6 +702,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
                         </p>
                         <p className="text-xs liquid-glass-modal-text-muted">
                           {suggestion.secondary_text || suggestion.formatted_address}
+                          {formatAddressDistance(suggestion.distance_meters, i18n?.resolvedLanguage || i18n?.language) && ` · ${formatAddressDistance(suggestion.distance_meters, i18n?.resolvedLanguage || i18n?.language)}`}
                         </p>
                       </div>
                     </div>
@@ -625,8 +712,12 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
             )}
           </div>
 
-          {hasDeliveryPro && validationResult && (
-            <div className="liquid-glass-modal-card space-y-3">
+          {mapStreetName && <p className="mt-1 text-xs liquid-glass-modal-text-muted">{t('modals.addCustomer.mapStreetNameDiffers', { street: mapStreetName })}</p>}
+
+          <AnimatePresence initial={false}>
+
+            {hasDeliveryPro && validationResult && (
+            <motion.div {...revealMotion} key="reveal-1" className="pos-glass-form-card space-y-3">
               <div className="text-sm font-medium liquid-glass-modal-text flex items-center gap-2">
                 <MapPin className="w-4 h-4" />
                 {t('modals.addCustomer.deliveryValidation')}
@@ -658,11 +749,14 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
                 </div>
               )}
 
-              {(validationStatus === 'out_of_zone' || validationStatus === 'unverified_offline') && (
-                <div className="space-y-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
-                  <label className="flex items-center gap-2 text-sm text-orange-200">
+              <AnimatePresence initial={false}>
+
+                {(validationStatus === 'out_of_zone' || validationStatus === 'unverified_offline') && (
+                <motion.div {...revealMotion} key="reveal-5" className="pos-glass-form-card p-3! space-y-2">
+                  <label className="flex min-h-touch items-center gap-2 text-sm liquid-glass-modal-text">
                     <input
                       type="checkbox"
+                      className="h-5 w-5 shrink-0 accent-yellow-400"
                       checked={overrideApplied}
                       onChange={(e) => setOverrideApplied(e.target.checked)}
                     />
@@ -677,13 +771,15 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
                     rows={2}
                     className={`${fieldClass} resize-none`}
                   />
-                </div>
-              )}
-            </div>
-          )}
+                </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
+            )}
+          </AnimatePresence>
 
           <div>
-            <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
               {t('modals.addNewAddress.postalCode')}
             </label>
             <input
@@ -694,6 +790,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
               placeholder={t('modals.addNewAddress.postalPlaceholder')}
               className={fieldClass}
             />
+            {providerPostalCode && <p className="mt-1 text-xs liquid-glass-modal-text-muted">{t('modals.addCustomer.mapPostalCodeDiffers', { code: providerPostalCode })}</p>}
           </div>
 
           <div>
@@ -713,8 +810,9 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
             )}
           </div>
 
-          <div>
-            <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+          </div>
+          <div className="pos-glass-form-card">
+            <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
               {t('modals.addNewAddress.deliveryNotes')}
             </label>
             <textarea
@@ -727,10 +825,12 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
           </div>
         </div>
 
-        <div className="flex gap-3 mt-6">
+
+        <div className="px-6 pb-5 pt-2">
+        <div className="flex gap-3">
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl"
           >
             {t('modals.addNewAddress.cancel')}
@@ -738,7 +838,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
           <button
             type="button"
             onClick={handleSubmit}
-            disabled={isSubmitting || !formData.address.trim()}
+            disabled={isSubmitting || isValidatingDelivery || !formData.address.trim()}
             className="liquid-glass-modal-button liquid-glass-modal-success flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
           >
             <Home className="w-5 h-5" />
@@ -749,6 +849,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
         <p className="text-xs liquid-glass-modal-text-muted mt-3 text-center">
           {t('modals.addNewAddress.helpText')}
         </p>
+        </div>
       </div>
     </LiquidGlassModal>
   );

@@ -679,7 +679,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       pulseSaved('connection')
     } catch (e: any) {
       console.warn('Failed to update credentials or trigger sync:', e)
-      toast.error(e?.message || t('modals.connectionSettings.networkError'))
+      const unsyncedQueue = e === 'UNSYNCED_QUEUE' || e?.code === 'UNSYNCED_QUEUE' || e?.message === 'UNSYNCED_QUEUE'
+      toast.error(unsyncedQueue
+        ? t('modals.connectionSettings.unsyncedQueue')
+        : e?.message || t('modals.connectionSettings.networkError'))
     }
   }
 

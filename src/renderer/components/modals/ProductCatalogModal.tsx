@@ -7,6 +7,7 @@ import { formatCurrency } from '../../utils/format';
  */
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { X, Package, Search, Barcode, Plus, Minus, ShoppingCart, DollarSign, Gift } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
@@ -1076,6 +1077,15 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     return true;
   };
 
+  // Presentation only: reveal conditional blocks without animating cart-line updates (founder 11/11/2026).
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -1084,16 +1094,16 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         isOpen={isOpen}
         onClose={onClose}
         title={t('productCatalog.title', 'Product Catalog')}
-        className="max-w-[95vw]! w-[1400px]! h-[90vh]!"
+        className="max-w-[95vw]! w-[1400px]! h-[90vh]! [&>.liquid-glass-modal-header]:border-b-0!"
       >
         <div className="flex h-full gap-4">
           {/* Left: Product Grid */}
           <div className="flex-1 flex flex-col min-w-0">
             {/* Search and Filters */}
-            <div className="flex gap-2 mb-4">
+            <div className="pos-glass-form-card flex gap-2 mb-3">
               <div className="relative flex-1">
                 <Barcode className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 transition-colors ${
-                  scannerState.isScanning ? 'text-green-400 animate-pulse' : 'text-gray-400'
+                  scannerState.isScanning ? 'text-green-400 animate-pulse' : 'liquid-glass-modal-text-muted'
                 }`} />
                 <input
                   ref={barcodeInputRef}
@@ -1104,27 +1114,27 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                   placeholder={scannerState.isScanning
                     ? t('productCatalog.scanning', 'Scanning...')
                     : t('productCatalog.scanBarcode', 'Scan barcode or enter SKU...')}
-                  className={`w-full pl-10 pr-4 py-2 rounded-2xl bg-white/10 text-white border placeholder-gray-400 transition-colors ${
+                  className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-10 pr-4 py-2 rounded-2xl transition-colors ${
                     scannerState.isScanning
-                      ? 'border-green-600 ring-1 ring-(--pos-s-border)'
-                      : 'border-white/20'
+                      ? 'border-green-600! ring-1 ring-(--pos-s-border)'
+                      : ''
                   }`}
                 />
                 {/* Scanner status indicator */}
                 {scannerState.scanCount > 0 && (
-                  <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400">
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs liquid-glass-modal-text-muted">
                     {t('productCatalog.scansCount', '{{count}} scans', { count: scannerState.scanCount })}
                   </div>
                 )}
               </div>
               <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 liquid-glass-modal-text-muted" />
                 <input
                   type="text"
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   placeholder={t('productCatalog.search', 'Search products...')}
-                  className="w-48 pl-10 pr-4 py-2 rounded-2xl bg-white/10 text-white border border-white/20 placeholder-gray-400"
+                  className="liquid-glass-modal-input pos-glass-field min-h-touch w-48 pl-10 pr-4 py-2 rounded-2xl"
                 />
               </div>
             </div>
@@ -1132,10 +1142,10 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
             <div className="pos-scroll-row mb-4 gap-2">
               <button
                 onClick={() => setCategoryFilter('all')}
-                className={`px-4 py-2 rounded-2xl whitespace-nowrap transition-transform duration-150 active:scale-[0.98] ${
+                className={`min-h-touch px-4 py-2 rounded-2xl whitespace-nowrap transition-colors duration-150 ${
                   categoryFilter === 'all'
-                    ? 'bg-yellow-400 text-black'
-                    : 'bg-white/10 text-white active:bg-white/20'
+                    ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border border-(--pos-s-sel-bg)'
+                    : 'pos-glass-field liquid-glass-modal-text'
                 }`}
               >
                 {t('productCatalog.allProducts', 'All Products')}
@@ -1144,10 +1154,10 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                 <button
                   key={cat.id}
                   onClick={() => setCategoryFilter(cat.id)}
-                  className={`px-4 py-2 rounded-2xl whitespace-nowrap transition-transform duration-150 active:scale-[0.98] ${
+                  className={`min-h-touch px-4 py-2 rounded-2xl whitespace-nowrap transition-colors duration-150 ${
                     categoryFilter === cat.id
-                      ? 'bg-yellow-400 text-black'
-                      : 'bg-white/10 text-white active:bg-white/20'
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border border-(--pos-s-sel-bg)'
+                      : 'pos-glass-field liquid-glass-modal-text'
                   }`}
                 >
                   {cat.name}
@@ -1156,282 +1166,307 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
             </div>
             {/* Product Grid */}
             <div className="flex-1 overflow-y-auto scrollbar-hide">
-              {isLoading ? (
-                <div className="flex items-center justify-center h-full">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
-                </div>
-              ) : products.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-gray-400">
-                  <Package className="w-16 h-16 mb-4" />
-                  <p>{t('productCatalog.noProducts', 'No products found')}</p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                  {products.map(product => (
-                    <button
-                      key={product.id}
-                      onClick={() => addToCart(product)}
-                      className="p-4 rounded-2xl bg-white/10 text-left transition-transform duration-150 active:scale-[0.99] active:bg-white/20"
-                    >
-                      <div className="flex items-start justify-between mb-2">
-                        <Package className="w-8 h-8 text-yellow-300" />
-                        {product.quantity <= product.lowStockThreshold && (
-                          <span className="text-xs px-2 py-0.5 rounded-sm bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-300">
-                            {t('productCatalog.lowStock', 'Low Stock')}
+              <AnimatePresence initial={false}>
+                {isLoading ? (
+                  <div className="flex items-center justify-center h-full">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-(--pos-s-muted)"></div>
+                  </div>
+                ) : products.length === 0 ? (
+                  <motion.div key="catalog-no-products" {...revealMotion} className="flex flex-col items-center justify-center h-full liquid-glass-modal-text-muted">
+                    <Package className="w-16 h-16 mb-4" />
+                    <p>{t('productCatalog.noProducts', 'No products found')}</p>
+                  </motion.div>
+                ) : (
+                  <motion.div key="catalog-results" {...revealMotion} className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                    {products.map(product => (
+                      <button
+                        key={product.id}
+                        onClick={() => addToCart(product)}
+                        className="pos-glass-tap-card min-h-touch p-4 rounded-2xl border-(--pos-s-border)! text-left liquid-glass-modal-text"
+                      >
+                        <div className="flex items-start justify-between mb-2">
+                          <Package className="w-8 h-8 liquid-glass-modal-text-muted" />
+                          {product.quantity <= product.lowStockThreshold && (
+                            <span className="text-xs px-2 py-0.5 rounded-sm bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-300">
+                              {t('productCatalog.lowStock', 'Low Stock')}
+                            </span>
+                          )}
+                        </div>
+                        <h3 className="font-medium liquid-glass-modal-text truncate">{product.name}</h3>
+                        <p className="text-sm liquid-glass-modal-text-muted truncate">{product.sku}</p>
+                        <div className="flex items-center justify-between mt-2">
+                          <span className="text-lg font-bold text-green-400">
+                            {formatCurrency(product.price)}
                           </span>
-                        )}
-                      </div>
-                      <h3 className="font-medium text-white truncate">{product.name}</h3>
-                      <p className="text-sm text-gray-400 truncate">{product.sku}</p>
-                      <div className="flex items-center justify-between mt-2">
-                        <span className="text-lg font-bold text-green-400">
-                          {formatCurrency(product.price)}
-                        </span>
-                        <span className="text-sm text-gray-500">
-                          {product.quantity} {t('productCatalog.inStock', 'in stock')}
-                        </span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
+                          <span className="text-sm liquid-glass-modal-text-muted">
+                            {product.quantity} {t('productCatalog.inStock', 'in stock')}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           </div>
           {/* Right: Cart */}
-          <div className="w-80 flex flex-col bg-white/5 rounded-2xl p-4">
+          <div className="pos-glass-form-card w-80 flex min-h-0 flex-col p-4!">
             <div className="flex items-center gap-2 mb-4">
-              <ShoppingCart className="w-5 h-5 text-white" />
-              <h3 className="text-lg font-semibold text-white">
+              <ShoppingCart className="w-5 h-5 liquid-glass-modal-text" />
+              <h3 className="text-lg font-semibold liquid-glass-modal-text">
                 {t('productCatalog.cart', 'Cart')} ({cartItems.length})
               </h3>
             </div>
             {/* Customer Info */}
-            {selectedCustomer && (
-              <div className="p-3 mb-4 rounded-2xl bg-white/10">
-                <p className="text-sm text-gray-400">{t('productCatalog.customer', 'Customer')}</p>
-                <p className="text-white font-medium">{selectedCustomer.name}</p>
-                {selectedCustomer.phone && (
-                  <p className="text-sm text-gray-400">{selectedCustomer.phone}</p>
-                )}
-              </div>
-            )}
+            <AnimatePresence initial={false}>
+              {selectedCustomer && (
+                <motion.div {...revealMotion} className="pos-glass-form-card p-3! mb-3">
+                  <p className="text-sm liquid-glass-modal-text-muted">{t('productCatalog.customer', 'Customer')}</p>
+                  <p className="liquid-glass-modal-text font-medium">{selectedCustomer.name}</p>
+                  {selectedCustomer.phone && (
+                    <p className="text-sm liquid-glass-modal-text-muted">{selectedCustomer.phone}</p>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
             {/* Cart Items */}
             <div className="flex-1 overflow-y-auto space-y-2 scrollbar-hide">
-              {cartItems.length === 0 ? (
-                <div className="text-center text-gray-400 py-8">
-                  {t('productCatalog.emptyCart', 'Cart is empty')}
-                </div>
-              ) : (
-                cartItems.map(item => (
-                  <div key={item.lineId} className="p-3 rounded-2xl bg-white/10">
-                    <div className="flex justify-between items-start mb-2">
-                      <div className="flex-1 min-w-0">
-                        <span className="text-white font-medium truncate block">{item.name}</span>
-                        {item.is_offer_reward && (
-                          <div className="mt-1 flex items-center gap-1.5">
-                            <span className="inline-flex items-center gap-1 rounded-full bg-(--pos-s-surface-2) px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:text-emerald-200">
-                              <Gift className="w-3 h-3" />
-                              {t('menu.cart.autoOfferReward', 'Auto reward')}
-                            </span>
-                            {item.offer_name && (
-                              <span className="text-[11px] text-gray-400 truncate">{item.offer_name}</span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                      {!item.is_offer_reward && (
-                        <button
-                          onClick={() => removeFromCart(item.lineId)}
-                          aria-label={t('common.remove', 'Remove')}
-                          className="text-red-400 active:text-red-300 ml-2 transition-transform duration-150 active:scale-95"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
-                    <div className="flex items-center justify-between">
-                      {item.soldByMeasure && !item.is_offer_reward ? (
-                        /* Weighed/measured goods: typed decimal quantity in the
-                           product's own unit (kg, L, m …) instead of stepping.
-                           Edits a raw text draft; commits on blur/Enter. */
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            inputMode="decimal"
-                            value={measuredQuantityDrafts[item.lineId] ?? String(item.cartQuantity)}
-                            onChange={(e) => {
-                              const draft = e.target.value;
-                              setMeasuredQuantityDrafts(prev => ({ ...prev, [item.lineId]: draft }));
-                            }}
-                            onBlur={(e) => commitMeasuredQuantity(item.lineId, e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.currentTarget.blur();
-                              }
-                            }}
-                            aria-label={t('productCatalog.measuredQuantity', 'Quantity')}
-                            className="w-20 px-2 py-1 rounded-sm bg-white/10 text-white text-center focus:outline-hidden focus:ring-1 focus:ring-white/40"
-                          />
-                          <span className="text-white/60 text-sm">{item.unitOfMeasure}</span>
-                          {['kg', 'g', 'lb', 'oz'].includes(item.unitOfMeasure.toLowerCase()) && (
-                            <button type="button" disabled={readingScale} onClick={() => void readScaleIntoLine(item)}
-                              className="rounded-2xl px-2 py-1 bg-white/10 text-white text-sm disabled:opacity-40">
-                              {t('productCatalog.retailReadiness.readScale')}
-                            </button>
+              <AnimatePresence initial={false}>
+                {cartItems.length === 0 ? (
+                  <motion.div key="catalog-cart-empty" {...revealMotion} className="text-center liquid-glass-modal-text-muted py-8">
+                    {t('productCatalog.emptyCart', 'Cart is empty')}
+                  </motion.div>
+                ) : (
+                  cartItems.map(item => (
+                    <div key={item.lineId} className="pos-glass-form-card p-3! shadow-(--pos-s-depth-card)">
+                      <div className="flex justify-between items-start mb-2">
+                        <div className="flex-1 min-w-0">
+                          <span className="liquid-glass-modal-text font-medium truncate block">{item.name}</span>
+                          {item.is_offer_reward && (
+                            <div className="mt-1 flex items-center gap-1.5">
+                              <span className="inline-flex items-center gap-1 rounded-full bg-(--pos-s-surface-2) px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:text-emerald-200">
+                                <Gift className="w-3 h-3" />
+                                {t('menu.cart.autoOfferReward', 'Auto reward')}
+                              </span>
+                              {item.offer_name && (
+                                <span className="text-[11px] liquid-glass-modal-text-muted truncate">{item.offer_name}</span>
+                              )}
+                            </div>
                           )}
                         </div>
-                      ) : (
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => updateCartQuantity(item.lineId, -1)}
-                          disabled={item.is_offer_reward}
-                          className="w-7 h-7 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center transition-transform duration-150 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100"
-                        >
-                          <Minus className="w-4 h-4 text-white" />
-                        </button>
-                        <span className="text-white w-8 text-center">{item.cartQuantity}</span>
-                        <button
-                          onClick={() => updateCartQuantity(item.lineId, 1)}
-                          disabled={item.is_offer_reward}
-                          className="w-7 h-7 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center transition-transform duration-150 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100"
-                        >
-                          <Plus className="w-4 h-4 text-white" />
-                        </button>
+                        {!item.is_offer_reward && (
+                          <button
+                            onClick={() => removeFromCart(item.lineId)}
+                            aria-label={t('common.remove', 'Remove')}
+                            className="min-h-touch min-w-touch flex items-center justify-center text-red-400 active:text-red-300 ml-2 transition-transform duration-150 active:scale-95"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
-                      )}
-                      {item.is_offer_reward ? (
-                        <span className="rounded-full bg-(--pos-s-surface-2) px-2 py-1 text-sm font-medium text-emerald-800 dark:text-emerald-200">
-                          {t('menu.cart.freeLabel', 'Free')}
-                        </span>
-                      ) : (
-                        <span className="text-green-400 font-medium">
-                          {formatCurrency((item.price * item.cartQuantity))}
-                        </span>
-                      )}
+                      <div className="flex items-center justify-between">
+                        {item.soldByMeasure && !item.is_offer_reward ? (
+                          /* Weighed/measured goods: typed decimal quantity in the
+                             product's own unit (kg, L, m …) instead of stepping.
+                             Edits a raw text draft; commits on blur/Enter. */
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={measuredQuantityDrafts[item.lineId] ?? String(item.cartQuantity)}
+                              onChange={(e) => {
+                                const draft = e.target.value;
+                                setMeasuredQuantityDrafts(prev => ({ ...prev, [item.lineId]: draft }));
+                              }}
+                              onBlur={(e) => commitMeasuredQuantity(item.lineId, e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.currentTarget.blur();
+                                }
+                              }}
+                              aria-label={t('productCatalog.measuredQuantity', 'Quantity')}
+                              className="liquid-glass-modal-input pos-glass-field min-h-touch w-20 px-2 py-1 rounded-sm text-center focus:outline-hidden"
+                            />
+                            <span className="liquid-glass-modal-text-muted text-sm">{item.unitOfMeasure}</span>
+                            {['kg', 'g', 'lb', 'oz'].includes(item.unitOfMeasure.toLowerCase()) && (
+                              <button type="button" disabled={readingScale} onClick={() => void readScaleIntoLine(item)}
+                                className="pos-glass-field min-h-touch rounded-2xl px-2 py-1 text-sm disabled:opacity-40">
+                                {t('productCatalog.retailReadiness.readScale')}
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => updateCartQuantity(item.lineId, -1)}
+                            disabled={item.is_offer_reward}
+                            className="pos-glass-field h-11 w-11 shrink-0 rounded-full flex items-center justify-center disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            <Minus className="w-4 h-4 liquid-glass-modal-text" />
+                          </button>
+                          <span className="liquid-glass-modal-text w-8 text-center">{item.cartQuantity}</span>
+                          <button
+                            onClick={() => updateCartQuantity(item.lineId, 1)}
+                            disabled={item.is_offer_reward}
+                            className="pos-glass-field h-11 w-11 shrink-0 rounded-full flex items-center justify-center disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            <Plus className="w-4 h-4 liquid-glass-modal-text" />
+                          </button>
+                        </div>
+                        )}
+                        {item.is_offer_reward ? (
+                          <span className="rounded-full bg-(--pos-s-surface-2) px-2 py-1 text-sm font-medium text-emerald-800 dark:text-emerald-200">
+                            {t('menu.cart.freeLabel', 'Free')}
+                          </span>
+                        ) : (
+                          <span className="text-green-400 font-medium">
+                            {formatCurrency((item.price * item.cartQuantity))}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))
-              )}
+                  ))
+                )}
+              </AnimatePresence>
             </div>
             {/* Discount */}
-            {cartItems.length > 0 && maxDiscountPercentage > 0 && (
-              <div className="mt-4 p-3 rounded-2xl bg-white/10">
-                <label className="text-sm text-gray-400 block mb-2">
-                  {t('productCatalog.discount', 'Discount')} (max {maxDiscountPercentage}%)
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  max={maxDiscountPercentage}
-                  value={discountPercentage}
-                  onChange={(e) => setDiscountPercentage(Math.min(maxDiscountPercentage, Math.max(0, Number(e.target.value))))}
-                  className="w-full px-3 py-2 rounded-2xl bg-white/10 text-white border border-white/20"
-                />
-              </div>
-            )}
-            {/* Totals */}
-            <div className="mt-4 pt-4 border-t border-white/20">
-              <div className="flex justify-between text-gray-400 mb-1">
-                <span>{t('productCatalog.subtotal', 'Subtotal')}</span>
-                <span>{formatCurrency(subtotal)}</span>
-              </div>
-              {offerDiscountAmount > 0 && (
-                <div className="flex justify-between text-emerald-400 mb-1">
-                  <span>
-                    {matchedOfferNames.length > 0
-                      ? t('menu.cart.offerDiscountWithNames', 'Offers ({{names}})', {
-                          names: matchedOfferNames.join(', '),
-                        })
-                      : t('menu.cart.offerDiscount', 'Offers')}
-                  </span>
-                  <span>-{formatCurrency(offerDiscountAmount)}</span>
+            <AnimatePresence initial={false}>
+              {cartItems.length > 0 && maxDiscountPercentage > 0 && (
+                <motion.div {...revealMotion} className="mt-3 pos-glass-form-card p-3!">
+                  <label className="text-xs font-semibold liquid-glass-modal-text-muted block mb-2">
+                    {t('productCatalog.discount', 'Discount')} (max {maxDiscountPercentage}%)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max={maxDiscountPercentage}
+                    value={discountPercentage}
+                    onChange={(e) => setDiscountPercentage(Math.min(maxDiscountPercentage, Math.max(0, Number(e.target.value))))}
+                    className="liquid-glass-modal-input pos-glass-field min-h-touch w-full px-3 py-2 rounded-2xl"
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+            {/* Totals and checkout stay opaque in both themes. */}
+            <div className="mt-3 rounded-2xl bg-(--pos-s-surface) p-3">
+              <div>
+                <div className="flex justify-between liquid-glass-modal-text-muted mb-1">
+                  <span>{t('productCatalog.subtotal', 'Subtotal')}</span>
+                  <span>{formatCurrency(subtotal)}</span>
                 </div>
-              )}
-              {discountAmount > 0 && (
-                <div className="flex justify-between text-red-400 mb-1">
-                  <span>{t('productCatalog.discountLabel', 'Discount')}</span>
-                  <span>-{formatCurrency(discountAmount)}</span>
-                </div>
-              )}
-              {depositTotal > 0 && (
-                <div className="flex justify-between text-gray-400 mb-1">
-                  <span>{t('productCatalog.depositTotal', 'Deposits')}</span>
-                  <span>{formatCurrency(depositTotal)}</span>
-                </div>
-              )}
-              {orderType === 'delivery' && hasDeliveryPro && offlineZoneChoice.active && (
-                <OfflineDeliveryZonePicker
-                  options={offlineZoneChoice.options}
-                  loading={offlineZoneChoice.loading}
-                  selectedZoneId={offlineZoneChoice.selectedZoneId}
-                  onChoose={offlineZoneChoice.choose}
-                />
-              )}
-              {orderType === 'delivery' && hasDeliveryPro && deliveryFeeStatus === 'not_checked' && (
-                <p
-                  role="status"
-                  data-testid="product-catalog-zone-not-checked"
-                  className="mb-1 rounded-2xl border border-(--pos-s-warn) bg-(--pos-s-warn-bg) px-2 py-1.5 text-xs text-amber-800 dark:text-amber-200"
-                >
-                  {t('menu.cart.deliveryZoneNotCheckedNotice')}
-                  {onRepickDeliveryAddress && (
-                    <button
-                      type="button"
-                      onClick={onRepickDeliveryAddress}
-                      data-testid="product-catalog-zone-repick"
-                      className="mt-1.5 block min-h-[36px] rounded-2xl border border-(--pos-s-border) px-3 py-1 text-xs font-semibold text-amber-800 dark:text-amber-200 active:bg-(--pos-s-surface-2)"
+                <AnimatePresence initial={false}>
+                  {offerDiscountAmount > 0 && (
+                    <motion.div {...revealMotion} className="flex justify-between text-emerald-400 mb-1">
+                      <span>
+                        {matchedOfferNames.length > 0
+                          ? t('menu.cart.offerDiscountWithNames', 'Offers ({{names}})', {
+                              names: matchedOfferNames.join(', '),
+                            })
+                          : t('menu.cart.offerDiscount', 'Offers')}
+                      </span>
+                      <span>-{formatCurrency(offerDiscountAmount)}</span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                <AnimatePresence initial={false}>
+                  {discountAmount > 0 && (
+                    <motion.div {...revealMotion} className="flex justify-between text-red-400 mb-1">
+                      <span>{t('productCatalog.discountLabel', 'Discount')}</span>
+                      <span>-{formatCurrency(discountAmount)}</span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                <AnimatePresence initial={false}>
+                  {depositTotal > 0 && (
+                    <motion.div {...revealMotion} className="flex justify-between liquid-glass-modal-text-muted mb-1">
+                      <span>{t('productCatalog.depositTotal', 'Deposits')}</span>
+                      <span>{formatCurrency(depositTotal)}</span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                <AnimatePresence initial={false}>
+                  {orderType === 'delivery' && hasDeliveryPro && offlineZoneChoice.active && (
+                    <motion.div {...revealMotion}>
+                      <OfflineDeliveryZonePicker
+                        options={offlineZoneChoice.options}
+                        loading={offlineZoneChoice.loading}
+                        selectedZoneId={offlineZoneChoice.selectedZoneId}
+                        onChoose={offlineZoneChoice.choose}
+                      />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                <AnimatePresence initial={false}>
+                  {orderType === 'delivery' && hasDeliveryPro && deliveryFeeStatus === 'not_checked' && (
+                    <motion.p {...revealMotion}
+                      role="status"
+                      data-testid="product-catalog-zone-not-checked"
+                      className="mb-1 rounded-2xl border border-(--pos-s-warn) bg-(--pos-s-warn-bg) px-2 py-1.5 text-xs text-amber-800 dark:text-amber-200"
                     >
-                      {t('menu.cart.repickDeliveryAddress')}
-                    </button>
+                      {t('menu.cart.deliveryZoneNotCheckedNotice')}
+                      {onRepickDeliveryAddress && (
+                        <button
+                          type="button"
+                          onClick={onRepickDeliveryAddress}
+                          data-testid="product-catalog-zone-repick"
+                          className="pos-glass-field mt-1.5 block min-h-touch rounded-2xl px-3 py-1 text-xs font-semibold liquid-glass-modal-text"
+                        >
+                          {t('menu.cart.repickDeliveryAddress')}
+                        </button>
+                      )}
+                    </motion.p>
                   )}
-                </p>
-              )}
-              {orderType === 'delivery' && (
-                <div className="flex justify-between text-gray-400 mb-1">
-                  <span>{t('menu.cart.deliveryFee')}</span>
-                  {hasDeliveryPro ? (
-                    <span>{deliveryFeeText}</span>
-                  ) : (
-                    <CentsMoneyInput
-                      aria-label={t('menu.cart.deliveryFee')}
-                      value={manualDeliveryFeeInput}
-                      onValueChange={(value, amount) => {
-                        manualDeliveryFeeEditedRef.current = true;
-                        setManualDeliveryFeeInput(value)
-                        setManualDeliveryFee(amount)
-                      }}
-                      placeholder={t('menu.cart.manualDeliveryFeePlaceholder', '0,00')}
-                      className="w-24 rounded-2xl border bg-white/10 px-2 py-1 text-right text-white border-white/20 placeholder-gray-400 focus:outline-hidden focus:ring-2 focus:ring-yellow-400"
-                    />
+                </AnimatePresence>
+                <AnimatePresence initial={false}>
+                  {orderType === 'delivery' && (
+                    <motion.div {...revealMotion} className="flex justify-between liquid-glass-modal-text-muted mb-1">
+                      <span>{t('menu.cart.deliveryFee')}</span>
+                      {hasDeliveryPro ? (
+                        <span>{deliveryFeeText}</span>
+                      ) : (
+                        <CentsMoneyInput
+                          aria-label={t('menu.cart.deliveryFee')}
+                          value={manualDeliveryFeeInput}
+                          onValueChange={(value, amount) => {
+                            manualDeliveryFeeEditedRef.current = true;
+                            setManualDeliveryFeeInput(value)
+                            setManualDeliveryFee(amount)
+                          }}
+                          placeholder={t('menu.cart.manualDeliveryFeePlaceholder', '0,00')}
+                          className="liquid-glass-modal-input pos-glass-field min-h-touch w-24 rounded-2xl px-2 py-1 text-right focus:outline-hidden focus:ring-2 focus:ring-yellow-400"
+                        />
+                      )}
+                    </motion.div>
                   )}
+                </AnimatePresence>
+                <div className="flex justify-between liquid-glass-modal-text text-xl font-bold mt-2">
+                  <span>{t('productCatalog.total', 'Total')}</span>
+                  <span>{formatCurrency(total)}</span>
                 </div>
-              )}
-              <div className="flex justify-between text-white text-xl font-bold mt-2">
-                <span>{t('productCatalog.total', 'Total')}</span>
-                <span>{formatCurrency(total)}</span>
               </div>
+              {/* Checkout Button */}
+              <button
+                onClick={() => void handleCheckout()}
+                disabled={
+                  cartItems.length === 0 ||
+                  isProcessingOrder ||
+                  (orderType === 'delivery' && hasDeliveryPro && !canCheckoutWithDeliveryFeeStatus(deliveryFeeStatus))
+                }
+                className="pos-raised pos-raised--yellow mt-4 w-full py-3 rounded-2xl bg-(--pos-s-yellow) active:bg-yellow-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-black font-semibold flex items-center justify-center gap-2 transition-transform duration-150 active:scale-[0.98] disabled:active:scale-100"
+              >
+                <DollarSign className="w-5 h-5" />
+                {isProcessingOrder 
+                  ? t('productCatalog.processing', 'Processing...')
+                  : t('productCatalog.checkout', 'Checkout')
+                }
+              </button>
             </div>
-            {/* Checkout Button */}
-            <button
-              onClick={() => void handleCheckout()}
-              disabled={
-                cartItems.length === 0 ||
-                isProcessingOrder ||
-                (orderType === 'delivery' && hasDeliveryPro && !canCheckoutWithDeliveryFeeStatus(deliveryFeeStatus))
-              }
-              className="pos-raised pos-raised--yellow mt-4 w-full py-3 rounded-2xl bg-(--pos-s-yellow) active:bg-yellow-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-black font-semibold flex items-center justify-center gap-2 transition-transform duration-150 active:scale-[0.98] disabled:active:scale-100"
-            >
-              <DollarSign className="w-5 h-5" />
-              {isProcessingOrder 
-                ? t('productCatalog.processing', 'Processing...')
-                : t('productCatalog.checkout', 'Checkout')
-              }
-            </button>
           </div>
         </div>
       </LiquidGlassModal>
       <LiquidGlassModal isOpen={Boolean(variantPicker)} onClose={() => setVariantPicker(null)}
-        title={t('productCatalog.retailReadiness.chooseVariant', { name: variantPicker?.name })}>
+        title={t('productCatalog.retailReadiness.chooseVariant', { name: variantPicker?.name })}
+        className="[&>.liquid-glass-modal-header]:border-b-0!">
         <div className="flex flex-col gap-2">
           {variantPicker?.variants?.filter(variant => variant.isActive).map(variant => (
             <button key={variant.id} type="button"
@@ -1439,9 +1474,9 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                 productId: variantPicker.id, lines: cartItems.map(catalogCartStockLine), unsynced: unsyncedRetail,
               })}
               onClick={() => addToCart(variantPicker, variant.id)}
-              className="rounded-2xl p-3 bg-white/10 text-white text-left disabled:opacity-40">
+              className="pos-glass-tap-card min-h-touch rounded-2xl p-3 text-left liquid-glass-modal-text disabled:opacity-40">
               <span>{variant.name} · {formatCurrency(variantPicker.price + variant.priceAdjustment)}</span>
-              <span className="block text-sm opacity-70">{t('productCatalog.retailReadiness.stock', { quantity: variant.quantity })}</span>
+              <span className="block text-sm liquid-glass-modal-text-muted">{t('productCatalog.retailReadiness.stock', { quantity: variant.quantity })}</span>
             </button>
           ))}
         </div>

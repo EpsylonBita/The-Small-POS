@@ -140,6 +140,22 @@ const LOGIN_LEAVE_MAX_MS = 1600;
 const CONFIGURED_TERMINAL_HINT_KEY = 'pos-terminal-configured';
 const PARITY_QUEUE_REFRESH_INTERVAL_MS = 15_000;
 const TOAST_CONTAINER_STYLE: React.CSSProperties = { zIndex: 2147483647 };
+// Notification toasts are neutral frosted glass in both themes (founder,
+// 11/11/2026); the colours live in glassmorphism.css (--toast-glass*).
+const TOAST_OPTIONS = {
+  duration: 3000,
+  style: {
+    background: 'var(--toast-glass)',
+    color: 'var(--toast-glass-text)',
+    border: '1px solid var(--toast-glass-border)',
+    borderRadius: '14px',
+    boxShadow: 'var(--toast-glass-shadow)',
+    backdropFilter: 'blur(24px) saturate(1.15)',
+    WebkitBackdropFilter: 'blur(24px) saturate(1.15)',
+  },
+  success: { iconTheme: { primary: '#10B981', secondary: 'white' } },
+  error: { iconTheme: { primary: '#EF4444', secondary: 'white' } },
+} as const;
 
 type ConnectionSettingsSection = 'recovery' | 'printing' | null;
 function normalizeSessionIdentityValue(value: unknown): string | undefined {
@@ -1606,10 +1622,7 @@ function AppContent() {
             <Toaster
               position="top-center"
               containerStyle={TOAST_CONTAINER_STYLE}
-              toastOptions={{
-                duration: 3000,
-                style: { background: '#111827', color: '#fff' },
-              }}
+              toastOptions={TOAST_OPTIONS}
             />
           </HashRouter>
         </ThemeProvider>
@@ -1684,12 +1697,7 @@ function AppContent() {
             <Toaster
               position="top-center"
               containerStyle={TOAST_CONTAINER_STYLE}
-              toastOptions={{
-                duration: 3000,
-                style: { background: '#111827', color: '#fff' },
-                success: { iconTheme: { primary: '#10B981', secondary: 'white' } },
-                error: { iconTheme: { primary: '#EF4444', secondary: 'white' } },
-              }}
+              toastOptions={TOAST_OPTIONS}
             />
           )}
         </ThemeProvider>
@@ -1824,15 +1832,7 @@ function AppContent() {
             <PortaledToaster
               position="top-center"
               containerStyle={TOAST_CONTAINER_STYLE}
-              toastOptions={{
-                duration: 3000,
-                style: {
-                  background: "rgba(0, 0, 0, 0.8)",
-                  color: "#fff",
-                  borderRadius: "12px",
-                  border: "1px solid rgba(255, 255, 255, 0.2)",
-                },
-              }}
+              toastOptions={TOAST_OPTIONS}
             />
 
             {/* Unified Update Dialog - handles all update states */}

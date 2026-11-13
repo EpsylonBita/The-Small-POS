@@ -131,28 +131,27 @@ test('cash input keeps the light-theme surface neutral and reserves color for hi
   const enoughCash = getCashInputVisualClasses!(true);
   const shortCash = getCashInputVisualClasses!(false);
 
-  assert.match(enoughCash.quickAmountsPanel, /border-slate-200\/80/);
-  assert.match(enoughCash.quickAmountsPanel, /bg-slate-50\/70/);
+  // founder 11/11/2026: neutral panels and fields use the shared frost, preserving payment state colours.
+  assert.equal(enoughCash.quickAmountsPanel, 'pos-glass-form-card space-y-3 p-3!');
+  assert.equal(enoughCash.quickAmountIdle, 'pos-glass-field');
   assert.doesNotMatch(enoughCash.quickAmountsPanel, /green|emerald/);
 
   // Wave ΣΤ7: the chosen quick amount is the kit selection (dark in light, white in dark), not yellow.
   assert.match(enoughCash.quickAmountSelected, /bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)/);
   assert.doesNotMatch(enoughCash.quickAmountSelected, /yellow/);
 
-  assert.match(enoughCash.cashInput, /border-slate-300\/90/);
-  assert.match(enoughCash.cashInput, /bg-white\/90/);
-  assert.match(enoughCash.cashInput, /focus:border-yellow-400/);
+  assert.equal(enoughCash.cashInput, 'liquid-glass-modal-input pos-glass-field min-h-touch');
   assert.doesNotMatch(enoughCash.cashInput, /border-green|bg-green/);
 
-  assert.match(enoughCash.summary, /border-slate-200\/90/);
-  assert.match(enoughCash.summary, /bg-white\/80/);
+  assert.equal(enoughCash.summary, 'pos-glass-form-card');
+  assert.equal(enoughCash.summaryDivider, 'space-y-2');
   assert.doesNotMatch(enoughCash.summary, /bg-green|bg-emerald/);
   // Founder 31/10 («δε μου αρέσει που έβγαλες τα χρώματα»): the change keeps its green.
   assert.match(enoughCash.changeTone, /text-emerald-700/);
   // Wave ΣΤ7: «Ολοκλήρωση» is the kit modal primary (yellow), never a green fill.
   assert.equal(enoughCash.completeButton, 'pos-modal-primary');
   assert.doesNotMatch(enoughCash.completeButton, /emerald|green/);
-  assert.match(shortCash.summary, /bg-\(--pos-s-surface-2\)/);
+  assert.equal(shortCash.summary, 'pos-glass-form-card');
   assert.match(shortCash.changeTone, /text-red-700/);
 });
 
@@ -185,10 +184,21 @@ test('suggested-change chips keep one visual contract for English, Greek, and ev
   assert.equal(chipClass(greekMarkup), chipClass(englishMarkup));
   assert.match(chipClass(englishMarkup), /min-h-8/);
   assert.match(chipClass(englishMarkup), /whitespace-nowrap/);
-  assert.match(chipClass(englishMarkup), /border-slate-200\/90/);
-  assert.match(chipClass(englishMarkup), /bg-white\/90/);
-  assert.match(chipClass(englishMarkup), /text-slate-700/);
-  assert.match(chipClass(englishMarkup), /dark:bg-white\/5/);
+  // founder 11/11/2026: denomination chips have neutral frost and theme-safe text in every locale.
+  assert.equal(chipClass(englishMarkup), 'pos-glass-form-card inline-flex min-h-8 items-center gap-1.5 whitespace-nowrap rounded-full! px-2.5! py-1! text-xs font-semibold liquid-glass-modal-text');
   assert.match(englishMarkup, /€20\.00/);
   assert.match(greekMarkup, /20,00 €/);
+});
+
+// founder 11/11/2026: retain the payment-card kit and semantic colours while frosting the remaining content.
+test('payment frost preserves solid checkout actions and immediate tender lifecycles', () => {
+  assert.match(source, /bg-\(--pos-s-surface\) px-6 pb-5 pt-2/);
+  assert.match(source, /\[&>\.liquid-glass-modal-header\]:border-b-0!/);
+  assert.match(source, /pos-glass-tap-card min-h-touch flex flex-col items-center justify-center/);
+  assert.match(source, /duration: reduceMotion \? 0 : 0\.24, ease: \[0\.2, 0\.8, 0\.2, 1\]/);
+  assert.match(source, /animate: \{ opacity: 1, height: 'auto', y: 0, overflow: 'visible' \}/);
+  assert.match(source, /<AnimatePresence initial=\{false\}>/);
+  assert.doesNotMatch(source, /border-t\s|hover:|<[a-z][^>]*\stitle=/);
+  assert.match(source, /currentStep === 'twint' && twintConfiguration && \(\s*<TwintManualQrTender/);
+  assert.match(source, /currentStep === 'gift' && existingOrder && \(\s*<GiftCardTender/);
 });

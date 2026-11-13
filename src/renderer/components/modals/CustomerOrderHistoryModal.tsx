@@ -1,6 +1,6 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useState, useEffect } from "react";
 import { useTranslation } from 'react-i18next';
-import { useTheme } from '../../contexts/theme-context';
 import { History, X, Package, Store, ChevronRight, RefreshCw } from 'lucide-react';
 import { DeliveryScooterIcon, PickupHandBagIcon } from '../icons/OrderTypeGlyphs';
 import { toast } from 'react-hot-toast';
@@ -35,7 +35,14 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
     onViewOrder,
 }) => {
     const { t } = useTranslation();
-    const { resolvedTheme } = useTheme();
+  // Presentation only: preserve every existing reveal condition (founder 11/11/2026).
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
     const bridge = getBridge();
     const [orders, setOrders] = useState<CustomerOrder[]>([]);
     const [loading, setLoading] = useState(false);
@@ -80,13 +87,13 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
 
     const getStatusColor = (status: string) => {
         switch (status?.toLowerCase()) {
-            case 'pending': return 'bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-300 border-(--pos-s-border)';
-            case 'preparing': return 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border-(--pos-s-border)';
-            case 'ready': return 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-200 border-(--pos-s-border)';
+            case 'pending': return 'text-yellow-800 dark:text-yellow-300';
+            case 'preparing': return 'text-amber-800 dark:text-amber-200';
+            case 'ready': return 'text-green-800 dark:text-green-200';
             case 'completed':
-            case 'delivered': return 'bg-(--pos-s-surface-2) text-green-800 dark:text-green-300 border-(--pos-s-border)';
-            case 'cancelled': return 'bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 border-(--pos-s-border)';
-            default: return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+            case 'delivered': return 'text-green-800 dark:text-green-300';
+            case 'cancelled': return 'text-red-800 dark:text-red-300';
+            default: return 'liquid-glass-modal-text-muted';
         }
     };
 
@@ -120,10 +127,10 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
             <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[80vh] z-1150 flex flex-col">
 
                 {/* Header */}
-                <div className="shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
+                <div className="shrink-0 px-6 py-4">
                     <div className="flex justify-between items-center">
                         <div className="flex items-center gap-3">
-                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-yellow-400 text-black shadow-xs">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl liquid-glass-modal-text-muted">
                                 <History className="w-5 h-5" />
                             </div>
                             <div>
@@ -146,7 +153,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                 </div>
 
                 {/* Stats Bar */}
-                <div className="shrink-0 px-6 py-3 bg-white/5 border-b liquid-glass-modal-border">
+                <div className="pos-glass-form-card shrink-0 mx-6 p-3!">
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-6">
                             <div>
@@ -159,13 +166,13 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                                 <div className="text-xs liquid-glass-modal-text-muted uppercase">
                                     {t('modals.customerHistory.totalSpent') || 'Total Spent'}
                                 </div>
-                                <div className="text-lg font-bold text-green-400">{totalSpent}</div>
+                                <div className="text-lg font-bold liquid-glass-modal-text">{totalSpent}</div>
                             </div>
                         </div>
                         <button
                             onClick={loadCustomerOrders}
                             disabled={loading}
-                            className="liquid-glass-modal-button p-2 min-h-0 min-w-0"
+                            className="pos-glass-field flex min-h-touch min-w-touch items-center justify-center p-2"
                         >
                             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
                         </button>
@@ -174,31 +181,32 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
 
                 {/* Scrollable Content */}
                 <div className="flex-1 overflow-y-auto px-6 py-4 min-h-0 scrollbar-hide">
-                    {loading ? (
-                        <div className="flex items-center justify-center py-12">
+                    <AnimatePresence initial={false}>
+                      {loading ? (
+                        <motion.div {...revealMotion} key="loading" className="flex items-center justify-center py-12">
                             <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-yellow-400"></div>
-                        </div>
+                        </motion.div>
                     ) : orders.length === 0 ? (
-                        <div className="text-center py-12">
+                        <motion.div {...revealMotion} key="empty" className="text-center py-12">
                             <Package className="w-12 h-12 mx-auto mb-4 opacity-30" />
                             <p className="liquid-glass-modal-text-muted">
                                 {t('modals.customerHistory.noOrders') || 'No order history found'}
                             </p>
-                        </div>
+                        </motion.div>
                     ) : (
-                        <div className="space-y-3">
+                        <motion.div {...revealMotion} key="orders" className="space-y-3">
                             {orders.map((order) => (
                                 <button
                                     type="button"
                                     key={order.id}
                                     disabled={!onViewOrder}
-                                    className={`w-full rounded-2xl border border-white/10 bg-white/5 p-4 text-left transition-transform duration-150 active:scale-[0.99] active:bg-white/10 disabled:cursor-default disabled:active:scale-100 ${onViewOrder ? 'cursor-pointer' : ''}`}
+                                    className={`pos-glass-tap-card min-h-touch w-full p-4 text-left focus-visible:outline-2 focus-visible:outline-yellow-400 disabled:cursor-default ${onViewOrder ? 'cursor-pointer' : ''}`}
                                     onClick={() => onViewOrder?.(order.id)}
                                 >
                                     <div className="flex items-center justify-between">
                                         <div className="flex items-center gap-4">
                                             {/* Order Type Icon */}
-                                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-(--pos-s-border) bg-white/5 text-yellow-300">
+                                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl liquid-glass-modal-text-muted">
                                                 {getOrderTypeIcon(order.order_type)}
                                             </div>
 
@@ -208,7 +216,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                                                     <span className="font-mono font-bold liquid-glass-modal-text">
                                                         #{order.order_number}
                                                     </span>
-                                                    <span className={`text-xs px-2 py-0.5 rounded-full border ${getStatusColor(order.status)}`}>
+                                                    <span className={`text-xs px-2 py-0.5 font-semibold ${getStatusColor(order.status)}`}>
                                                         {order.status}
                                                     </span>
                                                 </div>
@@ -236,12 +244,13 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                                     </div>
                                 </button>
                             ))}
-                        </div>
-                    )}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                 </div>
 
                 {/* Footer */}
-                <div className="shrink-0 px-6 py-4 border-t liquid-glass-modal-border">
+                <div className="shrink-0 px-6 pb-5 pt-2">
                     <button
                         onClick={onClose}
                         className="liquid-glass-modal-button w-full border-(--pos-s-border) bg-(--pos-s-surface-2) text-yellow-800 dark:text-yellow-200 active:bg-(--pos-s-surface-2)"

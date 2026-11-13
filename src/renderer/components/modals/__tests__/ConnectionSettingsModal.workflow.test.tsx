@@ -5,7 +5,7 @@ import ConnectionSettingsModal from '../ConnectionSettingsModal'
 
 const mocks = vi.hoisted(() => {
   const bridge = {
-    settings: { getAdminUrl: vi.fn(), getLocal: vi.fn() },
+    settings: { getAdminUrl: vi.fn(), getLocal: vi.fn(), updateTerminalCredentials: vi.fn() },
     terminalConfig: { getFullConfig: vi.fn(), syncFromAdmin: vi.fn() },
     diagnostics: { getAbout: vi.fn() },
     hardware: { scaleConnect: vi.fn(), scaleDisconnect: vi.fn() },
@@ -22,8 +22,12 @@ vi.mock('../../../../lib', () => ({
   offEvent: (event: string, callback: (payload: any) => void) => mocks.events.get(event)?.delete(callback),
 }))
 vi.mock('react-hot-toast', () => ({ toast: { success: mocks.success, error: mocks.error } }))
-vi.mock('react-i18next', () => {
-  const t = (key: string, fallback?: any) => typeof fallback === 'string' ? fallback : fallback?.defaultValue ?? key
+vi.mock('react-i18next', async () => {
+  const { default: en } = await import('../../../../locales/en.json')
+  const t = (key: string, fallback?: any) => key === 'modals.connectionSettings.unsyncedQueue'
+    ? en.modals.connectionSettings.unsyncedQueue
+    : key === 'modals.connectionSettings.networkError' ? en.modals.connectionSettings.networkError
+    : typeof fallback === 'string' ? fallback : fallback?.defaultValue ?? key
   return { useTranslation: () => ({ t }) }
 })
 vi.mock('../../../contexts/theme-context', () => ({ useTheme: () => ({ theme: 'dark', setTheme: vi.fn() }) }))
@@ -79,6 +83,7 @@ beforeEach(() => {
   mocks.events.clear()
   mocks.bridge.settings.getAdminUrl.mockResolvedValue(pollingConfig.admin_dashboard_url)
   mocks.bridge.settings.getLocal.mockResolvedValue({})
+  mocks.bridge.settings.updateTerminalCredentials.mockReset().mockResolvedValue({ success: true })
   mocks.bridge.terminalConfig.getFullConfig.mockResolvedValue(pollingConfig)
   mocks.bridge.terminalConfig.syncFromAdmin.mockResolvedValue({ success: true, data: { config: pollingConfig } })
   mocks.hardwareStatus = { scale: { connected: false } }
@@ -92,6 +97,46 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('ConnectionSettingsModal workflow', () => {
+  const validCode = btoa(JSON.stringify({ key: 'fixture-api-key', url: 'https://admin.example.test', tid: 'register-2' }))
+
+  async function saveConnection() {
+    render(<ConnectionSettingsModal isOpen onClose={vi.fn()} />)
+    await within(statusCard()).findByText('Settings are up to date')
+    fireEvent.change(screen.getByLabelText('Connection Code'), { target: { value: validCode } })
+    fireEvent.click(screen.getByRole('button', { name: 'modals.connectionSettings.save' }))
+  }
+
+  it.each([
+    'UNSYNCED_QUEUE',
+    new Error('UNSYNCED_QUEUE'),
+    { message: 'UNSYNCED_QUEUE' },
+    { code: 'UNSYNCED_QUEUE', message: 'Rebind refused' },
+  ])('explains unsent money instead of a network error or raw code for %j', async (error) => {
+    mocks.bridge.settings.updateTerminalCredentials.mockRejectedValue(error)
+    localStorage.setItem('activeShift', 'existing-shift')
+    localStorage.setItem('staff', 'existing-staff')
+    await saveConnection()
+    const message = 'This till still has money that was not sent to the server. Sync first, then connect it to the other store.'
+    await waitFor(() => expect(mocks.error).toHaveBeenCalledWith(message))
+    expect(mocks.error).not.toHaveBeenCalledWith(expect.stringContaining('UNSYNCED_QUEUE'))
+    expect(mocks.error).not.toHaveBeenCalledWith('Network error')
+    expect(mocks.bridge.terminalConfig.syncFromAdmin).not.toHaveBeenCalled()
+    expect(mocks.success).not.toHaveBeenCalled()
+    expect(localStorage.getItem('activeShift')).toBe('existing-shift')
+    expect(localStorage.getItem('staff')).toBe('existing-staff')
+  })
+
+  it.each([
+    ['Failed to fetch', 'Network error'],
+    [new Error('Network is unavailable'), 'Network is unavailable'],
+  ])('preserves a real connection network error: %j', async (error, message) => {
+    mocks.bridge.settings.updateTerminalCredentials.mockRejectedValue(error)
+    await saveConnection()
+    await waitFor(() => expect(mocks.error).toHaveBeenCalledWith(message))
+    expect(mocks.bridge.terminalConfig.syncFromAdmin).not.toHaveBeenCalled()
+    expect(mocks.success).not.toHaveBeenCalled()
+  })
+
   it('reads the local configuration on open without starting admin sync and shows healthy polling', async () => {
     const onClose = vi.fn()
     render(<ConnectionSettingsModal isOpen onClose={onClose} />)

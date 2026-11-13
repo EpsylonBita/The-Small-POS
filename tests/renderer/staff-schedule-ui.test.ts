@@ -123,7 +123,8 @@ test('StaffScheduleView is in the kit: yellow for selection, colours for states,
 
   assert.match(source, /const panelClass = 'pos-card';/);
   assert.match(source, /const modalPanelClass = 'liquid-glass-modal-shell text-\(--pos-s-fg\)';/);
-  assert.match(source, /const inputClass = 'min-h-\[48px\] w-full rounded-xl border border-\(--pos-s-control\) bg-\(--pos-s-surface\)[^']*focus:border-\(--pos-s-yellow\)/);
+  // founder 11/11/2026: frosted fields retain 48 px targets and the kit focus ring.
+  assert.match(source, /const inputClass = 'liquid-glass-modal-input pos-glass-field min-h-\[48px\] w-full px-3 text-base font-semibold placeholder:font-normal';/);
   assert.match(source, /const primaryButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';/);
   assert.match(source, /const secondaryButtonClass = 'pos-solid-btn pos-solid-btn--md';/);
   // Today's column: the kit selection outline; «Σήμερα» is a word, not a pill.
@@ -140,7 +141,7 @@ test('StaffScheduleView is in the kit: yellow for selection, colours for states,
   assert.match(source, /<select\s+id=\{roleFilterId\}\s+value=\{roleFilter\}/);
   assert.match(source, /<option key=\{role\} value=\{role\}>\{getRoleChipLabel\(role\)\}<\/option>/);
   // Add Shift: presets are kit options, the matching one selected.
-  assert.match(source, /aria-pressed=\{isPresetActive\(preset\)\}\s*className=\{`pos-choice\$\{isPresetActive\(preset\) \? ' is-selected' : ''\}`\}/);
+  assert.match(source, /aria-pressed=\{isPresetActive\(preset\)\}\s*className=\{`min-h-11 rounded-xl px-4 py-2 text-sm font-semibold \$\{isPresetActive\(preset\) \? 'bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)' : 'pos-glass-field'\}`\}/);
   assert.match(source, /staffSchedule\.addShiftForDay/);
   assert.doesNotMatch(source, /staffSchedule\.actions\.addShift/);
   assert.doesNotMatch(source, /focus:border-blue-500|bg-blue-600|border-blue-500|border-blue-600|text-blue-/);
@@ -151,10 +152,10 @@ test('StaffScheduleView is in the kit: yellow for selection, colours for states,
 test('Round 430: StaffScheduleView keeps page controls and preview cards on smooth touch radii', () => {
   const source = readScheduleSource();
 
-  // The retry is a kit button; the preview's day cards keep their touch radius.
+  // founder 11/11/2026: retry stays solid, preview cards and shortcut use the frosted kit.
   assert.match(source, /onClick=\{fetchStaffData\}\s*className="pos-solid-btn pos-solid-btn--md"/);
-  assert.match(source, /className=\{`rounded-2xl border-l-4 px-2 py-2 \$\{isDark \? 'bg-zinc-900 border-zinc-800' : 'bg-slate-50 border-slate-200'\}`\}/);
-  assert.match(source, /className="pos-solid-btn pos-solid-btn--sm w-full"/);
+  assert.match(source, /className=\{`pos-glass-form-card border-l-4 px-2! py-2!`\}/);
+  assert.match(source, /className="pos-glass-field min-h-11 w-full px-3 py-2 font-semibold"/);
   assert.doesNotMatch(source, /rounded-lg/);
 });
 

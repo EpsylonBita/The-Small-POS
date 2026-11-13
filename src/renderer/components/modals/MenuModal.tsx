@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
   secureLoyaltyCheckout,
   LoyaltyCheckoutRefused,
@@ -544,6 +545,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
 
   const { t } = useTranslation();
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const {
     maxDiscountPercentage: storeMaxDiscountPercentage,
     unavailable: discountCapUnavailable,
@@ -3244,7 +3253,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           <span className="flex flex-wrap gap-2">
             <button
               type="button"
-              className="rounded-lg border border-current px-2 py-1 text-xs font-bold"
+              className="pos-glass-field min-h-11 px-2 py-1 text-xs font-bold"
               onClick={() => {
                 toast.dismiss(current.id);
                 void retryLoyaltyConfirmation();
@@ -3254,7 +3263,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             </button>
             <button
               type="button"
-              className="rounded-lg border border-current px-2 py-1 text-xs font-bold"
+              className="pos-glass-field min-h-11 px-2 py-1 text-xs font-bold"
               onClick={() => {
                 toast.dismiss(current.id);
                 void removeUnconfirmedLoyaltyPoints();
@@ -3567,16 +3576,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         onClose={handleMenuSurfaceClose}
         ariaLabel={getModalTitle()}
         header={
-          <div className="flex flex-col gap-1 px-5 py-2.5 border-b border-white/10 shrink-0 min-w-0">
+          <div className="flex flex-col gap-1 px-5 py-2.5 shrink-0 min-w-0">
             {/* Main row: Title + Customer + Close */}
             <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 w-full min-w-0">
               <h2
                 className="liquid-glass-modal-title text-xl flex flex-wrap items-center gap-2 min-w-0"
-                title={getModalTitle()}
               >
                 <span className="whitespace-normal wrap-break-word">{getModalTitle()}</span>
                 {editMode && (
-                  <span className="shrink-0 whitespace-normal text-xs font-medium text-amber-800 dark:text-amber-300 bg-(--pos-s-surface-2) px-2 py-0.5 rounded-full">
+                  <span className="shrink-0 whitespace-normal text-xs font-medium liquid-glass-modal-text-muted pos-glass-form-card px-2! py-0.5!">
                     <Pencil className="w-3 h-3 inline mr-1" />
                     {t('modals.menu.editModeMessage') || 'Editing'}
                   </span>
@@ -3592,12 +3600,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   value={menuSearchQuery}
                   onChange={(e) => setMenuSearchQuery(e.target.value)}
                   placeholder={salonMode ? t('salonSale.search') : t('menu.search', { defaultValue: 'Search menu items...' })}
-                  className="liquid-glass-modal-input h-10 w-full rounded-xl pl-9 pr-9 text-sm focus:border-(--pos-s-yellow) focus:outline-hidden focus:ring-1 focus:ring-yellow-400"
+                  className="liquid-glass-modal-input pos-glass-field min-h-11 h-11 w-full rounded-xl pl-9 pr-16 text-sm focus:border-(--pos-s-yellow) focus:outline-hidden focus:ring-1 focus:ring-yellow-400"
                 />
                 {menuSearchQuery && (
                   <button
                     onClick={() => setMenuSearchQuery('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-gray-400 transition-colors active:bg-white/10 active:text-white"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 pos-glass-field flex h-11 w-11 items-center justify-center transition-colors"
                     aria-label={t('common.actions.clear', 'Clear')}
                   >
                     <X className="w-4 h-4" />
@@ -3622,7 +3630,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   ) : (
                     <button
                       onClick={() => setShowCustomerPopover(true)}
-                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm liquid-glass-modal-button active:bg-white/10 transition-colors"
+                      className="inline-flex min-h-11 items-center gap-2 px-3 py-1.5 text-sm pos-glass-field transition-colors"
                     >
                       <UserPlus className="w-3.5 h-3.5" />
                       {t('modals.menu.addCustomer', { defaultValue: 'Add Customer' })}
@@ -3647,7 +3655,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 <span>{selectedAddress.street_address || selectedAddress.street}, {selectedAddress.postal_code || selectedAddress.city}</span>
                 {effectiveDeliveryZoneInfo?.zone && (
                   <>
-                    <span className="px-2 py-0.5 rounded-sm bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 font-medium">
+                    <span className="pos-glass-form-card px-2! py-0.5! liquid-glass-modal-text-muted font-medium">
                       {effectiveDeliveryZoneInfo.zone.name}
                     </span>
                     <span>{t('modals.menu.fee')}: {formatCurrency(resolvedDeliveryFee)}</span>
@@ -3666,95 +3674,95 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         closeOnEscape={true}
       >
 
-        {editMode && hasLoadedItemsRef.current && cartItems.length === 0 && draftPersistence.status === 'ready' && (
-          <p role="status" className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{t('modals.menu.emptyEditHint')}</p>
-        )}
-        {(draftPersistence.error || draftPersistence.status !== 'ready' || draftPersistence.isPending()) && (
-          <div role="status" className="px-4 py-3 border-b border-amber-500 text-amber-800 dark:text-amber-200">
+        <AnimatePresence initial={false}>{editMode && hasLoadedItemsRef.current && cartItems.length === 0 && draftPersistence.status === 'ready' && (
+          <motion.div key="glass-reveal-1" {...revealMotion}><p role="status" className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{t('modals.menu.emptyEditHint')}</p></motion.div>
+        )}</AnimatePresence>
+        <AnimatePresence initial={false}>{(draftPersistence.error || draftPersistence.status !== 'ready' || draftPersistence.isPending()) && (
+          <motion.div key="glass-reveal-2" {...revealMotion}><div role="status" className="pos-glass-form-card mx-4 my-1 px-4! py-3! text-amber-800 dark:text-amber-200">
             {(draftPersistence.error ? t(`modals.menu.${draftPersistence.error}`) : null) || (draftPersistence.isPending()
               ? (editMode
                 ? t('modals.menu.editDraftPending', { defaultValue: 'Your original change is saved for recovery. Check its result before making another change.' })
                 : t('modals.menu.draftPending', { defaultValue: 'The original checkout is retained. Confirm its result before starting another payment.' }))
               : t('modals.menu.draftLoading', { defaultValue: 'Loading the saved cart…' }))}
-            {draftPersistence.isPending() && !refusedEdit && <button type="button" disabled={draftRecoveryBusy || isSavingEdit || isLocalProcessing} onClick={() => void recoverSavedCheckout()} className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+            {draftPersistence.isPending() && !refusedEdit && <button type="button" disabled={draftRecoveryBusy || isSavingEdit || isLocalProcessing} onClick={() => void recoverSavedCheckout()} className="ml-3 pos-glass-field min-h-11 px-3 py-2 font-semibold disabled:opacity-50">
               {t('modals.menu.draftRecover', { defaultValue: 'Check original checkout' })}
             </button>}
             {draftPersistence.isPending() && draftPersistence.restored?.state.paymentAdmission === 'admitted' &&
               draftPersistence.restored?.submission?.paymentData?.method === 'twint' && <>
               <button type="button" data-testid="twint-recover-paid" disabled={draftRecoveryBusy || isLocalProcessing}
-                onClick={() => void recoverSavedCheckout('paid')} className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+                onClick={() => void recoverSavedCheckout('paid')} className="ml-3 pos-glass-field min-h-11 px-3 py-2 font-semibold disabled:opacity-50">
                 {t('modals.menu.twintRecoveryPaid')}
               </button>
               <button type="button" data-testid="twint-recover-not-paid" disabled={draftRecoveryBusy || isLocalProcessing}
-                onClick={() => void cancelCheckoutPaymentAdmission()} className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+                onClick={() => void cancelCheckoutPaymentAdmission()} className="ml-3 pos-glass-field min-h-11 px-3 py-2 font-semibold disabled:opacity-50">
                 {t('modals.menu.twintRecoveryNotPaid')}
               </button>
             </>}
-            {draftPersistence.isPending() && cardRecovery && <div data-testid="card-recovery" className="mt-2 space-y-2">
+            <AnimatePresence initial={false}>{draftPersistence.isPending() && cardRecovery && <motion.div key="glass-reveal-3" {...revealMotion}><div data-testid="card-recovery" className="mt-2 space-y-2">
               <p>{t('modals.menu.cardRecoveryQuestion', { defaultValue: 'Was the card charged? Check the bank POS for this amount before you answer. Nothing is charged here.' })}</p>
               {!cardRecovery.chargeConfirmable && <p>{t('modals.menu.cardRecoveryRegisterNote', { defaultValue: 'This till records card charges through its cash register or terminal, and nothing there shows this card was charged. If the bank POS shows a charge, ask a manager.' })}</p>}
               <div className="flex flex-wrap gap-3">
                 {cardRecovery.chargeConfirmable && <button type="button" data-testid="card-recover-charged" disabled={draftRecoveryBusy || isLocalProcessing}
-                  onClick={() => void recoverSavedCheckout('card_charged')} className="rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+                  onClick={() => void recoverSavedCheckout('card_charged')} className="pos-glass-field min-h-11 px-3 py-2 font-semibold disabled:opacity-50">
                   {t('modals.menu.cardRecoveryCharged', { defaultValue: 'The card was charged – record it' })}
                 </button>}
                 <button type="button" data-testid="card-recover-not-charged" disabled={draftRecoveryBusy || isLocalProcessing}
-                  onClick={() => void cancelCheckoutPaymentAdmission({ confirmed: cardRecovery.confirmed })} className="rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+                  onClick={() => void cancelCheckoutPaymentAdmission({ confirmed: cardRecovery.confirmed })} className="pos-glass-field min-h-11 px-3 py-2 font-semibold disabled:opacity-50">
                   {t('modals.menu.cardRecoveryNotCharged', { defaultValue: 'The card was NOT charged – back to the cart' })}
                 </button>
               </div>
-            </div>}
+            </div></motion.div>}</AnimatePresence>
             {draftPersistence.isPending() && parkOffered && !refusedEdit && <button type="button" data-testid="checkout-park"
               disabled={draftRecoveryBusy || isLocalProcessing} onClick={() => void parkFrozenCheckout()}
-              className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+              className="ml-3 pos-glass-field min-h-11 px-3 py-2 font-semibold disabled:opacity-50">
               {t('modals.menu.checkoutPark', { defaultValue: 'Set aside (manager)' })}
             </button>}
             {draftPersistence.isPending() && <button
               type="button"
               disabled={draftRecoveryBusy || isSavingEdit || checkoutPhase !== 'editing' || draftPersistence.error === 'draftSaveFailed'}
               onClick={() => void requestClose()}
-              className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50"
+              className="ml-3 pos-glass-field min-h-11 px-3 py-2 font-semibold disabled:opacity-50"
             >
               {t('modals.menu.draftReturnToOrders', { defaultValue: 'Return to orders' })}
             </button>}
-          </div>
-        )}
-        {staleEdit && editMode && editOrderId && !draftPersistence.isPending() && (
-          <div role="alert" data-testid="menu-edit-stale" className="px-4 py-3 border-b border-amber-500 text-amber-800 dark:text-amber-100 space-y-2">
+          </div></motion.div>
+        )}</AnimatePresence>
+        <AnimatePresence initial={false}>{staleEdit && editMode && editOrderId && !draftPersistence.isPending() && (
+          <motion.div key="glass-reveal-4" {...revealMotion}><div role="alert" data-testid="menu-edit-stale" className="pos-glass-form-card mx-4 my-1 px-4! py-3! text-amber-800 dark:text-amber-100 space-y-2">
             <p>{t('modals.menu.editCanonicalChanged')}</p>
             <button type="button" disabled={staleRefreshBusy} onClick={() => void refreshStaleEdit()}
-              className="min-h-11 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50" data-testid="menu-edit-refresh-order">
+              className="min-h-11 pos-glass-field min-h-11 px-3 py-2 font-semibold disabled:opacity-50" data-testid="menu-edit-refresh-order">
               {staleRefreshBusy ? t('modals.menu.editRefreshing') : t('modals.menu.editRefreshOrder')}
             </button>
-          </div>
-        )}
-        {heldEditOrderId === editOrderId && editMode && heldEditOrderId && (
-          <div role="alert" data-testid="menu-order-held-edit" className="px-4 py-3 border-b border-amber-500 text-amber-800 dark:text-amber-100 space-y-2">
+          </div></motion.div>
+        )}</AnimatePresence>
+        <AnimatePresence initial={false}>{heldEditOrderId === editOrderId && editMode && heldEditOrderId && (
+          <motion.div key="glass-reveal-5" {...revealMotion}><div role="alert" data-testid="menu-order-held-edit" className="pos-glass-form-card mx-4 my-1 px-4! py-3! text-amber-800 dark:text-amber-100 space-y-2">
             <p>{t('modals.menu.editPreviousNotSaved')}</p>
             <p>{t('modals.zReport.heldEditApprovalSubtitle')}</p>
             <button type="button" disabled={draftRecoveryBusy} onClick={() => void closeOrderHeldEdit()}
-              className="underline font-semibold" data-testid="menu-order-close-held-edit">
+              className="pos-glass-field min-h-11 px-3 underline font-semibold" data-testid="menu-order-close-held-edit">
               {t('modals.menu.editCloseWithoutMoney')}
             </button>
             <button type="button" disabled={draftRecoveryBusy} onClick={() => setDiscardEditTarget('order')}
-              className="ml-3 underline font-semibold" data-testid="menu-order-discard-held-edit">{t('modals.menu.editDiscard')}</button>
-          </div>
-        )}
-        {refusedEdit && draftPersistence.isPending() && (
-          <div role="alert" data-testid="menu-edit-not-applied" className="px-4 py-3 border-b border-amber-500 text-amber-800 dark:text-amber-100 space-y-2">
+              className="pos-glass-field min-h-11 ml-3 px-3 underline font-semibold" data-testid="menu-order-discard-held-edit">{t('modals.menu.editDiscard')}</button>
+          </div></motion.div>
+        )}</AnimatePresence>
+        <AnimatePresence initial={false}>{refusedEdit && draftPersistence.isPending() && (
+          <motion.div key="glass-reveal-6" {...revealMotion}><div role="alert" data-testid="menu-edit-not-applied" className="pos-glass-form-card mx-4 my-1 px-4! py-3! text-amber-800 dark:text-amber-100 space-y-2">
             <p>{t('modals.menu.editNotApplied', { defaultValue: 'This correction was not saved, so its difference was not recorded anywhere. If money already changed hands, prepare the correction again and record that same money once; never collect or return it twice. Otherwise a manager can close it without recording money.' })}</p>
             <div className="flex flex-wrap gap-3">
-              <button type="button" disabled={draftRecoveryBusy} onClick={requoteRefusedEdit} className="underline font-semibold" data-testid="menu-edit-requote">
+              <button type="button" disabled={draftRecoveryBusy} onClick={requoteRefusedEdit} className="pos-glass-field min-h-11 px-3 underline font-semibold" data-testid="menu-edit-requote">
                 {t('modals.menu.editRequote', { defaultValue: 'Prepare the correction again' })}
               </button>
-              <button type="button" disabled={draftRecoveryBusy} onClick={() => void closeRefusedEdit()} className="underline" data-testid="menu-edit-close-without-money">
+              <button type="button" disabled={draftRecoveryBusy} onClick={() => void closeRefusedEdit()} className="pos-glass-field min-h-11 px-3 underline" data-testid="menu-edit-close-without-money">
                 {t('modals.menu.editCloseWithoutMoney', { defaultValue: 'Close without recording money (manager)' })}
               </button>
               <button type="button" disabled={draftRecoveryBusy} onClick={() => setDiscardEditTarget('refused')}
-                className="underline font-semibold" data-testid="menu-edit-discard">{t('modals.menu.editDiscard')}</button>
+                className="pos-glass-field min-h-11 px-3 underline font-semibold" data-testid="menu-edit-discard">{t('modals.menu.editDiscard')}</button>
             </div>
-          </div>
-        )}
+          </div></motion.div>
+        )}</AnimatePresence>
         <div className="flex flex-col sm:flex-row flex-1 overflow-hidden min-h-0" style={draftPersistence.status !== 'ready' || draftPersistence.isPending() ? { pointerEvents: 'none', opacity: 0.6 } : undefined}>
           {/* Left Panel - Menu */}
           <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
@@ -3968,50 +3976,53 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="liquid-glass-modal-header py-4! px-5!">
+            <div className="liquid-glass-modal-header pos-glass-header--plain py-4! px-5!">
               <h3 className="liquid-glass-modal-title text-lg!">
                 {t('modals.menu.customerInfo', { defaultValue: 'Customer Info (Optional)' })}
               </h3>
               <button
                 onClick={() => setShowCustomerPopover(false)}
                 aria-label={t('common.actions.close', { defaultValue: 'Close' })}
-                title={t('common.actions.close', { defaultValue: 'Close' })}
-                className="liquid-glass-modal-close w-8! h-8! text-base!"
+                className="liquid-glass-modal-close min-w-11 min-h-11 text-base!"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             {/* Body */}
-            <div className="p-5 space-y-3">
-              <input
-                type="text"
-                value={pickupCustomerName}
-                onChange={(e) => { pickupCustomerEditedRef.current = true; setPickupCustomerDraft(current => ({ ...current, name: e.target.value })); }}
-                placeholder={t('modals.menu.customerName', { defaultValue: 'Name' })}
-                className="liquid-glass-modal-input w-full"
-                autoFocus
-              />
-              <input
-                type="tel"
-                value={pickupCustomerPhone}
-                onChange={(e) => { pickupCustomerEditedRef.current = true; setPickupCustomerDraft(current => ({ ...current, phone: e.target.value })); }}
-                placeholder={t('modals.menu.customerPhone', { defaultValue: 'Phone' })}
-                className="liquid-glass-modal-input w-full"
-              />
-              <input
-                type="text"
-                value={pickupCustomerNotes}
-                onChange={(e) => { pickupCustomerEditedRef.current = true; setPickupCustomerDraft(current => ({ ...current, notes: e.target.value })); }}
-                placeholder={t('modals.menu.customerNotes', { defaultValue: 'Notes' })}
-                className="liquid-glass-modal-input w-full"
-              />
-              <button
-                onClick={() => setShowCustomerPopover(false)}
-                className="liquid-glass-modal-button liquid-glass-modal-success w-full"
-              >
-                {t('common.actions.save', { defaultValue: 'Save' })}
-              </button>
+            <div className="space-y-3">
+              <div className="pos-glass-form-card mx-5 space-y-3">
+                <input
+                  type="text"
+                  value={pickupCustomerName}
+                  onChange={(e) => { pickupCustomerEditedRef.current = true; setPickupCustomerDraft(current => ({ ...current, name: e.target.value })); }}
+                  placeholder={t('modals.menu.customerName', { defaultValue: 'Name' })}
+                  className="liquid-glass-modal-input pos-glass-field min-h-11 w-full"
+                  autoFocus
+                />
+                <input
+                  type="tel"
+                  value={pickupCustomerPhone}
+                  onChange={(e) => { pickupCustomerEditedRef.current = true; setPickupCustomerDraft(current => ({ ...current, phone: e.target.value })); }}
+                  placeholder={t('modals.menu.customerPhone', { defaultValue: 'Phone' })}
+                  className="liquid-glass-modal-input pos-glass-field min-h-11 w-full"
+                />
+                <input
+                  type="text"
+                  value={pickupCustomerNotes}
+                  onChange={(e) => { pickupCustomerEditedRef.current = true; setPickupCustomerDraft(current => ({ ...current, notes: e.target.value })); }}
+                  placeholder={t('modals.menu.customerNotes', { defaultValue: 'Notes' })}
+                  className="liquid-glass-modal-input pos-glass-field min-h-11 w-full"
+                />
+              </div>
+              <div className="px-6 pb-5 pt-2">
+                <button
+                  onClick={() => setShowCustomerPopover(false)}
+                  className="liquid-glass-modal-button pos-modal-primary w-full"
+                >
+                  {t('common.actions.save', { defaultValue: 'Save' })}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -4022,20 +4033,21 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         onClose={() => { if (!legacyCurrencyBusy) { setLegacyCurrency(null); setLegacyCurrencyPin(''); } }}
         title={t('modals.menu.legacyCurrency.title')}
         size="sm"
+        className="[&_.liquid-glass-modal-header]:border-b-0"
         closeOnBackdrop={false}
         closeDisabled={legacyCurrencyBusy}
       >
         <div className="space-y-4 p-5">
           <p className="liquid-glass-modal-text">{t('modals.menu.legacyCurrency.message', { currency: legacyCurrency?.currency })}</p>
-          <label className="block text-sm liquid-glass-modal-text">
+          <label className="pos-glass-form-card block text-sm font-semibold liquid-glass-modal-text-muted">
             {t('modals.menu.legacyCurrency.pin')}
             <input type="password" inputMode="numeric" autoComplete="off" maxLength={8}
               value={legacyCurrencyPin} disabled={legacyCurrencyBusy}
               onChange={event => setLegacyCurrencyPin(event.target.value.replace(/\D/g, ''))}
-              className="liquid-glass-modal-input mt-2 w-full rounded-lg px-3 py-2" />
+              className="liquid-glass-modal-input pos-glass-field min-h-11 mt-2 w-full rounded-lg px-3 py-2" />
           </label>
-          {legacyCurrencyError && <p role="alert" className="text-sm text-red-600 dark:text-red-400">{legacyCurrencyError}</p>}
-          <div className="flex justify-end gap-3">
+          <AnimatePresence initial={false}>{legacyCurrencyError && <motion.div key="glass-reveal-7" {...revealMotion}><p role="alert" className="text-sm text-red-600 dark:text-red-400">{legacyCurrencyError}</p></motion.div>}</AnimatePresence>
+          <div className="flex justify-end gap-3 px-6 pb-5 pt-2">
             <button disabled={legacyCurrencyBusy} onClick={() => { setLegacyCurrency(null); setLegacyCurrencyPin(''); }}
               className="liquid-glass-modal-button rounded-lg px-4 py-2">{t('common.actions.cancel')}</button>
             <button disabled={legacyCurrencyBusy} onClick={() => void confirmLegacyCurrency()}
@@ -4053,7 +4065,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       {/* Processing Overlay */}
       {isOpen && effectiveProcessing && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-1100">
-          <div className="rounded-2xl p-8 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border backdrop-blur-xl">
+          <div className="pos-glass-form-card p-8!">
             <div className="flex flex-col items-center space-y-4">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-500"></div>
               <p className="text-lg font-medium liquid-glass-modal-text">

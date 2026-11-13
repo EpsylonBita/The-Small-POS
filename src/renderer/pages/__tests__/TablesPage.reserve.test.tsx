@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
 const stripMotionProps = ({ variants, initial, animate, exit, transition, whileTap, whileHover, layout, ...props }: any) => props;
 
 vi.mock('framer-motion', () => ({
+  // founder 11/11/2026: motion mocks support the glass reveals; behavioral assertions stay unchanged.
+  useReducedMotion: () => false,
   AnimatePresence: ({ children }: any) => children,
   motion: {
     div: React.forwardRef(({ children, ...props }: any, ref: any) => <div ref={ref} {...stripMotionProps(props)}>{children}</div>),

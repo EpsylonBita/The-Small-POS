@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useState, useEffect, useCallback, useId, useRef } from 'react';
 import {
   AlertTriangle,
@@ -239,6 +240,14 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
+  // Presentation only: preserve every existing reveal condition (founder 11/11/2026).
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
   const [searchQuery, setSearchQuery] = useState('');
   const [lookupQuery, setLookupQuery] = useState('');
   const [customer, setCustomer] = useState<Customer | null>(null);
@@ -729,7 +738,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       onClose={onClose}
       title={t('modals.customerSearch.title')}
       header={callerIdWorkspace ? (
-        <div className="liquid-glass-modal-header">
+        <div className="liquid-glass-modal-header pos-glass-header--plain">
           <h2 className="liquid-glass-modal-title">
             {t('modals.customerSearch.title')}
           </h2>
@@ -755,7 +764,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       ) : undefined}
       ariaLabel={callerIdWorkspace ? t('modals.customerSearch.title') : undefined}
       size={callerIdWorkspace ? 'xl' : 'sm'}
-      className={callerIdWorkspace ? 'max-w-6xl! max-h-[90vh]!' : 'max-w-md!'}
+      className={callerIdWorkspace ? 'max-w-6xl! max-h-[90vh]! pos-progressive-form [&_.liquid-glass-modal-header]:border-b-0!' : 'max-w-md! pos-progressive-form [&_.liquid-glass-modal-header]:border-b-0!'}
       contentClassName={callerIdWorkspace ? 'px-6! pb-6!' : undefined}
       closeOnBackdrop={true}
       closeOnEscape={true}
@@ -768,10 +777,10 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       />
 
       {/* Search Input */}
-      <div className="mb-6">
+      <div className="pos-glass-form-card mb-3">
         <label
           htmlFor={searchInputId}
-          className="block text-sm font-medium mb-2 liquid-glass-modal-text"
+          className="block text-xs font-semibold mb-1.5 liquid-glass-modal-text-muted"
         >
           {t('modals.customerSearch.searchLabel', 'Phone Number or Name')}
         </label>
@@ -785,7 +794,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             onChange={handleSearchChange}
             onKeyDown={handleKeyPress}
             placeholder={t('modals.customerSearch.searchPlaceholder', 'Enter phone or name...')}
-            className="customer-search-yellow-input liquid-glass-modal-input w-full rounded-xl px-3 py-3 pl-10 transition-all focus:outline-hidden"
+            className="customer-search-yellow-input liquid-glass-modal-input pos-glass-field min-h-touch w-full rounded-xl px-3 py-3 pl-10 transition-all focus:outline-hidden"
             autoFocus
           />
           {/* Real-time search indicator */}
@@ -812,16 +821,20 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       )}
 
       {/* Error Message */}
-      {error && (!callerIdWorkspace || error !== t('modals.customerSearch.customerNotFound')) && (
-        <div className="mb-4 p-3 bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl text-red-800 dark:text-red-400 text-sm">
+      <AnimatePresence initial={false}>
+        {error && (!callerIdWorkspace || error !== t('modals.customerSearch.customerNotFound')) && (
+        <motion.div {...revealMotion} key="reveal-1" className="pos-glass-form-card mb-3 p-3! text-red-800 dark:text-red-400 text-sm">
           {error}
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
 
-      {callerIdWorkspace &&
+      <AnimatePresence initial={false}>
+
+        {callerIdWorkspace &&
         !isSearching &&
         error === t('modals.customerSearch.customerNotFound') && (
-        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <motion.div {...revealMotion} key="reveal-2" className="mb-5 flex flex-wrap items-center justify-between gap-3">
           <p className="font-medium text-red-600 dark:text-red-400">
             {t('modals.customerSearch.customerNotFound')}
           </p>
@@ -833,12 +846,14 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             <User className="h-5 w-5" aria-hidden="true" />
             {t('modals.customerSearch.addNewCustomer')}
           </button>
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Multiple Customers Found */}
-      {customers.length > 0 && !customer && (
-        <div className="mb-4">
+      <AnimatePresence initial={false}>
+        {customers.length > 0 && !customer && (
+        <motion.div {...revealMotion} key="reveal-3" className="mb-4">
           <p className="text-sm liquid-glass-modal-text-muted mb-2">
             {t('modals.customerSearch.multipleResults', { count: customers.length })}
           </p>
@@ -847,7 +862,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               <button
                 type="button"
                 key={c.id}
-                className={`pos-choice-card relative mb-3 cursor-pointer text-left ${c.is_banned ? 'pos-neon-bad' : ''}`}
+                className={`pos-glass-tap-card relative min-h-touch w-full cursor-pointer p-4 text-left`}
                 onClick={() => handleSelectFromList(c)}
               >
                 <div className="flex items-center gap-3">
@@ -877,14 +892,18 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               </button>
             ))}
           </div>
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
 
-      {customer && (
-        <div className={`pos-card mb-6 p-4 ${customer.is_banned ? 'pos-neon-bad' : ''}`} data-testid="customer-search-customer">
+      <AnimatePresence initial={false}>
+
+        {customer && (
+        <motion.div {...revealMotion} key="reveal-4" className={`pos-glass-form-card mb-3`} data-testid="customer-search-customer">
           {/* Banned Customer Warning Banner */}
-          {customer.is_banned && (
-            <div className="mb-4 p-3 bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl">
+          <AnimatePresence initial={false}>
+            {customer.is_banned && (
+            <motion.div {...revealMotion} key="reveal-5" className="pos-glass-form-card mb-3 p-3!">
               <div className="flex items-center gap-2 text-red-500 mb-1">
                 <Ban className="w-5 h-5" />
                 <span className="font-semibold text-sm uppercase tracking-wide">
@@ -902,8 +921,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                   {t('modals.customerSearch.bannedOn', 'Banned on')}: {formatDate(customer.banned_at)}
                 </p>
               )}
-            </div>
-          )}
+            </motion.div>
+            )}
+          </AnimatePresence>
 
           <div className="flex items-center gap-3">
             <User className={`h-7 w-7 shrink-0 ${customer.is_banned ? 'text-(--pos-s-bad)' : 'text-(--pos-s-muted)'}`} aria-hidden="true" />
@@ -951,8 +971,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                       setSelectedAddressId(addr.id);
                     }}
                     data-address-selected={isSelected ? 'true' : undefined}
-                    className={`pos-raised w-full cursor-pointer rounded-2xl border p-3 text-left ${isSelected
-                      ? 'pos-raised--tint [--pos-tint:var(--pos-s-sel-bg)]'
+                    className={`pos-glass-tap-card min-h-touch w-full cursor-pointer p-3 text-left focus-visible:outline-2 focus-visible:outline-yellow-400 ${isSelected
+                      ? 'bg-(--pos-s-sel-bg)! text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)! [&_*]:text-(--pos-s-sel-fg)!'
                       : ''
                       }`}
                   >
@@ -979,8 +999,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                         )}
                       </div>
                       {/* Operational actions are intentionally hidden for passive Caller ID lookup. */}
-                      {!lookupOnly && (
-                      <div className="flex items-center gap-1">
+                      <AnimatePresence initial={false}>
+                        {!lookupOnly && (
+                      <motion.div {...revealMotion} key="reveal-6" className="flex items-center gap-1">
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -988,7 +1009,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                               onEditCustomer({ ...customer, editAddressId: addr.id } as any);
                             }
                           }}
-                          className="pos-icon-btn h-10! w-10!"
+                          className="pos-glass-field inline-flex min-h-touch min-w-touch items-center justify-center p-2"
                           aria-label={t('common.edit', 'Edit')}
                         >
                           <Edit className="h-4 w-4" aria-hidden="true" />
@@ -1047,13 +1068,14 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                               </div>
                             ), { duration: 10000 });
                           }}
-                          className="pos-icon-btn pos-icon-btn--danger h-10! w-10!"
+                          className="pos-solid-btn pos-solid-btn--danger min-h-touch min-w-touch p-2"
                           aria-label={t('common.delete', 'Delete')}
                         >
                           <Trash2 className="h-4 w-4" aria-hidden="true" />
                         </button>
-                      </div>
-                      )}
+                      </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
                   </div>
                 );
@@ -1161,8 +1183,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               </button>
             </>
           )}
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
 
       {!callerIdWorkspace && onContinueWithoutCustomer && lookupQuery.length >= 3 && !isSearching && error === t('modals.customerSearch.customerNotFound') && (
         <button
@@ -1174,10 +1197,12 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
         </button>
       )}
 
-      {callerIdWorkspace &&
+      <AnimatePresence initial={false}>
+
+        {callerIdWorkspace &&
         !isSearching &&
         (Boolean(customer) || error === t('modals.customerSearch.customerNotFound')) && (
-        <section
+        <motion.section {...revealMotion} key="reveal-7"
           className="mb-4"
           aria-labelledby="caller-id-order-actions-title"
         >
@@ -1240,7 +1265,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                     buildSelectedCustomer(),
                     searchQuery.trim(),
                   )}
-                  className={`pos-raised pos-raised--tint flex min-h-[104px] flex-col items-center justify-center gap-2 rounded-2xl border px-4 py-4 font-bold ${config.tint} ${config.colour}`}
+                  className={`pos-glass-tap-card flex min-h-[104px] flex-col items-center justify-center gap-2 px-4 py-4 font-bold liquid-glass-modal-text`}
                 >
                   <span className="flex h-10 w-10 items-center justify-center" aria-hidden="true">{config.icon}</span>
                   <span className="text-center text-sm leading-tight">{config.label}</span>
@@ -1248,12 +1273,14 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               );
             })}
           </div>
-        </section>
-      )}
+        </motion.section>
+        )}
+      </AnimatePresence>
 
       {/* Add New Customer Option - only after an authoritative not-found result in Caller ID mode. */}
-      {!callerIdWorkspace && Boolean(onAddNewCustomer) && lookupQuery.length >= 3 && !isSearching && ((!lookupOnly && customer) || error === t('modals.customerSearch.customerNotFound')) && (
-        <div className="pos-card p-4">
+      <AnimatePresence initial={false}>
+        {!callerIdWorkspace && Boolean(onAddNewCustomer) && lookupQuery.length >= 3 && !isSearching && ((!lookupOnly && customer) || error === t('modals.customerSearch.customerNotFound')) && (
+        <motion.div {...revealMotion} key="reveal-8" className="pos-glass-form-card">
           <p className="mb-3 text-sm text-(--pos-s-muted)">
             {customer
               ? t('modals.customerSearch.differentPersonPrompt')
@@ -1267,8 +1294,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             <User className="h-5 w-5" aria-hidden="true" />
             {t('modals.customerSearch.addNewCustomer')}
           </button>
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Delete Confirmation Dialog */}
       {!lookupOnly && (

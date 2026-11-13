@@ -56,23 +56,27 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en
 vi.mock('react-hot-toast', () => ({
   default: Object.assign(vi.fn(), { success: vi.fn(), error: mocks.toastError, dismiss: vi.fn() }),
 }));
-vi.mock('framer-motion', () => ({
-  AnimatePresence: ({ children }: any) => children,
-  motion: {
-    div: React.forwardRef(({ children, initial, animate, exit, transition, ...props }: any, ref: any) => (
-      <div ref={ref} {...props}>
-        {children}
-      </div>
-    )),
-    button: React.forwardRef(
-      ({ children, initial, animate, exit, transition, whileTap, whileHover, ...props }: any, ref: any) => (
-        <button ref={ref} {...props}>
-          {children}
-        </button>
-      ),
-    ),
-  },
-}));
+vi.mock('framer-motion', () => {
+  // founder 11/11/2026: motion mocks support the glass reveals; behavioral assertions stay unchanged.
+  // Any tag (div, button, fieldset…), one component per tag so a re-render never remounts it.
+  const cache = new Map<string, any>();
+  const motion = new Proxy({}, {
+    get: (_target, tag: string) => {
+      if (!cache.has(tag)) {
+        cache.set(tag, React.forwardRef(
+          ({ children, initial, animate, exit, transition, whileTap, whileHover, layout, layoutId, variants, ...props }: any, ref: any) =>
+            React.createElement(tag, { ref, ...props }, children),
+        ));
+      }
+      return cache.get(tag);
+    },
+  });
+  return {
+    useReducedMotion: () => false,
+    AnimatePresence: ({ children }: any) => children,
+    motion,
+  };
+});
 import { TableCheckManagerModal } from '../TableCheckManagerModal';
 
 const sessionId = '11111111-1111-4111-8111-111111111111';

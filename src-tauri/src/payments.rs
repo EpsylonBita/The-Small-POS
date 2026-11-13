@@ -9574,6 +9574,63 @@ mod tests {
     }
 
     #[test]
+    fn k2c_update_payment_method_during_cash_post_keeps_card_correction_pending() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO orders (currency,branch_id,id,items,total_amount,total_amount_cents,
+                status,sync_status,payment_status,supabase_id,created_at,updated_at)
+                VALUES ('EUR','b1','tender-race','[]',12,1200,'completed','synced','pending','remote-tender-race',datetime('now'),datetime('now'))", []).unwrap();
+        }
+        let recorded = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId":"tender-race", "method":"cash", "amount":12.0,
+                "cashReceived":12.0, "changeGiven":0.0, "transactionRef":"CASH-1760000001001"
+            }),
+        )
+        .unwrap();
+        let payment_id = recorded["paymentId"].as_str().unwrap();
+        let sent: Value = {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE parity_sync_queue SET status='processing',claim_generation=1 WHERE table_name='payments' AND record_id=?1", [payment_id]).unwrap();
+            serde_json::from_str(
+                &build_payment_sync_payload_for_payment(&conn, payment_id).unwrap(),
+            )
+            .unwrap()
+        };
+        update_payment_method(&db, "tender-race", "card").unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            !crate::sync::mark_local_payment_applied_if_tender_unchanged(
+                &conn,
+                payment_id,
+                "2026-11-11T01:00:00Z",
+                Some("remote-payment"),
+                &sent,
+            )
+            .unwrap()
+        );
+        let state: (String, String, String) = conn
+            .query_row(
+                "SELECT method,sync_status,sync_state FROM order_payments WHERE id=?1",
+                [payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, ("card".into(), "pending".into(), "pending".into()));
+        let pending: String = conn.query_row("SELECT data FROM parity_sync_queue WHERE table_name='payments' AND record_id=?1 AND status='pending'", [payment_id], |row| row.get(0)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&pending).unwrap()["method"],
+            "card"
+        );
+        let processing: i64 = conn.query_row("SELECT COUNT(*) FROM parity_sync_queue WHERE table_name='payments' AND record_id=?1 AND status='processing'", [payment_id], |row| row.get(0)).unwrap();
+        assert_eq!(processing, 1);
+    }
+
+    #[test]
     fn test_update_payment_method_requeues_payment_sync_and_updates_snapshot() {
         let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();

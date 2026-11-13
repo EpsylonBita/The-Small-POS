@@ -287,7 +287,9 @@ describe('ZReportModal gift card close', () => {
   it('keeps pending gift proof not final: no final print, no submit, actionable recovery', async () => {
     serveReports((date) => pendingGiftPreview(date));
     renderModal();
-    await waitFor(() => expect(printButton()).toHaveAttribute('title', GIFT_CLOSE_LABELS.blocked));
+    // founder 11/11/2026: the print reason is visible on the touch till, without a native tooltip.
+    await waitFor(() => expect(document.querySelector('[data-z-print-hint]')).toHaveTextContent(GIFT_CLOSE_LABELS.blocked));
+    expect(printButton()).not.toHaveAttribute('title');
 
     expect(printButton()).toBeDisabled();
     expect(submitButton()).toBeDisabled();
@@ -309,7 +311,9 @@ describe('ZReportModal gift card close', () => {
   it('keeps ordinary reports unchanged and a no-id preview unavailable for final print', async () => {
     serveReports((date) => baseReport(date));
     renderModal();
-    await waitFor(() => expect(printButton()).toHaveAttribute('title', GIFT_CLOSE_LABELS.finalPrintUnavailable));
+    // founder 11/11/2026: the print reason is visible on the touch till, without a native tooltip.
+    await waitFor(() => expect(document.querySelector('[data-z-print-hint]')).toHaveTextContent(GIFT_CLOSE_LABELS.finalPrintUnavailable));
+    expect(printButton()).not.toHaveAttribute('title');
     await waitFor(() => expect(submitButton()).toBeEnabled());
 
     expect(printButton()).toBeDisabled();

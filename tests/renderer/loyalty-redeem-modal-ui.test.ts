@@ -19,14 +19,16 @@ test('LoyaltyRedeemModal keeps checkout-only redemption behavior', () => {
   assert.doesNotMatch(source, /bridge\.loyalty\.redeemPoints/);
 });
 
-test('LoyaltyRedeemModal uses yellow loyalty accents and green commit action', () => {
+test('LoyaltyRedeemModal uses frosted cards, yellow selection and a solid primary action', () => {
   const source = readFileSync(sourcePath, 'utf8');
   const buttonTypes = source.match(/type="button"/g) ?? [];
 
-  assert.match(source, /rounded-2xl border border-\(--pos-s-border\) bg-yellow-400 text-black/);
-  assert.match(source, /bg-\(--pos-s-surface-2\) text-yellow-700 dark:text-yellow-200/);
-  assert.match(source, /border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\) text-yellow-900/);
-  assert.match(source, /font-bold text-yellow-700 dark:text-yellow-300/);
+  // founder 11/11/2026: bare icon, frosted panels, yellow selected quick choices.
+  assert.match(source, /liquid-glass-modal-header pos-glass-header--plain/);
+  assert.match(source, /const glassPanelClass = 'pos-glass-form-card'/);
+  assert.match(source, /text-yellow-700 dark:text-yellow-200/);
+  assert.match(source, /bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)/);
+  assert.match(source, /font-bold liquid-glass-modal-text/);
   // Wave ΣΤ7: the redeem confirm is the kit glass-modal primary (yellow in both themes).
   assert.match(source, /liquid-glass-modal-button pos-modal-primary/);
   assert.doesNotMatch(source, /active:bg-green-800/);

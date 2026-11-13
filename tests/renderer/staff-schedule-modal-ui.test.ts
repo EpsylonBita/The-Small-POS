@@ -43,17 +43,17 @@ test('staff schedule modals portal outside the page container and blur the app b
 });
 
 test('add-shift modal keeps a scrollable body and a non-scrolling footer for Cancel/Create', () => {
-  // Scrollable body.
-  assert.match(viewSource, /flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto scrollbar-hide p-5 md:p-6/);
-  // Footer stays out of the scroll region (shrink-0 + top divider) so the actions stay visible.
+  // founder 11/11/2026: keep the scroll contract with 12 px between glass cards.
+  assert.match(viewSource, /flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto scrollbar-hide p-5 md:p-6/);
+  // Footer stays out of the scroll region (shrink-0), with no bar or divider.
   assert.match(
     viewSource,
-    /flex items-center justify-end gap-3 shrink-0 border-t border-\(--modal-glass-line\) p-5 md:p-6/,
+    /flex items-center justify-end gap-3 shrink-0 px-6 pb-5 pt-2/,
   );
   // Header is also pinned (non-scrolling) so the close button stays visible.
   assert.match(
     viewSource,
-    /flex items-start justify-between gap-3 shrink-0 border-b border-\(--modal-glass-line\) p-5 md:p-6/,
+    /flex items-start justify-between gap-3 shrink-0 p-5 md:p-6/,
   );
 });
 

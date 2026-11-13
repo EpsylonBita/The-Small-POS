@@ -78,7 +78,8 @@ const confirmButton = () => {
   return button;
 };
 const personCard = (person: number) => {
-  const card = screen.getByRole('textbox', { name: `Person ${person}` }).closest('.split-payment-person');
+  // founder 11/11/2026: the portion panel now uses the shared frosted card.
+  const card = screen.getByRole('textbox', { name: `Person ${person}` }).closest('.pos-glass-form-card');
   if (!(card instanceof HTMLElement)) throw new Error(`Person ${person} card not rendered`);
   return card;
 };

@@ -184,9 +184,9 @@ export default function LoginPage({ onLogin, exitPhase = null, onLeft }: LoginPa
             try {
                 console.log('[LoginPage] Checking if PIN is configured...');
                 const snapshot = await bridge.settings.getLocal();
-                // Check for hashed PINs (new secure format)
-                const adminPinHash = snapshot?.['staff.admin_pin_hash'] ?? snapshot?.staff?.admin_pin_hash;
-                const staffPinHash = snapshot?.['staff.staff_pin_hash'] ?? snapshot?.staff?.staff_pin_hash;
+                // Native status fields keep PIN verifiers out of the renderer.
+                const adminPinConfigured = (snapshot?.['staff.admin_pin_configured'] ?? snapshot?.staff?.admin_pin_configured) === true;
+                const staffPinConfigured = (snapshot?.['staff.staff_pin_configured'] ?? snapshot?.staff?.staff_pin_configured) === true;
                 const legacySimplePinFromDb = snapshot?.['staff.simple_pin'] ?? snapshot?.staff?.simple_pin;
 
                 // Wave 1 C7: persistent migration-complete marker. Once set,
@@ -210,8 +210,8 @@ export default function LoginPage({ onLogin, exitPhase = null, onLeft }: LoginPa
                     ? ''
                     : localStorage.getItem('staff.simple_pin') || '';
 
-                let hasPinHashes = !!adminPinHash || !!staffPinHash;
-                if (!hasPinHashes) {
+                let hasConfiguredPin = adminPinConfigured || staffPinConfigured;
+                if (!hasConfiguredPin) {
                     // Never-migrated path: read legacy sources and attempt
                     // migration. After the attempt (whether it succeeds or
                     // fails), remove the localStorage key FIRST, THEN set
@@ -234,7 +234,7 @@ export default function LoginPage({ onLogin, exitPhase = null, onLeft }: LoginPa
                                 settings: { legacy_pin_migrated: true },
                             });
                             await rememberLoginPinLength(bridge, ['staff'], legacyPin.length);
-                            hasPinHashes = true;
+                            hasConfiguredPin = true;
                             console.log('[LoginPage] Migrated legacy simple_pin to hashed staff PIN');
                         } catch (migrationError) {
                             console.warn('[LoginPage] Failed to migrate legacy simple_pin:', migrationError);
@@ -258,15 +258,15 @@ export default function LoginPage({ onLogin, exitPhase = null, onLeft }: LoginPa
                     }
                 }
 
-                const noPinConfigured = !hasPinHashes;
-                console.log('[LoginPage] PIN check result - noPinConfigured:', noPinConfigured, 'hasAdminHash:', !!adminPinHash, 'hasStaffHash:', !!staffPinHash);
+                const noPinConfigured = !hasConfiguredPin;
+                console.log('[LoginPage] PIN check result - noPinConfigured:', noPinConfigured, 'adminPinConfigured:', adminPinConfigured, 'staffPinConfigured:', staffPinConfigured);
                 setNoPinSet(noPinConfigured);
                 const readSlotLength = (key: string) =>
                     readLoginPinLength(snapshot?.[`terminal.${key}`] ?? snapshot?.terminal?.[key]);
                 setPinSlots({
-                    adminConfigured: !!adminPinHash,
+                    adminConfigured: adminPinConfigured,
                     // A PIN migrated just now is a staff PIN the snapshot does not show yet.
-                    staffConfigured: !!staffPinHash || (hasPinHashes && !adminPinHash),
+                    staffConfigured: staffPinConfigured || (hasConfiguredPin && !adminPinConfigured),
                     adminLength: readSlotLength(LOGIN_PIN_LENGTH_SETTING.admin),
                     staffLength: readSlotLength(LOGIN_PIN_LENGTH_SETTING.staff),
                 });
@@ -278,9 +278,9 @@ export default function LoginPage({ onLogin, exitPhase = null, onLeft }: LoginPa
                     snapshot?.terminal?.pinResetRequired;
                 const resetRequired = rawResetFlag === true || rawResetFlag === 'true';
 
-                if (resetRequired && hasPinHashes) {
+                if (resetRequired && hasConfiguredPin) {
                     // Stale flag — user already has a PIN set. Auto-clear.
-                    console.log('[LoginPage] pin_reset_required is true but PIN hashes exist. Auto-clearing stale flag.');
+                    console.log('[LoginPage] pin_reset_required is true but a PIN is configured. Auto-clearing stale flag.');
                     setPinResetRequired(false);
                     bridge.settings.updateLocal({
                         settingType: 'terminal',

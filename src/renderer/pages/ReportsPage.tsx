@@ -17,9 +17,8 @@ import { useShift } from '../contexts/shift-context';
 import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
 import ZReportModal from '../components/modals/ZReportModal';
 import { toast } from 'react-hot-toast';
-import { formatCurrency, formatDate } from '../utils/format';
+import { formatCurrency } from '../utils/format';
 import type {
-  SalesTrendData,
   TopItemData,
   TodayStatistics,
   HourlySalesData,
@@ -28,7 +27,6 @@ import type {
 } from '../types/reports';
 import { exportArrayToCSV } from '../utils/reportExport';
 import {
-  SalesTrendChart,
   TopItemsChart,
   HourlySalesChart,
   PaymentMethodChart,
@@ -42,10 +40,8 @@ const ReportsPage: React.FC = () => {
   const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const [selectedPeriod, setSelectedPeriod] = useState('today');
   const { staff } = useShift();
   const [todayStats, setTodayStats] = useState<TodayStatistics | null>(null);
-  const [salesData, setSalesData] = useState<SalesTrendData[]>([]);
   const [topItems, setTopItems] = useState<TopItemData[]>([]);
   const [hourlySales, setHourlySales] = useState<HourlySalesData[]>([]);
   const [paymentBreakdown, setPaymentBreakdown] = useState<PaymentMethodBreakdown | null>(null);
@@ -71,10 +67,6 @@ const ReportsPage: React.FC = () => {
         // IPC handlers wrap response in { success: true, data: ... }
         const statsResult = await bridge.reports.getTodayStatistics({ branchId: staff.branchId });
         setTodayStats(statsResult?.data || statsResult || null);
-
-        const days = selectedPeriod === 'today' ? 5 : selectedPeriod === 'week' ? 7 : selectedPeriod === 'month' ? 30 : 90;
-        const trendResult = await bridge.reports.getSalesTrend({ branchId: staff.branchId, days });
-        setSalesData(trendResult?.data || trendResult || []);
 
         const itemsResult = await bridge.reports.getTopItems({ branchId: staff.branchId, limit: 5 });
         setTopItems(itemsResult?.data || itemsResult || []);
@@ -108,7 +100,7 @@ const ReportsPage: React.FC = () => {
       }
     };
     fetchReportData();
-  }, [staff?.branchId, selectedPeriod, t, bridge]);
+  }, [staff?.branchId, t, bridge]);
 
   // Metric card component
   const MetricCard = ({
@@ -186,37 +178,32 @@ const ReportsPage: React.FC = () => {
           </p>
         </motion.div>
 
-        {/* Period Selector & Actions */}
+        {/* Period & Actions */}
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.5, delay: 0.1 }}
           className="mb-8 flex flex-wrap items-center justify-between gap-4"
         >
-          <select
-            value={selectedPeriod}
-            onChange={(e) => setSelectedPeriod(e.target.value)}
+          <p
             className={`px-6 py-3 rounded-xl border ${
               isDark
                 ? 'bg-gray-800/50 border-gray-700 text-white backdrop-blur-md'
                 : 'bg-white/80 border-gray-300 text-gray-900 backdrop-blur-md'
-            } focus:ring-2 focus:ring-yellow-400 focus:border-transparent shadow-lg transition-all`}
+            } shadow-lg`}
           >
-            <option value="today">{t('reports.period.today')}</option>
-            <option value="week">{t('reports.period.thisWeek')}</option>
-            <option value="month">{t('reports.period.thisMonth')}</option>
-            <option value="quarter">{t('reports.period.thisQuarter')}</option>
-          </select>
+            {t('reports.period.sinceLastZ')}
+          </p>
 
           <div className="flex gap-3">
             <button
               onClick={() => {
-                const data = salesData.map(d => ({
-                  [t('reports.table.date')]: formatDate(d.date),
-                  [t('reports.table.orders')]: d.orders,
-                  [t('reports.table.revenue')]: d.revenue,
-                  [t('reports.table.avgOrder')]: d.avgOrderValue
-                }));
+                const data = [{
+                  [t('reports.table.date')]: t('reports.period.sinceLastZ'),
+                  [t('reports.table.orders')]: todayStats?.totalOrders ?? 0,
+                  [t('reports.table.revenue')]: todayStats?.totalSales ?? 0,
+                  [t('reports.table.avgOrder')]: todayStats?.avgOrderValue ?? 0
+                }];
                 exportArrayToCSV(data, 'sales-report.csv');
               }}
               className={`px-6 py-3 rounded-xl border ${
@@ -278,11 +265,6 @@ const ReportsPage: React.FC = () => {
 
         {/* Charts Section */}
         <div className="space-y-8">
-          {/* Sales Trend Chart */}
-          {salesData.length > 0 && (
-            <SalesTrendChart data={salesData} isDark={isDark} currency={currency} />
-          )}
-
           {/* Two Column Charts */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
             {/* Top Items Chart */}

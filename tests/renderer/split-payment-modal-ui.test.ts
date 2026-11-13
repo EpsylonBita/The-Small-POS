@@ -47,17 +47,35 @@ test('zero-discount portions suppress redundant subtotal and discount rows', () 
 test('split controls, cards and fields carry the kit depth', () => {
   const splitCss = readFileSync(path.join(process.cwd(), 'src/renderer/components/modals/split-payment-modal.css'), 'utf8');
   assert.doesNotMatch(splitCss, /box-shadow:\s*none/);
-  for (const selector of ['button.split-payment-method,', '.split-payment-quick button {', 'button.split-payment-assignment {']) {
+  for (const selector of ['button.split-payment-method,']) {
     const block = splitCss.slice(splitCss.indexOf(selector));
     assert.match(block.slice(0, block.indexOf('}')), /background: var\(--pos-s-raised\) !important;\s*box-shadow: var\(--pos-s-depth\);/, selector);
   }
   assert.match(splitCss, /button\.split-payment-method\[aria-pressed='true'\] \{[^}]*box-shadow: var\(--pos-s-depth-yellow\);/);
   assert.match(splitCss, /button\.split-payment-confirm \{[^}]*box-shadow: var\(--pos-s-depth-yellow\);/);
   assert.match(splitCss, /button\.split-payment-segment-selected \{\s*box-shadow: var\(--pos-s-depth-yellow\);/);
-  assert.match(splitCss, /\.split-payment-person \{[^}]*box-shadow: var\(--pos-s-depth-card\);/);
-  assert.match(splitCss, /\.split-payment-money-input,[^{]*\{[^}]*box-shadow: var\(--pos-s-well\);/);
+  // founder 11/11/2026: portion panels and money fields use the shared frost; tender/confirm actions stay solid.
+  assert.match(modalSource, /className="pos-glass-form-card px-4! py-3! space-y-2"/);
+  assert.match(modalSource, /className="pos-glass-form-card space-y-2 p-2\.5!"/);
+  assert.match(modalSource, /className="liquid-glass-modal-input pos-glass-field min-h-touch w-full py-2 pl-12 pr-3 text-base tabular-nums font-medium disabled:cursor-not-allowed disabled:opacity-70"/);
+  assert.match(modalSource, /className="pos-glass-field min-h-touch flex w-full items-center justify-between gap-2 px-3 py-2\.5 text-sm"/);
+  assert.match(modalSource, /assignedTo === portion\.id \? "bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\)[^"]*" : "pos-glass-tap-card"/);
+  assert.doesNotMatch(modalSource, /className="split-payment-(?:money-input|person|assignment|card-notice|footer)\b/);
   assert.equal((modalSource.match(/className="pos-solid-btn pos-solid-btn--sm w-full gap-2"/g) ?? []).length, 2, 'both Add Person buttons are raised');
   assert.equal((modalSource.match(/className="pos-icon-btn pos-icon-btn--danger"/g) ?? []).length, 2, 'both remove buttons are kit icon buttons');
   assert.doesNotMatch(modalSource, /border-dashed/);
   assert.doesNotMatch(modalSource, /bg-slate-100\/80|bg-white\/80|bg-slate-500\/1[05]/);
+});
+
+// founder 11/11/2026: glass content reveals without changing payment eligibility or the bounded scroll body.
+test('split glass reveals respect reduced motion and keep checkout actions opaque', () => {
+  assert.match(modalSource, /const reduceMotion = useReducedMotion\(\);/);
+  assert.match(modalSource, /initial: reduceMotion \? false as const : \{ opacity: 0, height: 0, y: 12, overflow: 'hidden' \}/);
+  assert.match(modalSource, /animate: \{ opacity: 1, height: 'auto', y: 0, overflow: 'visible' \}/);
+  assert.match(modalSource, /duration: reduceMotion \? 0 : 0\.24, ease: \[0\.2, 0\.8, 0\.2, 1\]/);
+  assert.doesNotMatch(modalSource, /AnimatePresence mode="wait"|animate-in|border-t\b/);
+  assert.match(modalSource, /bg-\(--pos-s-surface\) px-6 pb-5 pt-2/);
+  assert.match(modalSource, /\[&>\.liquid-glass-modal-header\]:border-b-0!/);
+  // The notice's obsolete tender text unmounts immediately; only its empty visual wrapper exits.
+  assert.match(modalSource, /useIsPresent\(\) \? children : null/);
 });

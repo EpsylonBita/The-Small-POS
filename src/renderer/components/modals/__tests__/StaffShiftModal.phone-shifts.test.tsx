@@ -196,6 +196,23 @@ describe('StaffShiftModal phone shifts hand over to the Main', () => {
   });
 
   describe('the staff screen', () => {
+    it('shows the frozen collections block when the phone supplies it', async () => {
+      bridge.shifts.unitReadiness.mockResolvedValue(readiness({ pending_returns: [closedPhoneTill()] }));
+      bridge.shifts.remoteCheckout.mockResolvedValue({ ...PREVIEW, figures: {
+        ...PREVIEW.figures,
+        netCollections: { version: 1, total: 50, totalCents: 5000, refunded: 10, refundedCents: 1000,
+          tips: 5, tipsCents: 500, tenders: [{ tender: 'card', kept: 50, keptCents: 5000 }] },
+      } });
+      render(<StaffShiftModal {...checkin} />);
+      fireEvent.click(await screen.findByTestId('phone-till-receive-phone-close-1'));
+      const pane = await screen.findByTestId('satellite-checkout-section');
+      const collections = await within(pane).findByTestId('shift-net-collections');
+      expect(collections).toHaveTextContent('Net collections');
+      expect(collections).toHaveTextContent(/50[.,]00/);
+      expect(collections).toHaveTextContent('of which tips');
+      expect(within(pane).queryByText('Total sales')).toBeNull();
+    });
+
     it('shows a till the phone closed itself with its orders, sales, cash and card, and receives it by shift id', async () => {
       bridge.shifts.unitReadiness.mockResolvedValue(readiness({ pending_returns: [closedPhoneTill()] }));
       render(<StaffShiftModal {...checkin} />);

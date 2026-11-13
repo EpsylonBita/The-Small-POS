@@ -15390,11 +15390,14 @@ fn apply_success(
                     )?;
                 }
             } else {
-                sync::mark_local_payment_applied(
+                let sent = serde_json::from_str::<Value>(&item.data)
+                    .map_err(|error| format!("parse acknowledged payment tender: {error}"))?;
+                sync::mark_local_payment_applied_if_tender_unchanged(
                     conn,
                     item.record_id.as_str(),
                     now.as_str(),
                     remote_payment_id.as_deref(),
+                    &sent,
                 )?;
             }
         }
@@ -34281,6 +34284,98 @@ pub(crate) mod tests {
             generation, 1,
             "stale-reclaim must bump claim_generation so any late ack from the prior worker is rejected"
         );
+    }
+
+    #[test]
+    fn k2c_payment_ack_keeps_new_tender_and_fences_stale_claims() {
+        for correction in [true, false] {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            conn.execute("INSERT INTO orders (id,supabase_id,items,total_amount,total_amount_cents,status,sync_status,created_at,updated_at)
+                VALUES ('ack-order','remote-ack-order','[]',10,1000,'completed','synced',datetime('now'),datetime('now'))", []).unwrap();
+            conn.execute("INSERT INTO order_payments (id,order_id,method,amount,amount_cents,status,payment_origin,sync_status,sync_state,created_at,updated_at)
+                VALUES ('ack-payment','ack-order','cash',10,1000,'completed','manual','pending','pending',datetime('now'),datetime('now'))", []).unwrap();
+            crate::payments::refresh_payment_sync_queue_entry(&conn, "ack-payment").unwrap();
+            conn.execute("UPDATE parity_sync_queue SET status='processing',claim_generation=7 WHERE table_name='payments' AND record_id='ack-payment'", []).unwrap();
+            let item = conn.query_row("SELECT id,table_name,record_id,operation,data,organization_id,created_at,attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,priority,module_type,conflict_strategy,version,claim_generation,status FROM parity_sync_queue WHERE table_name='payments' AND record_id='ack-payment'", [], map_internal_queue_item).unwrap();
+            if correction {
+                conn.execute(
+                    "UPDATE order_payments SET method='card' WHERE id='ack-payment'",
+                    [],
+                )
+                .unwrap();
+                crate::payments::refresh_payment_sync_queue_entry(&conn, "ack-payment").unwrap();
+            } else {
+                conn.execute(r#"UPDATE order_payments SET metadata='{"receipt":"new"}',updated_at='2026-11-11T00:59:00Z' WHERE id='ack-payment'"#, []).unwrap();
+            }
+            let ack = json!({"payment_id":"remote-ack-payment"});
+            let mut stale = item.clone();
+            stale.claim_generation = 6;
+            assert!(with_live_generic_claim(&conn, &stale, |conn| {
+                apply_success(conn, &stale, Some(&ack))?;
+                mark_success(conn, &stale.id, stale.claim_generation)
+            })
+            .unwrap()
+            .is_none());
+            let before: String = conn
+                .query_row(
+                    "SELECT sync_status FROM order_payments WHERE id='ack-payment'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(before, "pending");
+            assert!(with_live_generic_claim(&conn, &item, |conn| {
+                apply_success(conn, &item, Some(&ack))?;
+                mark_success(conn, &item.id, item.claim_generation)
+            })
+            .unwrap()
+            .is_some());
+            let state: (String, String) = conn
+                .query_row(
+                    "SELECT sync_status,sync_state FROM order_payments WHERE id='ack-payment'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                state,
+                if correction {
+                    ("pending".into(), "pending".into())
+                } else {
+                    ("synced".into(), "applied".into())
+                }
+            );
+            let old_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue WHERE id=?1",
+                    [&item.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                old_count, 0,
+                "only the acknowledged processing row is consumed"
+            );
+            let remaining: Vec<String> = conn.prepare("SELECT data FROM parity_sync_queue WHERE table_name='payments' AND record_id='ack-payment'").unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+            assert_eq!(remaining.len(), if correction { 1 } else { 0 });
+            if correction {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&remaining[0]).unwrap()["method"],
+                    "card"
+                );
+                let body = apply_ack_for_test(&conn, "payments", "ack-payment", &ack).unwrap();
+                assert_eq!(body["payment_method"], "card");
+                let state: String = conn
+                    .query_row(
+                        "SELECT sync_state FROM order_payments WHERE id='ack-payment'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(state, "applied");
+            }
+        }
     }
 
     /// Wave 10 H8 regression #2: a late `mark_success` from a worker

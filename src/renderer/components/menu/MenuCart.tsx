@@ -1,6 +1,7 @@
 import type { CouponEligibility } from '../../utils/couponErrors';
 import { getStoreCurrency } from '../../utils/store-currency';
 import React from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine, Gift, CheckSquare, Square, Percent, RotateCcw, Award, MapPin } from 'lucide-react';
 import { EmptyCartIllustration } from '../icons/EmptyCartIllustration';
@@ -1021,12 +1022,23 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const showZoneNotCheckedNotice =
     isDeliveryOrder && !allowManualDeliveryFee && !editMode && !showOfflineZoneChoice && deliveryFeeStatus === 'not_checked';
 
+  // Presentation only: reveal conditional blocks without animating cart-line updates (founder 11/11/2026).
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   return (
+    // The shadow stays inside the 8 px the menu's clipped column leaves around the cart: a wider
+    // one was cut square and read as a frame behind the rounded card (founder 11/11/2026).
     <div
-      className="flex h-full w-full flex-col overflow-hidden rounded-[28px] border border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) shadow-[0_12px_32px_rgba(0,0,0,0.18)]"
+      className="pos-glass-form-card p-0! flex h-full w-full flex-col overflow-hidden rounded-[28px]! text-(--pos-s-fg) shadow-[0_2px_6px_rgba(0,0,0,0.10)]"
     >
       {/* Header - shrink-0 keeps it fixed size */}
-      <div className="shrink-0 border-b border-(--pos-s-border)">
+      <div className="shrink-0">
         <div className="flex items-center justify-between px-4 py-3">
           <h3 className="text-lg font-semibold liquid-glass-modal-title text-base!">
             {t('menu.cart.header', { count: uniqueCartItems.length })}
@@ -1034,7 +1046,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           <div className="flex items-center gap-2">
             {isSelectionMode && (
               <>
-                <span className="rounded-full bg-(--pos-s-surface-2) px-2.5 py-1 text-xs font-semibold text-amber-800 dark:text-amber-300">
+                <span className="rounded-full px-2.5 py-1 text-xs font-semibold text-amber-800 dark:text-amber-300">
                   {t('menu.cart.selectedCount', '{{count}} selected', {
                     count: selectedCartItemIdsArray.length,
                   })}
@@ -1042,7 +1054,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 <button
                   type="button"
                   onClick={exitSelectionMode}
-                  className="p-1.5 rounded-lg transition-colors liquid-glass-modal-text-muted active:bg-black/5 dark:active:bg-white/10"
+                  className="pos-glass-field min-h-touch min-w-touch flex items-center justify-center p-1.5 rounded-lg transition-colors liquid-glass-modal-text-muted"
                   aria-label={t('menu.cart.exitSelection', 'Exit selection')}
                 >
                   <X className="w-4 h-4" />
@@ -1052,10 +1064,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             {onAddManualItem && !isSelectionMode && (
               <button
                 onClick={() => setShowManualInput((prev) => !prev)}
-                className={`flex items-center justify-center p-1.5 rounded-lg transition-colors ${
+                className={`min-h-touch min-w-touch flex items-center justify-center p-1.5 rounded-lg transition-colors ${
                   showManualInput
                     ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
-                    : 'liquid-glass-modal-text-muted active:bg-black/5 dark:active:bg-white/10'
+                    : 'pos-glass-field liquid-glass-modal-text-muted'
                 }`}
                 aria-label={t('menu.cart.addManualItem', 'Manual Item')}
               >
@@ -1064,266 +1076,320 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             )}
           </div>
         </div>
-        {isSelectionMode && (
-          <div className="px-4 pb-3">
-            <div className="grid grid-cols-[2.75rem_1fr_1fr] gap-2">
-              <button
-                type="button"
-                onClick={toggleSelectAllCartItems}
-                disabled={selectableCartItemIds.length === 0}
-                className="h-10 rounded-lg border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15 disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center"
-                aria-label={
-                  allSelectableSelected
-                    ? t('menu.cart.clearSelection', 'Clear selection')
-                    : t('menu.cart.selectAll', 'Select all')
-                }
-              >
-                {allSelectableSelected ? (
-                  <CheckSquare className="w-4 h-4" />
-                ) : (
-                  <Square className="w-4 h-4" />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={openLineDiscountModal}
-                disabled={selectedCartItemIdsArray.length === 0}
-                className="h-10 px-3 rounded-lg border text-sm font-semibold bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15 disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center gap-2"
-              >
-                <Percent className="w-4 h-4" />
-                <span>{t('menu.cart.discountSelectedShort', 'Discount')}</span>
-              </button>
-              <button
-                type="button"
-                onClick={clearSelectedLineDiscount}
-                disabled={selectedCartItemIdsArray.length === 0}
-                className="h-10 px-3 rounded-lg border text-sm font-semibold bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15 disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center gap-2"
-              >
-                <RotateCcw className="w-4 h-4" />
-                <span>{t('menu.cart.clearLineDiscountShort', 'Clear')}</span>
-              </button>
-            </div>
-          </div>
-        )}
-        {ghostModeArmed && (
-          <div className="px-4 pb-3">
-            <div className="rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-xs font-medium text-amber-800 dark:text-amber-200">
-              {t(
-                'menu.cart.ghostModeBanner',
-                'Ghost order armed. This cart will print only, stay hidden in POS, and be saved as a ghost reference order.'
-              )}
-            </div>
-          </div>
-        )}
-        {/* Manual item inline form */}
-        {showManualInput && onAddManualItem && !isSelectionMode && (
-          <div className={`px-4 pb-3 space-y-2`}>
-            {ghostModeFeatureEnabled && !ghostModeArmed && (
-              <p className="text-[11px] liquid-glass-modal-text-muted">
-                {t(
-                  'menu.cart.ghostModeHint',
-                  'Enter name X and price 1 to arm ghost mode for the current cart only.'
-                )}
-              </p>
-            )}
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={manualName}
-                onChange={(e) => setManualName(e.target.value)}
-                placeholder={t('menu.cart.manualNamePlaceholder', 'Item name (optional)')}
-                className="flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400"
-              />
-            </div>
-            <div className="flex gap-2">
-              <CentsMoneyInput
-                aria-label={t('menu.cart.manualPricePlaceholder', 'Price')}
-                value={manualPrice}
-                onValueChange={setManualPrice}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    commitManualItem();
+        <AnimatePresence initial={false}>
+          {isSelectionMode && (
+            <motion.div {...revealMotion} className="px-4 pb-3">
+              <div className="grid grid-cols-[2.75rem_1fr_1fr] gap-2">
+                <button
+                  type="button"
+                  onClick={toggleSelectAllCartItems}
+                  disabled={selectableCartItemIds.length === 0}
+                  className="min-h-touch rounded-lg border pos-glass-field liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center"
+                  aria-label={
+                    allSelectableSelected
+                      ? t('menu.cart.clearSelection', 'Clear selection')
+                      : t('menu.cart.selectAll', 'Select all')
                   }
-                }}
-                placeholder={`${t('menu.cart.manualPricePlaceholder', 'Price')} (0,00)`}
-                className="flex-1 min-w-0 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400"
-                autoFocus
-              />
-              <button
-                onClick={commitManualItem}
-                disabled={!canAddManualItem}
-                className={`shrink-0 whitespace-nowrap px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
-                  !canAddManualItem
-                    ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
-                    : 'bg-yellow-400 text-black active:bg-yellow-300'
-                }`}
-              >
-                {t('menu.cart.manualItemSubmit', 'Add')}
-              </button>
-            </div>
-          </div>
-        )}
+                >
+                  {allSelectableSelected ? (
+                    <CheckSquare className="w-4 h-4" />
+                  ) : (
+                    <Square className="w-4 h-4" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={openLineDiscountModal}
+                  disabled={selectedCartItemIdsArray.length === 0}
+                  className="min-h-touch px-3 rounded-lg border text-sm font-semibold pos-glass-field liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center gap-2"
+                >
+                  <Percent className="w-4 h-4" />
+                  <span>{t('menu.cart.discountSelectedShort', 'Discount')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={clearSelectedLineDiscount}
+                  disabled={selectedCartItemIdsArray.length === 0}
+                  className="min-h-touch px-3 rounded-lg border text-sm font-semibold pos-glass-field liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center gap-2"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  <span>{t('menu.cart.clearLineDiscountShort', 'Clear')}</span>
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+        <AnimatePresence initial={false}>
+          {ghostModeArmed && (
+            <motion.div {...revealMotion} className="px-4 pb-3">
+              <div className="pos-glass-form-card p-3! text-xs font-medium text-amber-800 dark:text-amber-200">
+                {t(
+                  'menu.cart.ghostModeBanner',
+                  'Ghost order armed. This cart will print only, stay hidden in POS, and be saved as a ghost reference order.'
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+        {/* Manual item inline form */}
+        <AnimatePresence initial={false}>
+          {showManualInput && onAddManualItem && !isSelectionMode && (
+            <motion.div {...revealMotion} className="pos-glass-form-card mx-4 mb-3 p-3! space-y-2">
+              <AnimatePresence initial={false}>
+                {ghostModeFeatureEnabled && !ghostModeArmed && (
+                  <motion.p {...revealMotion} className="text-[11px] liquid-glass-modal-text-muted">
+                    {t(
+                      'menu.cart.ghostModeHint',
+                      'Enter name X and price 1 to arm ghost mode for the current cart only.'
+                    )}
+                  </motion.p>
+                )}
+              </AnimatePresence>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={manualName}
+                  onChange={(e) => setManualName(e.target.value)}
+                  placeholder={t('menu.cart.manualNamePlaceholder', 'Item name (optional)')}
+                  className="flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased liquid-glass-modal-input pos-glass-field min-h-touch focus:outline-hidden focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400"
+                />
+              </div>
+              <div className="flex gap-2">
+                <CentsMoneyInput
+                  aria-label={t('menu.cart.manualPricePlaceholder', 'Price')}
+                  value={manualPrice}
+                  onValueChange={setManualPrice}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      commitManualItem();
+                    }
+                  }}
+                  placeholder={`${t('menu.cart.manualPricePlaceholder', 'Price')} (0,00)`}
+                  className="flex-1 min-w-0 px-2.5 py-1.5 text-sm border rounded-lg antialiased liquid-glass-modal-input pos-glass-field min-h-touch focus:outline-hidden focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400"
+                  autoFocus
+                />
+                <button
+                  onClick={commitManualItem}
+                  disabled={!canAddManualItem}
+                  className={`min-h-touch shrink-0 whitespace-nowrap px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
+                    !canAddManualItem
+                      ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
+                      : 'bg-yellow-400 text-black active:bg-yellow-300'
+                  }`}
+                >
+                  {t('menu.cart.manualItemSubmit', 'Add')}
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Scrollable Cart Items - flex-1 + min-h-0 allows proper scrolling */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3 touch-scroll scrollbar-hide">
-        {uniqueCartItems.length === 0 ? (
-          // Founder 01/11/2026: a better picture than the plain cart glyph (EmptyCartIllustration), in the middle of the
-          // cart's empty space.
-          <div data-cart-empty className="flex min-h-full flex-col items-center justify-center py-6 text-center sm:py-8">
-            <EmptyCartIllustration className="mx-auto mb-3 w-28 text-(--pos-s-muted) opacity-80 sm:mb-4 sm:w-36" />
-            <p className="text-sm sm:text-base antialiased liquid-glass-modal-text-muted">
-              {t('menu.cart.empty')}
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {uniqueCartItems.map((item) => {
-              const itemUnitPrice =
-                item.unitPrice ||
-                item.price ||
-                ((item.totalPrice || 0) / Math.max(item.quantity || 1, 1));
-              const isHoldingLinePrice = holdingLineItemId === item.id;
-              const isPriceOverridden =
-                item.isPriceOverridden || ((item.originalUnitPrice ?? itemUnitPrice) !== itemUnitPrice);
-              const isRewardLine = item.is_offer_reward === true;
-              const canSelectLine = !isRewardLine;
-              const isSelectedLine = selectedCartItemIds.has(item.id);
-              const lineDiscountAmount = Math.max(
-                0,
-                Number(item.discountAmount ?? item.discount_amount ?? item.discount ?? 0)
-              );
+        <AnimatePresence initial={false}>
+          {uniqueCartItems.length === 0 ? (
+            // Founder 01/11/2026: a better picture than the plain cart glyph (EmptyCartIllustration), in the middle of the
+            // cart's empty space.
+            <motion.div key="cart-empty" {...revealMotion} data-cart-empty className="flex min-h-full flex-col items-center justify-center py-6 text-center sm:py-8">
+              <EmptyCartIllustration className="mx-auto mb-3 w-28 text-(--pos-s-muted) opacity-80 sm:mb-4 sm:w-36" />
+              <p className="text-sm sm:text-base antialiased liquid-glass-modal-text-muted">
+                {t('menu.cart.empty')}
+              </p>
+            </motion.div>
+          ) : (
+            <div className="space-y-3">
+              {uniqueCartItems.map((item) => {
+                const itemUnitPrice =
+                  item.unitPrice ||
+                  item.price ||
+                  ((item.totalPrice || 0) / Math.max(item.quantity || 1, 1));
+                const isHoldingLinePrice = holdingLineItemId === item.id;
+                const isPriceOverridden =
+                  item.isPriceOverridden || ((item.originalUnitPrice ?? itemUnitPrice) !== itemUnitPrice);
+                const isRewardLine = item.is_offer_reward === true;
+                const canSelectLine = !isRewardLine;
+                const isSelectedLine = selectedCartItemIds.has(item.id);
+                const lineDiscountAmount = Math.max(
+                  0,
+                  Number(item.discountAmount ?? item.discount_amount ?? item.discount ?? 0)
+                );
 
-              return (
-              <div
-                key={item.id}
-                aria-selected={isSelectionMode ? isSelectedLine : undefined}
-                // pos-enter: a newly added line fades in once (CSS only, keyed by line id).
-                className={`pos-enter p-3 rounded-xl border transition-all duration-200 ${
-                  isSelectionMode && isSelectedLine
-                    ? 'bg-(--pos-s-surface-2) border-(--pos-s-sel-bg) ring-1 ring-(--pos-s-sel-bg)'
-                    : 'bg-(--pos-s-surface-2) border-(--pos-s-border) active:bg-(--pos-s-border)'
-                } ${isSelectionMode && canSelectLine ? 'cursor-pointer' : onEditItem && !isRewardLine ? 'cursor-pointer' : ''}`}
-                onPointerDown={(event) => {
-                  if (!isSelectionMode && canSelectLine) {
-                    startSelectionHold(event, item.id);
-                  }
-                }}
-                onPointerUp={handleSelectionPointerEnd}
-                onPointerCancel={handleSelectionPointerEnd}
-                onLostPointerCapture={handleSelectionPointerEnd}
-                onContextMenu={(event) => {
-                  if (canSelectLine) {
-                    event.preventDefault();
-                  }
-                }}
-                onClick={() => {
-                  if (selectionHoldTriggeredRef.current) {
-                    selectionHoldTriggeredRef.current = false;
-                    return;
-                  }
-                  if (isSelectionMode) {
-                    if (canSelectLine) {
-                      toggleSelectedCartItem(item.id);
+                return (
+                <div
+                  key={item.id}
+                  aria-selected={isSelectionMode ? isSelectedLine : undefined}
+                  // Cart lines stay still while quantities change; only conditional notices reveal.
+                  className={`p-3 rounded-xl border transition-colors duration-200 ${
+                    isSelectionMode && isSelectedLine
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-(--pos-s-depth-card)'
+                      : 'pos-glass-tap-card border-(--pos-s-border)!'
+                  } ${isSelectionMode && canSelectLine ? 'cursor-pointer' : onEditItem && !isRewardLine ? 'cursor-pointer' : ''}`}
+                  onPointerDown={(event) => {
+                    if (!isSelectionMode && canSelectLine) {
+                      startSelectionHold(event, item.id);
                     }
-                    return;
-                  }
-                  if (!isRewardLine) {
-                    onEditItem?.(item);
-                  }
-                }}
-              >
-                <div className="flex justify-between items-start mb-2">
-                  <div className="flex min-w-0 flex-1 items-start gap-2">
-                    {isSelectionMode && canSelectLine && (
-                      <span
-                        className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border ${
-                          isSelectedLine
-                            ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
-                            : 'border-black/15 bg-black/5 text-black/45 dark:border-white/20 dark:bg-white/10 dark:text-white/55'
-                        }`}
-                      >
-                        {isSelectedLine ? (
-                          <CheckSquare className="h-4 w-4" />
-                        ) : (
-                          <Square className="h-4 w-4" />
-                        )}
-                      </span>
-                    )}
-                    <div className="min-w-0 flex-1">
-                    {/* Category label */}
-                    {item.categoryName && (
-                      <div className="text-[11px] uppercase tracking-wider font-semibold mb-0.5 antialiased liquid-glass-modal-text-muted">
-                        {item.categoryName}
-                      </div>
-                    )}
-                    {/* Item name (subcategory) */}
-                    <h4 className="font-semibold antialiased liquid-glass-modal-text">
-                      {item.name}
-                    </h4>
-                    {isRewardLine && (
-                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                        <span className="inline-flex items-center gap-1 rounded-full bg-(--pos-s-surface-2) px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
-                          <Gift className="h-3 w-3" />
-                          {t('menu.cart.autoOfferReward', 'Auto reward')}
+                  }}
+                  onPointerUp={handleSelectionPointerEnd}
+                  onPointerCancel={handleSelectionPointerEnd}
+                  onLostPointerCapture={handleSelectionPointerEnd}
+                  onContextMenu={(event) => {
+                    if (canSelectLine) {
+                      event.preventDefault();
+                    }
+                  }}
+                  onClick={() => {
+                    if (selectionHoldTriggeredRef.current) {
+                      selectionHoldTriggeredRef.current = false;
+                      return;
+                    }
+                    if (isSelectionMode) {
+                      if (canSelectLine) {
+                        toggleSelectedCartItem(item.id);
+                      }
+                      return;
+                    }
+                    if (!isRewardLine) {
+                      onEditItem?.(item);
+                    }
+                  }}
+                >
+                  <div className="flex justify-between items-start mb-2">
+                    <div className="flex min-w-0 flex-1 items-start gap-2">
+                      {isSelectionMode && canSelectLine && (
+                        <span
+                          className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border ${
+                            isSelectedLine
+                              ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
+                              : 'border-(--pos-s-border) liquid-glass-modal-text-muted'
+                          }`}
+                        >
+                          {isSelectedLine ? (
+                            <CheckSquare className="h-4 w-4" />
+                          ) : (
+                            <Square className="h-4 w-4" />
+                          )}
                         </span>
-                        {item.offer_name && (
-                          <span className="text-[11px] antialiased liquid-glass-modal-text-muted">
-                            {item.offer_name}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="text-right">
-                      <span className="font-semibold antialiased text-emerald-800 dark:text-emerald-400">
-                        {formatCurrency(item.totalPrice || 0)}
-                      </span>
-                      {lineDiscountAmount > 0 && (
-                        <div className="text-[11px] font-semibold text-green-800 dark:text-green-400">
-                          -{formatCurrency(lineDiscountAmount)}
+                      )}
+                      <div className="min-w-0 flex-1">
+                      {/* Category label */}
+                      {item.categoryName && (
+                        <div className="text-[11px] uppercase tracking-wider font-semibold mb-0.5 antialiased liquid-glass-modal-text-muted">
+                          {item.categoryName}
                         </div>
                       )}
+                      {/* Item name (subcategory) */}
+                      <h4 className="font-semibold antialiased liquid-glass-modal-text">
+                        {item.name}
+                      </h4>
+                      {isRewardLine && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                          <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                            <Gift className="h-3 w-3" />
+                            {t('menu.cart.autoOfferReward', 'Auto reward')}
+                          </span>
+                          {item.offer_name && (
+                            <span className="text-[11px] antialiased liquid-glass-modal-text-muted">
+                              {item.offer_name}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      </div>
                     </div>
-                    {/* Delete button - positioned away from main click area */}
-                    {onRemoveItem && !isRewardLine && (
+                    <div className="flex items-center gap-2">
+                      <div className="text-right">
+                        <span className="font-semibold antialiased text-emerald-800 dark:text-emerald-400">
+                          {formatCurrency(item.totalPrice || 0)}
+                        </span>
+                        {lineDiscountAmount > 0 && (
+                          <div className="text-[11px] font-semibold text-green-800 dark:text-green-400">
+                            -{formatCurrency(lineDiscountAmount)}
+                          </div>
+                        )}
+                      </div>
+                      {/* Delete button - positioned away from main click area */}
+                      {onRemoveItem && !isRewardLine && (
+                        <button
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onRemoveItem(item.id);
+                          }}
+                          className="min-h-touch min-w-touch flex items-center justify-center p-1.5 rounded-full active:bg-(--pos-s-surface-2) transition-colors ml-2 text-red-600 dark:text-red-400"
+                          aria-label={t('common.actions.delete')}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {/* Quantity controls */}
+                  <div
+                    className="flex items-center justify-between mt-2 antialiased liquid-glass-modal-text-muted"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center gap-2">
                       <button
-                        onPointerDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation();
-                          onRemoveItem(item.id);
+                          if (isRewardLine) {
+                            return;
+                          }
+                          if (item.quantity <= 1) {
+                            onRemoveItem?.(item.id);
+                          } else {
+                            const updatedItems = cartItems.map(ci =>
+                              ci.id === item.id
+                                ? (() => {
+                                    const nextQuantity = ci.quantity - 1;
+                                    const unitPrice =
+                                      ci.unitPrice || ci.price || (ci.totalPrice / ci.quantity);
+                                    const nextTotal = roundMoney(unitPrice * nextQuantity);
+                                    const discountBaseUnitPrice = ci.discountBaseUnitPrice;
+                                    const nextDiscountAmount =
+                                      discountBaseUnitPrice !== undefined
+                                        ? roundMoney(Math.max(0, (discountBaseUnitPrice - unitPrice) * nextQuantity))
+                                        : ci.discountAmount;
+
+                                    return {
+                                      ...ci,
+                                      quantity: nextQuantity,
+                                      totalPrice: nextTotal,
+                                      total_price: nextTotal,
+                                      discount:
+                                        nextDiscountAmount !== undefined ? nextDiscountAmount : ci.discount,
+                                      discountAmount: nextDiscountAmount,
+                                      discount_amount: nextDiscountAmount,
+                                      discountBaseTotalPrice:
+                                        discountBaseUnitPrice !== undefined
+                                          ? roundMoney(discountBaseUnitPrice * nextQuantity)
+                                          : ci.discountBaseTotalPrice,
+                                    };
+                                  })()
+                                : ci
+                            );
+                            onUpdateCart(updatedItems);
+                          }
                         }}
-                        className="p-1.5 rounded-full active:bg-(--pos-s-surface-2) transition-colors ml-2 text-red-600 dark:text-red-400"
-                        aria-label={t('common.actions.delete')}
+                        disabled={isRewardLine}
+                        className="pos-glass-field h-11 w-11 shrink-0 rounded-full flex items-center justify-center font-bold transition-colors liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        <Trash2 className="w-4 h-4" />
+                        −
                       </button>
-                    )}
-                  </div>
-                </div>
-                {/* Quantity controls */}
-                <div
-                  className="flex items-center justify-between mt-2 antialiased liquid-glass-modal-text-muted"
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (isRewardLine) {
-                          return;
-                        }
-                        if (item.quantity <= 1) {
-                          onRemoveItem?.(item.id);
-                        } else {
-                          const updatedItems = cartItems.map(ci =>
+                      <span className="min-w-[24px] text-center font-semibold antialiased liquid-glass-modal-text">{item.quantity}</span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (isRewardLine) {
+                            return;
+                          }
+                          const increase = (source: CartItem[]) => source.map(ci =>
                             ci.id === item.id
                               ? (() => {
-                                  const nextQuantity = ci.quantity - 1;
+                                  const nextQuantity = ci.quantity + 1;
                                   const unitPrice =
                                     ci.unitPrice || ci.price || (ci.totalPrice / ci.quantity);
                                   const nextTotal = roundMoney(unitPrice * nextQuantity);
@@ -1350,212 +1416,168 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                                 })()
                               : ci
                           );
-                          onUpdateCart(updatedItems);
+                          // A retail line's + goes through the shared stock rule
+                          // (retail.block_overselling); other lines step at once.
+                          if (orderLineStockLine(item)) {
+                            void retailStockRefused([item.id], true).then(refused => {
+                              if (!refused) {
+                                const updated = increase(cartItemsRef.current);
+                                cartItemsRef.current = updated;
+                                onUpdateCart(updated);
+                              }
+                            });
+                            return;
+                          }
+                          onUpdateCart(increase(cartItems));
+                        }}
+                        disabled={isRewardLine}
+                        className="pos-glass-field h-11 w-11 shrink-0 rounded-full flex items-center justify-center font-bold transition-colors liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        +
+                      </button>
+                    </div>
+                    {isRewardLine ? (
+                      <span className="rounded-md px-2.5 py-1 text-sm font-medium text-emerald-700 dark:text-emerald-300">
+                        {t('menu.cart.freeLabel', 'Free')}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onPointerDown={(event) =>
+                          startLinePriceHold(
+                            event,
+                            item.id,
+                            itemUnitPrice || 0,
+                            `${item.quantity}:${itemUnitPrice || 0}:${item.totalPrice || 0}`
+                          )
                         }
-                      }}
-                      disabled={isRewardLine}
-                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors border border-(--pos-s-border) bg-(--pos-s-surface) active:bg-(--pos-s-border) liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      −
-                    </button>
-                    <span className="min-w-[24px] text-center font-semibold antialiased liquid-glass-modal-text">{item.quantity}</span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (isRewardLine) {
-                          return;
-                        }
-                        const increase = (source: CartItem[]) => source.map(ci =>
-                          ci.id === item.id
-                            ? (() => {
-                                const nextQuantity = ci.quantity + 1;
-                                const unitPrice =
-                                  ci.unitPrice || ci.price || (ci.totalPrice / ci.quantity);
-                                const nextTotal = roundMoney(unitPrice * nextQuantity);
-                                const discountBaseUnitPrice = ci.discountBaseUnitPrice;
-                                const nextDiscountAmount =
-                                  discountBaseUnitPrice !== undefined
-                                    ? roundMoney(Math.max(0, (discountBaseUnitPrice - unitPrice) * nextQuantity))
-                                    : ci.discountAmount;
-
-                                return {
-                                  ...ci,
-                                  quantity: nextQuantity,
-                                  totalPrice: nextTotal,
-                                  total_price: nextTotal,
-                                  discount:
-                                    nextDiscountAmount !== undefined ? nextDiscountAmount : ci.discount,
-                                  discountAmount: nextDiscountAmount,
-                                  discount_amount: nextDiscountAmount,
-                                  discountBaseTotalPrice:
-                                    discountBaseUnitPrice !== undefined
-                                      ? roundMoney(discountBaseUnitPrice * nextQuantity)
-                                      : ci.discountBaseTotalPrice,
-                                };
-                              })()
-                            : ci
-                        );
-                        // A retail line's + goes through the shared stock rule
-                        // (retail.block_overselling); other lines step at once.
-                        if (orderLineStockLine(item)) {
-                          void retailStockRefused([item.id], true).then(refused => {
-                            if (!refused) {
-                              const updated = increase(cartItemsRef.current);
-                              cartItemsRef.current = updated;
-                              onUpdateCart(updated);
-                            }
-                          });
-                          return;
-                        }
-                        onUpdateCart(increase(cartItems));
-                      }}
-                      disabled={isRewardLine}
-                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors border border-(--pos-s-border) bg-(--pos-s-surface) active:bg-(--pos-s-border) liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      +
-                    </button>
+                        onPointerUp={handleLinePricePointerEnd}
+                        onPointerCancel={handleLinePricePointerEnd}
+                        onLostPointerCapture={handleLinePricePointerEnd}
+                        onContextMenu={(event) => event.preventDefault()}
+                        onClick={(event) => event.stopPropagation()}
+                        className={`min-h-touch relative overflow-hidden px-2.5 py-1 rounded-md text-sm font-medium antialiased transition-colors ${
+                          isHoldingLinePrice
+                            ? 'text-amber-800 dark:text-amber-300'
+                            : 'pos-glass-field liquid-glass-modal-text'
+                        }`}
+                      >
+                        <span className="relative z-1">× {formatCurrency(itemUnitPrice || 0)}</span>
+                        {isHoldingLinePrice && (
+                          <span
+                            className="absolute left-0 bottom-0 h-[2px] bg-(--pos-s-yellow) rounded-full"
+                            style={{ width: `${linePriceHoldProgress}%` }}
+                          />
+                        )}
+                      </button>
+                    )}
                   </div>
-                  {isRewardLine ? (
-                    <span className="rounded-md bg-(--pos-s-surface-2) px-2.5 py-1 text-sm font-medium text-emerald-700 dark:text-emerald-300">
-                      {t('menu.cart.freeLabel', 'Free')}
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onPointerDown={(event) =>
-                        startLinePriceHold(
-                          event,
-                          item.id,
-                          itemUnitPrice || 0,
-                          `${item.quantity}:${itemUnitPrice || 0}:${item.totalPrice || 0}`
-                        )
-                      }
-                      onPointerUp={handleLinePricePointerEnd}
-                      onPointerCancel={handleLinePricePointerEnd}
-                      onLostPointerCapture={handleLinePricePointerEnd}
-                      onContextMenu={(event) => event.preventDefault()}
-                      onClick={(event) => event.stopPropagation()}
-                      className={`relative overflow-hidden px-2.5 py-1 rounded-md text-sm font-medium antialiased transition-colors ${
-                        isHoldingLinePrice
-                          ? 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300'
-                          : 'liquid-glass-modal-text active:bg-black/8 dark:active:bg-white/10'
-                      }`}
-                    >
-                      <span className="relative z-1">× {formatCurrency(itemUnitPrice || 0)}</span>
-                      {isHoldingLinePrice && (
-                        <span
-                          className="absolute left-0 bottom-0 h-[2px] bg-(--pos-s-yellow) rounded-full"
-                          style={{ width: `${linePriceHoldProgress}%` }}
-                        />
+                  {(lineDiscountAmount > 0 || isPriceOverridden) && (
+                    <div className="mt-2 flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+                      {lineDiscountAmount > 0 && (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full text-green-800 dark:text-green-300">
+                          {t('menu.cart.lineDiscountBadge', 'Line discount')}
+                        </span>
                       )}
-                    </button>
+                      {isPriceOverridden && (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full text-amber-800 dark:text-amber-300">
+                          {t('menu.cart.priceOverridden', 'Overridden')}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {item.customizations && item.customizations.length > 0 && (
+                    <div className="mt-3 pt-1">
+                      {/* Separate "with" and "without" ingredients */}
+                      {(() => {
+                        const withIngredients = item.customizations.filter(c => !c.isWithout);
+                        const withoutIngredients = item.customizations.filter(c => c.isWithout);
+
+                        return (
+                          <>
+                            {/* Added ingredients */}
+                            {withIngredients.length > 0 && (
+                              <>
+                                <div className="text-xs font-semibold mb-1 antialiased liquid-glass-modal-text-muted">
+                                  {t('menu.cart.ingredients')}:
+                                </div>
+                                <div className="flex flex-wrap gap-1">
+                                  {withIngredients.map((c, idx) => {
+                                    const ingredientName = getIngredientName(c.ingredient);
+                                    const quantityText = c.quantity > 1 ? ` ×${c.quantity}` : '';
+                                    const littleText = c.isLittle ? ` (${t('menu.itemModal.little')})` : '';
+
+                                    return (
+                                      <span
+                                        key={`${item.id}-customization-${c.ingredient.id}-${idx}`}
+                                        className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased liquid-glass-modal-text"
+                                      >
+                                        + {ingredientName}
+                                        {quantityText && (
+                                          <span className="ml-1 font-bold liquid-glass-modal-text">
+                                            {quantityText}
+                                          </span>
+                                        )}
+                                        {littleText && (
+                                          <span className="ml-1 opacity-80">{littleText}</span>
+                                        )}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              </>
+                            )}
+
+                            {/* Without ingredients */}
+                            {withoutIngredients.length > 0 && (
+                              <>
+                                <div className={`text-xs font-semibold mb-1 antialiased text-red-700 dark:text-red-400 ${withIngredients.length > 0 ? 'mt-2' : ''}`}>
+                                  <span className="inline-flex items-center gap-1">
+                                    <Ban className="w-3 h-3" aria-hidden="true" />
+                                    {t('menu.cart.without', { defaultValue: 'Without' })}:
+                                  </span>
+                                </div>
+                                <div className="flex flex-wrap gap-1">
+                                  {withoutIngredients.map((c, idx) => {
+                                    const ingredientName = getIngredientName(c.ingredient);
+
+                                    return (
+                                      <span
+                                        key={`${item.id}-without-${c.ingredient.id}-${idx}`}
+                                        className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased text-red-700 dark:text-red-200 line-through"
+                                      >
+                                        {ingredientName}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              </>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
+                  {/* Special Notes */}
+                  {item.notes && item.notes.trim() && (
+                    <div className="mt-3 pt-1">
+                      <div className="text-xs font-semibold mb-1 antialiased text-amber-800 dark:text-amber-400">
+                        📝 {t('menu.cart.specialNotes') || t('menu.itemModal.specialInstructions')}:
+                      </div>
+                      <p className="text-xs italic antialiased liquid-glass-modal-text-muted">
+                        {item.notes}
+                      </p>
+                    </div>
                   )}
                 </div>
-                {(lineDiscountAmount > 0 || isPriceOverridden) && (
-                  <div className="mt-2 flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
-                    {lineDiscountAmount > 0 && (
-                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-(--pos-s-surface-2) text-green-800 dark:text-green-300">
-                        {t('menu.cart.lineDiscountBadge', 'Line discount')}
-                      </span>
-                    )}
-                    {isPriceOverridden && (
-                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300">
-                        {t('menu.cart.priceOverridden', 'Overridden')}
-                      </span>
-                    )}
-                  </div>
-                )}
-                {item.customizations && item.customizations.length > 0 && (
-                  <div className="mt-2 pt-2 border-t border-(--pos-s-border)">
-                    {/* Separate "with" and "without" ingredients */}
-                    {(() => {
-                      const withIngredients = item.customizations.filter(c => !c.isWithout);
-                      const withoutIngredients = item.customizations.filter(c => c.isWithout);
-
-                      return (
-                        <>
-                          {/* Added ingredients */}
-                          {withIngredients.length > 0 && (
-                            <>
-                              <div className="text-xs font-semibold mb-1 antialiased liquid-glass-modal-text-muted">
-                                {t('menu.cart.ingredients')}:
-                              </div>
-                              <div className="flex flex-wrap gap-1">
-                                {withIngredients.map((c, idx) => {
-                                  const ingredientName = getIngredientName(c.ingredient);
-                                  const quantityText = c.quantity > 1 ? ` ×${c.quantity}` : '';
-                                  const littleText = c.isLittle ? ` (${t('menu.itemModal.little')})` : '';
-
-                                  return (
-                                    <span
-                                      key={`${item.id}-customization-${c.ingredient.id}-${idx}`}
-                                      className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased border border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg)"
-                                    >
-                                      + {ingredientName}
-                                      {quantityText && (
-                                        <span className="ml-1 font-bold text-slate-800 dark:text-slate-100">
-                                          {quantityText}
-                                        </span>
-                                      )}
-                                      {littleText && (
-                                        <span className="ml-1 opacity-80">{littleText}</span>
-                                      )}
-                                    </span>
-                                  );
-                                })}
-                              </div>
-                            </>
-                          )}
-
-                          {/* Without ingredients */}
-                          {withoutIngredients.length > 0 && (
-                            <>
-                              <div className={`text-xs font-semibold mb-1 antialiased text-red-700 dark:text-red-400 ${withIngredients.length > 0 ? 'mt-2' : ''}`}>
-                                <span className="inline-flex items-center gap-1">
-                                  <Ban className="w-3 h-3" aria-hidden="true" />
-                                  {t('menu.cart.without', { defaultValue: 'Without' })}:
-                                </span>
-                              </div>
-                              <div className="flex flex-wrap gap-1">
-                                {withoutIngredients.map((c, idx) => {
-                                  const ingredientName = getIngredientName(c.ingredient);
-
-                                  return (
-                                    <span
-                                      key={`${item.id}-without-${c.ingredient.id}-${idx}`}
-                                      className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased bg-(--pos-s-surface-2) text-red-700 dark:bg-zinc-800 dark:text-red-200 line-through"
-                                    >
-                                      {ingredientName}
-                                    </span>
-                                  );
-                                })}
-                              </div>
-                            </>
-                          )}
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
-                {/* Special Notes */}
-                {item.notes && item.notes.trim() && (
-                  <div className="mt-2 pt-2 border-t border-(--pos-s-border)">
-                    <div className="text-xs font-semibold mb-1 antialiased text-amber-800 dark:text-amber-400">
-                      📝 {t('menu.cart.specialNotes') || t('menu.itemModal.specialInstructions')}:
-                    </div>
-                    <p className="text-xs italic antialiased liquid-glass-modal-text-muted">
-                      {item.notes}
-                    </p>
-                  </div>
-                )}
-              </div>
-            )})}
-          </div>
-        )}
+              )})}
+            </div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Cart Footer - shrink-0 keeps it fixed at bottom */}
-      <div className="shrink-0 p-3 border-t border-black/10 dark:border-white/10 bg-transparent space-y-3">
+      <div className="shrink-0 p-3 bg-(--pos-s-surface) space-y-3">
         {/* Coupon + Discount Controls */}
         {!editMode && (onApplyCoupon || discountControlEnabled || loyaltyControlEnabled) && (
           <div className="space-y-2">
@@ -1614,69 +1636,77 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               )}
             </div>
 
-            {couponError && !appliedCoupon && (
-              <p className="text-xs text-red-500 font-medium antialiased">{couponError}</p>
-            )}
+            <AnimatePresence initial={false}>
+              {couponError && !appliedCoupon && (
+                <motion.p {...revealMotion} className="text-xs text-red-500 font-medium antialiased">{couponError}</motion.p>
+              )}
+            </AnimatePresence>
 
-            {isAppliedDiscountOverMax && (
-              <p className="text-xs text-red-500 text-right font-medium antialiased">
-                {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
-              </p>
-            )}
+            <AnimatePresence initial={false}>
+              {isAppliedDiscountOverMax && (
+                <motion.p {...revealMotion} className="text-xs text-red-500 text-right font-medium antialiased">
+                  {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
+                </motion.p>
+              )}
+            </AnimatePresence>
 
-            {onApplyCoupon && appliedCoupon && (
-              <div className="flex items-center justify-between rounded-lg px-3 py-2 bg-(--pos-s-surface-2) dark:bg-zinc-800 border border-(--pos-s-border) dark:border-zinc-700">
-                <div className="flex items-center gap-2">
-                  <Ticket className="w-4 h-4 text-emerald-800 dark:text-emerald-400" />
-                  <div>
-                    <span className="text-sm font-semibold antialiased text-emerald-700 dark:text-emerald-400">
-                      {appliedCoupon.code}
-                    </span>
-                    <span className="text-xs ml-2 antialiased text-emerald-600 dark:text-emerald-300">
-                      {appliedCoupon.discount_type === 'percentage'
-                        ? `${appliedCoupon.discount_value}%`
-                        : formatCurrency(appliedCoupon.discount_value)
-                      } {t('menu.cart.couponOff', 'off')}
-                    </span>
+            <AnimatePresence initial={false}>
+              {onApplyCoupon && appliedCoupon && (
+                <motion.div {...revealMotion} className="pos-glass-form-card p-3! flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Ticket className="w-4 h-4 text-emerald-800 dark:text-emerald-400" />
+                    <div>
+                      <span className="text-sm font-semibold antialiased text-emerald-700 dark:text-emerald-400">
+                        {appliedCoupon.code}
+                      </span>
+                      <span className="text-xs ml-2 antialiased text-emerald-600 dark:text-emerald-300">
+                        {appliedCoupon.discount_type === 'percentage'
+                          ? `${appliedCoupon.discount_value}%`
+                          : formatCurrency(appliedCoupon.discount_value)
+                        } {t('menu.cart.couponOff', 'off')}
+                      </span>
+                    </div>
                   </div>
-                </div>
-                {onRemoveCoupon && (
-                  <button
-                    onClick={onRemoveCoupon}
-                    className="p-1 rounded-full transition-colors text-emerald-800 dark:text-emerald-400 active:bg-(--pos-s-surface-2)"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            )}
+                  {onRemoveCoupon && (
+                    <button
+                      onClick={onRemoveCoupon}
+                      className="min-h-touch min-w-touch flex items-center justify-center p-1 rounded-full transition-colors text-emerald-800 dark:text-emerald-400 active:bg-(--pos-s-surface-2)"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
 
-            {loyaltyRedemption && (
-              <div className="flex items-center justify-between rounded-lg px-3 py-2 bg-(--pos-s-surface-2) dark:bg-zinc-800 border border-(--pos-s-border) dark:border-zinc-700">
-                <div className="flex items-center gap-2">
-                  <Award className="w-4 h-4 text-amber-800 dark:text-amber-400" />
-                  <div>
-                    <span className="text-sm font-semibold antialiased text-amber-800 dark:text-amber-300">
-                      {t('menu.cart.loyaltyRedemption', '{{points}} pts', {
-                        points: loyaltyRedemption.pointsRedeemed,
-                      })}
-                    </span>
-                    <span className="text-xs ml-2 antialiased text-amber-800 dark:text-amber-300">
-                      {formatCurrency(loyaltyDiscountAmount)} {t('menu.cart.loyaltyOff', 'off')}
-                    </span>
+            <AnimatePresence initial={false}>
+              {loyaltyRedemption && (
+                <motion.div {...revealMotion} className="pos-glass-form-card p-3! flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Award className="w-4 h-4 text-amber-800 dark:text-amber-400" />
+                    <div>
+                      <span className="text-sm font-semibold antialiased text-amber-800 dark:text-amber-300">
+                        {t('menu.cart.loyaltyRedemption', '{{points}} pts', {
+                          points: loyaltyRedemption.pointsRedeemed,
+                        })}
+                      </span>
+                      <span className="text-xs ml-2 antialiased text-amber-800 dark:text-amber-300">
+                        {formatCurrency(loyaltyDiscountAmount)} {t('menu.cart.loyaltyOff', 'off')}
+                      </span>
+                    </div>
                   </div>
-                </div>
-                {onRemoveLoyaltyRedemption && (
-                  <button
-                    onClick={onRemoveLoyaltyRedemption}
-                    className="p-1 rounded-full transition-colors text-amber-800 dark:text-amber-300 active:bg-(--pos-s-surface-2)"
-                    aria-label={t('menu.cart.removeLoyaltyRedemption', 'Remove loyalty redemption')}
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            )}
+                  {onRemoveLoyaltyRedemption && (
+                    <button
+                      onClick={onRemoveLoyaltyRedemption}
+                      className="min-h-touch min-w-touch flex items-center justify-center p-1 rounded-full transition-colors text-amber-800 dark:text-amber-300 active:bg-(--pos-s-surface-2)"
+                      aria-label={t('menu.cart.removeLoyaltyRedemption', 'Remove loyalty redemption')}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         )}
 
@@ -1688,88 +1718,98 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           <ChangingValue className="liquid-glass-modal-text" value={formatCurrency(subtotal)} />
         </div>
 
-        {offerDiscountAmount > 0 && (
-          <div className="flex justify-between items-center text-sm font-medium antialiased">
-            <span className="flex items-center gap-1 text-emerald-800 dark:text-emerald-400">
-              <Gift className="w-3.5 h-3.5" />
-              {matchedOfferNames.length > 0
-                ? t('menu.cart.offerDiscountWithNames', 'Offers ({{names}})', {
-                    names: matchedOfferNames.join(', '),
-                  })
-                : t('menu.cart.offerDiscount', 'Offers')}
-              :
-            </span>
-            <span className="text-emerald-800 dark:text-emerald-400">
-              -{formatCurrency(offerDiscountAmount)}
-            </span>
-          </div>
-        )}
+        <AnimatePresence initial={false}>
+          {offerDiscountAmount > 0 && (
+            <motion.div {...revealMotion} className="flex justify-between items-center text-sm font-medium antialiased">
+              <span className="flex items-center gap-1 text-emerald-800 dark:text-emerald-400">
+                <Gift className="w-3.5 h-3.5" />
+                {matchedOfferNames.length > 0
+                  ? t('menu.cart.offerDiscountWithNames', 'Offers ({{names}})', {
+                      names: matchedOfferNames.join(', '),
+                    })
+                  : t('menu.cart.offerDiscount', 'Offers')}
+                :
+              </span>
+              <span className="text-emerald-800 dark:text-emerald-400">
+                -{formatCurrency(offerDiscountAmount)}
+              </span>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Discount Display */}
-        {discountAmount > 0 && (
-          <div className="flex justify-between items-center text-sm font-medium antialiased">
-            <span className="text-green-800 dark:text-green-400">
-              {effectiveDiscountMode === 'percentage'
-                ? t('menu.cart.discount', { percent: effectiveDiscountPercentage })
-                : t('menu.cart.discountAmount', 'Discount')}:
-            </span>
-            <span className="text-green-800 dark:text-green-400">
-              -{formatCurrency(discountAmount)}
-            </span>
-          </div>
-        )}
+        <AnimatePresence initial={false}>
+          {discountAmount > 0 && (
+            <motion.div {...revealMotion} className="flex justify-between items-center text-sm font-medium antialiased">
+              <span className="text-green-800 dark:text-green-400">
+                {effectiveDiscountMode === 'percentage'
+                  ? t('menu.cart.discount', { percent: effectiveDiscountPercentage })
+                  : t('menu.cart.discountAmount', 'Discount')}:
+              </span>
+              <span className="text-green-800 dark:text-green-400">
+                -{formatCurrency(discountAmount)}
+              </span>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Coupon Discount Display */}
-        {couponDiscount > 0 && appliedCoupon && (
-          <div className="flex justify-between items-center text-sm font-medium antialiased">
-            <span className="flex items-center gap-1 text-emerald-800 dark:text-emerald-400">
-              <Ticket className="w-3.5 h-3.5" />
-              {t('menu.cart.couponDiscount', 'Coupon')} ({appliedCoupon.code}):
-            </span>
-            <span className="text-emerald-800 dark:text-emerald-400">
-              -{formatCurrency(couponDiscount)}
-            </span>
-          </div>
-        )}
-
-        {loyaltyDiscountAmount > 0 && loyaltyRedemption && (
-          <div className="flex justify-between items-center text-sm font-medium antialiased">
-            <span className="flex items-center gap-1 text-amber-800 dark:text-amber-400">
-              <Award className="w-3.5 h-3.5" />
-              {t('menu.cart.loyaltyDiscount', 'Loyalty')}:
-            </span>
-            <span className="text-amber-800 dark:text-amber-400">
-              -{formatCurrency(loyaltyDiscountAmount)}
-            </span>
-          </div>
-        )}
-
-        {isDeliveryOrder && (
-          <div className="flex justify-between items-center text-sm font-medium antialiased">
-            <span className="liquid-glass-modal-text-muted">
-              {t('menu.cart.deliveryFee')}
-            </span>
-            {allowManualDeliveryFee ? (
-              <CentsMoneyInput
-                aria-label={t('menu.cart.deliveryFee')}
-                value={manualDeliveryFeeInput}
-                onValueChange={(value, amount) => {
-                  setManualDeliveryFeeInput(value);
-                  onManualDeliveryFeeChange?.(amount);
-                }}
-                placeholder={t('menu.cart.manualDeliveryFeePlaceholder', '0,00')}
-                className="w-24 rounded-lg border bg-black/5 px-2.5 py-1.5 text-right text-sm antialiased dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
-              />
-            ) : (
-              <span className="liquid-glass-modal-text">
-                {deliveryFeeDisplay}
+        <AnimatePresence initial={false}>
+          {couponDiscount > 0 && appliedCoupon && (
+            <motion.div {...revealMotion} className="flex justify-between items-center text-sm font-medium antialiased">
+              <span className="flex items-center gap-1 text-emerald-800 dark:text-emerald-400">
+                <Ticket className="w-3.5 h-3.5" />
+                {t('menu.cart.couponDiscount', 'Coupon')} ({appliedCoupon.code}):
               </span>
-            )}
-          </div>
-        )}
+              <span className="text-emerald-800 dark:text-emerald-400">
+                -{formatCurrency(couponDiscount)}
+              </span>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence initial={false}>
+          {loyaltyDiscountAmount > 0 && loyaltyRedemption && (
+            <motion.div {...revealMotion} className="flex justify-between items-center text-sm font-medium antialiased">
+              <span className="flex items-center gap-1 text-amber-800 dark:text-amber-400">
+                <Award className="w-3.5 h-3.5" />
+                {t('menu.cart.loyaltyDiscount', 'Loyalty')}:
+              </span>
+              <span className="text-amber-800 dark:text-amber-400">
+                -{formatCurrency(loyaltyDiscountAmount)}
+              </span>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence initial={false}>
+          {isDeliveryOrder && (
+            <motion.div {...revealMotion} className="flex justify-between items-center text-sm font-medium antialiased">
+              <span className="liquid-glass-modal-text-muted">
+                {t('menu.cart.deliveryFee')}
+              </span>
+              {allowManualDeliveryFee ? (
+                <CentsMoneyInput
+                  aria-label={t('menu.cart.deliveryFee')}
+                  value={manualDeliveryFeeInput}
+                  onValueChange={(value, amount) => {
+                    setManualDeliveryFeeInput(value);
+                    onManualDeliveryFeeChange?.(amount);
+                  }}
+                  placeholder={t('menu.cart.manualDeliveryFeePlaceholder', '0,00')}
+                  className="w-24 rounded-lg border px-2.5 py-1.5 text-right text-sm antialiased liquid-glass-modal-input pos-glass-field min-h-touch focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+                />
+              ) : (
+                <span className="liquid-glass-modal-text">
+                  {deliveryFeeDisplay}
+                </span>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Total */}
-        <div className="flex justify-between items-center pt-2 border-t border-black/10 dark:border-white/10 antialiased">
+        <div className="flex justify-between items-center pt-2 antialiased">
           <span className="text-lg font-semibold liquid-glass-modal-text">
             {t('menu.cart.total')}
           </span>
@@ -1780,55 +1820,63 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         </div>
 
         {/* Offline: the cashier chooses the zone of an address that cannot be located */}
-        {showOfflineZoneChoice && deliveryZoneChoice && (
-          <OfflineDeliveryZonePicker
-            options={deliveryZoneChoice.options}
-            loading={deliveryZoneChoice.loading}
-            selectedZoneId={deliveryZoneChoice.selectedZoneId}
-            onChoose={deliveryZoneChoice.onChoose}
-          />
-        )}
+        <AnimatePresence initial={false}>
+          {showOfflineZoneChoice && deliveryZoneChoice && (
+            <motion.div {...revealMotion}>
+              <OfflineDeliveryZonePicker
+                options={deliveryZoneChoice.options}
+                loading={deliveryZoneChoice.loading}
+                selectedZoneId={deliveryZoneChoice.selectedZoneId}
+                onChoose={deliveryZoneChoice.onChoose}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Delivery zone not checked (address without a usable point) */}
-        {showZoneNotCheckedNotice && (
-          <div
-            role="status"
-            data-testid="menu-cart-zone-not-checked"
-            className="flex items-start gap-2 p-3 rounded-lg mb-3 bg-(--pos-s-surface-2) dark:bg-zinc-800 border border-(--pos-s-border) dark:border-zinc-700"
-          >
-            <MapPin className="w-5 h-5 shrink-0 text-amber-800 dark:text-amber-300" aria-hidden="true" />
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium antialiased text-amber-800 dark:text-amber-200">
-                {t('menu.cart.deliveryZoneNotCheckedNotice')}
-              </p>
-              {onRepickDeliveryAddress && (
-                <button
-                  type="button"
-                  onClick={onRepickDeliveryAddress}
-                  data-testid="menu-cart-zone-repick"
-                  className="mt-2 min-h-[40px] rounded-lg border border-(--pos-s-border) dark:border-zinc-700 px-3 py-1.5 text-sm font-semibold antialiased text-amber-800 dark:text-amber-100 active:bg-(--pos-s-surface-2) dark:active:bg-zinc-800"
-                >
-                  {t('menu.cart.repickDeliveryAddress')}
-                </button>
-              )}
-            </div>
-          </div>
-        )}
+        <AnimatePresence initial={false}>
+          {showZoneNotCheckedNotice && (
+            <motion.div {...revealMotion}
+              role="status"
+              data-testid="menu-cart-zone-not-checked"
+              className="pos-glass-form-card p-3! flex items-start gap-2 mb-3 text-amber-800 dark:text-amber-200"
+            >
+              <MapPin className="w-5 h-5 shrink-0 text-amber-800 dark:text-amber-300" aria-hidden="true" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium antialiased text-amber-800 dark:text-amber-200">
+                  {t('menu.cart.deliveryZoneNotCheckedNotice')}
+                </p>
+                {onRepickDeliveryAddress && (
+                  <button
+                    type="button"
+                    onClick={onRepickDeliveryAddress}
+                    data-testid="menu-cart-zone-repick"
+                    className="pos-glass-field mt-2 min-h-touch rounded-lg px-3 py-1.5 text-sm font-semibold antialiased liquid-glass-modal-text"
+                  >
+                    {t('menu.cart.repickDeliveryAddress')}
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Minimum Order Warning for Delivery */}
-        {isBelowMinimum && !editMode && (
-          <div className="flex items-center gap-2 p-3 rounded-lg mb-3 bg-(--pos-s-surface-2) dark:bg-zinc-800 border border-(--pos-s-border) dark:border-zinc-700">
-            <AlertTriangle className="w-5 h-5 shrink-0 text-orange-500 dark:text-orange-400" />
-            <div className="flex-1">
-              <p className="text-sm font-medium antialiased text-orange-600 dark:text-orange-400">
-                {t('menu.cart.minimumNotMet', 'Minimum order not met')}
-              </p>
-              <p className="text-xs antialiased text-orange-500 dark:text-orange-300">
-                {t('menu.cart.addMoreToOrder', 'Add {{amount}} more to complete order', { amount: formatCurrency(shortfall) })}
-              </p>
-            </div>
-          </div>
-        )}
+        <AnimatePresence initial={false}>
+          {isBelowMinimum && !editMode && (
+            <motion.div {...revealMotion} className="pos-glass-form-card p-3! flex items-center gap-2 mb-3">
+              <AlertTriangle className="w-5 h-5 shrink-0 text-orange-500 dark:text-orange-400" />
+              <div className="flex-1">
+                <p className="text-sm font-medium antialiased text-orange-600 dark:text-orange-400">
+                  {t('menu.cart.minimumNotMet', 'Minimum order not met')}
+                </p>
+                <p className="text-xs antialiased text-orange-500 dark:text-orange-300">
+                  {t('menu.cart.addMoreToOrder', 'Add {{amount}} more to complete order', { amount: formatCurrency(shortfall) })}
+                </p>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <button
           onClick={handleCheckoutClick}
@@ -1868,7 +1916,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             className="absolute inset-0 bg-black/50 backdrop-blur-md"
           />
           <div className="relative w-full max-w-xl liquid-glass-modal-shell fixed! top-1/2! left-1/2! -translate-x-1/2! -translate-y-1/2! max-w-xl! max-h-fit! animate-none!">
-            <div className="liquid-glass-modal-header">
+            <div className="liquid-glass-modal-header pos-glass-header--plain">
               <div>
                 <h4 className="liquid-glass-modal-title text-xl!">
                   {t('menu.cart.lineDiscountTitle', 'Selected Item Discount')}
@@ -1890,18 +1938,18 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               </button>
             </div>
 
-            <div className="px-6 py-5 space-y-5">
-              <div className="grid grid-cols-2 gap-2">
+            <div className="px-6 py-5 space-y-3">
+              <div className="pos-glass-form-card grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => {
                     setLineDiscountModeDraft('percentage');
                     setLineDiscountDraft(parseDiscountInput(lineDiscountManualInput, 'percentage'));
                   }}
-                  className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                  className={`min-h-touch py-2 rounded-lg text-sm font-semibold border transition-colors ${
                     lineDiscountModeDraft === 'percentage'
                       ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
-                      : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
+                      : 'pos-glass-field liquid-glass-modal-text'
                   }`}
                 >
                   {t('menu.cart.percentMode', '% Mode')}
@@ -1912,18 +1960,18 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     setLineDiscountModeDraft('fixed');
                     setLineDiscountDraft(parseDiscountInput(lineDiscountManualInput, 'fixed'));
                   }}
-                  className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                  className={`min-h-touch py-2 rounded-lg text-sm font-semibold border transition-colors ${
                     lineDiscountModeDraft === 'fixed'
                       ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
-                      : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
+                      : 'pos-glass-field liquid-glass-modal-text'
                   }`}
                 >
                   {t('menu.cart.fixedMode', 'Fixed')}
                 </button>
               </div>
 
-              <div>
-                <p className="text-sm font-semibold mb-3 antialiased liquid-glass-modal-text">
+              <div className="pos-glass-form-card">
+                <p className="text-xs font-semibold mb-3 antialiased liquid-glass-modal-text-muted">
                   {t('menu.cart.quickDiscounts', 'Quick discounts')}
                 </p>
                 <div className="grid grid-cols-5 gap-2">
@@ -1950,12 +1998,12 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           setLineDiscountDraft(nextValue);
                           setLineDiscountManualInput(String(nextValue));
                         }}
-                        className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                        className={`min-h-touch py-2 rounded-lg text-sm font-semibold border transition-colors ${
                           disabled
-                            ? 'opacity-45 cursor-not-allowed'
+                            ? 'pos-glass-field opacity-45 cursor-not-allowed'
                             : selected
                               ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
-                              : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
+                              : 'pos-glass-field liquid-glass-modal-text'
                         }`}
                       >
                         {lineDiscountModeDraft === 'percentage' ? `${value}%` : formatCurrency(value)}
@@ -1965,8 +2013,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="text-sm font-semibold mb-2 block antialiased liquid-glass-modal-text">
+              <div className="pos-glass-form-card">
+                <label className="text-xs font-semibold mb-2 block antialiased liquid-glass-modal-text-muted">
                   {t('menu.cart.manualDiscount', 'Manual discount')}
                 </label>
                 <div className="flex items-center gap-2">
@@ -1984,7 +2032,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         }
                       }}
                       placeholder={t('menu.cart.discountAmount', 'Discount amount')}
-                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+                      className="w-full px-4 py-3 rounded-lg text-base border liquid-glass-modal-input pos-glass-field min-h-touch focus:outline-hidden focus:ring-2 focus:ring-amber-400"
                       autoFocus
                     />
                   ) : (
@@ -2007,7 +2055,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           ? t('menu.cart.discountLabel')
                           : t('menu.cart.discountAmount', 'Discount amount')
                       }
-                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+                      className="w-full px-4 py-3 rounded-lg text-base border liquid-glass-modal-input pos-glass-field min-h-touch focus:outline-hidden focus:ring-2 focus:ring-amber-400"
                       autoFocus
                     />
                   )}
@@ -2015,19 +2063,21 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     {lineDiscountModeDraft === 'percentage' ? '%' : (getStoreCurrency() ?? '—')}
                   </span>
                 </div>
-                {isLineDiscountDraftOverMax && (
-                  <p className="text-xs text-red-500 mt-2 font-medium antialiased">
-                    {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
-                  </p>
-                )}
+                <AnimatePresence initial={false}>
+                  {isLineDiscountDraftOverMax && (
+                    <motion.p {...revealMotion} className="text-xs text-red-500 mt-2 font-medium antialiased">
+                      {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
+                    </motion.p>
+                  )}
+                </AnimatePresence>
               </div>
             </div>
 
-            <div className="flex items-center justify-between gap-3 px-6 py-4 border-t border-black/10 dark:border-white/10">
+            <div className="flex items-center justify-between gap-3 px-6 pb-5 pt-2">
               <button
                 type="button"
                 onClick={clearSelectedLineDiscount}
-                className="liquid-glass-modal-button px-4 py-2 text-sm font-semibold"
+                className="liquid-glass-modal-button min-h-touch px-4 py-2 text-sm font-semibold"
               >
                 {t('menu.cart.clearLineDiscountShort', 'Clear')}
               </button>
@@ -2035,7 +2085,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsLineDiscountModalOpen(false)}
-                  className="liquid-glass-modal-button px-4 py-2 text-sm font-semibold"
+                  className="liquid-glass-modal-button min-h-touch px-4 py-2 text-sm font-semibold"
                 >
                   {t('common.cancel', 'Cancel')}
                 </button>
@@ -2043,7 +2093,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   type="button"
                   onClick={applySelectedLineDiscount}
                   disabled={!canApplyLineDiscount}
-                  className={`px-5 py-2 rounded-lg text-sm font-semibold ${
+                  className={`min-h-touch px-5 py-2 rounded-lg text-sm font-semibold ${
                     canApplyLineDiscount
                       ? 'bg-(--pos-s-yellow) text-black active:bg-yellow-500'
                       : 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
@@ -2066,10 +2116,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             className="absolute inset-0 bg-black/45 backdrop-blur-sm"
           />
           <div
-            className="relative w-full max-w-xs rounded-2xl border bg-white/85 dark:bg-black/75 border-black/10 dark:border-white/15 shadow-2xl p-4 space-y-3"
+            className="relative w-full max-w-xs liquid-glass-modal-shell max-w-xs! max-h-fit! p-0! space-y-3"
             onClick={(event) => event.stopPropagation()}
           >
-            <div>
+            <div className="liquid-glass-modal-header pos-glass-header--plain flex-col! items-start!">
               <h4 className="text-base font-semibold liquid-glass-modal-text">
                 {t('menu.cart.changePrice', 'Change Price')}
               </h4>
@@ -2078,7 +2128,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               </p>
             </div>
 
-            <div className="space-y-2">
+            <div className="pos-glass-form-card mx-6 space-y-2">
               <label className="text-xs font-semibold antialiased liquid-glass-modal-text-muted">
                 {t('menu.cart.unitPrice', 'Unit price')}
               </label>
@@ -2094,20 +2144,22 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   }
                 }}
                 placeholder="0,00"
-                className="w-full px-3 py-2 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+                className="w-full px-3 py-2 text-sm border rounded-lg antialiased liquid-glass-modal-input pos-glass-field min-h-touch focus:outline-hidden focus:ring-2 focus:ring-amber-400"
               />
-              {!isLinePriceDraftValid && linePriceDraft.trim().length > 0 && (
-                <p className="text-xs text-red-500 font-medium antialiased">
-                  {t('menu.cart.invalidPrice', 'Enter a valid non-negative price')}
-                </p>
-              )}
+              <AnimatePresence initial={false}>
+                {!isLinePriceDraftValid && linePriceDraft.trim().length > 0 && (
+                  <motion.p {...revealMotion} className="text-xs text-red-500 font-medium antialiased">
+                    {t('menu.cart.invalidPrice', 'Enter a valid non-negative price')}
+                  </motion.p>
+                )}
+              </AnimatePresence>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-1">
+            <div className="flex items-center justify-end gap-2 px-6 pb-5 pt-2">
               <button
                 type="button"
                 onClick={closeLinePriceModal}
-                className="px-3 py-1.5 text-xs font-semibold rounded-md border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15"
+                className="liquid-glass-modal-button min-h-touch px-3 py-1.5 text-xs font-semibold rounded-md"
               >
                 {t('common.cancel', 'Cancel')}
               </button>
@@ -2115,7 +2167,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 type="button"
                 onClick={applyLinePriceDraft}
                 disabled={!isLinePriceDraftValid}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-md ${
+                className={`min-h-touch px-3 py-1.5 text-xs font-semibold rounded-md ${
                   isLinePriceDraftValid
                     ? 'bg-(--pos-s-yellow) text-black active:bg-yellow-500'
                     : 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
@@ -2137,10 +2189,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             className="absolute inset-0 bg-black/45 backdrop-blur-sm"
           />
           <div
-            className="relative w-full max-w-xs rounded-2xl border bg-white/85 dark:bg-black/75 border-black/10 dark:border-white/15 shadow-2xl p-4 space-y-3"
+            className="relative w-full max-w-xs liquid-glass-modal-shell max-w-xs! max-h-fit! p-0! space-y-3"
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="flex items-center justify-between gap-3">
+            <div className="liquid-glass-modal-header pos-glass-header--plain">
               <h4 className="text-base font-semibold liquid-glass-modal-text">
                 {t('menu.cart.couponButton', 'Coupon')}
               </h4>
@@ -2154,7 +2206,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               </button>
             </div>
 
-            <div className="space-y-2">
+            <div className="pos-glass-form-card mx-6 space-y-2">
               <label className="text-xs font-semibold antialiased liquid-glass-modal-text-muted">
                 {t('menu.cart.couponPlaceholder', 'Coupon code')}
               </label>
@@ -2170,21 +2222,23 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   }
                 }}
                 placeholder={t('menu.cart.couponPlaceholder', 'Coupon code')}
-                className="w-full px-3 py-2 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+                className="w-full px-3 py-2 text-sm border rounded-lg antialiased liquid-glass-modal-input pos-glass-field min-h-touch focus:outline-hidden focus:ring-2 focus:ring-amber-400"
               />
-              {couponError && (
-                <p className="text-xs text-red-500 font-medium antialiased">{couponError}</p>
-              )}
+              <AnimatePresence initial={false}>
+                {couponError && (
+                  <motion.p {...revealMotion} className="text-xs text-red-500 font-medium antialiased">{couponError}</motion.p>
+                )}
+              </AnimatePresence>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-1">
+            <div className="flex items-center justify-end gap-2 px-6 pb-5 pt-2">
               <button
                 type="button"
                 onClick={() => {
                   startLoyaltyReader().catch(() => undefined);
                   couponInputRef.current?.focus();
                 }}
-                className="px-3 py-1.5 text-xs font-semibold rounded-md border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15 inline-flex items-center gap-1.5"
+                className="liquid-glass-modal-button min-h-touch px-3 py-1.5 text-xs font-semibold rounded-md inline-flex items-center gap-1.5"
               >
                 <ScanLine className="w-3.5 h-3.5" />
                 {t('menu.cart.scanCoupon', 'Scan')}
@@ -2192,7 +2246,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               <button
                 type="button"
                 onClick={() => setIsCouponModalOpen(false)}
-                className="px-3 py-1.5 text-xs font-semibold rounded-md border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15"
+                className="liquid-glass-modal-button min-h-touch px-3 py-1.5 text-xs font-semibold rounded-md"
               >
                 {t('common.cancel', 'Cancel')}
               </button>
@@ -2200,7 +2254,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 type="button"
                 onClick={applyCouponFromModal}
                 disabled={!couponInput.trim() || isValidatingCoupon}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-md ${
+                className={`min-h-touch px-3 py-1.5 text-xs font-semibold rounded-md ${
                   !couponInput.trim() || isValidatingCoupon
                     ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
                     : 'bg-(--pos-s-yellow) text-black active:bg-yellow-500'
@@ -2226,7 +2280,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             className="absolute inset-0 bg-black/50 backdrop-blur-md"
           />
           <div className="relative w-full max-w-xl liquid-glass-modal-shell fixed! top-1/2! left-1/2! -translate-x-1/2! -translate-y-1/2! max-w-xl! max-h-fit! animate-none!">
-            <div className="liquid-glass-modal-header">
+            <div className="liquid-glass-modal-header pos-glass-header--plain">
               <div>
                 <h4 className="liquid-glass-modal-title text-xl!">
                   {t('menu.cart.discountPickerTitle', 'Apply Discount')}
@@ -2247,18 +2301,18 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               </button>
             </div>
 
-            <div className="px-6 py-5 space-y-5">
-              <div className="grid grid-cols-2 gap-2">
+            <div className="px-6 py-5 space-y-3">
+              <div className="pos-glass-form-card grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => {
                     setDiscountModeDraft('percentage');
                     setDiscountDraft(parseDiscountInput(discountManualInput, 'percentage'));
                   }}
-                  className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                  className={`min-h-touch py-2 rounded-lg text-sm font-semibold border transition-colors ${
                     discountModeDraft === 'percentage'
                       ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
-                      : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
+                      : 'pos-glass-field liquid-glass-modal-text'
                   }`}
                 >
                   {t('menu.cart.percentMode', '% Mode')}
@@ -2269,18 +2323,18 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     setDiscountModeDraft('fixed');
                     setDiscountDraft(parseDiscountInput(discountManualInput, 'fixed'));
                   }}
-                  className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                  className={`min-h-touch py-2 rounded-lg text-sm font-semibold border transition-colors ${
                     discountModeDraft === 'fixed'
                       ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
-                      : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
+                      : 'pos-glass-field liquid-glass-modal-text'
                   }`}
                 >
                   {t('menu.cart.fixedMode', 'Fixed')}
                 </button>
               </div>
 
-              <div>
-                <p className="text-sm font-semibold mb-3 antialiased liquid-glass-modal-text">
+              <div className="pos-glass-form-card">
+                <p className="text-xs font-semibold mb-3 antialiased liquid-glass-modal-text-muted">
                   {t('menu.cart.quickDiscounts', 'Quick discounts')}
                 </p>
                 <div className="grid grid-cols-5 gap-2">
@@ -2302,12 +2356,12 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           setDiscountDraft(nextValue);
                           setDiscountManualInput(String(nextValue));
                         }}
-                        className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                        className={`min-h-touch py-2 rounded-lg text-sm font-semibold border transition-colors ${
                           disabled
-                            ? 'opacity-45 cursor-not-allowed'
+                            ? 'pos-glass-field opacity-45 cursor-not-allowed'
                             : selected
                               ? 'bg-(--pos-s-sel-bg) border-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
-                              : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text active:bg-black/10 dark:active:bg-white/15'
+                              : 'pos-glass-field liquid-glass-modal-text'
                         }`}
                       >
                         {discountModeDraft === 'percentage' ? `${value}%` : formatCurrency(value)}
@@ -2317,8 +2371,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="text-sm font-semibold mb-2 block antialiased liquid-glass-modal-text">
+              <div className="pos-glass-form-card">
+                <label className="text-xs font-semibold mb-2 block antialiased liquid-glass-modal-text-muted">
                   {t('menu.cart.manualDiscount', 'Manual discount')}
                 </label>
                 <div className="flex items-center gap-2">
@@ -2336,7 +2390,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         }
                       }}
                       placeholder={t('menu.cart.discountAmount', 'Discount amount')}
-                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+                      className="w-full px-4 py-3 rounded-lg text-base border liquid-glass-modal-input pos-glass-field min-h-touch focus:outline-hidden focus:ring-2 focus:ring-amber-400"
                       autoFocus
                     />
                   ) : (
@@ -2359,26 +2413,28 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           ? t('menu.cart.discountLabel')
                           : t('menu.cart.discountAmount', 'Discount amount')
                       }
-                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+                      className="w-full px-4 py-3 rounded-lg text-base border liquid-glass-modal-input pos-glass-field min-h-touch focus:outline-hidden focus:ring-2 focus:ring-amber-400"
                     />
                   )}
                   <span className="text-base font-semibold liquid-glass-modal-text">
                     {discountModeDraft === 'percentage' ? '%' : (getStoreCurrency() ?? '—')}
                   </span>
                 </div>
-                {isDraftOverMax && (
-                  <p className="text-xs text-red-500 mt-2 font-medium antialiased">
-                    {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
-                  </p>
-                )}
+                <AnimatePresence initial={false}>
+                  {isDraftOverMax && (
+                    <motion.p {...revealMotion} className="text-xs text-red-500 mt-2 font-medium antialiased">
+                      {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
+                    </motion.p>
+                  )}
+                </AnimatePresence>
               </div>
             </div>
 
-            <div className="flex items-center justify-between gap-3 px-6 py-4 border-t border-black/10 dark:border-white/10">
+            <div className="flex items-center justify-between gap-3 px-6 pb-5 pt-2">
               <button
                 type="button"
                 onClick={clearDiscount}
-                className="liquid-glass-modal-button px-4 py-2 text-sm font-semibold"
+                className="liquid-glass-modal-button min-h-touch px-4 py-2 text-sm font-semibold"
               >
                 {t('menu.cart.removeDiscount', 'Remove discount')}
               </button>
@@ -2386,7 +2442,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsDiscountModalOpen(false)}
-                  className="liquid-glass-modal-button px-4 py-2 text-sm font-semibold"
+                  className="liquid-glass-modal-button min-h-touch px-4 py-2 text-sm font-semibold"
                 >
                   {t('common.cancel', 'Cancel')}
                 </button>
@@ -2394,7 +2450,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   type="button"
                   onClick={applyDraftDiscount}
                   disabled={isDraftOverMax}
-                  className={`px-5 py-2 rounded-lg text-sm font-semibold ${
+                  className={`min-h-touch px-5 py-2 rounded-lg text-sm font-semibold ${
                     isDraftOverMax
                       ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
                       : 'bg-(--pos-s-yellow) text-black active:bg-yellow-500'

@@ -22,9 +22,11 @@ test('EditOrderItemsModal quantity and remove controls are labelled tap targets'
   assert.match(source, /aria-label=\{t\('common\.decrease', 'Decrease'\)\}/);
   assert.match(source, /aria-label=\{t\('common\.increase', 'Increase'\)\}/);
   assert.match(source, /aria-label=\{t\('common\.remove', 'Remove'\)\}/);
-  assert.match(source, /active:bg-\(--pos-s-surface-2\) dark:active:bg-zinc-800 transition-transform duration-150 active:scale-95/);
-  assert.match(source, /active:bg-\(--pos-s-surface-2\) dark:active:bg-zinc-800 transition-transform duration-150 active:scale-95/);
-  assert.match(source, /active:bg-\(--pos-s-surface-2\) liquid-glass-modal-text active:text-red-600 transition-transform duration-150 active:scale-95/);
+  // founder 11/11/2026: all three labelled steppers are 44 px frosted controls with kit press depth.
+  assert.equal((source.match(/pos-glass-field h-11 w-11 shrink-0 flex items-center justify-center/g) ?? []).length, 3);
+  const css = readFileSync(path.join(projectRoot, 'src/renderer/styles/glassmorphism.css'), 'utf8');
+  assert.match(css, /button\.pos-glass-field:is\(:active, \[data-pressed\]\):not\(:disabled\)[\s\S]*?box-shadow: var\(--pos-s-depth-press\)/);
+
 });
 
 test('EditOrderItemsModal loading spinner uses the yellow accent', () => {

@@ -11,10 +11,10 @@ import { useTerminalSettings } from '../../../hooks/useTerminalSettings';
  * Task 17.2: Create POS appointments interface
  */
 
-import React, { memo, useState, useMemo, useEffect, useCallback, useId, useRef } from 'react';
+import React, { memo, useState, useMemo, useEffect, useLayoutEffect, useCallback, useId, useRef } from 'react';
 import { renderModalPortal } from '../../../utils/render-modal-portal';
 import { useTranslation } from 'react-i18next';
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
@@ -41,6 +41,7 @@ import {
   type AppointmentClaimOutcome,
 } from '../../../services/appointment-checkout-claims';
 import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
+import { applyModalOrigin } from '../../../components/ui/modal-origin';
 import { WorkspaceChips, WorkspaceHeader, WorkspaceIconButton, WorkspaceSearch, WorkspaceSelect } from '../../../components/tables/TableWorkspace';
 import { KitDateField } from '../../../components/ui/KitDateField';
 
@@ -85,11 +86,17 @@ interface AppointmentsViewProps {
   embedded?: boolean;
   /** Bump to open the Create Appointment modal from the hub New Order -> Services flow. */
   openCreateSignal?: number;
+  /**
+   * The Create Appointment window asked for through `openCreateSignal` is on screen, or this
+   * screen cannot show it (no time zone): the hub stops holding its backdrop.
+   */
+  onCreateRequestSettled?: () => void;
 }
 
 export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
   embedded = false,
   openCreateSignal = 0,
+  onCreateRequestSettled,
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
@@ -156,6 +163,19 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
       setShowCreateModal(true);
     }
   }, [openCreateSignal]);
+  // The window itself reports when it is in the page (this screen first waits for the branch
+  // time zone, so `showCreateModal` alone is too early). The hub drops the backdrop it held since
+  // the press in that same frame, so the dim never doubles and the page never shows sharp.
+  const onCreateRequestSettledRef = useRef(onCreateRequestSettled);
+  onCreateRequestSettledRef.current = onCreateRequestSettled;
+  const handleCreateModalShown = useCallback(() => {
+    onCreateRequestSettledRef.current?.();
+  }, []);
+  // The time zone could not be read: this screen shows its own message and retry instead of the
+  // window, so the hub must let the page go rather than hold a blurred backdrop over it.
+  useEffect(() => {
+    if (zoneError && showCreateModal) onCreateRequestSettledRef.current?.();
+  }, [zoneError, showCreateModal]);
   const [staffList, setStaffList] = useState<{ id: string; name: string }[]>([]);
   const [servicesList, setServicesList] = useState<{ id: string; name: string; duration: number }[]>([]);
   const createRequestId = useRef<string | null>(null);
@@ -888,6 +908,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
           }}
           branchId={branchId || ''}
           organizationId={effectiveOrgId}
+          onShown={handleCreateModalShown}
         />
       )}
 
@@ -936,6 +957,8 @@ interface CreateAppointmentModalContentProps {
   onClose: () => void;
   branchId: string;
   organizationId: string;
+  /** The window is in the page (called before its first paint). */
+  onShown?: () => void;
 }
 
 // Round 308 (live QA, Greek/dark): the New Appointment staff + service fields used native <select>
@@ -1000,7 +1023,7 @@ const GlassSelect: React.FC<GlassSelectProps> = ({ value, onChange, options, pla
         aria-controls={listboxId}
         aria-label={ariaLabel}
         onClick={() => setOpen((prev) => !prev)}
-        className={`flex w-full items-center gap-2 min-h-touch px-3.5 py-2.5 rounded-xl border text-sm text-left transition active:scale-[0.99] focus:outline-hidden ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100 active:bg-zinc-900 focus:ring-2 focus:ring-zinc-600' : 'bg-white border-gray-300 text-gray-900 active:bg-gray-50 focus:ring-2 focus:ring-gray-300'}`}
+        className="pos-glass-field flex w-full items-center gap-2 min-h-touch px-3.5 py-2.5 text-sm text-left transition active:scale-[0.99]"
       >
         <span className={`min-w-0 flex-1 truncate ${selected ? '' : (isDark ? 'text-zinc-500' : 'text-gray-400')}`}>
           {selected ? selected.label : placeholder}
@@ -1026,9 +1049,9 @@ const GlassSelect: React.FC<GlassSelectProps> = ({ value, onChange, options, pla
                   role="option"
                   aria-selected={isSelected}
                   onClick={() => { onChange(option.value); setOpen(false); }}
-                  className={`flex w-full items-center gap-2 min-h-touch rounded-xl px-3 py-2 text-sm text-left transition ${
+                  className={`flex w-full items-center gap-2 min-h-touch rounded-xl px-3 py-2 text-sm text-left transition active:scale-95 focus-visible:outline-2 focus-visible:outline-yellow-400 ${
                     isSelected
-                      ? 'bg-yellow-400 text-black'
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
                       : (isDark ? 'text-zinc-200 active:bg-white/10' : 'text-gray-800 active:bg-black/5')
                   }`}
                 >
@@ -1059,6 +1082,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
   onClose,
   branchId,
   organizationId,
+  onShown,
 }) => {
   const { t, i18n } = useTranslation();
   const bridge = getBridge();
@@ -1205,20 +1229,55 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
   // in handleCreateAppointment is unchanged; this only gates the UI affordance + the guidance copy.
   const hasStaffAndService = Boolean(formData.staffId && formData.serviceId);
 
+  // Progressive reveal is presentation only; availability, validation and submit stay authoritative.
+  const reduceMotion = useReducedMotion();
+  const showSummaryStage = Boolean(formData.startTime);
+  const dateTimeStageRef = useRef<HTMLDivElement>(null);
+  const summaryStageRef = useRef<HTMLDivElement>(null);
+  const previousStages = useRef({ dateTime: hasStaffAndService, summary: showSummaryStage });
+  // Grow out of the control that opened the window (founder 11/11/2026), like every glass window.
+  const onShownRef = useRef(onShown);
+  onShownRef.current = onShown;
+  useLayoutEffect(() => {
+    if (dialogRef.current) applyModalOrigin(dialogRef.current);
+    onShownRef.current?.();
+  }, []);
+  const slotsMayAnimate = useRef(false);
+  useEffect(() => { slotsMayAnimate.current = true; }, []);
+  useEffect(() => {
+    const revealed = [
+      hasStaffAndService && !previousStages.current.dateTime ? dateTimeStageRef.current : null,
+      showSummaryStage && !previousStages.current.summary ? summaryStageRef.current : null,
+    ].filter((element): element is HTMLDivElement => Boolean(element));
+    previousStages.current = { dateTime: hasStaffAndService, summary: showSummaryStage };
+    if (!revealed.length) return;
+    const timer = window.setTimeout(() => revealed.forEach(element =>
+      element.scrollIntoView({ block: 'nearest', behavior: reduceMotion ? 'instant' : 'smooth' }),
+    ), reduceMotion ? 0 : 240);
+    return () => window.clearTimeout(timer);
+  }, [hasStaffAndService, showSummaryStage, reduceMotion]);
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   return renderModalPortal(
-    <div className={`fixed inset-0 z-1000 flex items-center justify-center backdrop-blur-xl p-3 sm:p-6 ${isDark ? 'bg-black/55' : 'bg-black/22'}`}>
+    <div className={`fixed inset-0 z-1000 flex items-start justify-center backdrop-blur-xl px-3 pb-3 pt-[4vh] sm:px-6 sm:pb-6 ${isDark ? 'bg-black/55' : 'bg-black/22'}`}>
       <motion.div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        initial={{ opacity: 0, scale: 0.97 }}
+        initial={reduceMotion ? false : { opacity: 0, scale: 0.6 }}
+        style={{ transformOrigin: 'var(--modal-origin-x, 50%) var(--modal-origin-y, 50%)' }}
         animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-        className={`w-full max-w-6xl rounded-3xl border ring-1 shadow-[0_30px_90px_rgba(0,0,0,0.55)] max-h-[calc(100%-1.5rem)] sm:max-h-[calc(100%-3rem)] flex flex-col overflow-hidden ${isDark ? 'bg-zinc-950/55 backdrop-blur-2xl border-white/10 ring-white/10' : 'bg-white/18 backdrop-blur-2xl border-white/70 ring-white/45'}`}
+        transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.2, 0.8, 0.2, 1], opacity: { duration: reduceMotion ? 0 : 0.1 } }}
+        className={`w-full max-w-3xl rounded-3xl border ring-1 shadow-[0_30px_90px_rgba(0,0,0,0.55)] max-h-full flex flex-col overflow-hidden ${isDark ? 'bg-zinc-950/55 backdrop-blur-2xl border-white/10 ring-white/10' : 'bg-white/18 backdrop-blur-2xl border-white/70 ring-white/45'}`}
       >
         {/* Header */}
-        <div className={`flex items-start justify-between px-4 sm:px-6 py-4 border-b shrink-0 ${isDark ? 'border-white/10 bg-zinc-950/25' : 'border-white/40 bg-white/12'}`}>
+        <div className={`flex items-start justify-between px-4 sm:px-6 pt-4 pb-1 shrink-0`}>
           <div>
             <h2 id={titleId} className={`text-lg sm:text-xl font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>
               {t('appointments.modal.title', 'New Appointment')}
@@ -1239,331 +1298,347 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
           </button>
         </div>
 
-        {/* Body — min-h-0 lets this flex child shrink and scroll so the sticky footer always keeps
-            its reserved space and nothing (availability guidance / time slots) is clipped at short
-            viewport heights (e.g. 1282x802). */}
-        <div className="p-4 sm:p-6 overflow-y-auto flex-1 min-h-0 scrollbar-hide">
-          <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 sm:gap-5">
-            <div className="xl:col-span-5 space-y-3">
-              <p className={`text-xs font-semibold ${isDark ? 'text-zinc-300' : 'text-gray-600'}`}>
-                {t('appointments.modal.sections.guestService', 'Customer & Service')}
-              </p>
-          {/* Customer Selection */}
-          <div className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/35 backdrop-blur-xl border-white/10' : 'bg-white/14 backdrop-blur-xl border-white/50'}`}>
-            <label className={`block text-sm font-medium mb-2 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
-              <User className="w-4 h-4 inline mr-1" /> {t('appointments.modal.customer', 'Customer')}
-            </label>
+        {/* One scrolling column reserves the plain footer, with stage 1 outside animated wrappers. */}
+        <div className="pos-progressive-form p-4 sm:p-6 overflow-y-auto flex-1 min-h-0 scrollbar-hide">
+          <div className="flex flex-col gap-4">
+            {/* Customer Selection */}
+            <div className="pos-glass-form-card">
+              <label className="block text-xs font-semibold mb-3 liquid-glass-modal-text-muted">
+                <User className="w-4 h-4 inline mr-1" /> {t('appointments.modal.customer', 'Customer')}
+              </label>
 
-            {selectedCustomer ? (
-              /* Selected customer card */
-              <div className={`p-3 rounded-xl border ${selectedCustomer.is_banned ? (isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border-(--pos-s-border)') : (isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border-(--pos-s-border)')}`}>
-                {selectedCustomer.is_banned && (
-                  <div className="flex items-center gap-1.5 mb-2">
-                    <Ban className="w-4 h-4 text-red-500" />
-                    <span className="text-xs font-semibold text-red-500 uppercase">{t('appointments.modal.bannedCustomer', 'Banned Customer')}</span>
-                    {selectedCustomer.ban_reason && <span className="text-xs text-red-700 dark:text-red-400">— {selectedCustomer.ban_reason}</span>}
-                  </div>
-                )}
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className={`font-semibold ${selectedCustomer.is_banned ? 'text-red-400' : (isDark ? 'text-emerald-300' : 'text-emerald-700')}`}>{selectedCustomer.name}</p>
-                    <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{selectedCustomer.phone}</p>
-                    {selectedCustomer.email && <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>{selectedCustomer.email}</p>}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <CheckCircle className="w-5 h-5 text-green-500" />
-                    <button
-                      type="button"
-                      onClick={onClearCustomer}
-                      aria-label={t('appointments.modal.clearCustomer', 'Clear')}
-                      className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition active:scale-95 ${isDark ? 'active:bg-zinc-700' : 'active:bg-gray-200'}`}
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
+              {selectedCustomer ? (
+                /* Selected customer card */
+                <div className={`p-3 rounded-xl border ${selectedCustomer.is_banned ? (isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border-(--pos-s-border)') : (isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border-(--pos-s-border)')}`}>
+                  {selectedCustomer.is_banned && (
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Ban className="w-4 h-4 text-red-500" />
+                      <span className="text-xs font-semibold text-red-500 uppercase">{t('appointments.modal.bannedCustomer', 'Banned Customer')}</span>
+                      {selectedCustomer.ban_reason && <span className="text-xs text-red-700 dark:text-red-400">— {selectedCustomer.ban_reason}</span>}
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className={`font-semibold ${selectedCustomer.is_banned ? 'text-red-400' : (isDark ? 'text-emerald-300' : 'text-emerald-700')}`}>{selectedCustomer.name}</p>
+                      <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{selectedCustomer.phone}</p>
+                      {selectedCustomer.email && <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>{selectedCustomer.email}</p>}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <CheckCircle className="w-5 h-5 text-green-500" />
+                      <button
+                        type="button"
+                        onClick={onClearCustomer}
+                        aria-label={t('appointments.modal.clearCustomer', 'Clear')}
+                        className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition active:scale-95 ${isDark ? 'active:bg-zinc-700' : 'active:bg-gray-200'}`}
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                 </div>
+              ) : (
+                /* Search button + walk-in option */
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <button
+                    type="button"
+                    onClick={onSearchCustomer}
+                    className="pos-glass-field min-h-touch w-full px-4 py-2.5 text-sm font-medium flex items-center justify-center gap-2 transition active:scale-[0.99]"
+                  >
+                    <Search className="w-4 h-4" />
+                    {t('appointments.modal.searchCustomer', 'Search Customer')}
+                  </button>
+                  <div className="contents">
+                    <input
+                      type="text"
+                      value={formData.customerName}
+                      onChange={(e) => setFormData(prev => ({ ...prev, customerName: e.target.value }))}
+                      aria-label={t('appointments.modal.walkInName', 'Walk-in name')}
+                      placeholder={t('appointments.modal.walkInName', 'Walk-in name')}
+                      className="pos-glass-field min-h-touch min-w-0 px-3 py-2.5 text-sm"
+                    />
+                    <input
+                      type="tel"
+                      value={formData.customerPhone}
+                      onChange={(e) => setFormData(prev => ({ ...prev, customerPhone: e.target.value }))}
+                      aria-label={t('appointments.modal.walkInPhone', 'Phone')}
+                      placeholder={t('appointments.modal.walkInPhone', 'Phone')}
+                      className="pos-glass-field min-h-touch min-w-0 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div data-appointment-staff-service className={`relative z-20 overflow-visible pos-glass-form-card grid grid-cols-1 sm:grid-cols-2 gap-3`}>
+              <p className="sm:col-span-2 text-xs font-semibold liquid-glass-modal-text-muted">
+                {t('appointments.modal.slotsEmpty.staffStep', 'Staff')} &amp; {t('appointments.modal.slotsEmpty.serviceStep', 'Service')}
+              </p>
+              <div>
+                <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
+                  {t('appointments.modal.staffLabel', 'Staff *')}
+                </label>
+                <GlassSelect
+                  value={formData.staffId}
+                  onChange={(value) => setFormData(prev => ({ ...prev, staffId: value, startTime: '' }))}
+                  options={staffList.map(s => ({ value: s.id, label: s.name }))}
+                  placeholder={t('appointments.modal.selectPlaceholder', 'Select...')}
+                  ariaLabel={t('appointments.modal.staffLabel', 'Staff *')}
+                  isDark={isDark}
+                />
               </div>
-            ) : (
-              /* Search button + walk-in option */
-              <div className="space-y-2">
-                <button
-                  type="button"
-                  onClick={onSearchCustomer}
-                  className={`w-full px-4 py-2.5 rounded-xl border text-sm font-medium flex items-center justify-center gap-2 ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 active:bg-gray-100'}`}
-                >
-                  <Search className="w-4 h-4" />
-                  {t('appointments.modal.searchCustomer', 'Search Customer')}
-                </button>
-                <div className="grid grid-cols-2 gap-2">
-                  <input
-                    type="text"
-                    value={formData.customerName}
-                    onChange={(e) => setFormData(prev => ({ ...prev, customerName: e.target.value }))}
-                    placeholder={t('appointments.modal.walkInName', 'Walk-in name')}
-                    className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-hidden ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
-                  />
-                  <input
-                    type="tel"
-                    value={formData.customerPhone}
-                    onChange={(e) => setFormData(prev => ({ ...prev, customerPhone: e.target.value }))}
-                    placeholder={t('appointments.modal.walkInPhone', 'Phone')}
-                    className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-hidden ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
-                  />
+              <div>
+                <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
+                  {t('appointments.modal.serviceLabel', 'Service *')}
+                </label>
+                <GlassSelect
+                  value={formData.serviceId}
+                  onChange={(value) => setFormData(prev => ({ ...prev, serviceId: value, startTime: '' }))}
+                  options={servicesList.map(s => ({ value: s.id, label: `${s.name} (${s.duration}${t('common.minutes', 'min')})` }))}
+                  placeholder={t('appointments.modal.selectPlaceholder', 'Select...')}
+                  ariaLabel={t('appointments.modal.serviceLabel', 'Service *')}
+                  isDark={isDark}
+                />
+              </div>
+            </div>
+
+            {!hasStaffAndService && (
+              <div
+                data-appointment-slots-empty
+                className="flex flex-wrap items-center gap-2 rounded-2xl text-xs liquid-glass-modal-text-muted"
+              >
+                <p className="text-xs leading-5 liquid-glass-modal-text-muted">
+                  <span className="font-semibold">{t('appointments.modal.slotsEmpty.title', 'Pick staff and service first')}</span>{' '}
+                  {t('appointments.modal.slotsEmpty.help', 'Choose a staff member and a service first, then the real available times show up here.')}
+                </p>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  {([
+                    { key: 'staff', done: Boolean(formData.staffId), label: t('appointments.modal.slotsEmpty.staffStep', 'Staff'), Icon: User },
+                    { key: 'service', done: Boolean(formData.serviceId), label: t('appointments.modal.slotsEmpty.serviceStep', 'Service'), Icon: Scissors },
+                  ] as const).map(step => {
+                    const StepIcon = step.Icon;
+                    return (
+                      <span
+                        key={step.key}
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium ${step.done
+                            ? (isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-emerald-800 dark:text-emerald-200' : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-emerald-700')
+                            : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-(--pos-s-muted)'
+                          }`}
+                      >
+                        {step.done ? <CheckCircle className="h-3.5 w-3.5" /> : <StepIcon className="h-3.5 w-3.5" />}
+                        {step.label}
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
             )}
-          </div>
-
-          {/* Staff & Service — Round 308: native <select> replaced with the touch-first GlassSelect
-              listbox so the dropdown stays inside the glass modal (no OS/WebView grey strip).
-              Round 333: this card's backdrop-blur makes it its own stacking context, and the Notes card
-              below (also backdrop-blur) was painting OVER an open listbox. Lift this card (relative z-20)
-              above Notes (z-10) and keep overflow visible so the open dropdown overlays the panels below. */}
-          <div data-appointment-staff-service className={`relative z-20 overflow-visible grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/35 backdrop-blur-xl border-white/10' : 'bg-white/14 backdrop-blur-xl border-white/50'}`}>
-            <div>
-              <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
-                {t('appointments.modal.staffLabel', 'Staff *')}
-              </label>
-              <GlassSelect
-                value={formData.staffId}
-                onChange={(value) => setFormData(prev => ({ ...prev, staffId: value, startTime: '' }))}
-                options={staffList.map(s => ({ value: s.id, label: s.name }))}
-                placeholder={t('appointments.modal.selectPlaceholder', 'Select...')}
-                ariaLabel={t('appointments.modal.staffLabel', 'Staff *')}
-                isDark={isDark}
-              />
-            </div>
-            <div>
-              <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
-                {t('appointments.modal.serviceLabel', 'Service *')}
-              </label>
-              <GlassSelect
-                value={formData.serviceId}
-                onChange={(value) => setFormData(prev => ({ ...prev, serviceId: value, startTime: '' }))}
-                options={servicesList.map(s => ({ value: s.id, label: `${s.name} (${s.duration}${t('common.minutes', 'min')})` }))}
-                placeholder={t('appointments.modal.selectPlaceholder', 'Select...')}
-                ariaLabel={t('appointments.modal.serviceLabel', 'Service *')}
-                isDark={isDark}
-              />
-            </div>
-          </div>
-
-          {/* Notes — moved to the left column (Round 279) so it is not clipped by the sticky footer
-              under the overloaded Date/Time column; the left column had spare vertical space. Round 333:
-              kept at a LOWER stacking level (relative z-10) than the Staff & Service card (z-20) so an open
-              GlassSelect listbox overlays Notes instead of rendering behind it. */}
-          <div className={`relative z-10 rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/35 backdrop-blur-xl border-white/10' : 'bg-white/14 backdrop-blur-xl border-white/50'}`}>
-            <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
-              {t('appointments.modal.notesLabel', 'Notes')}
-            </label>
-            <textarea
-              value={formData.notes}
-              onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))}
-              placeholder={t('appointments.modal.notesPlaceholder', 'Optional notes...')}
-              rows={3}
-              className={`w-full px-3.5 py-2.5 rounded-xl border text-sm resize-none ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-hidden ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
-            />
-          </div>
-
-            </div>
-            <div className="xl:col-span-7 space-y-3">
-              <p className={`text-xs font-semibold ${isDark ? 'text-zinc-300' : 'text-gray-600'}`}>
-                {t('appointments.modal.sections.dateTime', 'Date & Time')}
-              </p>
-          {/* Date & Time grid — Calendar | Time Slots sit side-by-side on xl/desktop so the first
-              time-slot row is visible in the first viewport (not pushed below the calendar/footer).
-              Stacked on mobile/tablet. */}
-          <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-          {/* Calendar */}
-          <div className={`p-3 rounded-2xl border ${isDark ? 'bg-zinc-900/35 backdrop-blur-xl border-white/10' : 'bg-white/14 backdrop-blur-xl border-white/50'}`}>
-            <div className="flex items-center justify-between mb-2">
-              <button
-                type="button"
-                onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1))}
-                aria-label={t('appointments.modal.previousMonth', 'Previous month')}
-                className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border transition active:scale-95 ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 active:bg-gray-100'}`}
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              <span className={`font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{formatDate(calendarDate, { month: 'long', year: 'numeric' })}</span>
-              <button
-                type="button"
-                onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1))}
-                aria-label={t('appointments.modal.nextMonth', 'Next month')}
-                className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border transition active:scale-95 ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 active:bg-gray-100'}`}
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="grid grid-cols-7 gap-1 mb-1.5">
-              {weekDays.map((d, i) => <div key={i} className={`text-center text-xs py-1 ${isDark ? 'text-zinc-500' : 'text-gray-600'}`}>{d}</div>)}
-            </div>
-            <div className="grid grid-cols-7 gap-1">
-              {calendarDays.map((day, idx) => {
-                const isCurrentMonth = day.getMonth() === calendarDate.getMonth();
-                const isSelected = selectedDay?.toDateString() === day.toDateString();
-                const today = timeZone ? parseLocalDateString(branchWallClock(new Date(), timeZone).slice(0, 10)) : null;
-                const isToday = today?.toDateString() === day.toDateString();
-                const isPast = !today || day < today;
-                return (
-                  <button
-                    key={idx}
-                    type="button"
-                    disabled={isPast}
-                    onClick={() => handleDateSelect(day)}
-                    className={`h-9 rounded-xl text-sm transition-all border
-                      ${!isCurrentMonth ? (isDark ? 'text-zinc-600' : 'text-gray-400') : ''}
+            <AnimatePresence initial={false}>
+              {hasStaffAndService && (
+                <motion.div key="date-time" ref={dateTimeStageRef} data-appointment-stage="2" {...revealMotion}>
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-[minmax(388px,1fr)_1fr]">
+                    {/* Calendar */}
+                    <div className="pos-glass-form-card min-w-0 overflow-x-auto scrollbar-hide">
+                      <div className="flex items-center justify-between mb-2">
+                        <button
+                          type="button"
+                          onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1))}
+                          aria-label={t('appointments.modal.previousMonth', 'Previous month')}
+                          className="pos-glass-field inline-flex h-11 w-11 items-center justify-center transition active:scale-95"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <span className={`font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{formatDate(calendarDate, { month: 'long', year: 'numeric' })}</span>
+                        <button
+                          type="button"
+                          onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1))}
+                          aria-label={t('appointments.modal.nextMonth', 'Next month')}
+                          className="pos-glass-field inline-flex h-11 w-11 items-center justify-center transition active:scale-95"
+                        >
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
+                      </div>
+                      <div className="grid min-w-[356px] grid-cols-7 gap-2 mb-2">
+                        {weekDays.map((d, i) => <div key={i} className={`text-center text-xs py-1 ${isDark ? 'text-zinc-500' : 'text-gray-600'}`}>{d}</div>)}
+                      </div>
+                      <div className="grid min-w-[356px] grid-cols-7 gap-2">
+                        {calendarDays.map((day, idx) => {
+                          const isCurrentMonth = day.getMonth() === calendarDate.getMonth();
+                          const isSelected = selectedDay?.toDateString() === day.toDateString();
+                          const today = timeZone ? parseLocalDateString(branchWallClock(new Date(), timeZone).slice(0, 10)) : null;
+                          const isToday = today?.toDateString() === day.toDateString();
+                          const isPast = !today || day < today;
+                          return (
+                            <button
+                              key={idx}
+                              type="button"
+                              disabled={isPast}
+                              onClick={() => handleDateSelect(day)}
+                              aria-pressed={isSelected}
+                              className={`h-11 min-w-11 rounded-xl text-sm font-medium transition-all border
                       ${isPast
-                        ? (isDark ? 'text-zinc-700 border-zinc-800 bg-zinc-900/40 cursor-not-allowed' : 'text-gray-300 border-gray-200 bg-gray-100 cursor-not-allowed')
-                        : (isDark ? 'border-zinc-800 active:bg-zinc-800/80' : 'border-gray-200 active:bg-gray-100')}
+                                  ? 'cursor-not-allowed border-transparent bg-transparent opacity-35 ' + (isDark ? 'text-zinc-400' : 'text-zinc-600')
+                                  : (isSelected ? '' : 'pos-glass-field ') + 'active:scale-95 ' + (!isCurrentMonth && !isSelected ? 'opacity-60' : '')}
                       ${isSelected ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)' : ''}
                       ${isToday && !isSelected ? (isDark ? 'ring-1 ring-zinc-500' : 'ring-1 ring-gray-400') : ''}
                     `}
-                  >
-                    {day.getDate()}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+                            >
+                              {day.getDate()}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
 
-          {/* Time Slots — Round 307: before BOTH staff and service are chosen we show a friendly warm-glass
-              empty state with a Staff/Service checklist (NOT a grid of disabled times, which read like broken
-              availability). Once both exist, the real period buttons + available/booked slots render. */}
-          {!hasStaffAndService ? (
-            <div
-              data-appointment-slots-empty
-              className={`flex flex-col items-center justify-center gap-3 p-6 text-center rounded-2xl border ${isDark ? 'bg-(--pos-s-surface-2) backdrop-blur-md border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) backdrop-blur-xl border-(--pos-s-border)'}`}
-            >
-              <div className={`flex h-12 w-12 items-center justify-center rounded-2xl border ${isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-amber-800 dark:text-amber-200' : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-amber-800 dark:text-amber-300'}`}>
-                <Clock className="h-6 w-6" />
-              </div>
-              <div>
-                <p className={`text-sm font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>
-                  {t('appointments.modal.slotsEmpty.title', 'Pick staff and service first')}
-                </p>
-                <p className={`mt-1 text-xs leading-5 ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-                  {t('appointments.modal.slotsEmpty.help', 'Choose a staff member and a service first, then the real available times show up here.')}
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center justify-center gap-2">
-                {([
-                  { key: 'staff', done: Boolean(formData.staffId), label: t('appointments.modal.slotsEmpty.staffStep', 'Staff'), Icon: User },
-                  { key: 'service', done: Boolean(formData.serviceId), label: t('appointments.modal.slotsEmpty.serviceStep', 'Service'), Icon: Scissors },
-                ] as const).map(step => {
-                  const StepIcon = step.Icon;
-                  return (
-                    <span
-                      key={step.key}
-                      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium ${
-                        step.done
-                          ? (isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-emerald-800 dark:text-emerald-200' : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-emerald-700')
-                          : (isDark ? 'bg-white/4 border-white/15 text-zinc-400' : 'bg-white/50 border-gray-200 text-gray-600')
-                      }`}
-                    >
-                      {step.done ? <CheckCircle className="h-3.5 w-3.5" /> : <StepIcon className="h-3.5 w-3.5" />}
-                      {step.label}
-                    </span>
-                  );
-                })}
-              </div>
-            </div>
-          ) : selectedDay ? (
-            <div className={`p-3 rounded-2xl border space-y-2.5 ${isDark ? 'bg-zinc-900/35 backdrop-blur-xl border-white/10' : 'bg-white/14 backdrop-blur-xl border-white/50'}`}>
-              <div className="grid grid-cols-3 gap-2">
-                {(['morning', 'afternoon', 'evening'] as const).map(p => (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => setTimePeriod(p)}
-                    className={`py-2 text-xs sm:text-sm rounded-xl border font-medium transition-all ${
-                      timePeriod === p
-                        ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
-                        : (isDark ? 'bg-zinc-950 text-zinc-300 border-zinc-700 active:bg-zinc-800' : 'bg-white text-gray-700 border-gray-300 active:bg-gray-100')
-                    }`}
-                  >
-                    {p === 'morning'
-                      ? t('appointments.modal.periods.morning', 'Morning')
-                      : p === 'afternoon'
-                        ? t('appointments.modal.periods.afternoon', 'Afternoon')
-                        : t('appointments.modal.periods.evening', 'Evening')}
-                  </button>
-                ))}
-              </div>
+                    {/* Times. On wide screens the card takes the calendar's height and the slots
+                        scroll inside it, so nothing is left empty under the legend (founder 11/11). */}
+                    <div className="pos-glass-form-card min-w-0 md:relative">
+                      <div className="flex flex-col gap-3 md:absolute md:inset-4">
+                      <div className="flex min-h-5 items-center justify-between gap-3">
+                        <h3 className="text-xs font-semibold liquid-glass-modal-text-muted">
+                          {t('appointments.modal.sections.dateTime', 'Date & Time')}
+                        </h3>
+                        {/* Always in the layout: the slots below never move while availability loads. */}
+                        <span
+                          aria-live="polite"
+                          className={`text-xs liquid-glass-modal-text-muted ${loadingSlots ? '' : 'invisible'}`}
+                        >
+                          {t('appointments.modal.loadingSlots', 'Loading...')}
+                        </span>
+                      </div>
+                      {!selectedDay && (
+                        <p className="flex flex-1 items-center justify-center py-6 text-center text-sm liquid-glass-modal-text-muted">
+                          {t('appointments.modal.pickDay', 'Pick a day to see the times')}
+                        </p>
+                      )}
+                      {selectedDay && (
+                        <div className="flex min-h-0 flex-1 flex-col gap-3">
+                          <div className="grid grid-cols-3 gap-2">
+                            {(['morning', 'afternoon', 'evening'] as const).map(p => (
+                              <button
+                                key={p}
+                                type="button"
+                                onClick={() => setTimePeriod(p)}
+                                aria-pressed={timePeriod === p}
+                                className={`min-h-touch active:scale-95 py-2 text-xs sm:text-sm rounded-xl border font-medium transition-all ${timePeriod === p
+                                    ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                                    : 'pos-glass-field active:scale-95'
+                                  }`}
+                              >
+                                {p === 'morning'
+                                  ? t('appointments.modal.periods.morning', 'Morning')
+                                  : p === 'afternoon'
+                                    ? t('appointments.modal.periods.afternoon', 'Afternoon')
+                                    : t('appointments.modal.periods.evening', 'Evening')}
+                              </button>
+                            ))}
+                          </div>
 
-              {availabilityError && <div role="alert" className="text-sm text-red-600 dark:text-red-300"><p>{t('appointments.workflow.availabilityUnavailable', 'Availability could not be checked. Check the connection and try again.')}</p><button type="button" className="mt-2 min-h-10 rounded-xl border px-3" onClick={() => setAvailabilityRefresh(value => value + 1)}>{t('common.actions.retry', 'Try again')}</button></div>}
-              {!loadingSlots && !availabilityError && availableSlots.length === 0 && <p className="text-sm">{t('appointments.workflow.noSlots', 'No available times for this staff member and service. Check the synced schedule or choose another day.')}</p>}
-              {loadingSlots && <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-600'}`}>{t('appointments.modal.loadingSlots', 'Loading...')}</p>}
+                          {availabilityError && <div role="alert" className="text-sm text-red-600 dark:text-red-300"><p>{t('appointments.workflow.availabilityUnavailable', 'Availability could not be checked. Check the connection and try again.')}</p><button type="button" className="pos-glass-field mt-2 min-h-touch rounded-xl border px-3 active:scale-95" onClick={() => setAvailabilityRefresh(value => value + 1)}>{t('common.actions.retry', 'Try again')}</button></div>}
+                          {!loadingSlots && !availabilityError && availableSlots.length === 0 && <p className="text-sm">{t('appointments.workflow.noSlots', 'No available times for this staff member and service. Check the synced schedule or choose another day.')}</p>}
 
-              <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 xl:grid-cols-5 gap-2 max-h-56 overflow-y-auto pr-1 scrollbar-hide">
-                {timeSlots.map(slot => {
-                  const booked = isTimeSlotBooked(slot);
-                  const selected = formData.startTime === slot;
-                  return (
-                    <button
-                      key={slot}
-                      type="button"
-                      disabled={booked}
-                      onClick={() => handleTimeSelect(slot)}
-                      className={`flex items-center justify-center min-h-touch py-2 px-2 text-xs sm:text-sm rounded-xl border relative transition-all
+                          <motion.div key={`${formData.date}-${timePeriod}`} initial={false} className="grid min-h-0 flex-1 auto-rows-min grid-cols-3 gap-2 overflow-y-auto p-1 scrollbar-hide max-md:max-h-64">
+                            {timeSlots.map((slot, index) => {
+                              const booked = isTimeSlotBooked(slot);
+                              // While availability is being checked nothing is known yet: the slot waits,
+                              // dimmed and not tappable, instead of flashing red as "booked".
+                              const checking = loadingSlots;
+                              const selected = formData.startTime === slot;
+                              return (
+                                <motion.button
+                                  key={slot}
+                                  initial={reduceMotion || !slotsMayAnimate.current ? false : { opacity: 0, y: 6 }}
+                                  animate={{ opacity: 1, y: 0 }}
+                                  transition={{ duration: reduceMotion ? 0 : 0.18, delay: reduceMotion || !slotsMayAnimate.current ? 0 : Math.min(index * 0.012, 0.24) }}
+                                  aria-pressed={selected}
+                                  type="button"
+                                  disabled={booked}
+                                  onClick={() => handleTimeSelect(slot)}
+                                  className={`flex items-center justify-center min-h-touch py-2 px-2 text-xs sm:text-sm rounded-xl border relative transition-all active:scale-95
                         ${selected
-                          ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
-                          : booked
-                            ? (isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-red-800 dark:text-red-200 line-through cursor-not-allowed' : 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-red-800 dark:text-red-300 line-through cursor-not-allowed')
-                            : (isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 active:bg-gray-100')}
+                                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                                      : checking
+                                        ? 'pos-glass-field cursor-wait opacity-45'
+                                        : booked
+                                          ? 'border-transparent bg-transparent text-red-700 dark:text-red-300 line-through cursor-not-allowed opacity-70'
+                                          : 'pos-glass-field active:scale-95'}
                       `}
-                    >
-                      {slot}
-                      {booked && <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full" />}
-                    </button>
-                  );
-                })}
-              </div>
+                                >
+                                  {slot}
+                                  {booked && !checking && <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full" />}
+                                </motion.button>
+                              );
+                            })}
+                          </motion.div>
 
-              <div className={`flex gap-4 text-xs ${isDark ? 'text-zinc-500' : 'text-gray-600'}`}>
-                <span className="flex items-center gap-1"><span className={`w-3 h-3 rounded-sm border ${isDark ? 'bg-zinc-800 border-zinc-600' : 'bg-white border-gray-300'}`} /> {t('appointments.modal.availability.available', 'Available')}</span>
-                <span className="flex items-center gap-1"><span className="w-3 h-3 bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-sm" /> {t('appointments.workflow.unavailable', 'Unavailable')}</span>
-              </div>
-            </div>
-          ) : null}
-          </div>
+                          <div className="flex shrink-0 items-center gap-3 text-[11px] leading-none liquid-glass-modal-text-muted">
+                            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full border border-(--field-glass-border) bg-(--field-glass)" /> {t('appointments.modal.availability.available', 'Available')}</span>
+                            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-red-500" /> {t('appointments.workflow.unavailable', 'Unavailable')}</span>
+                          </div>
+                        </div>
+                      )}
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+            <AnimatePresence initial={false}>
+              {showSummaryStage && (
+                <motion.div key="summary-notes" ref={summaryStageRef} data-appointment-stage="3" {...revealMotion}>
+                  <div className="space-y-4">
+                    {/* Summary */}
+                    {formData.startTime && selectedService && selectedDay && (
+                      <div className="pos-glass-form-card">
+                        <div className="flex flex-wrap gap-2 items-center justify-between text-sm">
+                          <span className={isDark ? 'text-zinc-300' : 'text-gray-600'}>{formatDate(selectedDay)}</span>
+                          <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{formData.startTime}</span>
+                          <span className={isDark ? 'text-zinc-500' : 'text-gray-400'}>→</span>
+                          <span className={`font-semibold ${isDark ? 'text-zinc-200' : 'text-gray-800'}`}>
+                            {(() => {
+                              const [h, m] = formData.startTime.split(':').map(Number);
+                              return appointmentWallTimes(formData.date, formData.startTime, selectedService.duration).end.slice(11, 16);
+                            })()}
+                          </span>
+                          <span className={isDark ? 'text-zinc-500' : 'text-gray-600'}>({selectedService.duration}{t('common.minutes', 'min')})</span>
+                        </div>
+                      </div>
+                    )}
+                    <div className={`relative z-10 pos-glass-form-card`}>
+                      <label className="block text-xs font-semibold mb-1.5 liquid-glass-modal-text-muted">
+                        {t('appointments.modal.notesLabel', 'Notes')}
+                      </label>
+                      <textarea
+                        aria-label={t('appointments.modal.notesLabel', 'Notes')}
+                        value={formData.notes}
+                        onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))}
+                        placeholder={t('appointments.modal.notesPlaceholder', 'Optional notes...')}
+                        rows={2}
+                        className="pos-glass-field w-full px-3.5 py-2.5 text-sm resize-none"
+                      />
+                    </div>
 
-          {/* Summary */}
-          {formData.startTime && selectedService && selectedDay && (
-            <div className={`p-4 rounded-2xl border backdrop-blur-md ${isDark ? 'bg-(--pos-s-surface-2) border-(--pos-s-border)' : 'bg-(--pos-s-surface-2) border-(--pos-s-border)'}`}>
-              <div className="flex items-center justify-between text-sm">
-                <span className={isDark ? 'text-zinc-300' : 'text-gray-600'}>{formatDate(selectedDay)}</span>
-                <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{formData.startTime}</span>
-                <span className={isDark ? 'text-zinc-500' : 'text-gray-400'}>→</span>
-                <span className={`font-semibold ${isDark ? 'text-zinc-200' : 'text-gray-800'}`}>
-                  {(() => {
-                    const [h, m] = formData.startTime.split(':').map(Number);
-                    return appointmentWallTimes(formData.date, formData.startTime, selectedService.duration).end.slice(11, 16);
-                  })()}
-                </span>
-                <span className={isDark ? 'text-zinc-500' : 'text-gray-600'}>({selectedService.duration}{t('common.minutes', 'min')})</span>
-              </div>
-            </div>
-          )}
-            </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         </div>
 
         {/* Footer — sticky glass bar; reserved by the flex column so it never overlaps the body. */}
-        <div className={`px-4 sm:px-6 py-4 border-t shrink-0 backdrop-blur-xl ${isDark ? 'border-white/10 bg-zinc-950/55' : 'border-white/40 bg-white/14'}`}>
-          <div className="flex flex-col-reverse sm:flex-row gap-3 sm:justify-end">
-          {/* Cancel = soft destructive red */}
-          <button onClick={onClose} className={`px-5 py-2.5 rounded-xl font-medium border transition-transform duration-150 active:scale-95 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'}`}>
-            {t('appointments.modal.cancel', 'Cancel')}
-          </button>
-          {/* Create = green primary, with a clear disabled state */}
-          <button
-            onClick={handleCreateAppointment}
-            disabled={isSubmitting || !formData.staffId || !formData.serviceId || !formData.startTime}
-            className="pos-raised pos-raised--yellow px-5 py-2.5 rounded-xl font-semibold bg-(--pos-s-yellow) text-black border border-(--pos-s-yellow) shadow-xs transition-transform duration-150 active:scale-95 active:bg-yellow-500 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
-          >
-            {isSubmitting ? t('appointments.modal.creating', 'Creating...') : t('appointments.modal.create', 'Create')}
-          </button>
+        <div className="pos-progressive-form px-4 sm:px-6 pb-5 pt-2 shrink-0">
+          <div className="flex items-center justify-between gap-3">
+            {/* Cancel = solid neutral */}
+            <button onClick={onClose} className={`min-h-touch px-5 py-2.5 rounded-xl font-medium border transition-transform duration-150 active:scale-95 ${isDark ? 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'}`}>
+              {t('appointments.modal.cancel', 'Cancel')}
+            </button>
+            {/* Create = solid yellow primary, with a clear disabled state */}
+            <button
+              onClick={handleCreateAppointment}
+              disabled={isSubmitting || !formData.staffId || !formData.serviceId || !formData.startTime}
+              className="pos-raised pos-raised--yellow min-h-touch px-5 py-2.5 rounded-xl font-semibold bg-(--pos-s-yellow) text-black border border-(--pos-s-yellow) shadow-xs transition-transform duration-150 active:scale-95 active:bg-yellow-500 disabled:bg-(--pos-s-surface-2) disabled:text-(--pos-s-muted) disabled:border-(--pos-s-border) disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
+            >
+              {isSubmitting ? t('appointments.modal.creating', 'Creating...') : t('appointments.modal.create', 'Create')}
+            </button>
           </div>
         </div>
       </motion.div>

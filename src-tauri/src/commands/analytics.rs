@@ -223,13 +223,6 @@ fn parse_report_daily_staff_performance_payload(
     serde_json::from_value(payload).unwrap_or_default()
 }
 
-fn resolve_report_date(optional_date: Option<String>) -> String {
-    optional_date
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string())
-}
-
 fn is_cancelled_status(status: &str) -> bool {
     matches!(
         status.to_ascii_lowercase().as_str(),
@@ -713,39 +706,162 @@ fn merge_aggregated_top_items(
     items
 }
 
-#[allow(clippy::type_complexity)]
+fn report_midnight_utc<Z: chrono::TimeZone>(
+    date: chrono::NaiveDate,
+    zone: Z,
+) -> Result<String, String> {
+    let midnight = date.and_hms_opt(0, 0, 0).ok_or("Invalid report date")?;
+    // Some zones skip midnight when daylight saving begins.
+    for minute in 0..1440 {
+        let local = midnight + chrono::Duration::minutes(minute);
+        if let Some(instant) = zone.from_local_datetime(&local).earliest() {
+            return Ok(instant.with_timezone(&Utc).to_rfc3339());
+        }
+    }
+    Err("Report date does not exist in the store time zone".to_string())
+}
+
+fn report_instant_range(
+    conn: &rusqlite::Connection,
+    date: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> Result<crate::data_helpers::ReportInstantRange, String> {
+    let date = date.map(str::trim).filter(|date| !date.is_empty());
+    if let Some(date) = date {
+        let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|e| format!("Invalid report date: {e}"))?;
+        let next = day.succ_opt().ok_or("Report date out of range")?;
+        let zone = crate::store_time::resolve_store_time_zone(conn);
+        let midnight = |date| match zone {
+            Some(zone) => report_midnight_utc(date, zone),
+            None => report_midnight_utc(date, Local),
+        };
+        return Ok(crate::data_helpers::ReportInstantRange {
+            start: Some(midnight(day)?),
+            end: midnight(next)?,
+            calendar_day: true,
+        });
+    }
+    let start = crate::business_day::stored_period_start(conn)
+        .filter(|value| !crate::business_day::is_epoch_timestamp(value))
+        .and_then(|value| crate::store_time::parse_stored_instant(&value))
+        .map(|instant| instant.to_rfc3339());
+    Ok(crate::data_helpers::ReportInstantRange {
+        start,
+        end: now.to_rfc3339(),
+        calendar_day: false,
+    })
+}
+
 fn load_report_rows_for_day(
     conn: &rusqlite::Connection,
     branch_id: &str,
-    date: &str,
-) -> Result<Vec<(String, String, Option<String>, Option<String>, f64, String)>, String> {
-    // v55 dropped `orders.payment_method`; derive it from the payment rows.
-    let derived_payment_method = crate::data_helpers::DERIVED_PAYMENT_METHOD_SQL;
-    let mut stmt = conn
-        .prepare(&format!(
-            // W4b: cents-with-real-fallback shim (removed in 4e).
-            "SELECT status, created_at, {derived_payment_method}, order_type,
-                    COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0),
-                    items
-             FROM orders
-             WHERE (?1 = '' OR branch_id = ?1)
-               AND COALESCE(is_ghost, 0) = 0
-               AND substr(created_at, 1, 10) = ?2"
-        ))
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![branch_id, date], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                crate::money::Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
-                row.get::<_, String>(5)?,
-            ))
+    date: Option<&str>,
+) -> Result<Vec<crate::data_helpers::ReportOrderRow>, String> {
+    let range = report_instant_range(conn, date, Utc::now())?;
+    crate::data_helpers::load_orders_for_instant_range(conn, branch_id, &range, false)
+}
+
+fn report_statistics(rows: &[crate::data_helpers::ReportOrderRow]) -> serde_json::Value {
+    let mut total_sales = 0.0;
+    let mut finished = 0;
+    let mut completed = 0;
+    let mut cancelled = 0;
+    for (status, _, _, _, total, _) in rows {
+        let status = status.to_lowercase();
+        if matches!(status.as_str(), "completed" | "delivered") {
+            total_sales += total;
+            finished += 1;
+        }
+        if matches!(
+            status.as_str(),
+            "completed" | "delivered" | "approved" | "ready"
+        ) {
+            completed += 1;
+        }
+        if matches!(status.as_str(), "cancelled" | "canceled" | "declined") {
+            cancelled += 1;
+        }
+    }
+    let average = if finished > 0 {
+        total_sales / finished as f64
+    } else {
+        0.0
+    };
+    serde_json::json!({
+        "success": true,
+        "totalOrders": rows.len(),
+        "completedOrders": completed,
+        "cancelledOrders": cancelled,
+        "totalSales": total_sales,
+        "averageOrderValue": average,
+        "avgOrderValue": average,
+    })
+}
+
+fn report_sales_trend(
+    conn: &rusqlite::Connection,
+    branch_id: &str,
+    days: i64,
+    now: chrono::DateTime<Utc>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut points: Vec<serde_json::Value> = Vec::new();
+    let today = crate::business_day::local_report_date_from_timestamp(
+        &now.to_rfc3339(),
+        crate::store_time::resolve_store_time_zone(conn),
+    );
+    let today = chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d").map_err(|e| e.to_string())?;
+    for i in (0..days).rev() {
+        let date = (today - chrono::Duration::days(i))
+            .format("%Y-%m-%d")
+            .to_string();
+        let range = report_instant_range(conn, Some(&date), now)?;
+        let orders =
+            crate::data_helpers::load_orders_for_instant_range(conn, &branch_id, &range, true)?;
+        let statistics = report_statistics(&orders);
+        points.push(serde_json::json!({
+            "date": date,
+            "sales": statistics["totalSales"],
+            "revenue": statistics["totalSales"],
+            "avgOrderValue": statistics["averageOrderValue"],
+            "orders": orders.len()
+        }));
+    }
+    Ok(points)
+}
+
+fn report_hourly_sales(
+    rows: Vec<crate::data_helpers::ReportOrderRow>,
+    zone: Option<chrono_tz::Tz>,
+) -> Vec<serde_json::Value> {
+    use chrono::Timelike;
+    let mut orders = [0i64; 24];
+    let mut revenue = [0.0; 24];
+    for (status, created_at, _, _, total, items) in rows {
+        if is_cancelled_status(&status) {
+            continue;
+        }
+        let Some(instant) = crate::store_time::parse_stored_instant(&created_at) else {
+            continue;
+        };
+        let hour = match zone {
+            Some(zone) => instant.with_timezone(&zone).hour(),
+            None => instant.with_timezone(&Local).hour(),
+        } as usize;
+        orders[hour] += 1;
+        revenue[hour] += if total > 0.0 {
+            total
+        } else {
+            crate::parse_item_totals(&items).0
+        };
+    }
+    (0..24)
+        .map(|hour| {
+            serde_json::json!({
+                "hour": hour, "orders": orders[hour], "revenue": revenue[hour],
+            })
         })
-        .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+        .collect()
 }
 
 fn extract_z_report_id_from_payload(payload: &serde_json::Value) -> Option<String> {
@@ -1322,44 +1438,11 @@ pub async fn report_get_today_statistics(
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .unwrap_or_default();
-        let date = payload
-            .date
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
-        let mut total_sales = 0.0f64;
-        let mut completed = 0i64;
-        let mut cancelled = 0i64;
-        for (_id, status, _created_at, items_json, _staff, _payment_method) in &orders {
-            let (order_total, _) = crate::parse_item_totals(items_json);
-            total_sales += order_total;
-            let st = status.to_lowercase();
-            if matches!(
-                st.as_str(),
-                "completed" | "delivered" | "approved" | "ready"
-            ) {
-                completed += 1;
-            }
-            if matches!(st.as_str(), "cancelled" | "canceled" | "declined") {
-                cancelled += 1;
-            }
-        }
-        let total_orders = orders.len() as i64;
-        let avg = if total_orders > 0 {
-            total_sales / (total_orders as f64)
-        } else {
-            0.0
-        };
-        Ok(serde_json::json!({
-            "success": true,
-            "totalOrders": total_orders,
-            "completedOrders": completed,
-            "cancelledOrders": cancelled,
-            "totalSales": total_sales,
-            "averageOrderValue": avg
-        }))
+        let range = report_instant_range(&conn, payload.date.as_deref(), Utc::now())?;
+        let orders =
+            crate::data_helpers::load_orders_for_instant_range(&conn, &branch_id, &range, true)?;
+        Ok(report_statistics(&orders))
     })
     .await
 }
@@ -1379,23 +1462,7 @@ pub async fn report_get_sales_trend(
             .unwrap_or_default();
         let days = payload.days.unwrap_or(7).clamp(1, 60);
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let mut points: Vec<serde_json::Value> = Vec::new();
-        for i in (0..days).rev() {
-            let date = (Local::now() - chrono::Duration::days(i))
-                .format("%Y-%m-%d")
-                .to_string();
-            let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
-            let mut total = 0.0f64;
-            for (_id, _status, _created, items, _staff, _payment_method) in orders.iter() {
-                let (order_total, _) = crate::parse_item_totals(items);
-                total += order_total;
-            }
-            points.push(serde_json::json!({
-                "date": date,
-                "sales": total,
-                "orders": orders.len()
-            }));
-        }
+        let points = report_sales_trend(&conn, &branch_id, days, Utc::now())?;
         Ok(serde_json::json!({ "success": true, "data": points }))
     })
     .await
@@ -1414,22 +1481,25 @@ pub async fn report_get_top_items(
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .unwrap_or_default();
-        let date = payload
-            .date
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
         let limit = payload.limit.unwrap_or(10).clamp(1, 50) as usize;
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
+        let date = payload
+            .date
+            .as_deref()
+            .map(str::trim)
+            .filter(|date| !date.is_empty());
+        let range = report_instant_range(&conn, date, Utc::now())?;
+        let orders =
+            crate::data_helpers::load_orders_for_instant_range(&conn, &branch_id, &range, true)?;
         let live = aggregate_top_items_from_order_rows(
             orders
                 .into_iter()
-                .map(|(_id, status, _created, items, _staff, _payment_method)| (status, items)),
+                .map(|(status, _, _, _, _, items)| (status, items)),
         );
-        // Merge only archived sales from the requested day. Lifetime totals must
-        // not leak into this daily ranking.
-        let archived = load_daily_top_items(&conn, &branch_id, &date, &date).unwrap_or_default();
+        // The open day must not pick up items archived by an earlier Z today.
+        let archived = date
+            .map(|date| load_daily_top_items(&conn, &branch_id, date, date).unwrap_or_default())
+            .unwrap_or_default();
         let merged = merge_aggregated_top_items(live, archived);
         let top = top_items_to_json(merged, limit);
         Ok(serde_json::json!({ "success": true, "data": top }))
@@ -1530,40 +1600,9 @@ pub async fn report_get_hourly_sales(
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .unwrap_or_default();
-        let date = resolve_report_date(payload.date);
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let rows = load_report_rows_for_day(&conn, &branch_id, &date)?;
-
-        let mut hourly_orders = [0i64; 24];
-        let mut hourly_revenue = [0.0f64; 24];
-
-        for (status, created_at, _payment_method, _order_type, total_amount, items) in rows {
-            if is_cancelled_status(&status) {
-                continue;
-            }
-            let hour = created_at
-                .get(11..13)
-                .and_then(|raw| raw.parse::<usize>().ok())
-                .filter(|h| *h < 24)
-                .unwrap_or(0);
-            let revenue = if total_amount > 0.0 {
-                total_amount
-            } else {
-                crate::parse_item_totals(&items).0
-            };
-            hourly_orders[hour] += 1;
-            hourly_revenue[hour] += revenue;
-        }
-
-        let data: Vec<serde_json::Value> = (0..24)
-            .map(|hour| {
-                serde_json::json!({
-                    "hour": hour,
-                    "orders": hourly_orders[hour],
-                    "revenue": hourly_revenue[hour],
-                })
-            })
-            .collect();
+        let rows = load_report_rows_for_day(&conn, &branch_id, payload.date.as_deref())?;
+        let data = report_hourly_sales(rows, crate::store_time::resolve_store_time_zone(&conn));
 
         Ok(serde_json::json!({ "success": true, "data": data }))
     })
@@ -1575,14 +1614,29 @@ pub(crate) fn load_payment_method_breakdown_for_day(
     branch_id: &str,
     date: &str,
 ) -> Result<serde_json::Value, String> {
+    let range = report_instant_range(conn, Some(date), Utc::now())?;
+    load_payment_method_breakdown_for_range(conn, branch_id, &range)
+}
+
+fn load_payment_method_breakdown_for_range(
+    conn: &rusqlite::Connection,
+    branch_id: &str,
+    range: &crate::data_helpers::ReportInstantRange,
+) -> Result<serde_json::Value, String> {
+    let (lower, upper) = if range.calendar_day {
+        (">=", "<")
+    } else {
+        (">", "<=")
+    };
     let mut result = serde_json::json!({
         "cash": {"count":0,"total":0.0}, "card": {"count":0,"total":0.0},
         "twint": {"count":0,"total":0.0}, "other": {"count":0,"total":0.0},
     });
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT op.method, COUNT(*), COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))),0)
          FROM order_payments op JOIN orders o ON o.id = op.order_id
-         WHERE (?1 = '' OR o.branch_id = ?1) AND substr(op.created_at,1,10) = ?2
+         WHERE (?1 = '' OR o.branch_id = ?1) AND (?2 IS NULL OR julianday(op.created_at) {lower} julianday(?2))
+           AND julianday(op.created_at) {upper} julianday(?3)
            AND op.status = 'completed'
            AND (op.method <> 'twint' OR op.currency = 'CHF')
            AND NOT (COALESCE(op.payment_origin,'') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id,'')) = '')
@@ -1590,9 +1644,9 @@ pub(crate) fn load_payment_method_breakdown_for_day(
            AND COALESCE(o.order_context,'') <> 'repair_settlement'
            AND (op.method = 'twint' OR o.status NOT IN ('cancelled','canceled','refunded'))
          GROUP BY op.method"
-    ).map_err(|e| e.to_string())?;
+    )).map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params![branch_id, date], |row| {
+        .query_map(params![branch_id, range.start, range.end], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
@@ -1631,9 +1685,9 @@ pub async fn report_get_payment_method_breakdown(
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .unwrap_or_default();
-        let date = resolve_report_date(payload.date);
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let data = load_payment_method_breakdown_for_day(&conn, &branch_id, &date)?;
+        let range = report_instant_range(&conn, payload.date.as_deref(), Utc::now())?;
+        let data = load_payment_method_breakdown_for_range(&conn, &branch_id, &range)?;
         Ok(serde_json::json!({"success": true, "data": data}))
     })
     .await
@@ -1652,9 +1706,8 @@ pub async fn report_get_order_type_breakdown(
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .unwrap_or_default();
-        let date = resolve_report_date(payload.date);
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let rows = load_report_rows_for_day(&conn, &branch_id, &date)?;
+        let rows = load_report_rows_for_day(&conn, &branch_id, payload.date.as_deref())?;
 
         let mut delivery_count = 0i64;
         let mut delivery_total = 0.0f64;
@@ -2600,6 +2653,212 @@ mod dto_tests {
         );
     }
 
+    fn report_test_conn() -> rusqlite::Connection {
+        let conn = driver_earning_test_conn();
+        for (key, value) in [
+            ("branch_id", "branch-A"),
+            ("hotel_timezone", "Europe/Athens"),
+            ("hotel_timezone_branch_id", "branch-A"),
+        ] {
+            crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        conn
+    }
+
+    fn seed_report_order(
+        conn: &rusqlite::Connection,
+        id: &str,
+        at: &str,
+        status: &str,
+        cents: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO orders (id, order_number, branch_id, status, created_at, updated_at,
+                                 items, total_amount, total_amount_cents, order_type)
+             VALUES (?1, ?1, 'branch-A', ?2, ?3, ?3,
+                     '[{\"menu_item_id\":\"item-1\",\"name\":\"Meal\",\"quantity\":1,\"price\":99}]',
+                     99, ?4, 'takeaway')",
+            params![id, status, at, cents],
+        ).unwrap();
+    }
+
+    #[test]
+    fn today_reports_keep_both_sides_of_athens_midnight_since_last_z() {
+        let conn = report_test_conn();
+        crate::db::set_setting(
+            &conn,
+            "system",
+            "last_z_report_timestamp",
+            "2026-11-09T06:00:00+02:00",
+        )
+        .unwrap();
+        for (id, at) in [
+            ("at-close", "2026-11-09T04:00:00Z"),
+            ("evening", "2026-11-09T19:00:00+00:00"),
+            ("after-midnight", "2026-11-09T22:30:00Z"),
+            ("future", "2026-11-10T12:00:00Z"),
+        ] {
+            seed_report_order(&conn, id, at, "completed", 1000);
+        }
+        let now = crate::store_time::parse_stored_instant("2026-11-09T22:45:00Z").unwrap();
+        let range = report_instant_range(&conn, None, now).unwrap();
+        let rows =
+            crate::data_helpers::load_orders_for_instant_range(&conn, "branch-A", &range, true)
+                .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(report_statistics(&rows)["totalSales"], 20.0);
+        let top = aggregate_top_items_from_order_rows(rows.into_iter().map(|row| (row.0, row.5)));
+        assert_eq!(top[0].quantity, 2.0);
+    }
+
+    #[test]
+    fn report_sales_use_finished_order_totals_and_preserve_completion_counts() {
+        let conn = report_test_conn();
+        for (status, cents) in [
+            ("completed", 800),
+            ("delivered", 1200),
+            ("cancelled", 5000),
+            ("canceled", 5000),
+            ("declined", 5000),
+            ("ready", 5000),
+            ("approved", 5000),
+        ] {
+            seed_report_order(&conn, status, "2026-11-09T19:00:00Z", status, cents);
+        }
+        let rows = load_report_rows_for_day(&conn, "branch-A", Some("2026-11-09")).unwrap();
+        assert_eq!(
+            report_statistics(&rows),
+            serde_json::json!({
+                "success": true, "totalOrders": 7, "completedOrders": 4, "cancelledOrders": 3,
+                "totalSales": 20.0, "averageOrderValue": 10.0, "avgOrderValue": 10.0,
+            })
+        );
+    }
+
+    #[test]
+    fn trend_dates_and_finished_sales_follow_the_store_day() {
+        let conn = report_test_conn();
+        seed_report_order(&conn, "evening", "2026-11-09T19:00:00Z", "completed", 800);
+        seed_report_order(&conn, "night", "2026-11-09T22:30:00Z", "delivered", 1200);
+        seed_report_order(
+            &conn,
+            "cancelled",
+            "2026-11-09T22:35:00Z",
+            "cancelled",
+            5000,
+        );
+        let now = crate::store_time::parse_stored_instant("2026-11-09T22:45:00Z").unwrap();
+        let points = report_sales_trend(&conn, "branch-A", 2, now).unwrap();
+        assert_eq!(points, serde_json::json!([
+            {"date": "2026-11-09", "sales": 8.0, "revenue": 8.0, "orders": 1, "avgOrderValue": 8.0},
+            {"date": "2026-11-10", "sales": 12.0, "revenue": 12.0, "orders": 2, "avgOrderValue": 12.0},
+        ]).as_array().unwrap().to_vec());
+    }
+
+    #[test]
+    fn reports_exclude_test_ghost_and_other_branch_orders() {
+        let conn = report_test_conn();
+        for id in ["real", "test", "ghost", "other"] {
+            seed_report_order(&conn, id, "2026-11-09T19:00:00Z", "completed", 500);
+        }
+        conn.execute("UPDATE orders SET is_test = 1 WHERE id = 'test'", [])
+            .unwrap();
+        conn.execute("UPDATE orders SET is_ghost = 1 WHERE id = 'ghost'", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE orders SET branch_id = 'branch-B' WHERE id = 'other'",
+            [],
+        )
+        .unwrap();
+        let rows = load_report_rows_for_day(&conn, "branch-A", Some("2026-11-09")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(report_statistics(&rows)["totalSales"], 5.0);
+    }
+
+    #[test]
+    fn report_hours_use_the_store_clock_for_utc_and_offset_timestamps() {
+        let conn = report_test_conn();
+        for (id, at) in [
+            ("utc", "2026-11-09T21:30:00Z"),
+            ("offset", "2026-11-09T23:30:00+02:00"),
+        ] {
+            seed_report_order(&conn, id, at, "completed", 500);
+        }
+        let rows = load_report_rows_for_day(&conn, "branch-A", Some("2026-11-09")).unwrap();
+        let hours = report_hourly_sales(rows, crate::store_time::resolve_store_time_zone(&conn));
+        assert_eq!(hours[23]["orders"], 2);
+        assert_eq!(hours[23]["revenue"], 10.0);
+        assert_eq!(hours[21]["orders"], 0);
+    }
+
+    #[test]
+    fn dated_reports_use_store_midnights_including_dst() {
+        let conn = report_test_conn();
+        for (id, at) in [
+            ("before", "2026-10-24T20:59:59Z"),
+            ("start", "2026-10-24T21:00:00+00:00"),
+            ("late", "2026-10-25T21:59:59Z"),
+            ("next", "2026-10-25T22:00:00Z"),
+        ] {
+            seed_report_order(&conn, id, at, "completed", 500);
+        }
+        let rows = load_report_rows_for_day(&conn, "branch-A", Some("2026-10-25")).unwrap();
+        assert_eq!(rows.len(), 2);
+        let range = report_instant_range(&conn, Some("2026-10-25"), Utc::now()).unwrap();
+        let start =
+            crate::store_time::parse_stored_instant(range.start.as_deref().unwrap()).unwrap();
+        let end = crate::store_time::parse_stored_instant(&range.end).unwrap();
+        assert_eq!((end - start).num_hours(), 25);
+        assert!(report_instant_range(&conn, Some("bad-date"), Utc::now()).is_err());
+    }
+
+    #[test]
+    fn today_without_a_z_keeps_all_local_history_up_to_now() {
+        let conn = report_test_conn();
+        seed_report_order(&conn, "old", "2025-01-01T12:00:00Z", "completed", 500);
+        let range = report_instant_range(&conn, None, Utc::now()).unwrap();
+        assert!(range.start.is_none());
+        assert_eq!(
+            crate::data_helpers::load_orders_for_instant_range(&conn, "branch-A", &range, false)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn report_tenders_use_the_same_open_day_instants() {
+        let conn = report_test_conn();
+        crate::db::set_setting(
+            &conn,
+            "system",
+            "last_z_report_timestamp",
+            "2026-11-09T06:00:00+02:00",
+        )
+        .unwrap();
+        for (id, at) in [
+            ("closed", "2026-11-09T04:00:00Z"),
+            ("evening", "2026-11-09T19:00:00Z"),
+            ("night", "2026-11-09T22:30:00+00:00"),
+        ] {
+            seed_report_order(&conn, id, at, "completed", 500);
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                          status, created_at, updated_at)
+                          VALUES (?1, ?1, 'cash', 5, 500, 'completed', ?2, ?2)",
+                params![id, at],
+            )
+            .unwrap();
+        }
+        let now = crate::store_time::parse_stored_instant("2026-11-09T22:45:00Z").unwrap();
+        let range = report_instant_range(&conn, None, now).unwrap();
+        let totals = load_payment_method_breakdown_for_range(&conn, "branch-A", &range).unwrap();
+        assert_eq!(
+            totals["cash"],
+            serde_json::json!({"count": 2, "total": 10.0})
+        );
+    }
+
     fn driver_earning_test_conn() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory database");
         conn.execute_batch(
@@ -3473,7 +3732,7 @@ mod dto_tests {
         )
         .expect("seed payment");
 
-        let rows = load_report_rows_for_day(&conn, "branch-A", "2026-09-05")
+        let rows = load_report_rows_for_day(&conn, "branch-A", Some("2026-09-05"))
             .expect("day-report loader must not read the dropped column");
         let method_by_status: std::collections::HashMap<String, Option<String>> = rows
             .into_iter()
@@ -3514,6 +3773,12 @@ mod dto_tests {
         ] {
             assert!(!is_server_unreachable_error(error), "{error}");
         }
+    }
+
+    #[tokio::test]
+    async fn k2b_unreachable_server_still_selects_local_closeout_after_drain_failure() {
+        assert!(closeout_drain_failed_offline("reconcile remote orders: Cannot reach admin dashboard at https://admin.the-small.ai").await);
+        assert!(!is_server_unreachable_error("REMOTE_PULL_FAILED"));
     }
 
     #[test]

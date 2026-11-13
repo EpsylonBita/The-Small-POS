@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { formatCurrency } from '../../utils/format';
 import React, { useState, useRef, useEffect } from 'react';
 import { MapPin, User, Phone, Mail, FileText, Building, Users, AlertTriangle, CheckCircle, Clock, Hash, Minus, X } from 'lucide-react';
@@ -22,7 +23,6 @@ import { Customer } from '../../../shared/types/customer';
 import { customerService } from '../../services/CustomerService';
 import { normalizeCustomerWriteResult } from '../../services/customer-write-result';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { useTheme } from '../../contexts/theme-context';
 import { getBridge, offEvent, onEvent } from '../../../lib';
 import {
   buildAddressFingerprint,
@@ -30,6 +30,8 @@ import {
   ensureAddressOfflineRuntime,
   extractStreetNumber,
   getSuggestionStreetLabel,
+  formatAddressDistance,
+  locateTypedAddress,
   resolveAddressSuggestion,
   searchAddressSuggestions,
   upsertVerifiedLocalCandidate,
@@ -38,6 +40,7 @@ import {
   type DeliveryValidationResult,
   type ValidationStatus,
 } from '../../services/address-workflow';
+import { streetNamesDiffer } from '../../services/address-street-name';
 import {
   getResolvedTerminalCredentials,
 } from '../../services/terminal-credentials';
@@ -45,7 +48,6 @@ import { parseSpecialAddressInput } from '../../utils/specialAddress';
 import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
 import { FloorPresetPicker } from '../forms/FloorPresetPicker';
 
-import { inputBase } from '../../styles/designSystem';
 
 interface CustomerData {
   id?: string;
@@ -101,9 +103,12 @@ interface AddressAutocompleteProps {
   /** Incremented by "pick the address again": focus the field and search `repickQuery`. */
   repickSignal?: number;
   repickQuery?: string;
+  addressGeneration: React.MutableRefObject<number>;
+  onPickStart: () => void;
 }
 
 interface AddressSelectionDetails {
+  route?: string;
   city?: string;
   postalCode?: string;
   coordinates?: { lat: number; lng: number };
@@ -396,19 +401,35 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   searchEnabled = true,
   repickSignal = 0,
   repickQuery,
+  addressGeneration,
+  onPickStart,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const placeholderText = placeholder ?? t('modals.addNewAddress.addressPlaceholder');
-  const { resolvedTheme } = useTheme();
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
   const searchRequestRef = useRef(0);
+  const searchGenerationRef = useRef(addressGeneration.current);
+  const formAddressGeneration = addressGeneration.current;
   const sessionTokenRef = useRef<string | null>(null);
   const [terminalBranchId, setTerminalBranchId] = useState<string | null>(null);
   const bridge = getBridge();
+
+  // Parent city/postal/scope changes invalidate the child's pending search too.
+  // A fresh street search/pick records its own generation before this effect runs.
+  useEffect(() => {
+    if (searchGenerationRef.current === formAddressGeneration) return;
+    searchGenerationRef.current = formAddressGeneration;
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    searchRequestRef.current += 1;
+    sessionTokenRef.current = null;
+    setIsLoading(false);
+    setSuggestions([]);
+    setShowSuggestions(false);
+  }, [formAddressGeneration]);
 
   // Resolve branch id from main (Admin-provisioned) - needed for delivery zone validation
   useEffect(() => {
@@ -434,25 +455,26 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
     void ensureAddressOfflineRuntime(terminalBranchId || undefined);
   }, [terminalBranchId]);
 
-  const searchAddresses = async (input: string, requestId: number) => {
+  const searchAddresses = async (input: string, requestId: number, generation = addressGeneration.current) => {
+    if (generation !== addressGeneration.current) return;
     try {
       const results = await searchAddressSuggestions(input, {
         branchId: terminalBranchId || undefined,
         limit: 5,
         sessionToken: sessionTokenRef.current || undefined,
       });
-      if (requestId !== searchRequestRef.current) {
+      if (requestId !== searchRequestRef.current || generation !== addressGeneration.current) {
         return;
       }
       setSuggestions(results.slice(0, 5));
     } catch (error) {
-      if (requestId !== searchRequestRef.current) {
+      if (requestId !== searchRequestRef.current || generation !== addressGeneration.current) {
         return;
       }
       console.error('[AddressAutocomplete] ❌ Error searching addresses:', error);
       setSuggestions([]);
     } finally {
-      if (requestId === searchRequestRef.current) {
+      if (requestId === searchRequestRef.current && generation === addressGeneration.current) {
         setIsLoading(false);
       }
     }
@@ -461,6 +483,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newValue = e.target.value;
     onChange(newValue);
+    searchGenerationRef.current = addressGeneration.current;
 
     // Debounce the search
     if (timeoutRef.current) {
@@ -491,8 +514,9 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       sessionTokenRef.current = createAddressSessionToken();
     }
     setIsLoading(true);
+    const generation = addressGeneration.current;
     timeoutRef.current = setTimeout(() => {
-      void searchAddresses(newValue, requestId);
+      void searchAddresses(newValue, requestId, generation);
     }, 200);
   };
 
@@ -525,11 +549,20 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   }, [repickSignal]);
 
   const handleSuggestionClick = async (suggestion: AddressSuggestion) => {
+    onPickStart();
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    const requestId = ++searchRequestRef.current;
+    const generation = addressGeneration.current;
+    searchGenerationRef.current = generation;
+    const sessionToken = sessionTokenRef.current;
+    sessionTokenRef.current = null;
+    setIsLoading(false);
     try {
       const resolved = await resolveAddressSuggestion(suggestion, value, {
         branchId: terminalBranchId || undefined,
-        sessionToken: sessionTokenRef.current || undefined,
+        sessionToken: sessionToken || undefined,
       });
+      if (requestId !== searchRequestRef.current || generation !== addressGeneration.current) return;
       // An offline or cached candidate can resolve to (0,0) or to no point at
       // all: that is "no coordinates", never a place to check the zone at.
       const resolvedPoint = toValidLatLng(resolved.coordinates);
@@ -549,6 +582,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       });
 
       onChange(resolved.streetAddress, {
+        route: resolved.route,
         city: resolved.city || undefined,
         postalCode: resolved.postalCode || undefined,
         coordinates: resolvedPoint || undefined,
@@ -562,6 +596,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       setShowSuggestions(false);
       sessionTokenRef.current = null;
     } catch (error) {
+      if (requestId !== searchRequestRef.current || generation !== addressGeneration.current) return;
       console.error('Error getting place details:', error);
       const streetAddress =
         getSuggestionStreetLabel(suggestion)
@@ -614,15 +649,15 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
           }}
           placeholder={placeholderText}
           autoComplete="off"
-          className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${className}`}
+          className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-10 pr-4 ${className}`}
         />
       </div>
 
       {/* Suggestions Dropdown */}
       {searchEnabled && showSuggestions && (suggestions.length > 0 || isLoading) && (
-        <div className="absolute left-0 right-0 top-full z-9999 mt-1 liquid-glass-modal-card shadow-2xl max-h-60 overflow-y-auto scrollbar-hide">
+        <div className="absolute left-0 right-0 top-full z-9999 mt-1 pos-glass-form-card p-2! space-y-2 shadow-2xl max-h-60 overflow-y-auto scrollbar-hide">
           {isLoading && (
-            <div className="p-3 text-center text-gray-500 dark:text-gray-400">
+            <div className="p-3 text-center liquid-glass-modal-text-muted">
               {t('modals.addCustomer.searchingAddresses')}
             </div>
           )}
@@ -632,16 +667,17 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
               type="button"
               key={suggestion.place_id || index}
               onClick={() => handleSuggestionClick(suggestion)}
-              className="w-full text-left p-3 active:bg-white/10 dark:active:bg-white/5 transition-colors border-b border-gray-200/20 dark:border-gray-600/20 last:border-b-0"
+              className="pos-glass-tap-card min-h-touch w-full text-left p-3 focus-visible:outline-2 focus-visible:outline-yellow-400"
             >
               <div className="flex items-start gap-2">
-                <MapPin className="w-4 h-4 text-amber-500 dark:text-amber-300 mt-1 shrink-0" />
+                <MapPin className="w-4 h-4 liquid-glass-modal-text-muted mt-1 shrink-0" />
                 <div>
-                  <p className="text-sm font-medium text-gray-900 dark:text-white">
+                  <p className="text-sm font-medium liquid-glass-modal-text">
                     {getSuggestionStreetLabel(suggestion)}
                   </p>
-                  <p className="text-xs text-gray-600 dark:text-gray-400">
+                  <p className="text-xs liquid-glass-modal-text-muted">
                     {suggestion.secondary_text || suggestion.formatted_address}
+                    {formatAddressDistance(suggestion.distance_meters, i18n?.resolvedLanguage || i18n?.language) && ` · ${formatAddressDistance(suggestion.distance_meters, i18n?.resolvedLanguage || i18n?.language)}`}
                   </p>
                 </div>
               </div>
@@ -663,7 +699,14 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   callerIdWorkspace,
 }) => {
   const { t } = useTranslation();
-  const { resolvedTheme } = useTheme();
+  // Presentation only: preserve every existing reveal condition (founder 11/11/2026).
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
   const bridge = getBridge();
   const { hasModule } = useAcquiredModules();
   const hasDeliveryModule = hasModule(MODULE_IDS.DELIVERY);
@@ -671,6 +714,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   const hasDeliveryPro = hasDeliveryModule && hasDeliveryZonesModule;
 
   const [terminalBranchId, setTerminalBranchId] = useState<string | null>(null);
+  const addressGenerationRef = useRef(0);
+  const typedLocateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [providerPostalCode, setProviderPostalCode] = useState<string | null>(null);
+  const [mapStreetName, setMapStreetName] = useState<string | null>(null);
   const validationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Track if we're editing an existing customer
@@ -994,9 +1041,53 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     ? describePhoneRejection(t, phoneRejection)
     : '';
 
+  const invalidateAddressWork = () => {
+    addressGenerationRef.current += 1;
+    if (typedLocateTimerRef.current) clearTimeout(typedLocateTimerRef.current);
+    if (validationTimeoutRef.current) clearTimeout(validationTimeoutRef.current);
+    setIsValidatingDelivery(false);
+    setProviderPostalCode(null);
+    setMapStreetName(null);
+  };
+
+  useEffect(() => {
+    invalidateAddressWork();
+    return () => {
+      addressGenerationRef.current += 1;
+      if (typedLocateTimerRef.current) clearTimeout(typedLocateTimerRef.current);
+      if (validationTimeoutRef.current) clearTimeout(validationTimeoutRef.current);
+    };
+  }, [isOpen, initialCustomer, mode, hasDeliveryPro]);
+
+  const scheduleTypedLocation = (fields: { street: string; city: string; postalCode: string }) => {
+    if (!isOpen || !hasDeliveryPro || !navigator.onLine || !extractStreetNumber(fields.street)
+      || parseSpecialAddressInput(fields.street).shouldSkipZoneValidation) return;
+    const generation = addressGenerationRef.current;
+    typedLocateTimerRef.current = setTimeout(async () => {
+      if (generation !== addressGenerationRef.current || !navigator.onLine) return;
+      setIsValidatingDelivery(true);
+      try {
+        const result = await locateTypedAddress(fields, { branchId: terminalBranchId || undefined });
+        if (generation !== addressGenerationRef.current || !navigator.onLine || !result.located) return;
+        setSelectedAddressDetails({ ...result.details, city: fields.city, postalCode: fields.postalCode });
+        setAddressCoordinates(toValidLatLng(result.details.coordinates));
+        setProviderPostalCode(result.postalCodeDiffers ? result.providerPostalCode || null : null);
+        setMapStreetName(streetNamesDiffer(fields.street, result.details.route) ? result.details.route! : null);
+        await validateDeliveryAddress(fields.street, result.details);
+      } catch {
+        // Keep requires_selection when the provider or an old server cannot locate it.
+      } finally {
+        if (generation === addressGenerationRef.current) setIsValidatingDelivery(false);
+      }
+    }, 700);
+  };
+
   const handleInputChange = (field: string, value: string) => {
     if ((field === 'city' || field === 'postalCode') && value !== formData[field]) {
+      invalidateAddressWork();
       clearAddressValidation(formData.address);
+      scheduleTypedLocation({ street: formData.address, city: field === 'city' ? value : formData.city,
+        postalCode: field === 'postalCode' ? value : formData.postalCode });
     }
     setFormData(prev => ({ ...prev, [field]: value }));
     // Clear error when user starts typing
@@ -1046,6 +1137,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     address: string,
     details?: AddressSelectionDetails | null
   ): Promise<DeliveryValidationResult | null> => {
+    const generation = addressGenerationRef.current;
     const parsedAddress = parseSpecialAddressInput(address);
     const trimmedAddress = hasDeliveryPro
       ? address.trim()
@@ -1077,6 +1169,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         validationSource: details?.validationSource,
       });
 
+      if (generation !== addressGenerationRef.current) return null;
       setDeliveryValidationResult(validation);
       setDeliveryValidationStatus(validation.validation_status);
       setShowDeliveryValidation(validation.validation_status !== 'module_disabled');
@@ -1098,6 +1191,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
       return validation;
     } catch (error) {
+      if (generation !== addressGenerationRef.current) return null;
       console.error('Delivery validation error:', error);
       const fallback: DeliveryValidationResult = {
         success: false,
@@ -1113,7 +1207,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       setShowDeliveryValidation(true);
       return fallback;
     } finally {
-      setIsValidatingDelivery(false);
+      if (generation === addressGenerationRef.current) setIsValidatingDelivery(false);
     }
   };
 
@@ -1178,6 +1272,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   };
 
   const handleAddressChange = (address: string, details?: AddressSelectionDetails) => {
+    invalidateAddressWork();
 
     // Clear address error
     if (errors.address) {
@@ -1195,6 +1290,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     const isFromSuggestion = Boolean(details?.fromSuggestion);
 
     if (isFromSuggestion) {
+      setMapStreetName(streetNamesDiffer(address, details?.route) ? details!.route! : null);
       setFormData(prev => ({
         ...prev,
         address,
@@ -1265,6 +1361,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
     submissionLockRef.current = true;
     const submissionGeneration = ++submissionGenerationRef.current;
+    const addressGeneration = addressGenerationRef.current;
     setIsSubmitting(true);
     setSubmitAttempted(true);
 
@@ -1305,6 +1402,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       // text silently while saving a floor or bell edit.
       if (hasDeliveryPro && !keepsStoredDestination) {
         validationForSubmit = await ensureAddressValidationForSubmit();
+        if (addressGeneration !== addressGenerationRef.current) return;
         const validationDecisionError = evaluateValidationDecision(validationForSubmit);
         if (validationDecisionError) {
           const nextErrors: Record<string, string> = {};
@@ -1801,10 +1899,12 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   const handleSafeClose = () => {
     if (isSubmissionLocked()) return;
     submissionGenerationRef.current += 1;
+    invalidateAddressWork();
     onClose();
   };
   const handleSafeMinimize = () => {
     if (isSubmissionLocked()) return;
+    invalidateAddressWork();
     callerIdWorkspace?.onMinimize();
   };
 
@@ -1841,7 +1941,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       onClose={handleSafeClose}
       title={callerIdWorkspace ? undefined : getModalTitle()}
       header={callerIdWorkspace ? (
-        <div className="liquid-glass-modal-header">
+        <div className="liquid-glass-modal-header pos-glass-header--plain">
           <h2 className="liquid-glass-modal-title">{getModalTitle()}</h2>
           <div className="ml-4 flex items-center gap-2">
             <button
@@ -1867,9 +1967,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       ) : undefined}
       ariaLabel={callerIdWorkspace ? getModalTitle() : undefined}
       size={callerIdWorkspace ? 'lg' : 'md'}
-      className={callerIdWorkspace ? 'max-w-4xl!' : 'max-w-2xl!'}
+      className={callerIdWorkspace ? 'max-w-4xl! [&_.liquid-glass-modal-header]:border-b-0!' : 'max-w-2xl! [&_.liquid-glass-modal-header]:border-b-0!'}
       footer={(
-        <div className="flex gap-3 border-t border-(--modal-glass-line) px-6 py-4">
+        <div className="flex gap-3 px-6 pb-5 pt-2">
           <button
             type="button"
             onClick={handleSafeClose}
@@ -1881,7 +1981,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           <button
             type="submit"
             form="add-customer-form"
-            disabled={isSubmitting}
+            disabled={isSubmitting || isValidatingDelivery}
             className="liquid-glass-modal-button pos-modal-primary flex-1 rounded-2xl disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isSubmitting
@@ -1899,14 +1999,14 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       closeOnEscape={!isSubmitting}
     >
       {/* Form Content */}
-      <form onSubmit={handleSubmit} id="add-customer-form" className="space-y-4">
+      <form onSubmit={handleSubmit} id="add-customer-form" className="pos-progressive-form space-y-3">
         {/* Founder 31/10: Phone | Name, Address, City | Postcode, Floor, Bell | Email, Notes. */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="pos-glass-form-card grid grid-cols-1 gap-3 sm:grid-cols-2">
         {/* Phone Number - disabled in addAddress mode */}
         <div>
           <label
             htmlFor="add-customer-phone"
-            className="block text-sm font-medium liquid-glass-modal-text mb-2"
+            className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5"
           >
             {t('modals.addCustomer.phoneLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
@@ -1926,7 +2026,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
                     ? 'add-customer-phone-warning'
                     : undefined
               }
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''} ${phoneErrorText ? 'border-red-500! focus:ring-(--pos-s-fg)!' : ''}`}
+              className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''} ${phoneErrorText ? 'border-red-500! focus:ring-(--pos-s-fg)!' : ''}`}
               disabled={isAddressOnlyMode}
               readOnly={isAddressOnlyMode}
             />
@@ -1953,7 +2053,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
         {/* Name - disabled in addAddress mode */}
         <div>
-          <label htmlFor="add-customer-name" className="block text-sm font-medium liquid-glass-modal-text mb-2">
+          <label htmlFor="add-customer-name" className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
             {t('modals.addCustomer.nameLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
@@ -1963,7 +2063,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               id="add-customer-name"
               value={formData.name}
               onChange={(e) => handleInputChange('name', e.target.value)}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+              className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
               disabled={isAddressOnlyMode}
               readOnly={isAddressOnlyMode}
             />
@@ -1974,15 +2074,18 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         </div>
         </div>
 
+        <div className="pos-glass-form-card space-y-3">
         {/* Address with Simple Input + Delivery Validation */}
         <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+          <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
             {t('modals.addCustomer.addressLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
             <AddressAutocomplete
               value={formData.address}
               onChange={handleAddressChange}
+              addressGeneration={addressGenerationRef}
+              onPickStart={invalidateAddressWork}
               placeholder={
                 hasDeliveryPro
                   ? t('modals.addCustomer.streetPlaceholder')
@@ -1994,14 +2097,16 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               repickQuery={repickQuery}
             />
           </div>
+          {mapStreetName && <p className="mt-1 text-xs liquid-glass-modal-text-muted">{t('modals.addCustomer.mapStreetNameDiffers', { street: mapStreetName })}</p>}
           {errors.address && (
             <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.address}</p>
           )}
-          {showZoneNotChecked && (
-            <div
+          <AnimatePresence initial={false}>
+            {showZoneNotChecked && (
+            <motion.div {...revealMotion} key="reveal-1"
               role="status"
               data-testid="add-customer-zone-not-checked"
-              className="mt-2 space-y-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3"
+              className="mt-2 pos-glass-form-card p-3! space-y-2"
             >
               <div className="flex items-start gap-2 text-sm text-amber-800 dark:text-amber-100">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-300" />
@@ -2010,28 +2115,31 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               <button
                 type="button"
                 onClick={() => setRepickSignal((signal) => signal + 1)}
-                className="liquid-glass-modal-button rounded-2xl px-3 py-2 text-sm"
+                className="pos-glass-field min-h-touch rounded-2xl px-3 py-2 text-sm"
               >
                 {t('modals.addCustomer.repickAddress')}
               </button>
-            </div>
-          )}
+            </motion.div>
+            )}
+          </AnimatePresence>
           {!hasDeliveryPro && (
-            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            <p className="mt-2 text-xs liquid-glass-modal-text-muted">
               {t('modals.addCustomer.manualAddressEntryHint')}
             </p>
           )}
         </div>
 
-        {isSpecialAddressMode && (
-          <div className="liquid-glass-modal-card">
-            <div className="flex items-start gap-3 text-sm text-emerald-800 dark:text-emerald-100">
+        <AnimatePresence initial={false}>
+
+          {isSpecialAddressMode && (
+          <motion.div {...revealMotion} key="reveal-2" className="pos-glass-form-card">
+            <div className="flex items-start gap-3 text-sm liquid-glass-modal-text">
               <Hash className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-300" />
               <div className="space-y-1">
                 <p className="font-medium">
                   {t('modals.addCustomer.specialAddressModeTitle', 'Special address label detected')}
                 </p>
-                <p className="text-emerald-700 dark:text-emerald-100">
+                <p className="liquid-glass-modal-text-muted">
                   {t(
                     'modals.addCustomer.specialAddressModeDescription',
                     {
@@ -2043,14 +2151,16 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
                 </p>
               </div>
             </div>
-          </div>
-        )}
+          </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Delivery Validation */}
-        {hasDeliveryPro && showDeliveryValidation && !showZoneNotChecked && (
-          <div className="liquid-glass-modal-card">
+        <AnimatePresence initial={false}>
+          {hasDeliveryPro && showDeliveryValidation && !showZoneNotChecked && (
+          <motion.div {...revealMotion} key="reveal-3" className="pos-glass-form-card">
             <div className="space-y-3">
-              <div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+              <div className="flex items-center gap-2 text-sm font-medium liquid-glass-modal-text">
                 <MapPin className="w-4 h-4" />
                 {t('modals.addCustomer.deliveryValidation')}
               </div>
@@ -2094,36 +2204,41 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               </div>
 
               {/* Validation Details */}
-              {deliveryValidationResult && deliveryValidationResult.selectedZone && (
-                <div className="bg-black/20 rounded-2xl p-3 space-y-2 border border-white/5">
+              <AnimatePresence initial={false}>
+                {deliveryValidationResult && deliveryValidationResult.selectedZone && (
+                <motion.div {...revealMotion} key="reveal-6" className="space-y-2 liquid-glass-modal-text">
                   <div className="grid grid-cols-2 gap-4 text-xs">
                     <div>
-                      <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.zone')}:</span>
+                      <span className="liquid-glass-modal-text-muted">{t('modals.addCustomer.zone')}:</span>
                       <span className="ml-2 font-medium">{deliveryValidationResult.selectedZone.name}</span>
                     </div>
                     <div>
-                      <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.deliveryFee')}:</span>
+                      <span className="liquid-glass-modal-text-muted">{t('modals.addCustomer.deliveryFee')}:</span>
                       <span className="ml-2 font-medium">{formatCurrency(Number(deliveryValidationResult.selectedZone.delivery_fee))}</span>
                     </div>
                     <div>
-                      <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.minimumOrder')}:</span>
+                      <span className="liquid-glass-modal-text-muted">{t('modals.addCustomer.minimumOrder')}:</span>
                       <span className="ml-2 font-medium">{formatCurrency(Number(deliveryValidationResult.selectedZone.minimum_order_amount))}</span>
                     </div>
                     <div>
-                      <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.estimatedTime')}:</span>
+                      <span className="liquid-glass-modal-text-muted">{t('modals.addCustomer.estimatedTime')}:</span>
                       <span className="ml-2 font-medium">
                         {deliveryValidationResult.selectedZone.estimated_delivery_time_min || 30}-{deliveryValidationResult.selectedZone.estimated_delivery_time_max || 45} min
                       </span>
                     </div>
                   </div>
-                </div>
-              )}
+                </motion.div>
+                )}
+              </AnimatePresence>
 
-              {(deliveryValidationStatus === 'out_of_zone' || deliveryValidationStatus === 'unverified_offline') && (
-                <div className="space-y-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3">
-                  <label className="flex items-center gap-2 text-sm text-orange-200">
+              <AnimatePresence initial={false}>
+
+                {(deliveryValidationStatus === 'out_of_zone' || deliveryValidationStatus === 'unverified_offline') && (
+                <motion.div {...revealMotion} key="reveal-7" className="pos-glass-form-card p-3! space-y-2">
+                  <label className="flex min-h-touch items-center gap-2 text-sm liquid-glass-modal-text">
                     <input
                       type="checkbox"
+                      className="h-5 w-5 shrink-0 accent-yellow-400"
                       checked={overrideApplied}
                       onChange={(e) => setOverrideApplied(e.target.checked)}
                     />
@@ -2141,21 +2256,23 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
                     }}
                     placeholder={t('modals.addCustomer.overrideReasonPlaceholder', 'Add override reason (minimum 6 characters)')}
                     rows={2}
-                    className={`${inputBase(resolvedTheme)} resize-none`}
+                    className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full resize-none`}
                   />
                   {errors.overrideReason && (
                     <p className="text-xs text-red-400">{errors.overrideReason}</p>
                   )}
-                </div>
-              )}
+                </motion.div>
+                )}
+              </AnimatePresence>
             </div>
-          </div>
-        )}
+          </motion.div>
+          )}
+        </AnimatePresence>
 
         <div className="grid grid-cols-2 gap-4">
         {/* City */}
         <div>
-          <label htmlFor="add-customer-city" className="block text-sm font-medium liquid-glass-modal-text mb-2">
+          <label htmlFor="add-customer-city" className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
             {t('modals.addCustomer.cityLabel')}
           </label>
           <div className="relative">
@@ -2165,14 +2282,14 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               id="add-customer-city"
               value={formData.city}
               onChange={(e) => handleInputChange('city', e.target.value)}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
+              className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-10 pr-4`}
             />
           </div>
         </div>
 
         {/* Postal Code */}
         <div>
-          <label htmlFor="add-customer-postcode" className="block text-sm font-medium liquid-glass-modal-text mb-2">
+          <label htmlFor="add-customer-postcode" className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
             {t('modals.addCustomer.postcodeLabel')}
           </label>
           <div className="relative">
@@ -2182,9 +2299,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               id="add-customer-postcode"
               value={formData.postalCode}
               onChange={(e) => handleInputChange('postalCode', e.target.value)}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
+              className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-10 pr-4`}
             />
           </div>
+          {providerPostalCode && <p className="mt-1 text-xs liquid-glass-modal-text-muted">{t('modals.addCustomer.mapPostalCodeDiffers', { code: providerPostalCode })}</p>}
         </div>
         </div>
 
@@ -2195,7 +2313,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             onChange={(value) => handleInputChange('floorNumber', value)}
             label={t('modals.addCustomer.floorLabel')}
             placeholder={t('modals.addCustomer.floorPlaceholder')}
-            inputClassName={inputBase(resolvedTheme)}
+            inputClassName="liquid-glass-modal-input pos-glass-field min-h-touch w-full"
             maxLength={100}
             required
           />
@@ -2212,7 +2330,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         {/* Name on Ringer */}
         <div>
-          <label htmlFor="add-customer-ringer" className="block text-sm font-medium liquid-glass-modal-text mb-2">
+          <label htmlFor="add-customer-ringer" className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
             {t('modals.addCustomer.nameOnRingerLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
@@ -2224,7 +2342,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               onChange={(e) => handleInputChange('nameOnRinger', e.target.value)}
               required
               aria-required="true"
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
+              className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-10 pr-4`}
             />
           </div>
           {errors.nameOnRinger && (
@@ -2234,7 +2352,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
         {/* Email - disabled in addAddress/editAddress mode */}
         <div>
-          <label htmlFor="add-customer-email" className="block text-sm font-medium liquid-glass-modal-text mb-2">
+          <label htmlFor="add-customer-email" className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
             {t('modals.addCustomer.emailLabel')}
           </label>
           <div className="relative">
@@ -2244,7 +2362,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               id="add-customer-email"
               value={formData.email}
               onChange={(e) => handleInputChange('email', e.target.value)}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+              className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
               disabled={isAddressOnlyMode}
               readOnly={isAddressOnlyMode}
             />
@@ -2255,9 +2373,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         </div>
         </div>
 
+        </div>
+
         {/* Notes */}
-        <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+        <div className="pos-glass-form-card">
+          <label className="block text-xs font-semibold liquid-glass-modal-text-muted mb-1.5">
             {t('modals.addCustomer.notesLabel')}
           </label>
           <div className="relative">
@@ -2267,17 +2387,19 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               onChange={(e) => handleInputChange('notes', e.target.value)}
               placeholder={t('modals.addCustomer.notesPlaceholder')}
               rows={3}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 resize-none`}
+              className={`liquid-glass-modal-input pos-glass-field min-h-touch w-full pl-10 pr-4 resize-none`}
             />
           </div>
         </div>
 
         {/* Submit Error */}
-        {errors.submit && (
-          <div className="p-3 bg-(--pos-s-surface-2) border border-(--pos-s-border) rounded-2xl text-red-800 dark:text-red-400 text-sm">
+        <AnimatePresence initial={false}>
+          {errors.submit && (
+          <motion.div {...revealMotion} key="reveal-8" className="pos-glass-form-card p-3! text-red-800 dark:text-red-400 text-sm">
             {errors.submit}
-          </div>
-        )}
+          </motion.div>
+          )}
+        </AnimatePresence>
       </form>
     </LiquidGlassModal>
   );

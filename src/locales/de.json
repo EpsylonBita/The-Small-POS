@@ -1948,7 +1948,8 @@
       "last5Days": "Letzte 5 Tage",
       "last7Days": "Letzte 7 Tage",
       "last30Days": "Letzte 30 Tage",
-      "last90Days": "Letzte 90 Tage"
+      "last90Days": "Letzte 90 Tage",
+      "sinceLastZ": "Seit dem letzten Z"
     },
     "sales": {
       "title": "Umsatz",
@@ -5170,7 +5171,9 @@
         "releaseWrongPin": "Mit dieser PIN kann sie nicht freigegeben werden. Eine Führungskraft mit dem Recht, Bestellungen zu stornieren, gibt ihre eigene PIN ein.",
         "releaseFailed": "Die Übergabe konnte nicht freigegeben werden. Es wurde nichts geändert; versuchen Sie es erneut.",
         "released": "Freigegeben. Das Bargeld der Nebenkasse wurde dieser Kassenlade nicht gutgeschrieben. Sie können die Schicht jetzt schließen."
-      }
+      },
+      "netCollections": "Nettoeinnahmen",
+      "ofWhichTips": "davon Trinkgeld"
     },
     "zReport": {
       "title": "Z-Report - {{date}}",
@@ -5531,7 +5534,12 @@
       "heldEditClosed": "Die Korrektur wurde geschlossen. Es wurde kein Geld gebucht.",
       "heldEditCloseFailed": "Die Korrektur konnte nicht geschlossen werden. Sie bleibt gehalten; es wurde nichts gebucht.",
       "unsavedSaved": "Zahlung gespeichert.",
-      "unsavedStillNotSaved": "An dieser Kasse noch immer nicht gespeichert. Nicht erneut belasten. Versuchen Sie es erneut, oder geben Sie dem Kunden das Geld zurück und bestätigen Sie es hier."
+      "unsavedStillNotSaved": "An dieser Kasse noch immer nicht gespeichert. Nicht erneut belasten. Versuchen Sie es erneut, oder geben Sie dem Kunden das Geld zurück und bestätigen Sie es hier.",
+      "tenderReconciliation": {
+        "received": "Eingenommen",
+        "refunded": "Erstattet",
+        "kept": "Verblieben"
+      }
     },
     "expense": {
       "title": "Kassenabflüsse",
@@ -5690,6 +5698,8 @@
       "managerApprovalSubtitle": "Das Stornieren einer bezahlten Bestellung erfordert die Stornoberechtigung. Ein Manager, der sie hat, gibt seine eigene PIN ein. Es wird nichts belastet."
     },
     "addCustomer": {
+      "mapStreetNameDiffers": "Die Karte nennt diese Straße „{{street}}“. Prüfen Sie, ob es die richtige ist.",
+      "mapPostalCodeDiffers": "Die Karte gibt für diese Adresse die Postleitzahl {{code}} an.",
       "title": "Neuen Kunden hinzufügen",
       "editTitle": "Kunde bearbeiten",
       "addAddressTitle": "Neue Adresse hinzufügen",
@@ -5965,6 +5975,7 @@
       "unknownError": "Unbekannter Fehler"
     },
     "connectionSettings": {
+      "unsyncedQueue": "Diese Kasse hat noch Geldbewegungen, die nicht an den Server gesendet wurden. Synchronisieren Sie zuerst und verbinden Sie die Kasse dann mit dem anderen Geschäft.",
       "pinSaveError": "PIN konnte nicht gespeichert werden",
       "connectionSavedSyncing": "Verbindung gespeichert. Daten werden synchronisiert…",
       "themeAutoDayNight": "Automatisch (Tag / Nacht)",
@@ -6516,7 +6527,8 @@
     "addressValidationError": "Adresse konnte nicht überprüft werden",
     "orderCreated": "Bestellung erfolgreich erstellt!",
     "markDeliveredFailed": "Bestellung {{orderNumber}} konnte nicht als geliefert markiert werden",
-    "pickupDelivered": "{{count}} Abholbestellung(en) als geliefert markiert",
+    "pickupDelivered_one": "Bestellung geliefert",
+    "pickupDelivered_other": "{{count}} Bestellungen geliefert",
     "platformReadySent": "Als fertig markiert",
     "platformReadyFailed": "Benachrichtigung der Plattform für {{orderNumber}} fehlgeschlagen",
     "deliveriesCompleted": "{{count}} Lieferbestellung(en) abgeschlossen",
@@ -8947,6 +8959,7 @@
         "serviceStep": "Leistung"
       },
       "loadingSlots": "Laden...",
+      "pickDay": "Tag wählen, um die Zeiten zu sehen",
       "availability": {
         "available": "Verfügbar",
         "booked": "Gebucht"
@@ -10347,6 +10360,18 @@
     "clearAttemptSubtitle": "Eine Führungskraft gibt ihre eigene PIN ein. Es wird nichts belastet oder zurückgegeben."
   },
   "reservationForm": {
+    "today": "Heute",
+    "tomorrow": "Morgen",
+    "dayStrip": "Nächste Tage",
+    "dayFree": "Frei",
+    "dayReserved": "{{count}} Reservierungen",
+    "dayReserved_one": "{{count}} Reservierung",
+    "dayReserved_other": "{{count}} Reservierungen",
+    "dayFull": "Voll",
+    "slotFree": "Frei",
+    "slotTaken": "Reserviert",
+    "pickDay": "Wählen Sie einen Tag, um die Zeiten zu sehen",
+    "noTimesLeft": "Für diesen Tag sind keine Zeiten mehr übrig. Wählen Sie einen anderen Tag oder geben Sie eine Uhrzeit ein.",
     "toasts": {
       "created": "Reservierung erfolgreich erstellt",
       "updated": "Reservierung erfolgreich aktualisiert",

@@ -16,7 +16,7 @@ import React, { useState, useEffect, useMemo, useCallback, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { useCashierPortalProps } from '../contexts/cashier-gate-context';
 import { useNavigate } from 'react-router-dom';
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'react-hot-toast';
 import { useTheme } from '../contexts/theme-context';
@@ -409,6 +409,13 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
 }) => {
   const { t } = useTranslation();
   const cashierPortalProps = useCashierPortalProps();
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
 
   if (!isOpen || !table) return null;
 
@@ -447,21 +454,17 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
 
       {/* Modal */}
       <div
-        className={`relative w-full max-w-md mx-4 rounded-2xl border backdrop-blur-2xl ring-1 ${
-          isDark
-            ? 'bg-black/60 border-white/10 ring-white/15 shadow-2xl shadow-black/50'
-            : 'bg-white/50 border-white/70 ring-white/60 shadow-2xl shadow-black/30'
-        }`}
+        className="liquid-glass-modal-shell pos-progressive-form relative w-full max-w-md mx-4"
       >
         {/* Header */}
-        <div className={`flex items-center justify-between p-4 border-b ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
+        <div className="liquid-glass-modal-header pos-glass-header--plain px-6 py-4">
           <div>
-            <h2 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+            <h2 className="text-xl font-bold liquid-glass-modal-text">
               {t('tables.tableNumber', 'Table {{number}}', { number: table.tableNumber })}
             </h2>
             <div
               className="inline-flex items-center gap-1.5 mt-1 px-2 py-1 rounded-2xl text-xs font-medium"
-              style={{ backgroundColor: `${STATUS_COLORS[table.status]}20`, color: STATUS_COLORS[table.status] }}
+              style={{ color: STATUS_COLORS[table.status] }}
             >
               {React.createElement(getStatusIcon(table.status), { className: 'w-3 h-3' })}
               <span>{t(`tables.status.${table.status}`, STATUS_LABELS[table.status])}</span>
@@ -476,13 +479,13 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
         </div>
 
         {/* Table Info */}
-        <div className={`px-4 py-3 flex items-center gap-4 border-b ${isDark ? 'border-white/10' : 'border-gray-100'}`}>
-          <div className={`flex items-center gap-2 ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+        <div className="pos-glass-form-card mx-6 mb-3 flex items-center gap-4 px-4! py-3!">
+          <div className="flex items-center gap-2 liquid-glass-modal-text-muted">
             <Users className="w-4 h-4" />
             <span className="text-sm">{formatTableSeats(t, table.capacity)}</span>
           </div>
           {table.occupiedSince && table.status === 'occupied' && (
-            <div className={`flex items-center gap-2 ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+            <div className="flex items-center gap-2 liquid-glass-modal-text-muted">
               <Clock className="w-4 h-4" />
               <span className="text-sm">{getElapsedTime(table.occupiedSince)}</span>
             </div>
@@ -490,54 +493,60 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
         </div>
 
         {/* Quick Actions */}
-        {(table.status === 'available' || table.status === 'occupied') && (
-          <div className="p-4 space-y-2">
-            <p className={`text-xs font-medium mb-3 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-              {t('tables.actions.quickActions', 'Quick Actions')}
-            </p>
-            <div className="flex gap-2">
-              <button
-                onClick={() => onNewOrder(table)}
-                disabled={isNewOrderActionDisabled}
-                aria-disabled={isNewOrderActionDisabled}
-                className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium border transition-colors ${
-                  isNewOrderActionDisabled
-                    ? isDark
-                      ? 'cursor-not-allowed bg-white/5 border-white/10 text-white/40'
-                      : 'cursor-not-allowed bg-gray-100 border-gray-200 text-gray-400'
-                    : isDark
-                      ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-yellow-800 dark:text-yellow-200 active:bg-(--pos-s-surface-2)'
-                      : 'bg-yellow-400! border-yellow-500 text-black active:bg-yellow-500! shadow-lg'
-                }`}
-              >
-                <Receipt className="w-4 h-4" />
-                <span>{table.currentOrderId ? t('tables.actions.viewOrder', 'View Order') : t('tables.actions.newOrder', 'New Order')}</span>
-              </button>
-              {table.status === 'available' && canCreateReservation && (
+        <AnimatePresence initial={false}>
+          {(table.status === 'available' || table.status === 'occupied') && (
+            <motion.div {...revealMotion} className="px-6 pb-3 space-y-2">
+              <p className="text-xs font-semibold mb-3 liquid-glass-modal-text-muted">
+                {t('tables.actions.quickActions', 'Quick Actions')}
+              </p>
+              <div className="flex gap-2">
                 <button
-                  onClick={() => onNewReservation(table)}
-                  className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-colors ${
-                    isDark
-                      ? 'bg-white/10 text-white active:bg-white/20'
-                      : 'bg-gray-100 text-gray-700 active:bg-gray-200'
+                  onClick={() => onNewOrder(table)}
+                  disabled={isNewOrderActionDisabled}
+                  aria-disabled={isNewOrderActionDisabled}
+                  className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium border transition-colors ${
+                    isNewOrderActionDisabled
+                      ? isDark
+                        ? 'cursor-not-allowed bg-white/5 border-white/10 text-white/40'
+                        : 'cursor-not-allowed bg-gray-100 border-gray-200 text-gray-400'
+                      : isDark
+                        ? 'bg-(--pos-s-surface-2) border-(--pos-s-border) text-yellow-800 dark:text-yellow-200 active:bg-(--pos-s-surface-2)'
+                        : 'bg-yellow-400! border-yellow-500 text-black active:bg-yellow-500! shadow-lg'
                   }`}
                 >
-                  <Clock className="w-4 h-4" />
-                  <span>{t('tables.actions.newReservation', 'Reserve')}</span>
+                  <Receipt className="w-4 h-4" />
+                  <span>{table.currentOrderId ? t('tables.actions.viewOrder', 'View Order') : t('tables.actions.newOrder', 'New Order')}</span>
                 </button>
-              )}
-            </div>
-            {isNewOrderActionDisabled && (
-              <p className={`text-xs ${isDark ? 'text-amber-400' : 'text-amber-600'}`}>
-                {orderCreationDisabledMessage}
-              </p>
-            )}
-          </div>
-        )}
+                {table.status === 'available' && canCreateReservation && (
+                  <button
+                    onClick={() => onNewReservation(table)}
+                    className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-colors ${
+                      isDark
+                        ? 'bg-white/10 text-white active:bg-white/20'
+                        : 'bg-gray-100 text-gray-700 active:bg-gray-200'
+                    }`}
+                  >
+                    <Clock className="w-4 h-4" />
+                    <span>{t('tables.actions.newReservation', 'Reserve')}</span>
+                  </button>
+                )}
+              </div>
+              <AnimatePresence initial={false}>
+                {isNewOrderActionDisabled && (
+                  <motion.div {...revealMotion}>
+                    <p className={`text-xs ${isDark ? 'text-amber-400' : 'text-amber-600'}`}>
+                      {orderCreationDisabledMessage}
+                    </p>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Status Actions */}
-        <div className={`p-4 ${table.status === 'available' || table.status === 'occupied' ? 'border-t ' + (isDark ? 'border-white/10' : 'border-gray-100') : ''}`}>
-          <p className={`text-xs font-medium mb-3 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+        <div className="px-6 pb-5 pt-2">
+          <p className="text-xs font-semibold mb-3 liquid-glass-modal-text-muted">
             {t('tables.actions.changeStatus', 'Change Status')}
           </p>
           <div className="space-y-2">

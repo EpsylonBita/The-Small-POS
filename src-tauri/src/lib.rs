@@ -67,6 +67,7 @@ mod manual_order_cancellation;
 mod memory_trim;
 mod menu;
 mod money;
+mod native_crash;
 mod offline_check_in;
 mod order_header_preflight;
 mod order_ownership;
@@ -108,6 +109,7 @@ mod table_session_cache;
 mod terminal_helpers;
 mod unit_shift_readiness;
 mod unsaved_payments;
+mod webview_recovery;
 mod windows_spooler;
 mod zreport;
 
@@ -1032,8 +1034,12 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
     // Install panic hook now that tracing is ready. Any panic before this point
     // still falls through to Rust's default stderr hook.
     panic_hook::install();
+    // A fault that is not a panic (an illegal instruction, an unhandled access violation) left
+    // no trace at all: record where it happened before Windows ends the process.
+    native_crash::install();
 
     info!("Starting The Small POS v{}", env!("CARGO_PKG_VERSION"));
+    native_crash::log_last_record();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1097,6 +1103,10 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 // Keep full responsiveness while the POS is active; lower
                 // WebView2's memory target only while its window is inactive.
                 memory_trim::start_activity_policy(app.handle().clone());
+
+                // A lost render process left the window blank white and the till dead on
+                // screen: log it and reload the page (capped).
+                webview_recovery::install(app.handle());
             }
 
             let app_data_dir = app.path().app_data_dir().map_err(|e| {

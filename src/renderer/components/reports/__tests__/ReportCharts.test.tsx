@@ -2,7 +2,7 @@ import React, { type ReactNode } from 'react';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  HourlySalesChart, OrderTypeChart, PaymentMethodChart, SalesTrendChart, TopItemsChart,
+  HourlySalesChart, OrderTypeChart, PaymentMethodChart, TopItemsChart,
 } from '../ReportCharts';
 
 // Supply layout dimensions; keep the installed Recharts rendering and label contracts.
@@ -51,16 +51,15 @@ describe('Recharts 3 report charts', () => {
     }, { timeout: 3000 });
   });
 
-  it('renders the trend, top items and active hourly sales with real chart types', () => {
+  it('renders top items and active hourly sales with real chart types', () => {
     const { container } = render(<>
-      <SalesTrendChart data={[{ date: '2026-10-27', revenue: 100, orders: 4, avgOrderValue: 25 }]} isDark={false} currency={currency} />
       <TopItemsChart data={[{ name: 'Coffee', quantity: 4, revenue: 100 }]} isDark={false} currency={currency} />
       <HourlySalesChart data={[{ hour: 0, orders: 0, revenue: 0 }, { hour: 12, orders: 4, revenue: 100 }]} isDark currency={currency} />
     </>);
     expect(screen.getByText('Coffee')).toBeInTheDocument();
     expect(screen.getAllByText('12:00').length).toBeGreaterThan(0);
     expect(screen.queryByText('0:00')).not.toBeInTheDocument();
-    expect(container.querySelectorAll('svg[role="application"][tabindex="0"]')).toHaveLength(3);
+    expect(container.querySelectorAll('svg[role="application"][tabindex="0"]')).toHaveLength(2);
     expect(container.querySelectorAll('.recharts-cartesian-grid-horizontal line').length).toBeGreaterThan(0);
   });
 });

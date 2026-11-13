@@ -1,8 +1,6 @@
 import React, { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  AreaChart,
-  Area,
   BarChart,
   Bar,
   PieChart,
@@ -15,8 +13,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { motion } from 'framer-motion';
-import { formatDate as formatDateValue } from '../../utils/format';
-import type { SalesTrendData, TopItemData, HourlySalesData } from '../../types/reports';
+import type { TopItemData, HourlySalesData } from '../../types/reports';
 
 interface ChartContainerProps {
   title: string;
@@ -42,74 +39,6 @@ const ChartContainer = memo<ChartContainerProps>(({ title, children, isDark, del
 ));
 
 ChartContainer.displayName = 'ChartContainer';
-
-interface SalesTrendChartProps {
-  data: SalesTrendData[];
-  isDark: boolean;
-  currency: Intl.NumberFormat;
-}
-
-export const SalesTrendChart = memo<SalesTrendChartProps>(({ data, isDark, currency }) => {
-  const { t } = useTranslation();
-  const formatChartDate = (dateStr: string) => {
-    const date = new Date(dateStr);
-    return formatDateValue(date, { month: 'short', day: 'numeric' });
-  };
-
-  return (
-    <ChartContainer title={t('reports.sales.salesTrend')} isDark={isDark} delay={0.1}>
-      <div className="h-80">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data}>
-            <defs>
-              <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#eab308" stopOpacity={0.8} />
-                <stop offset="95%" stopColor="#eab308" stopOpacity={0} />
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#374151' : '#e5e7eb'} />
-            <XAxis
-              dataKey="date"
-              tickFormatter={formatChartDate}
-              stroke={isDark ? '#9ca3af' : '#6b7280'}
-              style={{ fontSize: '12px' }}
-            />
-            <YAxis
-              stroke={isDark ? '#9ca3af' : '#6b7280'}
-              style={{ fontSize: '12px' }}
-              tickFormatter={(value: number) => currency.format(value)}
-            />
-            <Area
-              type="monotone"
-              dataKey="revenue"
-              stroke="#eab308"
-              strokeWidth={2}
-              fillOpacity={1}
-              fill="url(#colorRevenue)"
-              animationDuration={1000}
-            />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: isDark ? '#1f2937' : '#ffffff',
-                border: `1px solid ${isDark ? '#374151' : '#e5e7eb'}`,
-                borderRadius: '8px',
-                color: isDark ? '#ffffff' : '#000000',
-              }}
-              formatter={(value) => typeof value === 'number' || typeof value === 'string'
-                ? [currency.format(Number(value)), 'Revenue']
-                : undefined}
-              labelFormatter={(value) => typeof value === 'string' || typeof value === 'number'
-                ? formatChartDate(String(value))
-                : ''}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
-      </div>
-    </ChartContainer>
-  );
-});
-
-SalesTrendChart.displayName = 'SalesTrendChart';
 
 interface TopItemsChartProps {
   data: TopItemData[];

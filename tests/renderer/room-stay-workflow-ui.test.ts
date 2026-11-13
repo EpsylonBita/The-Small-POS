@@ -31,23 +31,30 @@ test('Round 350: New Order Room card opens a 3-action Room chooser modal (not th
   // It is a glass modal titled by the room-flow key (a chooser, not a navigation to the Rooms page).
   assert.match(region, /title=\{t\("orderFlow\.roomFlowTitle"/);
 
+  // founder 11/11/2026: frosted action cards, readable neutral titles, semantic icons.
+  assert.equal((region.match(/pos-glass-tap-card/g) ?? []).length, 3);
+  assert.equal((region.match(/text-base font-bold liquid-glass-modal-text/g) ?? []).length, 3);
+  assert.equal((region.match(/liquid-glass-modal-text-muted/g) ?? []).length, 3);
   // Exactly the three actions, each a touch-first <button> with its semantic color + handler.
   // 1. Room Order -- amber/orange.
   assert.match(region, /onClick=\{handleRoomFlowOrder\}/);
-  assert.match(region, /border-\(--pos-s-border\)[\s\S]*?/);
-  assert.match(region, /text-amber-400[\s\S]*?orderFlow\.roomFlowOrder/);
+  assert.match(region, /min-h-touch-xl w-full items-center/);
+  assert.match(region, /text-amber-600 dark:text-amber-300[\s\S]*?orderFlow\.roomFlowOrder/);
   // 2. Check-in -- green.
   assert.match(region, /onClick=\{handleRoomFlowCheckin\}/);
-  assert.match(region, /border-\(--pos-s-border\)[\s\S]*?/);
-  assert.match(region, /text-green-400[\s\S]*?orderFlow\.roomFlowCheckin/);
+  assert.match(region, /min-h-touch-xl w-full items-center/);
+  assert.match(region, /text-emerald-600 dark:text-emerald-300[\s\S]*?orderFlow\.roomFlowCheckin/);
   // 3. Create Reservation -- purple.
   assert.match(region, /onClick=\{handleRoomFlowReservation\}/);
-  assert.match(region, /border-\(--pos-s-border\)[\s\S]*?/);
-  assert.match(region, /text-\[#a855f7\][\s\S]*?orderFlow\.roomFlowReservation/);
+  assert.match(region, /min-h-touch-xl w-full items-center/);
+  assert.match(region, /text-violet-600 dark:text-violet-300[\s\S]*?orderFlow\.roomFlowReservation/);
 
   // Touch-first: the chooser actions are real buttons with active-press only (no hover-era styling).
   assert.ok((region.match(/type="button"/g) ?? []).length >= 3, 'all three room actions must be type=button');
-  assert.match(region, /active:scale-95/);
+  // founder 11/11/2026: the shared tap-card rule supplies touch press feedback.
+  const css = read('src/renderer/styles/glassmorphism.css');
+  assert.match(css, /\.pos-glass-tap-card:is\(:active, \[data-pressed\]\):not\(:disabled\) \{[^}]*box-shadow: var\(--pos-s-depth-press\);[^}]*translate: 0 1px;/);
+  assert.match(css, /:where\(button,[\s\S]*:focus-visible/);
   assert.doesNotMatch(region, /hover:/);
   assert.doesNotMatch(region, /group-hover/);
 });

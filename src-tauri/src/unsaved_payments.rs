@@ -1513,7 +1513,9 @@ pub(crate) fn write_new_order_checkout(
     let response = crate::sync::create_order(db, order_payload, invalidator)?;
     if let Some(order_id) = response.get("orderId").and_then(Value::as_str) {
         if let Ok(conn) = db.conn.lock() {
-            if let Err(error) = crate::fiscal::dispatcher::enqueue_for_order(&conn, order_id) {
+            if let Err(error) =
+                crate::fiscal::dispatcher::enqueue_with_admission_owed(&conn, order_id)
+            {
                 warn!(
                     order_id = %order_id,
                     error = %error,

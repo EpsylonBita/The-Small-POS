@@ -6,8 +6,7 @@
 //! In particular, this is not an RBS adapter and must not be inferred from an
 //! RBS brand selection.
 //!
-//! Frame format: `STX | LenLo | LenHi | Seq | Cmd | Data... | PostAmble | LRC | ETX`
-//! (Simplified variant uses `STX | Cmd | Data | LRC | ETX`)
+//! Frame format: `STX | Len | Seq | Cmd | Data... | PostAmble | LRC | ETX`.
 
 use crate::ecr::protocol::*;
 use crate::ecr::transport::EcrTransport;
@@ -107,7 +106,7 @@ impl GenericEscPosFiscal {
         s
     }
 
-    /// Build a frame: STX + Len(4) + Seq + Cmd + Data + PostAmble(0x05) + LRC + ETX
+    /// Build a frame: STX + Len + Seq + Cmd + Data + PostAmble(0x05) + LRC + ETX
     ///
     /// The length byte is `Seq(1) + Cmd(1) + Data(N) + PostAmble(1) + 0x20`
     /// offset. Because the byte is a u8, `Data(N)` must be ≤ 220 (since
@@ -171,47 +170,48 @@ impl GenericEscPosFiscal {
                 b => Err(format!("Unexpected single byte response: 0x{b:02X}")),
             };
         }
-        // Find STX..ETX frame
-        let stx_pos = raw.iter().position(|&b| b == STX);
-        let etx_pos = raw.iter().rposition(|&b| b == ETX);
-        match (stx_pos, etx_pos) {
-            (Some(s), Some(e)) if e > s + 3 => {
-                // Wave 3 C5: verify the frame's LRC byte. On HEAD the
-                // LRC was extracted and silently discarded — a bit-flip
-                // on the wire (or a malfunctioning device) could produce
-                // a frame the POS accepts as valid, potentially storing
-                // a corrupt fiscal receipt number in the audit trail.
-                //
-                // Layout: [STX, LEN, SEQ, CMD, ...data..., POSTAMBLE,
-                // LRC, ETX] where LRC = XOR(bytes between STX+1 and
-                // LRC itself, exclusive).
-                if STRICT_LRC && e >= 2 && e - 1 > s {
-                    let expected_lrc = raw[e - 1];
-                    let computed_lrc = raw[s + 1..e - 1].iter().fold(0u8, |acc, &b| acc ^ b);
-                    if computed_lrc != expected_lrc {
-                        return Err(format!(
-                            "Fiscal frame LRC mismatch: expected 0x{expected_lrc:02X}, \
+        // Only the complete one-byte-length profile emitted by build_frame is supported.
+        if raw.len() < 7 || raw[0] != STX || raw[raw.len() - 1] != ETX {
+            return Err("Invalid fiscal frame layout".into());
+        }
+        if usize::from(raw[1]) != raw.len() - 4 + 0x20 {
+            return Err("Fiscal frame length mismatch".into());
+        }
+        if raw[raw.len() - 3] != 0x05 {
+            return Err("Invalid fiscal frame postamble".into());
+        }
+        let s = 0;
+        let e = raw.len() - 1;
+        // Wave 3 C5: verify the frame's LRC byte. On HEAD the
+        // LRC was extracted and silently discarded — a bit-flip
+        // on the wire (or a malfunctioning device) could produce
+        // a frame the POS accepts as valid, potentially storing
+        // a corrupt fiscal receipt number in the audit trail.
+        //
+        // Layout: [STX, LEN, SEQ, CMD, ...data..., POSTAMBLE,
+        // LRC, ETX] where LRC = XOR(bytes between STX+1 and
+        // LRC itself, exclusive).
+        if STRICT_LRC && e >= 2 && e - 1 > s {
+            let expected_lrc = raw[e - 1];
+            let computed_lrc = raw[s + 1..e - 1].iter().fold(0u8, |acc, &b| acc ^ b);
+            if computed_lrc != expected_lrc {
+                return Err(format!(
+                    "Fiscal frame LRC mismatch: expected 0x{expected_lrc:02X}, \
                              computed 0x{computed_lrc:02X}. Wave 3 C5 strict LRC validation \
                              is enabled; if a specific device is known-good and producing \
                              false positives, disable `STRICT_LRC` to downgrade to a warn."
-                        ));
-                    }
-                }
-
-                // Extract payload between STX and ETX (skip len, seq)
-                let cmd = raw[s + 3];
-                let data = if e > s + 5 {
-                    raw[s + 4..e - 2].to_vec() // skip postamble + LRC
-                } else {
-                    Vec::new()
-                };
-                Ok((cmd, data))
+                ));
             }
-            _ => Err(format!(
-                "Invalid frame (no STX/ETX): {:02X?}",
-                &raw[..raw.len().min(20)]
-            )),
         }
+
+        // Extract payload between STX and ETX (skip len, seq)
+        let cmd = raw[s + 3];
+        let data = if e > s + 5 {
+            raw[s + 4..e - 2].to_vec() // skip postamble + LRC
+        } else {
+            Vec::new()
+        };
+        Ok((cmd, data))
     }
 
     /// Send a command and wait for response.
@@ -220,7 +220,13 @@ impl GenericEscPosFiscal {
         let raw = self
             .transport
             .send_and_receive(&frame, self.transaction_timeout_ms)?;
-        self.parse_response(&raw)
+        let (response_cmd, response_data) = self.parse_response(&raw)?;
+        if response_cmd != cmd && response_cmd != ACK && response_cmd != NAK {
+            return Err(format!(
+                "Fiscal response command mismatch: sent 0x{cmd:02X}, received 0x{response_cmd:02X}"
+            ));
+        }
+        Ok((response_cmd, response_data))
     }
 
     /// Format amount in cents as fiscal string (e.g. 1250 → "12.50").
@@ -678,12 +684,11 @@ mod tests {
     /// the old permissive parser; now the helper must compute the byte
     /// correctly or the parser rejects the frame.
     fn framed(cmd_byte: u8, data: &[u8]) -> Vec<u8> {
-        const LEN_PLACEHOLDER: u8 = 0x20;
         const SEQ_PLACEHOLDER: u8 = 0x20;
         const POSTAMBLE: u8 = 0x05;
 
         let mut body: Vec<u8> = Vec::with_capacity(4 + data.len());
-        body.push(LEN_PLACEHOLDER);
+        body.push(u8::try_from(data.len() + 3 + 0x20).unwrap());
         body.push(SEQ_PLACEHOLDER);
         body.push(cmd_byte);
         body.extend_from_slice(data);
@@ -773,6 +778,55 @@ mod tests {
         assert_eq!(cmd_of(&sent_frames[2]), CMD_SUBTOTAL);
         assert_eq!(cmd_of(&sent_frames[3]), CMD_PAYMENT);
         assert_eq!(cmd_of(&sent_frames[4]), CMD_CLOSE_FISCAL_RECEIPT);
+    }
+
+    #[test]
+    fn test_process_transaction_fiscal_receipt_rejects_unrelated_or_malformed_close() {
+        let mut wrong_length = framed(CMD_CLOSE_FISCAL_RECEIPT, b"12345");
+        wrong_length[1] -= 1;
+        let lrc_index = wrong_length.len() - 2;
+        wrong_length[lrc_index] = wrong_length[1..lrc_index].iter().fold(0, |a, b| a ^ b);
+        for close in [
+            wrong_length,
+            framed(CMD_STATUS, b"12345"),
+            vec![
+                0x02, 0x00, 0x20, 0x4A, 0x31, 0x32, 0x33, 0x34, 0x35, 0x05, 0x5E, 0x03,
+            ],
+        ] {
+            let transport = MockTransport::new(vec![
+                vec![ACK],
+                vec![ACK],
+                vec![ACK],
+                vec![ACK],
+                close.clone(),
+            ]);
+            let sent = transport.sent_handle();
+            let mut proto = GenericEscPosFiscal::new(Box::new(transport), &serde_json::json!({}));
+            assert!(
+                proto.process_transaction(&sample_fiscal_request()).is_err(),
+                "{close:02X?}"
+            );
+            assert_eq!(
+                sent.lock().unwrap().len(),
+                5,
+                "an ambiguous close must not cancel or retry"
+            );
+        }
+    }
+
+    #[test]
+    fn test_process_transaction_fiscal_receipt_accepts_correlated_close() {
+        let transport = MockTransport::new(vec![
+            vec![ACK],
+            vec![ACK],
+            vec![ACK],
+            vec![ACK],
+            framed(CMD_CLOSE_FISCAL_RECEIPT, b"12345"),
+        ]);
+        let mut proto = GenericEscPosFiscal::new(Box::new(transport), &serde_json::json!({}));
+        let response = proto.process_transaction(&sample_fiscal_request()).unwrap();
+        assert_eq!(response.status, TransactionStatus::Approved);
+        assert_eq!(response.fiscal_receipt_number.as_deref(), Some("12345"));
     }
 
     #[test]
@@ -1006,6 +1060,49 @@ mod tests {
             GenericEscPosFiscal::new(Box::new(MockTransport::new(vec![])), &serde_json::json!({}));
         let result = proto.parse_response(&[NAK]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_response_rejects_invalid_length_and_layout() {
+        let proto =
+            GenericEscPosFiscal::new(Box::new(MockTransport::new(vec![])), &serde_json::json!({}));
+        let valid = framed(CMD_CLOSE_FISCAL_RECEIPT, b"12345");
+        let mut wrong_length = valid.clone();
+        wrong_length[1] -= 1;
+        let mut wrong_postamble = valid.clone();
+        let postamble_index = wrong_postamble.len() - 3;
+        wrong_postamble[postamble_index] = 0x04;
+        let mut truncated = valid.clone();
+        truncated.remove(5);
+        let mut leading_garbage = vec![0xFF];
+        leading_garbage.extend_from_slice(&valid);
+        let mut trailing_garbage = valid.clone();
+        trailing_garbage.push(0xFF);
+        for mut raw in [
+            wrong_length,
+            wrong_postamble,
+            truncated,
+            leading_garbage,
+            trailing_garbage,
+            vec![STX, 0x20, 0x20, 0x03, ETX],
+        ] {
+            let lrc_index = raw.len() - 2;
+            raw[lrc_index] = raw[1..lrc_index].iter().fold(0, |a, b| a ^ b);
+            assert!(proto.parse_response(&raw).is_err(), "{raw:02X?}");
+        }
+        for length in 0..valid.len() {
+            assert!(
+                proto.parse_response(&valid[..length]).is_err(),
+                "truncated at {length}"
+            );
+        }
+        let mut ack_prefixed = vec![ACK, ACK];
+        ack_prefixed.extend_from_slice(&valid);
+        assert_eq!(
+            proto.parse_response(&ack_prefixed).unwrap(),
+            (CMD_CLOSE_FISCAL_RECEIPT, b"12345".to_vec())
+        );
+        assert_eq!(proto.parse_response(&framed(ACK, b"12345")).unwrap().0, ACK);
     }
 
     #[test]

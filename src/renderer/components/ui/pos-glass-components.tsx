@@ -2,6 +2,13 @@
 
 import { X } from 'lucide-react';
 import React from 'react'
+import {
+  applyModalOrigin,
+  installModalOriginTracking,
+  registerOpenGlassModal,
+  takeOverBackdrop,
+  type OpenGlassModal,
+} from './modal-origin'
 import ReactDOM from 'react-dom'
 import { cn } from '../../utils/cn'
 import { useI18n } from '../../contexts/i18n-context'
@@ -723,6 +730,9 @@ const getFocusableElements = (container: HTMLElement): HTMLElement[] => {
   ) as HTMLElement[]
 }
 
+// Presses are tracked from start-up, so the first window opened already knows its origin.
+installModalOriginTracking()
+
 // Exit animation (liquidModalExit) is 180 ms; this is the latest a close may settle.
 const MODAL_EXIT_FALLBACK_MS = 260
 
@@ -780,6 +790,15 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   // Internal state for closing animation
   const [isClosing, setIsClosing] = React.useState(false)
   const [mounted, setMounted] = React.useState(isServerRender ? isOpen : false)
+  // True when this window replaced one that was closing: its backdrop skips the fade-in so the
+  // dim and blur stay constant across the two (founder 11/11/2026, see modal-origin.ts).
+  const [backdropContinued, setBackdropContinued] = React.useState(false)
+  const isOpenRef = React.useRef(isOpen)
+  isOpenRef.current = isOpen
+  const openEntry = React.useMemo<OpenGlassModal>(
+    () => ({ isOpen: () => isOpenRef.current, backdrop: () => backdropRef.current }),
+    [],
+  )
   const blockerId = React.useId()
   const titleId = React.useId()
   const blockerMetadata = React.useMemo(
@@ -867,6 +886,25 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
     const timer = window.setTimeout(finalizeClose, MODAL_EXIT_FALLBACK_MS)
     return () => window.clearTimeout(timer)
   }, [isClosing, finalizeClose])
+
+  // While mounted, this window is known to the others (backdrop take-over).
+  React.useEffect(() => {
+    if (!mounted || isServerRender) return
+    return registerOpenGlassModal(openEntry)
+  }, [mounted, isServerRender, openEntry])
+
+  // Before the first paint: grow out of the control that was pressed, and take over the backdrop
+  // of a window this one replaces.
+  React.useLayoutEffect(() => {
+    if (isServerRender) return
+    if (!mounted) {
+      setBackdropContinued(false)
+      return
+    }
+    installModalOriginTracking()
+    if (containerRef.current) applyModalOrigin(containerRef.current)
+    if (takeOverBackdrop(openEntry)) setBackdropContinued(true)
+  }, [mounted, isServerRender, openEntry])
 
   // Sync mounted state with isOpen
   React.useEffect(() => {
@@ -1108,7 +1146,11 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
       {/* Backdrop */}
       <div
         ref={backdropRef}
-        className={cn('liquid-glass-modal-backdrop', isClosing && 'leaving')}
+        className={cn(
+          'liquid-glass-modal-backdrop',
+          backdropContinued && 'liquid-glass-modal-backdrop--continued',
+          isClosing && 'leaving',
+        )}
         onClick={closeOnBackdrop ? handleClose : undefined}
         aria-hidden="true"
       />

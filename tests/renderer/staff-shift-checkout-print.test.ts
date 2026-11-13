@@ -144,7 +144,8 @@ test('StaffShiftModal gates staff QR check-in behind an acquired and active ERGA
   assert.match(modal, /const ERGANI_PLUGIN_ID = 'ergani_digital_schedule'/);
   assert.match(modal, /posApiGet<\{ integrations\?: PosIntegrationPayload\[\] \}>\(\s*`\/pos\/integrations\?provider=\$\{ERGANI_PLUGIN_ID\}`/);
   assert.match(modal, /integration\.is_purchased === true &&\s*integration\.is_enabled === true &&\s*integration\.is_active === true/);
-  assert.match(modal, /\{hasActiveErganiPlugin && \(\s*<div className="pos-card p-4">[\s\S]*staffQrBadge/);
+  // founder 11/11/2026: keep the ERGANI gate; its panel now reveals as glass.
+  assert.match(modal, /\{hasActiveErganiPlugin && \(\s*<motion\.div key="reveal-\d+" \{\.\.\.revealMotion\} className="pos-glass-form-card p-4!">[\s\S]*staffQrBadge/);
   assert.match(modal, /if \(!hasActiveErganiPlugin\) \{[\s\S]*qrRequiresErgani/);
 });
 
@@ -175,7 +176,7 @@ test('StaffShiftModal keeps check-in person icons standalone and neutral', () =>
   }
 
   assert.doesNotMatch(modal, /iconSurface:/, 'decorative icon-tile presentation tokens must be removed');
-  assert.match(modal, /<User className="h-7 w-7 shrink-0 text-\(--pos-s-muted\)" strokeWidth=\{1\.8\} \/>/);
+  assert.match(modal, /<User className="h-7 w-7 shrink-0 liquid-glass-modal-text-muted" strokeWidth=\{1\.8\} \/>/);
   assert.doesNotMatch(modal, /activePresentation|primaryPresentation|summaryPresentation|selectedRolePresentation/);
 });
 
@@ -227,10 +228,10 @@ test('StaffShiftModal renders the cashier-first role gate as a readable kit warn
     'Locked until cashier starts',
   ];
 
-  // Kit warn notice: warn line + warn tint, words in the readable foreground colour.
+  // founder 11/11/2026: the same readable kit warning now reveals with the form.
   assert.match(
     modal,
-    /cashierFirstGateActive && \(\s*<div className="pos-notice pos-notice--warn mt-4 text-sm">\s*<AlertTriangle className="pos-notice__icon h-5 w-5" \/>/,
+    /cashierFirstGateActive && \(\s*<motion\.div key="reveal-\d+" \{\.\.\.revealMotion\} className="pos-notice pos-notice--warn mt-4 text-sm"><ShiftRevealContent>\s*<AlertTriangle className="pos-notice__icon h-5 w-5" \/>/,
   );
   for (const fallback of cashierFirstFallbacks) {
     assert.doesNotMatch(modal, new RegExp(fallback.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
@@ -267,13 +268,14 @@ test('cashier-first role gate copy exists in every POS locale and Greek is not E
   }
 });
 
-test('StaffShiftModal renders role choices as kit cards with plain primary/secondary words', () => {
+test('StaffShiftModal renders role choices as glass cards with plain primary/secondary words', () => {
   const modal = source(staffShiftModalPath);
   const roleStart = modal.indexOf('data-testid="staff-role-section"');
   const roleStep = modal.slice(roleStart, modal.indexOf("if (checkInStep === 'enter-cash'", roleStart));
 
-  assert.match(roleStep, /className="pos-choice-card pos-choice-card--row active:bg-\(--pos-s-surface-2\)"/);
-  assert.match(roleStep, /<span className="text-sm text-\(--pos-s-muted\)">\s*\{role\.is_primary/);
+  // founder 11/11/2026: raised glass choices, with the original role words and lock state.
+  assert.match(roleStep, /className="pos-glass-tap-card flex min-h-\[56px\] w-full items-center justify-between gap-3 px-4 py-3"/);
+  assert.match(roleStep, /<span className="text-sm liquid-glass-modal-text-muted">\s*\{role\.is_primary/);
   assert.match(roleStep, /<span className="text-sm font-semibold text-\(--pos-s-warn\)">\s*\{t\('modals\.staffShift\.roleLockedUntilCashier'\)\}/);
   assert.doesNotMatch(roleStep, /rolePresentation|badgeFilled|bg-amber-50/);
 });
@@ -281,22 +283,22 @@ test('StaffShiftModal renders role choices as kit cards with plain primary/secon
 test('StaffShiftModal renders the cash-entry icon neutral, without a wrapper tile', () => {
   const modal = source(staffShiftModalPath);
 
-  assert.match(modal, /<CashHandIcon\s+className="h-10 w-10 shrink-0 text-\(--pos-s-muted\)"\s*\/>/);
+  assert.match(modal, /<CashHandIcon\s+className="h-10 w-10 shrink-0 liquid-glass-modal-text-muted"\s*\/>/);
   assert.doesNotMatch(
     modal,
     /rounded-\[20px\] border \$\{selectedRolePresentation\.iconSurface\}[\s\S]*<CashHandIcon/,
   );
 });
 
-test('StaffShiftModal lists staff on shift as kit rows; the row itself opens the shift', () => {
+test('StaffShiftModal lists staff on shift as glass cards; the card itself opens the shift', () => {
   const modal = source(staffShiftModalPath);
   const listStart = modal.indexOf('data-testid="checkin-active-shifts"');
   const list = modal.slice(listStart, modal.indexOf('data-testid="checkin-ready-staff"', listStart));
 
-  assert.match(list, /activeCheckInStaff\.length > 0 \? 'text-\(--pos-s-ok\)' : 'text-\(--pos-s-muted\)'/);
-  assert.match(list, /className="pos-row relative w-full text-left active:bg-\(--pos-s-surface-2\)"/);
-  // Founder 01/11: staff already checked in show in green, in the kit ok colour (bar, icon, role badge).
-  assert.match(list, /bg-\(--pos-s-ok\)/);
+  assert.match(list, /activeCheckInStaff\.length > 0 \? 'text-\(--pos-s-ok\)' : 'liquid-glass-modal-text-muted'/);
+  assert.match(list, /className="pos-glass-tap-card flex min-h-\[56px\] w-full items-center justify-between gap-3 px-4 py-3 relative text-left"/);
+  // founder 11/11/2026: state words and icons stay green, with no decorative colour bar.
+  assert.match(list, /className="truncate text-base font-semibold text-\(--pos-s-ok\)">\{staffMember\.name\}/);
   assert.match(list, /<User className="h-7 w-7 shrink-0 text-\(--pos-s-ok\)"/);
   assert.match(list, /<span className="inline-flex items-center gap-1 font-semibold text-\(--pos-s-ok\)">\s*<CheckCircle/);
   assert.match(list, /\{t\('modals\.staffShift\.manageActiveShift'\)\}\s*<ChevronRight className="h-5 w-5 shrink-0" \/>/);
@@ -347,7 +349,8 @@ test('Round 338: the checkout action footer floats over the scrollable reconcili
   // its capped-height behaviour; the shells are distinguished by data-testid.
   assert.match(
     modal,
-    /className=\{`relative flex \$\{effectiveMode === 'checkout' \? 'flex-1 min-h-0' : 'max-h-\[84vh\]'\} flex-col`\}/,
+    /className=\{`pos-progressive-form relative flex \$\{effectiveMode === 'checkout' \? 'flex-1 min-h-0' : 'max-h-\[84vh\]'\} flex-col`\}/,
+    // founder 11/11/2026: the focus-visible scope keeps the same bounded scrolling shell.
     'the checkout shell must fill the modal (flex-1 min-h-0) so its body scrolls and the footer floats',
   );
   assert.match(

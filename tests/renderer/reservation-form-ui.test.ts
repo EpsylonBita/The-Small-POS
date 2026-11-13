@@ -69,14 +69,19 @@ test('ReservationForm renders through an app-level portal above the sidebar and 
   // layer with a full-screen backdrop/blur, and a constrained, scrollable body.
   assert.match(source, /import \{ renderModalPortal \} from '\.\.\/\.\.\/utils\/render-modal-portal';/);
   assert.match(source, /return renderModalPortal\(\s*<div/);
-  assert.match(source, /className="fixed inset-0 z-1200 flex items-center justify-center"/);
-  assert.match(source, /bg-black\/50 backdrop-blur-sm/);
+  // founder 11/11/2026: content-sized and anchored at the top (it no longer opens as a tall,
+  // mostly empty window, and it grows downward when the notes reveal), on the shared backdrop.
+  assert.match(source, /className="fixed inset-0 z-1200 flex items-start justify-center px-3 pb-3 pt-\[4vh\] sm:px-6 sm:pb-6"/);
+  assert.match(source, /className="absolute inset-0 bg-\(--modal-backdrop\) backdrop-blur-xl"/);
   // The old inline z-50 overlay (clipped by the dashboard container) is gone.
   assert.doesNotMatch(source, /fixed inset-0 z-50/);
   // Body is height-constrained and scrolls so header/footer never clip.
-  assert.match(source, /max-h-\[90vh\]/);
+  assert.match(source, /liquid-glass-modal-shell relative flex w-full max-w-3xl max-h-full flex-col/);
+  assert.doesNotMatch(source, /h-\[min\(820px,90vh\)\]/);
   assert.match(source, /flex-1 min-h-0 overflow-y-auto/);
-  assert.match(source, /border-t shrink-0/);
+  // founder 11/11/2026: the plain footer still reserves its own space.
+  assert.match(source, /justify-between gap-3 px-6 pb-5 pt-2 shrink-0/);
+  assert.doesNotMatch(source.slice(source.indexOf('{/* Action Buttons')), /border-t|backdrop-blur/);
 });
 
 test('ReservationForm passes count for guest pluralization (no flat "guests" label)', () => {
@@ -338,13 +343,15 @@ test('ReservationForm adopts the shared liquid-glass tokens (premium glass, not 
   assert.match(source, /data-reservation-form/);
 
   // Shared header / title / close / content / input tokens.
-  assert.match(source, /className="liquid-glass-modal-header"/);
+  assert.match(source, /className="liquid-glass-modal-header pos-glass-header--plain"/);
   assert.match(source, /<h2 id="reservation-form-title" className="liquid-glass-modal-title">/);
   assert.match(source, /className="liquid-glass-modal-close active:scale-95"/);
   assert.match(source, /liquid-glass-modal-content scrollbar-hide/);
   assert.match(source, /liquid-glass-modal-input/);
   assert.match(source, /liquid-glass-modal-text\b/);
-  assert.match(source, /liquid-glass-modal-border/);
+  // founder 11/11/2026: field/card borders come from shared neutral frost tokens.
+  assert.match(source, /pos-glass-field/);
+  assert.match(source, /pos-glass-form-card/);
 
   // The old opaque shell + ad-hoc inputs are gone.
   assert.doesNotMatch(source, /bg-gray-900 border border-white\/10/);
@@ -370,7 +377,8 @@ test('ReservationForm uses semantic action colours (cancel red, create green) an
 });
 
 test('ReservationForm guest steppers are centered 44px touch targets with active feedback + lucide icons', () => {
-  const stepperHits = source.match(/inline-flex h-11 w-11 items-center justify-center rounded-xl[^"]*active:scale-95/g) || [];
+  // founder 11/11/2026: the frosted field supplies the radius; 44px targets, names and press remain.
+  const stepperHits = source.match(/pos-glass-field inline-flex h-11 w-11 items-center justify-center[^"]*active:scale-95/g) || [];
   assert.ok(stepperHits.length >= 2, `guest steppers must be h-11 w-11 active-scale touch targets (found ${stepperHits.length})`);
   assert.match(source, /<Minus className="h-4 w-4" \/>/);
   assert.match(source, /<Plus className="h-4 w-4" \/>/);

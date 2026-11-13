@@ -1,8 +1,8 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { DeliveryScooterIcon } from '../icons/OrderTypeGlyphs';
-import { liquidGlassModalTone } from '../../styles/designSystem';
 
 interface EditOptionsModalProps {
   isOpen: boolean;
@@ -40,6 +40,15 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
   onChangeDriver,
   onClose
 }) => {
+  
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const { t } = useTranslation();
 
   return (
@@ -48,7 +57,7 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
       onClose={onClose}
       title={t('modals.editOptions.title')}
       size="md"
-      className="max-w-lg!"
+      className="max-w-lg! [&_.liquid-glass-modal-header]:border-b-0!"
     >
             <p className="liquid-glass-modal-text-muted mb-6">
               {t('modals.editOptions.message', { count: orderCount })}
@@ -58,7 +67,7 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
               {/* Edit Customer Info Option */}
               <button
                 onClick={onEditInfo}
-                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-slate-100 dark:active:bg-slate-800 active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-slate-500/60 dark:focus-visible:ring-slate-300/60 ${liquidGlassModalTone('neutral')}`}
+                className="pos-glass-tap-card min-h-touch w-full p-4 text-left liquid-glass-modal-text focus-visible:outline-2 focus-visible:outline-yellow-400"
               >
                 <div className="flex items-center gap-4">
                   <svg aria-hidden="true" className="h-7 w-7 shrink-0 text-slate-600 dark:text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -74,7 +83,7 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
               {/* Edit Order Items Option */}
               <button
                 onClick={onEditOrder}
-                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-emerald-100 dark:active:bg-zinc-800 active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg) ${liquidGlassModalTone('success')}`}
+                className="pos-glass-tap-card min-h-touch w-full p-4 text-left liquid-glass-modal-text focus-visible:outline-2 focus-visible:outline-yellow-400"
               >
                 <div className="flex items-center gap-4">
                   <svg aria-hidden="true" className="h-7 w-7 shrink-0 text-emerald-700 dark:text-emerald-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -91,11 +100,7 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
               <button
                 onClick={onEditPayment}
                 disabled={!canEditPayment}
-                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 focus-visible:outline-hidden focus-visible:ring-2 ${
-                  canEditPayment
-                    ? `${liquidGlassModalTone('warning')} active:bg-(--pos-s-surface-2) active:scale-[0.99] focus-visible:ring-(--pos-s-fg)`
-                    : `${liquidGlassModalTone('neutral')} cursor-not-allowed`
-                }`}
+                className={`pos-glass-tap-card min-h-touch w-full p-4 text-left liquid-glass-modal-text focus-visible:outline-2 focus-visible:outline-yellow-400 ${canEditPayment ? '' : 'cursor-not-allowed'}`}
               >
                 <div className="flex items-center gap-4">
                   <svg aria-hidden="true" className={`h-7 w-7 shrink-0 ${
@@ -117,12 +122,12 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                 </div>
               </button>
 
-              {orderCount === 1 && canChangeDriver && onChangeDriver && (
-                <button
+              <AnimatePresence initial={false}>{orderCount === 1 && canChangeDriver && onChangeDriver && (
+                <motion.div {...revealMotion}><button
                   type="button"
                   data-testid="edit-options-change-driver"
                   onClick={onChangeDriver}
-                  className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-(--pos-s-surface-2) active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg) border-zinc-300 bg-white text-sky-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-sky-300`}
+                  className="pos-glass-tap-card min-h-touch w-full p-4 text-left liquid-glass-modal-text focus-visible:outline-2 focus-visible:outline-yellow-400"
                 >
                   <div className="flex items-center gap-4">
                     <DeliveryScooterIcon className="h-7 w-7 shrink-0 text-sky-700 dark:text-sky-300" />
@@ -135,11 +140,11 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                       </div>
                     </div>
                   </div>
-                </button>
-              )}
+                </button></motion.div>
+              )}</AnimatePresence>
 
-              {orderCount === 1 && (
-                <div className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 ${liquidGlassModalTone('warning')}`}>
+              <AnimatePresence initial={false}>{orderCount === 1 && (
+                <motion.div {...revealMotion} className="pos-glass-form-card w-full text-left liquid-glass-modal-text">
                   <div className="flex items-center gap-4 mb-3">
                     <svg aria-hidden="true" className="h-7 w-7 shrink-0 text-amber-700 dark:text-amber-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h11m-8 5h8m-11 5h11m3-10 3 3m0 0-3 3m3-3h-7" />
@@ -163,10 +168,10 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                           key={type}
                           onClick={() => onChangeOrderType(type)}
                           disabled={isActive}
-                          className={`rounded-xl border px-3 py-2 text-sm font-semibold transition-all ${
+                          className={`min-h-touch rounded-xl border px-3 py-2 text-sm font-semibold transition-all ${
                             isActive
                               ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) cursor-default'
-                              : 'border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2) active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)'
+                              : 'pos-glass-field focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--pos-s-fg)'
                           }`}
                         >
                           {label}
@@ -174,8 +179,8 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                       );
                     })}
                   </div>
-                </div>
-              )}
+                </motion.div>
+              )}</AnimatePresence>
             </div>
     </LiquidGlassModal>
   );

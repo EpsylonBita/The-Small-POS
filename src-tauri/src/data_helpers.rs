@@ -117,6 +117,56 @@ pub(crate) fn load_orders_for_period(
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+pub(crate) type ReportOrderRow = (String, String, Option<String>, Option<String>, f64, String);
+
+pub(crate) struct ReportInstantRange {
+    pub start: Option<String>,
+    pub end: String,
+    pub calendar_day: bool,
+}
+
+pub(crate) fn load_orders_for_instant_range(
+    conn: &rusqlite::Connection,
+    branch_id: &str,
+    range: &ReportInstantRange,
+    include_legacy_branch: bool,
+) -> Result<Vec<ReportOrderRow>, String> {
+    // A closed Z owns its boundary; calendar days own their midnight instead.
+    let (lower, upper) = if range.calendar_day {
+        (">=", "<")
+    } else {
+        (">", "<=")
+    };
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT status, created_at, {DERIVED_PAYMENT_METHOD_SQL}, order_type,
+                COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0), items
+         FROM orders
+         WHERE (?1 = '' OR branch_id = ?1 OR (?4 AND TRIM(COALESCE(branch_id, '')) = ''))
+           AND COALESCE(is_ghost, 0) = 0 AND COALESCE(is_test, 0) = 0
+           AND (?2 IS NULL OR julianday(created_at) {lower} julianday(?2))
+           AND julianday(created_at) {upper} julianday(?3)"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![branch_id, range.start, range.end, include_legacy_branch],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    crate::money::Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
 pub(crate) fn parse_item_totals(items_json: &str) -> (f64, std::collections::HashMap<String, f64>) {
     let mut total = 0.0;
     let mut by_name: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
@@ -227,6 +277,31 @@ mod tests {
             rusqlite::params![id, branch_id, is_test, created_at],
         )
         .expect("seed order");
+    }
+
+    #[test]
+    fn instant_range_preserves_each_reports_legacy_branch_scope() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::run_migrations_for_test(&conn);
+        for (id, branch, is_test) in [
+            ("matching", Some("branch-A"), 0),
+            ("legacy-null", None, 0),
+            ("legacy-blank", Some(""), 0),
+            ("other", Some("branch-B"), 0),
+            ("sandbox", Some("branch-A"), 1),
+        ] {
+            seed_order(&conn, id, "2026-11-09T22:30:00Z", branch, is_test);
+        }
+        let range = ReportInstantRange {
+            start: Some("2026-11-09T04:00:00+00:00".to_string()),
+            end: "2026-11-09T22:45:00+00:00".to_string(),
+            calendar_day: false,
+        };
+        let strict = load_orders_for_instant_range(&conn, "branch-A", &range, false).unwrap();
+        assert_eq!(strict.len(), 1);
+        assert_eq!(strict[0].4, 5.0);
+        let legacy = load_orders_for_instant_range(&conn, "branch-A", &range, true).unwrap();
+        assert_eq!(legacy.len(), 3);
     }
 
     #[test]

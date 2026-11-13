@@ -101,7 +101,11 @@ test('wave 5 motion on the sale path is CSS or a layout slide, with no timer and
   assert.match(payment, /<ChangingValue value=\{hasEnoughCash \? formatCurrency\(changeAmount\) : formatCurrency\(amountShort\)\} \/>/);
   const cart = read('components', 'menu', 'MenuCart.tsx');
   assert.match(cart, /value=\{formatCurrency\(totalWithDeliveryFee\)\}/);
-  assert.match(cart, /className=\{`pos-enter p-3 rounded-xl border/);
+  // founder 11/11/2026: quantity taps keep lines still; conditional blocks reveal with reduced-motion support.
+  assert.match(cart, /className=\{`p-3 rounded-xl border transition-colors/);
+  assert.doesNotMatch(cart, /className=\{`pos-enter p-3|<motion\.div[^>]*key=\{item\.id\}/);
+  assert.match(cart, /<motion\.div key="cart-empty" \{\.\.\.revealMotion\}/);
+  assert.match(cart, /const reduceMotion = useReducedMotion\(\)/);
 
   // Order tabs: the selected background slides with a layoutId; the tab still changes on the press.
   const tabs = read('components', 'OrderTabsBar.tsx');

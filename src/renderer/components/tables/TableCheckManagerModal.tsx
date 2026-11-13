@@ -22,7 +22,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { paymentRefusalMessage } from '../../utils/paymentRefusalMessage';
 import { emitCompatEvent, getBridge, type RecordPaymentParams } from '../../../lib';
@@ -355,11 +355,25 @@ const applyLocalTableSessionSnapshot = async (session: TableSessionDetails, loca
   const result = await getBridge().invoke('orders:apply-table-session-snapshot', { session, localOrderId });
   if (result?.success === false) throw new Error(result.error || 'Failed to save table ownership locally');
 };
-const glassSurfaceClass =
-  'rounded-xl border liquid-glass-modal-border bg-white/55 backdrop-blur-xl dark:bg-black/20';
-const glassSubtleSurfaceClass =
-  'rounded-xl border liquid-glass-modal-border bg-white/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] backdrop-blur-xl dark:bg-white/4.5';
-const glassInputClass = 'liquid-glass-modal-input w-full';
+const glassSurfaceClass = 'pos-glass-form-card';
+const glassSubtleSurfaceClass = 'pos-glass-form-card';
+const glassInputClass = 'liquid-glass-modal-input pos-glass-field min-h-11 w-full';
+
+// Match the finished forms; clipping ends as soon as the reveal completes.
+const useGlassRevealMotion = () => {
+  const reduceMotion = useReducedMotion();
+  return {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+};
+
+const GlassReveal: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className }) => {
+  const revealMotion = useGlassRevealMotion();
+  return <motion.div {...revealMotion} className={className}>{children}</motion.div>;
+};
 
 const isLocalSessionId = (sessionId: string | null | undefined): boolean =>
   typeof sessionId === 'string' && sessionId.startsWith(localSessionIdPrefix);
@@ -812,14 +826,14 @@ interface TileProps {
 
 const MetricTile: React.FC<TileProps> = ({ label, value, tone = 'default' }) => {
   const color = {
-    default: 'text-slate-950 dark:text-white',
+    default: 'liquid-glass-modal-text',
     due: 'text-amber-700 dark:text-amber-300',
     paid: 'text-emerald-700 dark:text-emerald-300',
-    tip: 'text-blue-700 dark:text-blue-300',
+    tip: 'liquid-glass-modal-text',
   }[tone];
 
   return (
-    <div className={`${glassSubtleSurfaceClass} px-4 py-3`}>
+    <div className={`${glassSubtleSurfaceClass} px-4! py-3!`}>
       <p className="text-[11px] font-medium uppercase tracking-wide liquid-glass-modal-text-muted">{label}</p>
       <p className={`mt-1 text-xl font-semibold ${color}`}>{value}</p>
     </div>
@@ -833,7 +847,7 @@ interface FormFieldProps {
 
 const FormField: React.FC<FormFieldProps> = ({ label, children }) => (
   <label className="block">
-    <span className="text-xs font-medium liquid-glass-modal-text-muted">{label}</span>
+    <span className="text-xs font-semibold liquid-glass-modal-text-muted">{label}</span>
     <div className="mt-1">{children}</div>
   </label>
 );
@@ -851,7 +865,7 @@ interface FieldGroupProps {
 // <span id> referenced by the inner listbox via aria-labelledby instead.
 const FieldGroup: React.FC<FieldGroupProps> = ({ label, labelId, children }) => (
   <div role="group" aria-labelledby={labelId}>
-    <span id={labelId} className="text-xs font-medium liquid-glass-modal-text-muted">
+    <span id={labelId} className="text-xs font-semibold liquid-glass-modal-text-muted">
       {label}
     </span>
     <div className="mt-1">{children}</div>
@@ -887,7 +901,7 @@ const TableDestinationPicker: React.FC<TableDestinationPickerProps> = ({
       <p
         role="status"
         aria-labelledby={labelledBy}
-        className="rounded-xl border liquid-glass-modal-border bg-white/35 px-3 py-2 text-sm liquid-glass-modal-text-muted backdrop-blur-xl dark:bg-white/4.5"
+        className="pos-glass-form-card px-3! py-2! text-sm liquid-glass-modal-text-muted"
       >
         {emptyLabel}
       </p>
@@ -898,7 +912,7 @@ const TableDestinationPicker: React.FC<TableDestinationPickerProps> = ({
     <div
       role="listbox"
       aria-labelledby={labelledBy}
-      className="max-h-44 space-y-1 overflow-y-auto rounded-xl border liquid-glass-modal-border bg-white/35 p-1.5 backdrop-blur-xl dark:bg-white/4.5"
+      className="pos-glass-form-card max-h-44 space-y-2 overflow-y-auto p-1.5!"
     >
       {options.map(option => {
         const selected = value === option.id;
@@ -909,10 +923,10 @@ const TableDestinationPicker: React.FC<TableDestinationPickerProps> = ({
             role="option"
             aria-selected={selected}
             onClick={() => onChange(option.id)}
-            className={`flex min-h-10 w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors ${
+            className={`pos-raised flex min-h-11 w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left text-sm font-medium transition-transform active:scale-[0.99] ${
               selected
-                ? 'bg-blue-600 text-white shadow-xs'
-                : 'text-gray-900 dark:text-zinc-100 '
+                ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                : 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-(--pos-s-fg)'
             }`}
           >
             <span className="truncate">{optionLabel(option)}</span>
@@ -1022,9 +1036,9 @@ const SecondarySheet: React.FC<SecondarySheetProps> = ({
         aria-labelledby={sheetTitleId}
         className="liquid-glass-modal-shell w-full! max-w-2xl! overflow-hidden"
       >
-        <div className="liquid-glass-modal-header px-5 py-4">
+        <div className="liquid-glass-modal-header pos-glass-header--plain px-6 py-4">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border liquid-glass-modal-border bg-white/15 text-blue-700 backdrop-blur-xl dark:text-blue-300">
+            <div className="pos-glass-form-card flex h-11 w-11 shrink-0 items-center justify-center p-0! liquid-glass-modal-text-muted">
               {icon}
             </div>
             <div className="min-w-0">
@@ -1049,8 +1063,8 @@ const SecondarySheet: React.FC<SecondarySheetProps> = ({
             <X className="h-5 w-5" />
           </button>
         </div>
-        <div className="space-y-4 p-5 liquid-glass-modal-content">{children}</div>
-        {footer ? <div className="border-t liquid-glass-modal-border px-5 py-4">{footer}</div> : null}
+        <div className="pos-progressive-form space-y-3 px-6 pt-3 pb-5 liquid-glass-modal-content">{children}</div>
+        {footer ? <div className="px-6 pb-5 pt-2">{footer}</div> : null}
       </motion.div>
     </motion.div>
   );
@@ -1091,6 +1105,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
 }) => {
   const { t } = useI18n();
   const cashierPortalProps = useCashierPortalProps();
+  const revealMotion = useGlassRevealMotion();
+  const reduceMotion = useReducedMotion();
   const tr = useCallback(
     (key: string, defaultValue: string, options: Record<string, unknown> = {}) =>
       String(t(`tableCheckManager.${key}`, { defaultValue, ...options })),
@@ -2680,9 +2696,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         aria-modal="true"
         aria-labelledby={mainTitleId}
       >
-        <div className="liquid-glass-modal-header px-5 py-4">
+        <div className="liquid-glass-modal-header pos-glass-header--plain px-6 py-4">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border liquid-glass-modal-border bg-(--pos-s-surface-2) text-blue-700 backdrop-blur-xl dark:text-blue-300">
+            <div className="pos-glass-form-card flex h-11 w-11 shrink-0 items-center justify-center p-0! liquid-glass-modal-text-muted">
               <Receipt className="h-5 w-5" />
             </div>
             <div className="min-w-0">
@@ -2692,12 +2708,12 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               <p className="truncate text-sm liquid-glass-modal-text-muted">{mainSubtitle}</p>
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 {occupiedSinceLabel ? (
-                  <span className="truncate text-xs font-medium text-blue-700 dark:text-blue-200">{occupiedSinceLabel}</span>
+                  <span className="truncate text-xs font-medium liquid-glass-modal-text-muted">{occupiedSinceLabel}</span>
                 ) : null}
                 <button
                   type="button"
                   onClick={openAssignWaiterModal}
-                  className="pos-raised inline-flex max-w-[220px] items-center gap-1.5 rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) px-2.5 py-1 text-xs font-semibold text-blue-800 transition-colors dark:text-blue-200"
+                  className="pos-raised inline-flex min-h-11 max-w-[220px] items-center gap-1.5 rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) px-2.5 py-1 text-xs font-semibold text-(--pos-s-fg) transition-colors"
                 >
                   <UserCheck className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{currentWaiterLabel}</span>
@@ -2724,9 +2740,15 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           </div>
         </div>
 
-        {isSavedSession ? <div role="status" className="px-5 py-3 text-sm liquid-glass-modal-text-muted">
-          {tr('messages.savedCheckReadOnly', 'Saved check — amounts may be stale. Reconnect to collect payment or make changes.')}
-        </div> : null}
+        <AnimatePresence initial={false}>
+          {isSavedSession ? (
+            <GlassReveal key="saved-check">
+              <div role="status" className="pos-glass-form-card mx-6 mb-3 px-4! py-3! text-sm liquid-glass-modal-text-muted">
+                {tr('messages.savedCheckReadOnly', 'Saved check — amounts may be stale. Reconnect to collect payment or make changes.')}
+              </div>
+            </GlassReveal>
+          ) : null}
+        </AnimatePresence>
         {isLoading ? (
           <div className="flex flex-1 items-center justify-center liquid-glass-modal-text-muted">
             <Loader2 className="mr-2 h-6 w-6 animate-spin" />
@@ -2737,9 +2759,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
             {loadError || tr('messages.noOpenCheck', 'No open check found for this table.')}
           </div>
         ) : (
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-5 overflow-hidden p-5 lg:grid-cols-[1fr_360px]">
-            <section className={`flex min-h-0 flex-col overflow-hidden ${glassSurfaceClass}`}>
-              <div className="flex items-center justify-between border-b liquid-glass-modal-border px-4 py-3">
+          <div className="pos-progressive-form grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-hidden px-6 pb-5 pt-2 lg:grid-cols-[1fr_360px]">
+            <section className={`flex min-h-0 flex-col overflow-hidden p-0! ${glassSurfaceClass}`}>
+              <div className="flex items-center justify-between px-4 py-3">
                 <div>
                   <h3 className="text-base font-semibold liquid-glass-modal-text">{tr('labels.items', 'Items')}</h3>
                   <p className="text-xs liquid-glass-modal-text-muted">
@@ -2751,7 +2773,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                     <button
                       type="button"
                       onClick={clearBatchSelection}
-                      className="rounded-lg border liquid-glass-modal-border px-3 py-2 text-sm font-semibold liquid-glass-modal-text-muted transition-colors "
+                      className="pos-glass-field min-h-11 rounded-xl px-3 py-2 text-sm font-semibold"
                     >
                       {tr('actions.clearSelection', 'Clear')}
                     </button>
@@ -2762,15 +2784,13 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   </ActionButton>
                 </div>
               </div>
-              <AnimatePresence>
+              <AnimatePresence initial={false}>
                 {isBatchMode ? (
                   <motion.div
-                    initial={{ opacity: 0, y: -8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -8 }}
-                    className="border-b liquid-glass-modal-border px-4 py-3"
+                    {...revealMotion}
+                    className="px-3 pb-3"
                   >
-                    <div className={`${glassSubtleSurfaceClass} flex flex-wrap items-center justify-between gap-3 p-3`}>
+                    <div className={`${glassSubtleSurfaceClass} flex flex-wrap items-center justify-between gap-3 p-3!`}>
                       <div>
                         <p className="text-sm font-semibold liquid-glass-modal-text">
                           {tr('labels.batchSelectedCount', '{{count}} selected', { count: batchSelectedItems.length })}
@@ -2804,7 +2824,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {orderItems.map((item, index) => {
+                    {orderItems.map((item) => {
                       const availableQuantity = availableQuantityByItemId.get(item.id) ?? Number(item.quantity || 0);
                       const paidQuantity = Math.max(0, Number(item.quantity || 0) - availableQuantity);
                       const unpaidAmount = unpaidAmountByItemId.get(item.id) ?? Number((itemUnitPrice(item) * availableQuantity).toFixed(2));
@@ -2830,27 +2850,26 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                               }
                             }
                           }}
-                          initial={{ opacity: 0, y: 8 }}
+                          initial={reduceMotion ? false : { opacity: 0, y: 8 }}
                           animate={{ opacity: 1, y: 0 }}
-                          transition={{ delay: Math.min(index * 0.025, 0.18) }}
-                          whileTap={{ scale: 0.99 }}
-                          className={`${glassSubtleSurfaceClass} grid w-full grid-cols-[auto_1fr_auto] items-center gap-4 px-4 py-3 text-left transition-colors focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg) ${
-                            isSelectedForBatch ? 'border-blue-600 bg-(--pos-s-surface-2)' : ''
+                          transition={{ duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] }}
+                          className={`grid min-h-11 w-full rounded-[20px] border grid-cols-[auto_1fr_auto] items-center gap-4 px-4 py-3 text-left transition-colors focus:outline-hidden focus:ring-2 focus:ring-(--pos-s-fg) ${
+                            isSelectedForBatch ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) active:translate-y-px active:shadow-(--pos-s-depth-press) [&_.liquid-glass-modal-text]:text-(--pos-s-sel-fg)! [&_.liquid-glass-modal-text-muted]:text-(--pos-s-sel-fg)!' : 'pos-glass-tap-card'
                           }`}
                         >
                           <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition-colors ${
                             isSelectedForBatch
-                              ? 'border-blue-400 bg-blue-500 text-white'
+                              ? 'border-(--pos-s-sel-fg) bg-(--pos-s-sel-fg) text-(--pos-s-sel-bg)'
                               : isBatchMode
-                                ? 'liquid-glass-modal-border bg-white/10 text-transparent'
+                                ? 'liquid-glass-modal-border text-transparent'
                                 : 'border-transparent bg-transparent text-transparent'
                           }`}>
                             <Check className="h-3.5 w-3.5" />
                           </span>
                           <div className="min-w-0">
-                            <p className="truncate text-base font-semibold text-gray-900 dark:text-white">{itemDisplayName(item, translatedItemFallback)}</p>
-                            {serviceResponsibilityNames(session?.items, item.id).map(name => <p key={name} className="text-xs text-gray-600 dark:text-zinc-300">{t('waiterService.itemResponsibility', { name })}</p>)}
-                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-600 dark:text-zinc-300">
+                            <p className="truncate text-base font-semibold liquid-glass-modal-text">{itemDisplayName(item, translatedItemFallback)}</p>
+                            {serviceResponsibilityNames(session?.items, item.id).map(name => <p key={name} className="text-xs liquid-glass-modal-text-muted">{t('waiterService.itemResponsibility', { name })}</p>)}
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs liquid-glass-modal-text-muted">
                               <span>{tr('labels.quantityShortValue', 'Qty {{quantity}}', { quantity: Number(item.quantity || 0) })}</span>
                               <span className="h-1 w-1 rounded-full bg-slate-500/40 dark:bg-white/25" />
                               <span className={itemPaid ? 'text-emerald-700 dark:text-emerald-300' : undefined}>
@@ -2889,19 +2908,19 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                                     {tr('labels.paidAmount', 'Paid {{amount}}', { amount: money(paidAmount) })}
                                   </p>
                                 ) : null}
-                                <p className="text-xs text-gray-600 dark:text-zinc-300">
+                                <p className="text-xs liquid-glass-modal-text-muted">
                                   {tr('labels.totalAmount', 'Total {{amount}}', { amount: money(itemLineTotal(item)) })}
                                 </p>
                               </>
                             ) : (
                               <>
                                 <p className="text-base font-semibold text-emerald-700 dark:text-emerald-300">{tr('labels.paid', 'Paid')}</p>
-                                <p className="text-xs text-gray-600 dark:text-zinc-300">
+                                <p className="text-xs liquid-glass-modal-text-muted">
                                   {tr('labels.totalAmount', 'Total {{amount}}', { amount: money(itemLineTotal(item)) })}
                                 </p>
                               </>
                             )}
-                            <p className="text-xs text-gray-600 dark:text-zinc-300">
+                            <p className="text-xs liquid-glass-modal-text-muted">
                               {tr('labels.eachAmount', '{{amount}} each', { amount: money(itemUnitPrice(item)) })}
                             </p>
                           </div>
@@ -2914,22 +2933,26 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
             </section>
 
             <aside className="hide-scrollbar flex min-h-0 flex-col gap-3 overflow-y-auto">
-              <div className={`${glassSurfaceClass} border-(--pos-s-border) p-4`}>
-                <p className="text-xs font-medium uppercase tracking-wide text-blue-700 dark:text-blue-200">
+              <div className={`${glassSurfaceClass}`}>
+                <p className="text-xs font-medium uppercase tracking-wide liquid-glass-modal-text-muted">
                   {tr('labels.due', 'Due')}
                 </p>
                 <p className="mt-1 text-4xl font-semibold liquid-glass-modal-text">{money(outstanding)}</p>
                 <div className="mt-4 grid grid-cols-2 gap-2">
                   <MetricTile label={tr('labels.total', 'Total')} value={money(orderTotal)} />
-                  {discountTotal > 0.009 ? (
-                    <MetricTile label={tr('labels.discount', 'Discount')} value={money(discountTotal)} tone="due" />
-                  ) : null}
+                  <AnimatePresence initial={false}>
+                    {discountTotal > 0.009 ? (
+                      <GlassReveal key="discount-summary">
+                        <MetricTile label={tr('labels.discount', 'Discount')} value={money(discountTotal)} tone="due" />
+                      </GlassReveal>
+                    ) : null}
+                  </AnimatePresence>
                   <MetricTile label={tr('labels.paid', 'Paid')} value={money(paidTotal)} tone="paid" />
                   <MetricTile label={tr('labels.tips', 'Tips')} value={money(tipTotal)} tone="tip" />
                   <button
                     type="button"
                     onClick={() => setSecondaryModal('covers')}
-                    className={`${glassSubtleSurfaceClass} px-4 py-3 text-left transition-colors `}
+                    className="pos-raised min-h-11 rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-left transition-colors"
                   >
                     <p className="text-[11px] font-medium uppercase tracking-wide liquid-glass-modal-text-muted">
                       {tr('labels.covers', 'Covers')}
@@ -2939,44 +2962,48 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 </div>
               </div>
 
-              {paymentHistory.length > 0 ? (
-                <div className={`${glassSurfaceClass} p-3`}>
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <p className="text-xs font-medium uppercase tracking-wide liquid-glass-modal-text-muted">
-                      {tr('labels.paymentsAdded', 'Payments Added')}
-                    </p>
-                    <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">{money(paidTotal)}</span>
-                  </div>
-                  <div className="space-y-2">
-                    {paymentHistory.slice(0, 5).map((payment, index) => {
-                      const amount = paymentRecordAmount(payment);
-                      const tip = paymentRecordTip(payment);
-                      const method = String(payment.method || '').toLowerCase() === 'card'
-                        ? tr('paymentMethods.card', 'Card')
-                        : tr('paymentMethods.cash', 'Cash');
-                      const time = formatPaymentTimestamp(payment.createdAt || payment.created_at);
-                      return (
-                        <div key={payment.id || `${method}-${amount}-${index}`} className={`${glassSubtleSurfaceClass} flex items-center justify-between gap-3 px-3 py-2`}>
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-semibold liquid-glass-modal-text">+ {money(amount)} {method}</p>
-                            <p className="truncate text-xs liquid-glass-modal-text-muted">
-                              {time || tr('labels.recorded', 'Recorded')}
-                              {tip > 0 ? ` · ${tr('labels.tipAmount', 'Tip {{amount}}', { amount: money(tip) })}` : ''}
-                            </p>
-                          </div>
-                          <span className="shrink-0 text-xs font-semibold text-amber-700 dark:text-amber-300">
-                            {tr('labels.dueAmount', 'Due {{amount}}', { amount: money(outstanding) })}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <div className="mt-3 flex items-center justify-between border-t liquid-glass-modal-border pt-2 text-sm">
-                    <span className="liquid-glass-modal-text-muted">{tr('labels.unpaid', 'Unpaid')}</span>
-                    <span className="font-semibold liquid-glass-modal-text">{money(outstanding)}</span>
-                  </div>
-                </div>
-              ) : null}
+              <AnimatePresence initial={false}>
+                {paymentHistory.length > 0 ? (
+                  <GlassReveal key="payment-history">
+                    <div className={`${glassSurfaceClass} p-3!`}>
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <p className="text-xs font-medium uppercase tracking-wide liquid-glass-modal-text-muted">
+                          {tr('labels.paymentsAdded', 'Payments Added')}
+                        </p>
+                        <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">{money(paidTotal)}</span>
+                      </div>
+                      <div className="space-y-2">
+                        {paymentHistory.slice(0, 5).map((payment, index) => {
+                          const amount = paymentRecordAmount(payment);
+                          const tip = paymentRecordTip(payment);
+                          const method = String(payment.method || '').toLowerCase() === 'card'
+                            ? tr('paymentMethods.card', 'Card')
+                            : tr('paymentMethods.cash', 'Cash');
+                          const time = formatPaymentTimestamp(payment.createdAt || payment.created_at);
+                          return (
+                            <div key={payment.id || `${method}-${amount}-${index}`} className={`${glassSubtleSurfaceClass} flex items-center justify-between gap-3 px-3! py-2!`}>
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-semibold liquid-glass-modal-text">+ {money(amount)} {method}</p>
+                                <p className="truncate text-xs liquid-glass-modal-text-muted">
+                                  {time || tr('labels.recorded', 'Recorded')}
+                                  {tip > 0 ? ` · ${tr('labels.tipAmount', 'Tip {{amount}}', { amount: money(tip) })}` : ''}
+                                </p>
+                              </div>
+                              <span className="shrink-0 text-xs font-semibold text-amber-700 dark:text-amber-300">
+                                {tr('labels.dueAmount', 'Due {{amount}}', { amount: money(outstanding) })}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-3 flex items-center justify-between pt-2 text-sm">
+                        <span className="liquid-glass-modal-text-muted">{tr('labels.unpaid', 'Unpaid')}</span>
+                        <span className="font-semibold liquid-glass-modal-text">{money(outstanding)}</span>
+                      </div>
+                    </div>
+                  </GlassReveal>
+                ) : null}
+              </AnimatePresence>
 
               <div className="grid grid-cols-2 gap-2">
                 <ActionButton onClick={() => openPayTableModal()} tone="card" disabled={isSavedSession || outstanding <= 0}>
@@ -3001,7 +3028,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 </ActionButton>
               </div>
 
-              <div className={`${glassSurfaceClass} p-3`}>
+              <div className="pt-1">
                 <p className="mb-2 text-xs font-medium uppercase tracking-wide liquid-glass-modal-text-muted">
                   {tr('labels.settlement', 'Settlement')}
                 </p>
@@ -3036,7 +3063,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           </div>
         )}
 
-        <AnimatePresence>
+        <AnimatePresence initial={false}>
           {secondaryModal === 'pay-table' ? (
             <SecondarySheet
               title={tr('actions.payTable', 'Pay Table')}
@@ -3044,8 +3071,20 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               icon={<HandCoins className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
+              footer={
+                <div className="grid grid-cols-2 gap-2">
+                  <ActionButton onClick={() => void recordPayment('cash')} disabled={isSaving || isSavedSession} tone="cash">
+                    <CashHandIcon className="h-4 w-4" />
+                    {tr('paymentMethods.cash', 'Cash')}
+                  </ActionButton>
+                  <ActionButton onClick={() => void recordPayment('card')} disabled={isSaving || isSavedSession} tone="card">
+                    <CreditCard className="h-4 w-4" />
+                    {tr('paymentMethods.card', 'Card')}
+                  </ActionButton>
+                </div>
+              }
             >
-              <div className="grid grid-cols-3 gap-3">
+              <div className="pos-glass-form-card grid grid-cols-3 gap-3">
                 <FormField label={tr('labels.amount', 'Amount')}>
                   <CentsMoneyInput
                     value={paymentAmount}
@@ -3079,16 +3118,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 </ActionButton>
               </div>
               <MetricTile label={tr('labels.total', 'Total')} value={money(Number((parseMoneyInput(paymentAmount) + Math.max(0, parseMoneyInput(tipAmount))).toFixed(2)))} />
-              <div className="grid grid-cols-2 gap-2">
-                <ActionButton onClick={() => void recordPayment('cash')} disabled={isSaving || isSavedSession} tone="cash">
-                  <CashHandIcon className="h-4 w-4" />
-                  {tr('paymentMethods.cash', 'Cash')}
-                </ActionButton>
-                <ActionButton onClick={() => void recordPayment('card')} disabled={isSaving || isSavedSession} tone="card">
-                  <CreditCard className="h-4 w-4" />
-                  {tr('paymentMethods.card', 'Card')}
-                </ActionButton>
-              </div>
+
             </SecondarySheet>
           ) : null}
 
@@ -3102,8 +3132,20 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               icon={<HandCoins className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
+              footer={
+                <div className="grid grid-cols-2 gap-2">
+                  <ActionButton onClick={() => void recordBatchPayment('cash')} disabled={isSaving || isSavedSession || batchSelectedTotal <= 0} tone="cash">
+                    <CashHandIcon className="h-4 w-4" />
+                    {tr('paymentMethods.cash', 'Cash')}
+                  </ActionButton>
+                  <ActionButton onClick={() => void recordBatchPayment('card')} disabled={isSaving || isSavedSession || batchSelectedTotal <= 0} tone="card">
+                    <CreditCard className="h-4 w-4" />
+                    {tr('paymentMethods.card', 'Card')}
+                  </ActionButton>
+                </div>
+              }
             >
-              <div className="grid grid-cols-3 gap-3">
+              <div className="pos-glass-form-card grid grid-cols-3 gap-3">
                 <MetricTile label={tr('labels.amount', 'Amount')} value={money(batchSelectedTotal)} tone="due" />
                 <FormField label={tr('labels.tip', 'Tip')}>
                   <CentsMoneyInput
@@ -3121,7 +3163,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   />
                 </FormField>
               </div>
-              <div className={`${glassSubtleSurfaceClass} max-h-36 overflow-y-auto p-3 text-sm liquid-glass-modal-text-muted`}>
+              <div className={`${glassSubtleSurfaceClass} max-h-36 overflow-y-auto p-3! text-sm liquid-glass-modal-text-muted`}>
                 {batchUnpaidItemEntries.map(entry => (
                   <div key={entry.item.id} className="flex items-center justify-between gap-3 py-1">
                     <span className="truncate">{itemDisplayName(entry.item, translatedItemFallback)} · {tr('labels.quantityShortValue', 'Qty {{quantity}}', { quantity: entry.itemQuantity })}</span>
@@ -3130,16 +3172,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 ))}
               </div>
               <MetricTile label={tr('labels.total', 'Total')} value={money(Number((batchSelectedTotal + Math.max(0, parseMoneyInput(tipAmount))).toFixed(2)))} />
-              <div className="grid grid-cols-2 gap-2">
-                <ActionButton onClick={() => void recordBatchPayment('cash')} disabled={isSaving || isSavedSession || batchSelectedTotal <= 0} tone="cash">
-                  <CashHandIcon className="h-4 w-4" />
-                  {tr('paymentMethods.cash', 'Cash')}
-                </ActionButton>
-                <ActionButton onClick={() => void recordBatchPayment('card')} disabled={isSaving || isSavedSession || batchSelectedTotal <= 0} tone="card">
-                  <CreditCard className="h-4 w-4" />
-                  {tr('paymentMethods.card', 'Card')}
-                </ActionButton>
-              </div>
+
             </SecondarySheet>
           ) : null}
 
@@ -3150,8 +3183,14 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               icon={<MoveRight className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
+              footer={
+                <ActionButton onClick={() => void transferBatchItems()} disabled={isSaving || isSavedSession || !targetTableId} tone="warn" className="w-full">
+                  <MoveRight className="h-4 w-4" />
+                  {tr('actions.moveSelectedQuantities', 'Move Selected Quantities')}
+                </ActionButton>
+              }
             >
-              <div className="grid grid-cols-2 gap-3">
+              <div className="pos-glass-form-card grid grid-cols-2 gap-3">
                 <FieldGroup label={tr('labels.targetTable', 'Target Table')} labelId="table-check-batch-target">
                   <TableDestinationPicker
                     value={targetTableId}
@@ -3171,7 +3210,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   />
                 </FormField>
               </div>
-              <div className={`${glassSubtleSurfaceClass} max-h-40 overflow-y-auto p-3 text-sm liquid-glass-modal-text-muted`}>
+              <div className={`${glassSubtleSurfaceClass} max-h-40 overflow-y-auto p-3! text-sm liquid-glass-modal-text-muted`}>
                 {batchUnpaidItemEntries.map(entry => (
                   <div key={entry.item.id} className="flex items-center justify-between gap-3 py-1">
                     <span className="truncate">{itemDisplayName(entry.item, translatedItemFallback)}</span>
@@ -3181,10 +3220,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   </div>
                 ))}
               </div>
-              <ActionButton onClick={() => void transferBatchItems()} disabled={isSaving || isSavedSession || !targetTableId} tone="warn" className="w-full">
-                <MoveRight className="h-4 w-4" />
-                {tr('actions.moveSelectedQuantities', 'Move Selected Quantities')}
-              </ActionButton>
+
             </SecondarySheet>
           ) : null}
 
@@ -3198,15 +3234,21 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               icon={<Percent className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
+              footer={
+                <ActionButton onClick={applyBatchItemDiscount} disabled={isSaving || isSavedSession} tone="cash" className="w-full">
+                  <Check className="h-4 w-4" />
+                  {tr('actions.applyDiscountToSelected', 'Apply to Selected')}
+                </ActionButton>
+              }
             >
-              <div className={`${glassSubtleSurfaceClass} grid grid-cols-2 gap-2 p-1`}>
+              <div className={`${glassSubtleSurfaceClass} grid grid-cols-2 gap-2 p-2!`}>
                 <button
                   type="button"
                   onClick={() => setDiscountMode('percentage')}
-                  className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                  className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold transition-colors ${
                     discountMode === 'percentage'
-                      ? 'liquid-glass-modal-primary'
-                      : 'liquid-glass-modal-text-muted '
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                      : 'pos-glass-field'
                   }`}
                 >
                   {tr('labels.percent', 'Percent')}
@@ -3214,36 +3256,35 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setDiscountMode('fixed')}
-                  className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                  className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold transition-colors ${
                     discountMode === 'fixed'
-                      ? 'liquid-glass-modal-primary'
-                      : 'liquid-glass-modal-text-muted '
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                      : 'pos-glass-field'
                   }`}
                 >
                   {tr('labels.amount', 'Amount')}
                 </button>
               </div>
-              <FormField label={discountMode === 'percentage' ? tr('labels.percent', 'Percent') : tr('labels.amount', 'Amount')}>
-                {discountMode === 'fixed' ? (
-                  <CentsMoneyInput
-                    value={discountValue}
-                    onValueChange={setDiscountValue}
-                    className={glassInputClass}
-                  />
-                ) : (
-                  <input
-                    value={discountValue}
-                    onChange={(event) => setDiscountValue(event.target.value)}
-                    onBlur={() => setDiscountValue(formatMoneyInput(discountValue))}
-                    inputMode="decimal"
-                    className={glassInputClass}
-                  />
-                )}
-              </FormField>
-              <ActionButton onClick={applyBatchItemDiscount} disabled={isSaving || isSavedSession} tone="cash" className="w-full">
-                <Check className="h-4 w-4" />
-                {tr('actions.applyDiscountToSelected', 'Apply to Selected')}
-              </ActionButton>
+              <div className="pos-glass-form-card">
+                <FormField label={discountMode === 'percentage' ? tr('labels.percent', 'Percent') : tr('labels.amount', 'Amount')}>
+                  {discountMode === 'fixed' ? (
+                    <CentsMoneyInput
+                      value={discountValue}
+                      onValueChange={setDiscountValue}
+                      className={glassInputClass}
+                    />
+                  ) : (
+                    <input
+                      value={discountValue}
+                      onChange={(event) => setDiscountValue(event.target.value)}
+                      onBlur={() => setDiscountValue(formatMoneyInput(discountValue))}
+                      inputMode="decimal"
+                      className={glassInputClass}
+                    />
+                  )}
+                </FormField>
+              </div>
+
             </SecondarySheet>
           ) : null}
 
@@ -3276,134 +3317,146 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
             >
-              {itemActionMode === 'menu' ? (
-                <div className="grid gap-2">
-                  <ActionButton onClick={() => {
-                    if (requiresBalanceSettlement) { toast.error(balanceSettlementMessage); openPayTableModal(); }
-                    else setItemActionMode('pay');
-                  }} disabled={selectedItemAvailable <= 0 || selectedItemUnpaidAmount <= 0} tone="card">
-                    <HandCoins className="h-4 w-4" />
-                    {tr('actions.payItem', 'Pay Item')}
-                  </ActionButton>
-                  <ActionButton onClick={() => setItemActionMode('price')}>
-                    <PencilLine className="h-4 w-4" />
-                    {tr('actions.changePrice', 'Change Price')}
-                  </ActionButton>
-                  <ActionButton onClick={() => setItemActionMode('discount')} tone="cash">
-                    <Percent className="h-4 w-4" />
-                    {tr('actions.discount', 'Discount')}
-                  </ActionButton>
-                  <ActionButton onClick={() => openTransferModal(selectedItem)} disabled={selectedItemAvailable <= 0} tone="warn">
-                    <MoveRight className="h-4 w-4" />
-                    {tr('actions.transfer', 'Transfer')}
-                  </ActionButton>
-                </div>
-              ) : null}
-
-              {itemActionMode === 'pay' ? (
-                <div className="space-y-4">
-                  <div className="grid grid-cols-[1fr_110px] gap-3">
-                    <MetricTile label={tr('labels.amount', 'Amount')} value={money(selectedItemPayAmount)} tone="due" />
-                    <FormField label={tr('labels.quantityShort', 'Qty')}>
-                      <input
-                        value={itemPayQuantity}
-                        onChange={(event) => setItemPayQuantity(event.target.value)}
-                        className={glassInputClass}
-                      />
-                    </FormField>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <ActionButton
-                      onClick={() => void recordPayment('cash', {
-                        item: selectedItem,
-                        itemQuantity: Math.min(Number(itemPayQuantity || 1), selectedItemAvailable || 1),
-                        itemAmount: selectedItemPayAmount,
-                      })}
-                      disabled={isSaving || isSavedSession}
-                      tone="cash"
-                    >
-                      <CashHandIcon className="h-4 w-4" />
-                      {tr('paymentMethods.cash', 'Cash')}
+              <AnimatePresence initial={false}>
+                {itemActionMode === 'menu' ? (
+                  <GlassReveal key="item-menu" className="grid gap-2">
+                    <ActionButton onClick={() => {
+                      if (requiresBalanceSettlement) { toast.error(balanceSettlementMessage); openPayTableModal(); }
+                      else setItemActionMode('pay');
+                    }} disabled={selectedItemAvailable <= 0 || selectedItemUnpaidAmount <= 0} tone="card">
+                      <HandCoins className="h-4 w-4" />
+                      {tr('actions.payItem', 'Pay Item')}
                     </ActionButton>
-                    <ActionButton
-                      onClick={() => void recordPayment('card', {
-                        item: selectedItem,
-                        itemQuantity: Math.min(Number(itemPayQuantity || 1), selectedItemAvailable || 1),
-                        itemAmount: selectedItemPayAmount,
-                      })}
-                      disabled={isSaving || isSavedSession}
-                      tone="card"
-                    >
-                      <CreditCard className="h-4 w-4" />
-                      {tr('paymentMethods.card', 'Card')}
+                    <ActionButton onClick={() => setItemActionMode('price')}>
+                      <PencilLine className="h-4 w-4" />
+                      {tr('actions.changePrice', 'Change Price')}
                     </ActionButton>
-                  </div>
-                </div>
-              ) : null}
+                    <ActionButton onClick={() => setItemActionMode('discount')} tone="cash">
+                      <Percent className="h-4 w-4" />
+                      {tr('actions.discount', 'Discount')}
+                    </ActionButton>
+                    <ActionButton onClick={() => openTransferModal(selectedItem)} disabled={selectedItemAvailable <= 0} tone="warn">
+                      <MoveRight className="h-4 w-4" />
+                      {tr('actions.transfer', 'Transfer')}
+                    </ActionButton>
+                  </GlassReveal>
+                ) : null}
+              </AnimatePresence>
 
-              {itemActionMode === 'price' ? (
-                <div className="space-y-4">
-                  <FormField label={tr('labels.unitPrice', 'Unit Price')}>
-                    <CentsMoneyInput
-                      value={itemPriceValue}
-                      onValueChange={setItemPriceValue}
-                      className={glassInputClass}
-                    />
-                  </FormField>
-                  <ActionButton onClick={applySelectedItemPrice} disabled={isSaving || isSavedSession} tone="card" className="w-full">
-                    <Check className="h-4 w-4" />
-                    {tr('actions.savePrice', 'Save Price')}
-                  </ActionButton>
-                </div>
-              ) : null}
+              <AnimatePresence initial={false}>
+                {itemActionMode === 'pay' ? (
+                  <GlassReveal key="item-pay" className="space-y-4">
+                    <div className="pos-glass-form-card grid grid-cols-[1fr_110px] gap-3">
+                      <MetricTile label={tr('labels.amount', 'Amount')} value={money(selectedItemPayAmount)} tone="due" />
+                      <FormField label={tr('labels.quantityShort', 'Qty')}>
+                        <input
+                          value={itemPayQuantity}
+                          onChange={(event) => setItemPayQuantity(event.target.value)}
+                          className={glassInputClass}
+                        />
+                      </FormField>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <ActionButton
+                        onClick={() => void recordPayment('cash', {
+                          item: selectedItem,
+                          itemQuantity: Math.min(Number(itemPayQuantity || 1), selectedItemAvailable || 1),
+                          itemAmount: selectedItemPayAmount,
+                        })}
+                        disabled={isSaving || isSavedSession}
+                        tone="cash"
+                      >
+                        <CashHandIcon className="h-4 w-4" />
+                        {tr('paymentMethods.cash', 'Cash')}
+                      </ActionButton>
+                      <ActionButton
+                        onClick={() => void recordPayment('card', {
+                          item: selectedItem,
+                          itemQuantity: Math.min(Number(itemPayQuantity || 1), selectedItemAvailable || 1),
+                          itemAmount: selectedItemPayAmount,
+                        })}
+                        disabled={isSaving || isSavedSession}
+                        tone="card"
+                      >
+                        <CreditCard className="h-4 w-4" />
+                        {tr('paymentMethods.card', 'Card')}
+                      </ActionButton>
+                    </div>
+                  </GlassReveal>
+                ) : null}
+              </AnimatePresence>
 
-              {itemActionMode === 'discount' ? (
-                <div className="space-y-4">
-                  <div className={`${glassSubtleSurfaceClass} grid grid-cols-2 gap-2 p-1`}>
-                    <button
-                      type="button"
-                      onClick={() => setDiscountMode('percentage')}
-                      className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
-                        discountMode === 'percentage'
-                          ? 'liquid-glass-modal-primary'
-                          : 'liquid-glass-modal-text-muted '
-                      }`}
-                    >
-                      {tr('labels.percent', 'Percent')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setDiscountMode('fixed')}
-                      className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
-                        discountMode === 'fixed'
-                          ? 'liquid-glass-modal-primary'
-                          : 'liquid-glass-modal-text-muted '
-                      }`}
-                    >
-                      {tr('labels.amount', 'Amount')}
-                    </button>
-                  </div>
-                  <FormField label={discountMode === 'percentage' ? tr('labels.percent', 'Percent') : tr('labels.amount', 'Amount')}>
-                    {discountMode === 'fixed' ? (
-                      <CentsMoneyInput
-                        value={discountValue}
-                        onValueChange={setDiscountValue}
-                        className={glassInputClass}
-                      />
-                    ) : (
-                      <input
-                        value={discountValue}
-                        onChange={(event) => setDiscountValue(event.target.value)}
-                        className={glassInputClass}
-                      />
-                    )}
-                  </FormField>
-                  <ActionButton onClick={applySelectedItemDiscount} disabled={isSaving || isSavedSession} tone="cash" className="w-full">
-                    <Check className="h-4 w-4" />
-                    {tr('actions.applyDiscount', 'Apply Discount')}
-                  </ActionButton>
-                </div>
-              ) : null}
+              <AnimatePresence initial={false}>
+                {itemActionMode === 'price' ? (
+                  <GlassReveal key="item-price" className="space-y-4">
+                    <div className="pos-glass-form-card">
+                      <FormField label={tr('labels.unitPrice', 'Unit Price')}>
+                        <CentsMoneyInput
+                          value={itemPriceValue}
+                          onValueChange={setItemPriceValue}
+                          className={glassInputClass}
+                        />
+                      </FormField>
+                    </div>
+                    <ActionButton onClick={applySelectedItemPrice} disabled={isSaving || isSavedSession} tone="card" className="w-full">
+                      <Check className="h-4 w-4" />
+                      {tr('actions.savePrice', 'Save Price')}
+                    </ActionButton>
+                  </GlassReveal>
+                ) : null}
+              </AnimatePresence>
+
+              <AnimatePresence initial={false}>
+                {itemActionMode === 'discount' ? (
+                  <GlassReveal key="item-discount" className="space-y-4">
+                    <div className={`${glassSubtleSurfaceClass} grid grid-cols-2 gap-2 p-2!`}>
+                      <button
+                        type="button"
+                        onClick={() => setDiscountMode('percentage')}
+                        className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold transition-colors ${
+                          discountMode === 'percentage'
+                            ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                            : 'pos-glass-field'
+                        }`}
+                      >
+                        {tr('labels.percent', 'Percent')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDiscountMode('fixed')}
+                        className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold transition-colors ${
+                          discountMode === 'fixed'
+                            ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                            : 'pos-glass-field'
+                        }`}
+                      >
+                        {tr('labels.amount', 'Amount')}
+                      </button>
+                    </div>
+                    <div className="pos-glass-form-card">
+                      <FormField label={discountMode === 'percentage' ? tr('labels.percent', 'Percent') : tr('labels.amount', 'Amount')}>
+                        {discountMode === 'fixed' ? (
+                          <CentsMoneyInput
+                            value={discountValue}
+                            onValueChange={setDiscountValue}
+                            className={glassInputClass}
+                          />
+                        ) : (
+                          <input
+                            value={discountValue}
+                            onChange={(event) => setDiscountValue(event.target.value)}
+                            className={glassInputClass}
+                          />
+                        )}
+                      </FormField>
+                    </div>
+                    <ActionButton onClick={applySelectedItemDiscount} disabled={isSaving || isSavedSession} tone="cash" className="w-full">
+                      <Check className="h-4 w-4" />
+                      {tr('actions.applyDiscount', 'Apply Discount')}
+                    </ActionButton>
+                  </GlassReveal>
+                ) : null}
+              </AnimatePresence>
             </SecondarySheet>
           ) : null}
 
@@ -3414,8 +3467,14 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               icon={<MoveRight className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
+              footer={
+                <ActionButton onClick={() => void transferItem()} disabled={isSaving || isSavedSession || !targetTableId} tone="warn" className="w-full">
+                  <MoveRight className="h-4 w-4" />
+                  {tr('actions.moveQuantity', 'Move Quantity')}
+                </ActionButton>
+              }
             >
-              <div className="grid grid-cols-2 gap-3">
+              <div className="pos-glass-form-card grid grid-cols-2 gap-3">
                 <FieldGroup label={tr('labels.targetTable', 'Target Table')} labelId="table-check-transfer-target">
                   <TableDestinationPicker
                     value={targetTableId}
@@ -3443,10 +3502,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 </FormField>
                 <MetricTile label={tr('labels.available', 'Available')} value={String(selectedTransferAvailable)} />
               </div>
-              <ActionButton onClick={() => void transferItem()} disabled={isSaving || isSavedSession || !targetTableId} tone="warn" className="w-full">
-                <MoveRight className="h-4 w-4" />
-                {tr('actions.moveQuantity', 'Move Quantity')}
-              </ActionButton>
+
             </SecondarySheet>
           ) : null}
 
@@ -3457,29 +3513,34 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               icon={<ArrowRightLeft className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
+              footer={
+                <ActionButton
+                  onClick={() => targetTableId && void patchSession(
+                    { action: 'move_table', target_table_id: targetTableId, release_source_tables: true },
+                    tr('messages.tableMoved', 'Table moved'),
+                  )}
+                  disabled={isSaving || isSavedSession || !targetTableId}
+                  tone="card"
+                  className="w-full"
+                >
+                  <ArrowRightLeft className="h-4 w-4" />
+                  {tr('actions.moveCheck', 'Move Check')}
+                </ActionButton>
+              }
             >
-              <FieldGroup label={tr('labels.targetTable', 'Target Table')} labelId="table-check-move-target">
-                <TableDestinationPicker
-                  value={targetTableId}
-                  onChange={setTargetTableId}
-                  options={availableTables}
-                  optionLabel={(candidate) => tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(candidate.tableNumber) })}
-                  emptyLabel={tr('labels.selectTable', 'Select table')}
-                  labelledBy="table-check-move-target"
-                />
-              </FieldGroup>
-              <ActionButton
-                onClick={() => targetTableId && void patchSession(
-                  { action: 'move_table', target_table_id: targetTableId, release_source_tables: true },
-                  tr('messages.tableMoved', 'Table moved'),
-                )}
-                disabled={isSaving || isSavedSession || !targetTableId}
-                tone="card"
-                className="w-full"
-              >
-                <ArrowRightLeft className="h-4 w-4" />
-                {tr('actions.moveCheck', 'Move Check')}
-              </ActionButton>
+              <div className="pos-glass-form-card">
+                <FieldGroup label={tr('labels.targetTable', 'Target Table')} labelId="table-check-move-target">
+                  <TableDestinationPicker
+                    value={targetTableId}
+                    onChange={setTargetTableId}
+                    options={availableTables}
+                    optionLabel={(candidate) => tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(candidate.tableNumber) })}
+                    emptyLabel={tr('labels.selectTable', 'Select table')}
+                    labelledBy="table-check-move-target"
+                  />
+                </FieldGroup>
+              </div>
+
             </SecondarySheet>
           ) : null}
 
@@ -3490,30 +3551,35 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               icon={<Shuffle className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
+              footer={
+                <ActionButton
+                  onClick={() => mergeTableId && void patchSession(
+                    { action: 'merge_table', table_ids: [mergeTableId] },
+                    tr('messages.tableMerged', 'Table merged into check'),
+                  )}
+                  disabled={isSaving || isSavedSession || !mergeTableId}
+                  tone="purple"
+                  className="w-full"
+                >
+                  <Shuffle className="h-4 w-4" />
+                  {tr('actions.merge', 'Merge')}
+                </ActionButton>
+              }
             >
-              <FieldGroup label={tr('labels.table', 'Table')} labelId="table-check-merge-target">
-                <TableDestinationPicker
-                  value={mergeTableId}
-                  onChange={setMergeTableId}
-                  options={mergeTables}
-                  optionLabel={(candidate) => tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(candidate.tableNumber) })}
-                  emptyLabel={tr('labels.selectTable', 'Select table')}
-                  labelledBy="table-check-merge-target"
-                />
-                <p className="mt-2 text-sm liquid-glass-modal-text-muted">{tr('messages.mergeCompatibleChecks', 'Occupied tables can be merged when they contain parts of the same order. Checks from different orders must stay separate.')}</p>
-              </FieldGroup>
-              <ActionButton
-                onClick={() => mergeTableId && void patchSession(
-                  { action: 'merge_table', table_ids: [mergeTableId] },
-                  tr('messages.tableMerged', 'Table merged into check'),
-                )}
-                disabled={isSaving || isSavedSession || !mergeTableId}
-                tone="purple"
-                className="w-full"
-              >
-                <Shuffle className="h-4 w-4" />
-                {tr('actions.merge', 'Merge')}
-              </ActionButton>
+              <div className="pos-glass-form-card">
+                <FieldGroup label={tr('labels.table', 'Table')} labelId="table-check-merge-target">
+                  <TableDestinationPicker
+                    value={mergeTableId}
+                    onChange={setMergeTableId}
+                    options={mergeTables}
+                    optionLabel={(candidate) => tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(candidate.tableNumber) })}
+                    emptyLabel={tr('labels.selectTable', 'Select table')}
+                    labelledBy="table-check-merge-target"
+                  />
+                  <p className="mt-2 text-sm liquid-glass-modal-text-muted">{tr('messages.mergeCompatibleChecks', 'Occupied tables can be merged when they contain parts of the same order. Checks from different orders must stay separate.')}</p>
+                </FieldGroup>
+              </div>
+
             </SecondarySheet>
           ) : null}
 
@@ -3524,56 +3590,67 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               icon={<UserCheck className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
+              footer={
+                <ActionButton onClick={saveWaiterAssignment} disabled={isSaving || isSavedSession} tone="card" className="w-full">
+                  <Check className="h-4 w-4" />
+                  {tr('actions.saveWaiter', 'Save Waiter')}
+                </ActionButton>
+              }
             >
               <div className="grid gap-2">
                 <button
                   type="button"
                   onClick={() => setSelectedWaiterId('')}
-                  className={`${glassSubtleSurfaceClass} flex items-center justify-between gap-3 px-3 py-3 text-left transition-colors ${
+                  className={`flex min-h-11 items-center justify-between gap-3 rounded-[20px] border px-3 py-3 text-left transition-colors ${
                     selectedWaiterId === ''
-                      ? 'border-blue-600 bg-(--pos-s-surface-2)'
-                      : ''
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) active:translate-y-px active:shadow-(--pos-s-depth-press)'
+                      : 'pos-glass-tap-card'
                   }`}
                 >
-                  <span className="font-semibold liquid-glass-modal-text">{tr('labels.unassignedWaiter', 'Unassigned')}</span>
-                  {selectedWaiterId === '' ? <Check className="h-4 w-4 text-blue-700 dark:text-blue-300" /> : null}
+                  <span className={`font-semibold ${selectedWaiterId === '' ? 'text-(--pos-s-sel-fg)' : 'liquid-glass-modal-text'}`}>{tr('labels.unassignedWaiter', 'Unassigned')}</span>
+                  {selectedWaiterId === '' ? <Check className="h-4 w-4 text-(--pos-s-sel-fg)" /> : null}
                 </button>
-                {isLoadingWaiters ? (
-                  <div className="flex items-center justify-center rounded-2xl border liquid-glass-modal-border px-3 py-6 liquid-glass-modal-text-muted">
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    {tr('messages.loadingStaff', 'Loading staff...')}
-                  </div>
-                ) : waiterOptions.length === 0 ? (
-                  <div className="rounded-2xl border liquid-glass-modal-border px-3 py-6 text-center liquid-glass-modal-text-muted">
-                    {tr('messages.noWaitersAvailable', 'No active staff available.')}
-                  </div>
-                ) : (
-                  waiterOptions.map(waiter => (
-                    <button
-                      key={waiter.id}
-                      type="button"
-                      onClick={() => setSelectedWaiterId(waiter.id)}
-                      className={`${glassSubtleSurfaceClass} flex items-center justify-between gap-3 px-3 py-3 text-left transition-colors ${
-                        selectedWaiterId === waiter.id
-                          ? 'border-blue-600 bg-(--pos-s-surface-2)'
-                          : ''
-                      }`}
-                    >
-                      <span className="min-w-0">
-                        <span className="block truncate font-semibold liquid-glass-modal-text">{waiter.name}</span>
-                        <span className="block truncate text-xs liquid-glass-modal-text-muted">
-                          {translateRoleName(t, waiter.role || '', staffMemberFallbackLabel)}
-                        </span>
-                      </span>
-                      {selectedWaiterId === waiter.id ? <Check className="h-4 w-4 text-blue-700 dark:text-blue-300" /> : null}
-                    </button>
-                  ))
-                )}
+                <AnimatePresence initial={false}>
+                  {isLoadingWaiters ? (
+                    <GlassReveal key="staff-loading">
+                      <div className="pos-glass-form-card flex items-center justify-center px-3! py-6! liquid-glass-modal-text-muted">
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        {tr('messages.loadingStaff', 'Loading staff...')}
+                      </div>
+                    </GlassReveal>
+                  ) : waiterOptions.length === 0 ? (
+                    <GlassReveal key="staff-empty">
+                      <div className="pos-glass-form-card px-3! py-6! text-center liquid-glass-modal-text-muted">
+                        {tr('messages.noWaitersAvailable', 'No active staff available.')}
+                      </div>
+                    </GlassReveal>
+                  ) : (
+                    <GlassReveal key="staff-options" className="grid gap-2">
+                      {waiterOptions.map(waiter => (
+                        <button
+                          key={waiter.id}
+                          type="button"
+                          onClick={() => setSelectedWaiterId(waiter.id)}
+                          className={`flex min-h-11 items-center justify-between gap-3 rounded-[20px] border px-3 py-3 text-left transition-colors ${
+                            selectedWaiterId === waiter.id
+                              ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) active:translate-y-px active:shadow-(--pos-s-depth-press)'
+                              : 'pos-glass-tap-card'
+                          }`}
+                        >
+                          <span className="min-w-0">
+                            <span className={`block truncate font-semibold ${selectedWaiterId === waiter.id ? 'text-(--pos-s-sel-fg)' : 'liquid-glass-modal-text'}`}>{waiter.name}</span>
+                            <span className={`block truncate text-xs ${selectedWaiterId === waiter.id ? 'text-(--pos-s-sel-fg)' : 'liquid-glass-modal-text-muted'}`}>
+                              {translateRoleName(t, waiter.role || '', staffMemberFallbackLabel)}
+                            </span>
+                          </span>
+                          {selectedWaiterId === waiter.id ? <Check className="h-4 w-4 text-(--pos-s-sel-fg)" /> : null}
+                        </button>
+                      ))}
+                    </GlassReveal>
+                  )}
+                </AnimatePresence>
               </div>
-              <ActionButton onClick={saveWaiterAssignment} disabled={isSaving || isSavedSession} tone="card" className="w-full">
-                <Check className="h-4 w-4" />
-                {tr('actions.saveWaiter', 'Save Waiter')}
-              </ActionButton>
+
             </SecondarySheet>
           ) : null}
 
@@ -3596,24 +3673,27 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               icon={<Users className="h-5 w-5" />}
               onClose={closeSecondaryModal}
               closeLabel={tr('actions.close', 'Close')}
-            >
-              <div className="grid grid-cols-[64px_1fr_64px] gap-3">
-                <ActionButton onClick={() => setGuestCount(count => Math.max(1, count - 1))}>
-                  <Minus className="h-5 w-5" />
+              footer={
+                <ActionButton onClick={saveGuestCount} disabled={isSaving || isSavedSession} tone="card" className="w-full">
+                  <Check className="h-4 w-4" />
+                  {tr('actions.saveCovers', 'Save Covers')}
                 </ActionButton>
+              }
+            >
+              <div className="pos-glass-form-card grid grid-cols-[64px_1fr_64px] gap-3">
+                <button type="button" className="pos-glass-field flex min-h-11 items-center justify-center" onClick={() => setGuestCount(count => Math.max(1, count - 1))}>
+                  <Minus className="h-5 w-5" />
+                </button>
                 <input
                   value={guestCount}
                   onChange={(event) => setGuestCount(normalizeGuestCount(event.target.value))}
                   className={`${glassInputClass} text-center text-xl font-semibold`}
                 />
-                <ActionButton onClick={() => setGuestCount(count => Math.min(99, count + 1))}>
+                <button type="button" className="pos-glass-field flex min-h-11 items-center justify-center" onClick={() => setGuestCount(count => Math.min(99, count + 1))}>
                   <Plus className="h-5 w-5" />
-                </ActionButton>
+                </button>
               </div>
-              <ActionButton onClick={saveGuestCount} disabled={isSaving || isSavedSession} tone="card" className="w-full">
-                <Check className="h-4 w-4" />
-                {tr('actions.saveCovers', 'Save Covers')}
-              </ActionButton>
+
             </SecondarySheet>
           ) : null}
         </AnimatePresence>

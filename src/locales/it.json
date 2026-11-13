@@ -1948,7 +1948,8 @@
       "last5Days": "Ultimi 5 giorni",
       "last7Days": "Ultimi 7 giorni",
       "last30Days": "Ultimi 30 giorni",
-      "last90Days": "Ultimi 90 giorni"
+      "last90Days": "Ultimi 90 giorni",
+      "sinceLastZ": "Dall'ultimo Z"
     },
     "sales": {
       "title": "Vendite",
@@ -5170,7 +5171,9 @@
         "releaseWrongPin": "Questo PIN non può sbloccarla. Un responsabile con il permesso di annullare gli ordini inserisce il proprio PIN.",
         "releaseFailed": "Non è stato possibile sbloccare la consegna. Non è cambiato nulla; riprova.",
         "released": "Sbloccata. I contanti della cassa secondaria non sono stati aggiunti a questo cassetto. Ora puoi chiudere il turno."
-      }
+      },
+      "netCollections": "Incassi netti",
+      "ofWhichTips": "di cui mance"
     },
     "zReport": {
       "title": "Rapporto Z - {{date}}",
@@ -5531,7 +5534,12 @@
       "heldEditClosed": "La correzione è stata chiusa. Nessun denaro è stato registrato.",
       "heldEditCloseFailed": "Non è stato possibile chiudere la correzione. Resta in sospeso; non è stato registrato nulla.",
       "unsavedSaved": "Pagamento salvato.",
-      "unsavedStillNotSaved": "Ancora non salvato su questa cassa. Non addebitare di nuovo. Riprova, oppure restituisci il denaro al cliente e confermalo qui."
+      "unsavedStillNotSaved": "Ancora non salvato su questa cassa. Non addebitare di nuovo. Riprova, oppure restituisci il denaro al cliente e confermalo qui.",
+      "tenderReconciliation": {
+        "received": "Incassato",
+        "refunded": "Rimborsato",
+        "kept": "Rimasto"
+      }
     },
     "expense": {
       "title": "Uscite di cassa",
@@ -5690,6 +5698,8 @@
       "managerApprovalSubtitle": "Annullare un ordine pagato richiede il permesso di annullare. Un responsabile che lo possiede inserisce il proprio PIN. Non viene addebitato nulla."
     },
     "addCustomer": {
+      "mapStreetNameDiffers": "La mappa chiama questa strada «{{street}}». Verifica che sia quella giusta.",
+      "mapPostalCodeDiffers": "La mappa indica il codice postale {{code}} per questo indirizzo.",
       "title": "Aggiungi nuovo cliente",
       "editTitle": "Modifica cliente",
       "addAddressTitle": "Aggiungi nuovo indirizzo",
@@ -5965,6 +5975,7 @@
       "unknownError": "Errore sconosciuto"
     },
     "connectionSettings": {
+      "unsyncedQueue": "Questa cassa ha ancora movimenti di denaro che non sono stati inviati al server. Sincronizza prima, poi collegala all’altro negozio.",
       "pinSaveError": "Impossibile salvare il PIN",
       "connectionSavedSyncing": "Connessione salvata. Sincronizzazione dei dati…",
       "themeAutoDayNight": "Automatico (giorno / notte)",
@@ -6516,7 +6527,8 @@
     "addressValidationError": "Impossibile validare l'indirizzo",
     "orderCreated": "Ordine creato!",
     "markDeliveredFailed": "Impossibile segnare l'ordine {{orderNumber}} come consegnato",
-    "pickupDelivered": "{{count}} ordini da asporto segnati come consegnati",
+    "pickupDelivered_one": "Ordine consegnato",
+    "pickupDelivered_other": "{{count}} ordini consegnati",
     "platformReadySent": "Segnato come pronto",
     "platformReadyFailed": "Notifica alla piattaforma non riuscita per {{orderNumber}}",
     "deliveriesCompleted": "Ordini di consegna completati: {{count}}",
@@ -8947,6 +8959,7 @@
         "serviceStep": "Servizio"
       },
       "loadingSlots": "Caricamento...",
+      "pickDay": "Scegli un giorno per vedere gli orari",
       "availability": {
         "available": "Disponibile",
         "booked": "Prenotato"
@@ -10347,6 +10360,18 @@
     "clearAttemptSubtitle": "Un responsabile inserisce il proprio PIN. Non viene addebitato né restituito nulla."
   },
   "reservationForm": {
+    "today": "Oggi",
+    "tomorrow": "Domani",
+    "dayStrip": "Prossimi giorni",
+    "dayFree": "Libero",
+    "dayReserved": "{{count}} prenotazioni",
+    "dayReserved_one": "{{count}} prenotazione",
+    "dayReserved_other": "{{count}} prenotazioni",
+    "dayFull": "Completo",
+    "slotFree": "Libero",
+    "slotTaken": "Prenotato",
+    "pickDay": "Scegli un giorno per vedere gli orari",
+    "noTimesLeft": "Non restano orari per questo giorno. Scegli un altro giorno o scrivi un orario.",
     "toasts": {
       "created": "Prenotazione creata",
       "updated": "Prenotazione aggiornata",

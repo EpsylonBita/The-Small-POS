@@ -9419,6 +9419,8 @@ pub(crate) fn preserve_food_items_on_incomplete_snapshot(
     conn: &rusqlite::Connection,
     local_id: &str,
     incoming: Option<String>,
+    incoming_total: Option<f64>,
+    incoming_status: Option<&str>,
 ) -> Result<Option<String>, String> {
     let Some(raw) = incoming.as_ref() else {
         return Ok(incoming);
@@ -9426,16 +9428,28 @@ pub(crate) fn preserve_food_items_on_incomplete_snapshot(
     if print::has_usable_food_order_items(raw) {
         return Ok(incoming);
     }
-    let row: Option<(String, String)> = conn
+    let empty_array = serde_json::from_str::<Value>(raw)
+        .ok()
+        .is_some_and(|value| value.as_array().is_some_and(Vec::is_empty));
+    if empty_array && (incoming_total == Some(0.0) || incoming_status == Some("cancelled")) {
+        return Ok(incoming);
+    }
+    let row: Option<(String, String, f64)> = conn
         .query_row(
-            "SELECT COALESCE(plugin, ''), COALESCE(items, '[]') FROM orders WHERE id = ?1",
+            "SELECT COALESCE(plugin, ''), COALESCE(items, '[]'),
+                    COALESCE(total_amount_cents / 100.0, total_amount, 0) FROM orders WHERE id = ?1",
             [local_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(|error| format!("read food items before snapshot: {error}"))?;
-    if row.is_some_and(|(plugin, items)| {
-        print::is_food_delivery_plugin(&plugin) && print::has_usable_food_order_items(&items)
+    if row.is_some_and(|(plugin, items, total)| {
+        (print::is_food_delivery_plugin(&plugin) && print::has_usable_food_order_items(&items))
+            || (empty_array
+                && incoming_total.unwrap_or(total) != 0.0
+                && serde_json::from_str::<Value>(&items)
+                    .ok()
+                    .is_some_and(|value| value.as_array().is_some_and(|items| !items.is_empty())))
     }) {
         return Ok(None);
     }
@@ -9463,7 +9477,7 @@ fn enqueue_order_creation_fiscal(
         // Keep this new pending order and its ordinary order-sync row intact.
         return Ok(());
     }
-    crate::fiscal::dispatcher::enqueue_for_order(conn, order_id)
+    crate::fiscal::dispatcher::enqueue_with_admission_owed(conn, order_id)
 }
 
 #[tauri::command]
@@ -10169,7 +10183,7 @@ pub(crate) async fn create_order_with_initial_payment(
         if !fiscal_enqueued {
             if let Ok(conn) = db.lock_traced("order_create_with_initial_payment") {
                 if let Err(fiscal_err) =
-                    crate::fiscal::dispatcher::enqueue_for_order(&conn, &order_id)
+                    crate::fiscal::dispatcher::enqueue_with_admission_owed(&conn, &order_id)
                 {
                     tracing::warn!(
                         "[order_create_with_initial_payment] fiscal enqueue best-effort failed for order {order_id}: {fiscal_err}"
@@ -11343,110 +11357,144 @@ pub(crate) fn assign_driver_locally(
     notes: Option<&str>,
     now: &str,
 ) -> Result<(String, Option<String>, String), String> {
-    let order_id = resolve_renderer_order_id(conn, order_id_raw)?;
-    let driver_name = resolve_driver_display_name(conn, driver_id);
-    ensure_box_order_mutation_allowed(conn, &order_id, "delivered", BoxOrderMutation::Generic)?;
-    let current_status: String = conn
-        .query_row(
-            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
-            rusqlite::params![order_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("load order status: {e}"))?;
+    // Reserve a bare connection before reading; nested callers retain their
+    // transaction, while the savepoint still undoes only this assignment.
+    crate::db::with_immediate_admission(conn, || {
+        conn.execute_batch("SAVEPOINT assign_driver")
+            .map_err(|e| format!("savepoint driver assignment: {e}"))?;
+        let result = (|| {
+            let order_id = resolve_renderer_order_id(conn, order_id_raw)?;
+            let driver_name = resolve_driver_display_name(conn, driver_id);
+            ensure_box_order_mutation_allowed(
+                conn,
+                &order_id,
+                "delivered",
+                BoxOrderMutation::Generic,
+            )?;
+            let current_status: String = conn
+                .query_row(
+                    "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+                    rusqlite::params![order_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("load order status: {e}"))?;
 
-    if matches!(current_status.as_str(), "cancelled" | "canceled") {
-        return Err("Cannot assign a driver to a cancelled order".into());
-    }
+            if matches!(current_status.as_str(), "cancelled" | "canceled") {
+                return Err("Cannot assign a driver to a cancelled order".into());
+            }
 
-    // Only create driver_earnings for delivery orders
-    let is_delivery: bool = conn
-        .query_row(
-            "SELECT COALESCE(order_type, '') = 'delivery' FROM orders WHERE id = ?1",
-            rusqlite::params![order_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
+            // Only create driver_earnings for delivery orders
+            let is_delivery: bool = conn
+                .query_row(
+                    "SELECT COALESCE(order_type, '') = 'delivery' FROM orders WHERE id = ?1",
+                    rusqlite::params![order_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
 
-    if !is_delivery {
-        return Err("Driver assignment is only supported for delivery orders".into());
-    }
+            if !is_delivery {
+                return Err("Driver assignment is only supported for delivery orders".into());
+            }
 
-    let driver_shift_id = if is_delivery {
-        order_ownership::resolve_driver_shift_id(conn, driver_id, None)?
-    } else {
-        None
-    };
+            let driver_shift_id = if is_delivery {
+                order_ownership::resolve_driver_shift_id(conn, driver_id, None)?
+            } else {
+                None
+            };
 
-    let shift_id = driver_shift_id
-        .as_deref()
-        .ok_or_else(|| "Driver must have an active shift before assignment".to_string())?;
+            let shift_id = driver_shift_id
+                .as_deref()
+                .ok_or_else(|| "Driver must have an active shift before assignment".to_string())?;
 
-    // The assignment queues the driver earning, the receipt that now names
-    // the driver for its tip, and the order update. A full queue refuses it
-    // before the order moves to the driver or the earning is written
-    // (offline-week audit #3: the update row used to be dropped, and a
-    // refused earning or receipt row left the assignment half applied).
-    crate::sync_queue::ensure_enqueue_capacity(conn, 3)?;
+            // The assignment queues the driver earning, the receipt that now names
+            // the driver for its tip, and the order update. A full queue refuses it
+            // before the order moves to the driver or the earning is written
+            // (offline-week audit #3: the update row used to be dropped, and a
+            // refused earning or receipt row left the assignment half applied).
+            crate::sync_queue::ensure_enqueue_capacity(conn, 3)?;
 
-    let assignment = order_ownership::assign_order_to_driver_shift(
-        conn,
-        &order_id,
-        driver_id,
-        driver_name.as_deref(),
-        shift_id,
-        now,
-    )?;
+            let assignment = order_ownership::assign_order_to_driver_shift(
+                conn,
+                &order_id,
+                driver_id,
+                driver_name.as_deref(),
+                shift_id,
+                now,
+            )?;
 
-    let earning_id =
-        order_ownership::upsert_driver_earning(conn, &order_id, driver_id, &assignment, now)?;
+            let earning_id = order_ownership::upsert_driver_earning(
+                conn,
+                &order_id,
+                driver_id,
+                &assignment,
+                now,
+            )?;
 
-    // A delivery tip can be collected before dispatch. Resolve every pending
-    // driver allocation to the actual driver/shift at the same point that the
-    // canonical driver earning is created, then rebuild its payment sync row
-    // so an already-offline payment cannot retain a stale pending recipient.
-    resolve_delivery_tip_recipients_for_assignment(
-        conn,
-        &order_id,
-        driver_id,
-        &assignment.driver_shift_id,
-        now,
-    )?;
+            // A delivery tip can be collected before dispatch. Resolve every pending
+            // driver allocation to the actual driver/shift at the same point that the
+            // canonical driver earning is created, then rebuild its payment sync row
+            // so an already-offline payment cannot retain a stale pending recipient.
+            resolve_delivery_tip_recipients_for_assignment(
+                conn,
+                &order_id,
+                driver_id,
+                &assignment.driver_shift_id,
+                now,
+            )?;
 
-    let assigned_status: String = conn
-        .query_row(
-            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
-            rusqlite::params![order_id],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| current_status.clone());
+            let assigned_status: String = conn
+                .query_row(
+                    "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+                    rusqlite::params![order_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| current_status.clone());
 
-    let _ = conn.execute(
-        "UPDATE orders
+            let _ = conn.execute(
+                "UPDATE orders
          SET delivery_notes = COALESCE(?1, delivery_notes),
              sync_status = 'pending',
              updated_at = ?2
          WHERE id = ?3",
-        rusqlite::params![notes, now, order_id],
-    );
+                rusqlite::params![notes, now, order_id],
+            );
 
-    let driver_earning_sync_payload =
-        order_ownership::build_driver_earning_sync_payload(conn, &earning_id)?;
-    order_ownership::enqueue_or_refresh_driver_earning_sync_row(
-        conn,
-        &earning_id,
-        &driver_earning_sync_payload,
-    )?;
+            let driver_earning_sync_payload =
+                order_ownership::build_driver_earning_sync_payload(conn, &earning_id)?;
+            order_ownership::enqueue_or_refresh_driver_earning_sync_row(
+                conn,
+                &earning_id,
+                &driver_earning_sync_payload,
+            )?;
 
-    let order_sync_payload = serde_json::json!({
-        "orderId": order_id,
-        "orderType": "delivery",
-        "status": assigned_status,
-        "driverId": driver_id,
-        "driverName": driver_name,
-        "deliveryNotes": notes,
-    });
-    enqueue_order_sync_payload(conn, &order_id, &order_sync_payload)?;
-    Ok((order_id, driver_name, assigned_status))
+            let order_sync_payload = serde_json::json!({
+                "orderId": order_id,
+                "orderType": "delivery",
+                "status": assigned_status,
+                "driverId": driver_id,
+                "driverName": driver_name,
+                "deliveryNotes": notes,
+            });
+            enqueue_order_sync_payload(conn, &order_id, &order_sync_payload)?;
+            Ok((order_id, driver_name, assigned_status))
+        })()
+        .and_then(|assigned| {
+            conn.execute_batch("RELEASE assign_driver")
+                .map_err(|e| format!("release driver assignment: {e}"))?;
+            Ok(assigned)
+        });
+        match result {
+            Ok(assigned) => Ok(assigned),
+            Err(error) => {
+                if let Err(rollback_error) =
+                    conn.execute_batch("ROLLBACK TO assign_driver; RELEASE assign_driver")
+                {
+                    tracing::warn!(%rollback_error, "Could not roll back driver assignment");
+                }
+                Err(error)
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -16110,7 +16158,31 @@ mod transition_tests {
             assert!(preserve_food_items_on_incomplete_snapshot(
                 &conn,
                 "food-cache",
-                Some(incoming.into())
+                Some(incoming.into()),
+                None,
+                None,
+            )
+            .unwrap()
+            .is_none());
+        }
+        for (total, status) in [(Some(0.0), None), (None, Some("cancelled"))] {
+            assert_eq!(
+                preserve_food_items_on_incomplete_snapshot(
+                    &conn,
+                    "food-cache",
+                    Some("[]".into()),
+                    total,
+                    status,
+                )
+                .unwrap(),
+                Some("[]".into()),
+            );
+            assert!(preserve_food_items_on_incomplete_snapshot(
+                &conn,
+                "food-cache",
+                Some("null".into()),
+                total,
+                status,
             )
             .unwrap()
             .is_none());
@@ -16121,9 +16193,16 @@ mod transition_tests {
         )
         .unwrap();
         assert_eq!(
-            preserve_food_items_on_incomplete_snapshot(&conn, "food-cache", Some("[]".into()))
-                .unwrap(),
-            Some("[]".into())
+            preserve_food_items_on_incomplete_snapshot(
+                &conn,
+                "food-cache",
+                Some("[]".into()),
+                None,
+                None
+            )
+            .unwrap(),
+            // Ordinary non-zero orders need the same protection as plugin orders.
+            None
         );
     }
 
@@ -16219,6 +16298,88 @@ mod transition_tests {
     }
 
     #[test]
+    fn order_create_fiscal_failure_retains_admission_owed() {
+        let db = test_db();
+        insert_order(&db, "fiscal-owed", "pending");
+        let conn = db.conn.lock().unwrap();
+        // A missing branch is a real payload/admission failure after commit.
+        assert!(
+            enqueue_order_creation_fiscal(&conn, "fiscal-owed", &serde_json::json!({})).is_err()
+        );
+        let retained: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM local_settings WHERE setting_category = 'fiscal_admission_owed'
+             AND setting_key = 'fiscal-owed' AND json_extract(setting_value, '$.attempts') = 1",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(retained, 1);
+    }
+
+    #[tokio::test]
+    async fn order_create_fiscal_failure_keeps_checkout_success_and_original_payment() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_manual_twint_terminal(&conn);
+            crate::storage::seed_terminal_credential_for_test("terminal_id", "manual-terminal")
+                .unwrap();
+            conn.execute_batch("INSERT INTO staff_shifts(id,staff_id,staff_name,branch_id,terminal_id,role_type,
+                check_in_time,opening_cash_amount,status,sync_status,created_at,updated_at,currency)
+                VALUES ('manual-shift','manual-cashier','Cashier','manual-branch','manual-terminal','cashier',
+                'now',0,'active','pending','now','now','CHF');
+                CREATE TRIGGER fail_checkout_fiscal BEFORE INSERT ON parity_sync_queue
+                WHEN NEW.module_type='fiscal' BEGIN SELECT RAISE(ABORT, 'test fiscal failure'); END;").unwrap();
+        }
+        for recovery_writer in [false, true] {
+            let request_id = if recovery_writer {
+                "owed-recovery-checkout"
+            } else {
+                "owed-checkout"
+            };
+            let payload = serde_json::json!({"clientRequestId":request_id,
+                "organizationId":"manual-org", "branchId":"manual-branch", "terminalId":"manual-terminal",
+                "items":[{"name":"Coffee","quantity":1,"price":10}],"subtotal":10,"totalAmount":10,
+                "currency":"CHF","orderType":"takeaway","status":"completed",
+                "staffId":"manual-cashier","staffShiftId":"manual-shift",
+                "initialPayment":{"method":"cash","amount":10,"currency":"CHF",
+                    "staffId":"manual-cashier","staffShiftId":"manual-shift","idempotencyKey":request_id}});
+            let response = if recovery_writer {
+                crate::unsaved_payments::write_new_order_checkout(
+                    &db,
+                    &payload,
+                    &crate::print::NoopPrintQueueInvalidator,
+                )
+                .unwrap()
+            } else {
+                create_order_with_initial_payment(
+                    &db,
+                    &crate::ecr::DeviceManager::new(),
+                    &crate::print::NoopPrintQueueInvalidator,
+                    payload,
+                    &[],
+                )
+                .await
+                .unwrap()
+            };
+            assert_eq!(response["success"], true, "{response}");
+            let id = response["orderId"].as_str().unwrap();
+            let conn = db.conn.lock().unwrap();
+            assert!(crate::fiscal::admission_owed::list_owed(&conn, 25)
+                .unwrap()
+                .contains(&id.to_string()));
+            let payment: (i64, i64) = conn
+                .query_row(
+                    "SELECT COUNT(*), SUM(amount_cents) FROM order_payments
+                WHERE order_id=?1 AND method='cash'",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(payment, (1, 1000));
+        }
+    }
+
+    #[test]
     fn gift_create_fiscal_handoff_preserves_pending_order_without_a_fiscal_row() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -16269,6 +16430,9 @@ mod transition_tests {
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).unwrap();
         assert_eq!(rows, (0, 1, 0, 0));
+        assert!(crate::fiscal::admission_owed::list_owed(&conn, 25)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -16300,6 +16464,7 @@ mod transition_tests {
                 [&order_id], |row| row.get(0),
             ).unwrap();
             assert_eq!(count, 1, "ordinary fiscal handoff remains for control {index}");
+            assert!(crate::fiscal::admission_owed::list_owed(&conn, 25).unwrap().is_empty());
         }
     }
 
@@ -22979,6 +23144,128 @@ pub(crate) mod driver_restore_tests {
         assert_eq!(shift, "cashier-shift");
         server.sync(&conn);
         assert!(queued(&conn).is_empty(), "{:?}", queued(&conn));
+    }
+
+    fn driver_assignment_snapshot(conn: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+        [
+            "orders",
+            "driver_earnings",
+            "order_payments",
+            "parity_sync_queue",
+            "cash_drawer_sessions",
+        ]
+        .into_iter()
+        .map(|table| {
+            let mut stmt = conn
+                .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                .unwrap();
+            let columns = stmt.column_count();
+            stmt.query_map([], |row| (0..columns).map(|index| row.get(index)).collect())
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        })
+        .collect()
+    }
+
+    #[test]
+    fn assign_driver_earning_queue_failure_restores_all_local_state() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let conn = test_conn();
+        paid_delivery_order(&conn);
+        payments::refresh_payment_sync_queue_entry(&conn, PAYMENT).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_assignment_queue BEFORE INSERT ON parity_sync_queue
+             WHEN NEW.table_name='driver_earnings'
+             BEGIN SELECT RAISE(ABORT, 'injected assignment earning queue failure'); END;",
+        )
+        .unwrap();
+        let before = driver_assignment_snapshot(&conn);
+        let error = assign_driver_locally(
+            &conn,
+            ORDER,
+            "driver-1",
+            Some("leave at door"),
+            "2026-10-07T18:10:00Z",
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("injected assignment earning queue failure"),
+            "{error}"
+        );
+        assert_eq!(driver_assignment_snapshot(&conn), before);
+        assert!(conn.is_autocommit());
+    }
+
+    #[test]
+    fn assign_driver_order_queue_failure_restores_all_local_state_in_outer_transaction() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let conn = test_conn();
+        paid_delivery_order(&conn);
+        payments::refresh_payment_sync_queue_entry(&conn, PAYMENT).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_assignment_queue BEFORE INSERT ON parity_sync_queue
+             WHEN NEW.table_name='orders'
+             BEGIN SELECT RAISE(ABORT, 'injected assignment order queue failure'); END;",
+        )
+        .unwrap();
+        let tx = crate::db::immediate_transaction(&conn).unwrap();
+        tx.execute(
+            "UPDATE orders SET delivery_notes='outer change' WHERE id=?1",
+            [ORDER],
+        )
+        .unwrap();
+        let before = driver_assignment_snapshot(&tx);
+        let error = assign_driver_locally(
+            &tx,
+            ORDER,
+            "driver-1",
+            Some("leave at door"),
+            "2026-10-07T18:10:00Z",
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("injected assignment order queue failure"),
+            "{error}"
+        );
+        assert_eq!(driver_assignment_snapshot(&tx), before);
+        tx.commit().unwrap();
+        assert_eq!(driver_assignment_snapshot(&conn), before);
+    }
+
+    #[test]
+    fn assign_driver_tolerates_notes_update_failure_and_keeps_order_pending_sync() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let conn = test_conn();
+        paid_delivery_order(&conn);
+        conn.execute_batch(
+            "CREATE TRIGGER fail_assignment_notes BEFORE UPDATE OF delivery_notes ON orders
+             BEGIN SELECT RAISE(ABORT, 'injected assignment notes failure'); END;",
+        )
+        .unwrap();
+        let assigned = assign_driver_locally(
+            &conn,
+            ORDER,
+            "driver-1",
+            Some("leave at door"),
+            "2026-10-07T18:10:00Z",
+        )
+        .unwrap();
+        assert_eq!(assigned, (ORDER.to_string(), None, "delivered".to_string()));
+        let order: (String, Option<String>) = conn
+            .query_row(
+                "SELECT sync_status,delivery_notes FROM orders WHERE id=?1",
+                [ORDER],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(order, ("pending".into(), None));
+        let mut rows = queued(&conn);
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec!["driver_earnings:INSERT", "orders:UPDATE", "payments:INSERT"]
+        );
     }
 
     /// Offline-week audit #3 (13/10/2026): at a full queue the assignment's

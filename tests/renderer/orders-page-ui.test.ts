@@ -2504,6 +2504,7 @@ test('Round 238: room workflow buttons follow the cancel=red / confirm=green rul
 // --- Round 255 (live QA, 1282x802 Greek/dark): roomier room pickers (no clipped last card) +
 // neutral disabled room confirm buttons -----------------------------------------------------------
 
+// founder 11/11/2026: room picker padding follows the current frosted-card spacing.
 test('Round 255: New Order room pickers are roomier (wider modal, 3-col grid, bottom padding, hidden rail)', () => {
   const source = orderDashboardSource();
   const moduleSource = roomStayModuleSource();
@@ -2517,13 +2518,13 @@ test('Round 255: New Order room pickers are roomier (wider modal, 3-col grid, bo
   );
   assert.match(
     moduleSource,
-    /grid max-h-\[60vh\][^"]*overflow-y-auto scrollbar-hide pb-2 sm:grid-cols-2 lg:grid-cols-3/,
+    /grid max-h-\[60vh\][^"]*overflow-y-auto scrollbar-hide p-1 pb-4 sm:grid-cols-2 lg:grid-cols-3/,
   );
   // The dashboard Room Order selector uses the same roomier treatment.
   assert.match(source, /title=\{t\("orderFlow\.roomOrderTitle"[^}]*\}\)\}\s*className="max-w-(2xl|3xl)!"/);
   assert.match(
     source,
-    /grid max-h-\[60vh\][^"]*overflow-y-auto scrollbar-hide pb-2 sm:grid-cols-2 lg:grid-cols-3/,
+    /grid max-h-\[60vh\][^"]*overflow-y-auto scrollbar-hide p-1 pb-4 sm:grid-cols-2 lg:grid-cols-3/,
   );
   // The old narrow 2-column-only grid (no lg:grid-cols-3) is gone.
   assert.doesNotMatch(moduleSource, /grid max-h-\[60vh\][^"]*scrollbar-hide sm:grid-cols-2"/);

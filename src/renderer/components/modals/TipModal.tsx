@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'framer-motion';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Bike, HandCoins, Scissors, UserRound, WalletCards } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -26,7 +27,7 @@ interface TipModalProps {
 const TIP_PERCENTAGES = [5, 10, 15, 20];
 const EMPTY_STAFF_OPTIONS: TipStaffOption[] = [];
 const tipChoiceButtonBaseClass =
-  'rounded-xl border border-(--pos-s-border) bg-(--pos-s-surface) shadow-[0_8px_20px_rgba(0,0,0,0.10)] transition-all dark:shadow-[0_10px_24px_rgba(0,0,0,0.28)] active:translate-y-px active:shadow-inner';
+  'rounded-xl border transition-all focus-visible:outline-2 focus-visible:outline-yellow-400';
 const TIP_RECIPIENT_ICON_CLASSES: Record<TipRecipientRole, string> = {
   waiter: 'tip-recipient-icon-waiter',
   cashier: 'tip-recipient-icon-cashier',
@@ -45,6 +46,13 @@ const defaultRecipientForOrder = (
   return 'cashier';
 };
 
+// Remove interactive content at the original conditional boundary; only its empty
+// visual wrapper remains for the exit collapse (founder 11/11/2026).
+function TipStaffReveal({ children, ...props }: React.ComponentProps<typeof motion.div>) {
+  const isPresent = useIsPresent();
+  return <motion.div {...props}>{isPresent ? children : null}</motion.div>;
+}
+
 export const TipModal: React.FC<TipModalProps> = ({
   isOpen,
   onClose,
@@ -54,6 +62,15 @@ export const TipModal: React.FC<TipModalProps> = ({
   onApply,
   staffOptions = EMPTY_STAFF_OPTIONS,
 }) => {
+  
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const { t } = useTranslation();
   const hasStaff = staffOptions.length > 0;
   const onlyStaffId = staffOptions.length === 1 ? staffOptions[0].staffId : null;
@@ -150,12 +167,12 @@ export const TipModal: React.FC<TipModalProps> = ({
       onClose={onClose}
       title={t('modals.tip.title', 'Add Tip')}
       size="sm"
-      className="max-w-md!"
+      className="max-w-md! [&_.liquid-glass-modal-header]:border-b-0!"
       closeOnBackdrop={false}
     >
       <div className="space-y-3">
-        <div>
-          <p className="mb-1.5 text-sm font-semibold liquid-glass-modal-text">
+        <div className="pos-glass-form-card">
+          <p className="mb-1.5 text-xs font-semibold liquid-glass-modal-text-muted">
             {t('modals.tip.presetLabel', 'Choose a tip')}
           </p>
           <div className="grid grid-cols-4 gap-2">
@@ -165,20 +182,18 @@ export const TipModal: React.FC<TipModalProps> = ({
                 type="button"
                 onClick={() => choosePercentage(percentage)}
                 aria-pressed={selectedPercentage === percentage}
-                className={`min-h-10 text-sm font-bold ${tipChoiceButtonBaseClass} ${
+                className={`min-h-touch text-sm font-bold ${tipChoiceButtonBaseClass} ${
                   selectedPercentage === percentage
-                    ? 'border-emerald-600! bg-emerald-50! text-emerald-700 dark:bg-zinc-800! dark:text-emerald-100'
-                    : 'liquid-glass-modal-text'
+                    ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-[var(--pos-s-depth-card)] active:translate-y-px active:shadow-[var(--pos-s-depth-press)]'
+                    : 'pos-glass-field'
                 }`}
               >
                 {percentage}%
               </button>
             ))}
           </div>
-        </div>
-
-        <div>
-          <label className="mb-1.5 block text-sm font-semibold liquid-glass-modal-text">
+          <div className="mt-3">
+          <label className="mb-1.5 block text-xs font-semibold liquid-glass-modal-text-muted">
             {t('modals.tip.manualLabel', 'Or enter an amount')}
           </label>
           <div className="relative">
@@ -191,13 +206,14 @@ export const TipModal: React.FC<TipModalProps> = ({
                 setManualAmount(value);
               }}
               placeholder="0,00"
-              className="w-full rounded-xl border-2 border-slate-200/90 bg-white/90 py-2.5 pl-10 pr-4 text-lg font-bold liquid-glass-modal-text shadow-inner outline-hidden transition-colors focus:border-emerald-600 dark:border-white/15 dark:bg-white/10"
+              className="liquid-glass-modal-input pos-glass-field min-h-touch w-full py-2.5 pl-10! pr-4 text-lg font-bold"
             />
           </div>
         </div>
 
-        <div>
-          <p className="mb-1.5 text-sm font-semibold liquid-glass-modal-text">
+        </div>
+        <div className="pos-glass-form-card">
+          <p className="mb-1.5 text-xs font-semibold liquid-glass-modal-text-muted">
             {t('modals.tip.recipientLabel', 'Tip goes to')}
           </p>
           <div className="grid gap-2">
@@ -213,16 +229,16 @@ export const TipModal: React.FC<TipModalProps> = ({
                   aria-pressed={isSelected}
                   className={`flex min-h-14 items-center gap-3 p-2.5 text-left ${tipChoiceButtonBaseClass} ${
                     isSelected
-                      ? 'border-(--pos-s-sel-bg)! bg-(--pos-s-surface-2)! ring-1 ring-(--pos-s-sel-bg)'
-                      : ''
+                      ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-[var(--pos-s-depth-card)] active:translate-y-px active:shadow-[var(--pos-s-depth-press)]'
+                      : 'pos-glass-tap-card'
                   }`}
                 >
                   <Icon className={`h-6 w-6 shrink-0 ${TIP_RECIPIENT_ICON_CLASSES[role]}`} />
                   <span>
-                    <span className="block font-semibold liquid-glass-modal-text">
+                    <span className={`block font-semibold ${isSelected ? 'text-(--pos-s-sel-fg)' : 'liquid-glass-modal-text'}`}>
                       {recipient.label}
                     </span>
-                    <span className="block text-xs liquid-glass-modal-text-muted">
+                    <span className={`block text-xs ${isSelected ? 'text-(--pos-s-sel-fg)' : 'liquid-glass-modal-text-muted'}`}>
                       {recipient.help}
                     </span>
                   </span>
@@ -230,13 +246,14 @@ export const TipModal: React.FC<TipModalProps> = ({
               );
             })}
           </div>
-          {recipientRole === 'staff' && (
-            <div className="mt-2" data-testid="tip-staff-choices">
-              {staffOptions.length > 1 && (
-                <p className="mb-1.5 text-sm font-semibold liquid-glass-modal-text">
+          <AnimatePresence initial={false}>{recipientRole === 'staff' && (
+            <TipStaffReveal {...revealMotion} className="mt-2">
+              <div data-testid="tip-staff-choices">
+              <AnimatePresence initial={false}>{staffOptions.length > 1 && (
+                <motion.p {...revealMotion} className="mb-1.5 text-xs font-semibold liquid-glass-modal-text-muted">
                   {t('salonStaff.tipChooseStaff', 'Who gets the tip?')}
-                </p>
-              )}
+                </motion.p>
+              )}</AnimatePresence>
               <div className="grid grid-cols-2 gap-2">
                 {staffOptions.map(option => (
                   <button
@@ -244,32 +261,33 @@ export const TipModal: React.FC<TipModalProps> = ({
                     type="button"
                     onClick={() => setRecipientStaffId(option.staffId)}
                     aria-pressed={recipientStaffId === option.staffId}
-                    className={`min-h-10 truncate px-2 text-sm font-semibold ${tipChoiceButtonBaseClass} ${
+                    className={`min-h-touch truncate px-2 text-sm font-semibold ${tipChoiceButtonBaseClass} ${
                       recipientStaffId === option.staffId
-                        ? 'border-(--pos-s-sel-bg)! bg-(--pos-s-surface-2)! ring-1 ring-(--pos-s-sel-bg) liquid-glass-modal-text'
-                        : 'liquid-glass-modal-text'
+                        ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-[var(--pos-s-depth-card)] active:translate-y-px active:shadow-[var(--pos-s-depth-press)]'
+                        : 'pos-glass-field'
                     }`}
                   >
                     {option.staffName}
                   </button>
                 ))}
               </div>
-            </div>
-          )}
+              </div>
+            </TipStaffReveal>
+          )}</AnimatePresence>
         </div>
 
-        <div className="rounded-2xl border border-slate-200/90 bg-white/80 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)] dark:border-white/10 dark:bg-white/5 dark:shadow-none">
+        <div className="pos-glass-form-card p-3!">
           <div className="flex items-center justify-between text-sm liquid-glass-modal-text-muted">
             <span>{t('modals.tip.tipAmount', 'Tip')}</span>
             <span>{formatCurrency(tipAmount)}</span>
           </div>
-          <div className="mt-2 flex items-center justify-between border-t border-white/10 pt-2 font-bold liquid-glass-modal-text">
+          <div className="mt-2 flex items-center justify-between pt-2 font-bold liquid-glass-modal-text">
             <span>{t('modals.tip.totalWithTip', 'Total with tip')}</span>
-            <span className="text-xl text-emerald-700 dark:text-emerald-400">{formatCurrency(totalWithTip)}</span>
+            <span className="text-xl liquid-glass-modal-text">{formatCurrency(totalWithTip)}</span>
           </div>
         </div>
 
-        <div className="flex gap-3">
+        <div className="flex gap-3 px-6 pb-5 pt-2">
           <button
             type="button"
             onClick={() => {

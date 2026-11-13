@@ -6834,6 +6834,7 @@ fn build_shift_checkout_doc(
     .unwrap_or(0.0);
 
     let mut doc = Ok(ShiftCheckoutDoc {
+        net_collections: summary.get("netCollections").cloned(),
         currency: summary
             .get("currency")
             .and_then(Value::as_str)
@@ -7561,6 +7562,10 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
 
     ZReportDoc {
         vat_breakdown: payload.get("vatBreakdown").cloned().unwrap_or(Value::Null),
+        tender_reconciliation: payload
+            .get("tenderReconciliation")
+            .cloned()
+            .unwrap_or(Value::Null),
         hotel_report: serde_json::json!({"hotel":payload["hotel"],"presentation":payload["presentation"],"sales":payload["sales"]}),
         currency: text_from_paths(payload, &["/currency"])
             .and_then(|value| crate::fiscal::payload_builder::normalize_currency_code(&value)),
@@ -7702,6 +7707,10 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
                             .and_then(Value::as_f64)
                             .unwrap_or(0.0),
                         twint_amount: number_from_paths(s, &["/orders/twintAmount"]).unwrap_or(0.0),
+                        net_collections: s
+                            .get("netCollections")
+                            .filter(|value| value.is_object())
+                            .cloned(),
                         total_amount: s
                             .pointer("/orders/totalAmount")
                             .and_then(Value::as_f64)
@@ -7854,6 +7863,10 @@ fn build_z_report_doc_with_conn(
 
     Ok(ZReportDoc {
         vat_breakdown: rj.get("vatBreakdown").cloned().unwrap_or(Value::Null),
+        tender_reconciliation: rj
+            .get("tenderReconciliation")
+            .cloned()
+            .unwrap_or(Value::Null),
         hotel_report: serde_json::json!({"hotel":rj["hotel"],"presentation":rj["presentation"],"sales":rj["sales"]}),
         currency: text_from_paths(&rj, &["/currency"])
             .and_then(|value| crate::fiscal::payload_builder::normalize_currency_code(&value)),
@@ -8022,6 +8035,10 @@ fn build_z_report_doc_with_conn(
                             .and_then(Value::as_f64)
                             .unwrap_or(0.0),
                         twint_amount: number_from_paths(s, &["/orders/twintAmount"]).unwrap_or(0.0),
+                        net_collections: s
+                            .get("netCollections")
+                            .filter(|value| value.is_object())
+                            .cloned(),
                         total_amount: s
                             .pointer("/orders/totalAmount")
                             .and_then(Value::as_f64)
@@ -11504,6 +11521,36 @@ mod tests {
     }
 
     #[test]
+    fn rule7_stored_reconciliation_reaches_print_without_recount() {
+        let db = test_db();
+        let frozen = serde_json::json!({"tenderReconciliation":{"version":1,"lines":[
+            {"tender":"card","receivedCents":10000,"refundedCents":10000,"keptCents":0}]}});
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,role_type,status,check_in_time,created_at,updated_at) VALUES('shift','staff','cashier','closed','2026-10-02T09:00:00Z','now','now')",[]).unwrap();
+            conn.execute("INSERT INTO z_reports(id,shift_id,branch_id,terminal_id,report_date,generated_at,report_json,created_at,updated_at) VALUES('rule7','shift','branch','term','2026-10-02','2026-10-02T18:00:00Z',?1,'now','now')",params![frozen.to_string()]).unwrap();
+        }
+        for doc in [
+            build_z_report_doc(&db, "rule7").unwrap(),
+            build_z_report_doc_from_payload(&db, &frozen, "preview"),
+        ] {
+            let cfg = receipt_renderer::LayoutConfig {
+                language: "en".into(),
+                ..Default::default()
+            };
+            let document = receipt_renderer::ReceiptDocument::ZReport(doc);
+            let html = receipt_renderer::render_html(&document, &cfg);
+            let bytes = receipt_renderer::render_escpos(&document, &cfg).bytes;
+            let text = String::from_utf8_lossy(&bytes);
+            for output in [&html, text.as_ref()] {
+                assert!(output.contains("Card / Received"));
+                assert!(output.contains("Card / Refunded"));
+                assert!(output.contains("Card / Kept"));
+            }
+        }
+    }
+
+    #[test]
     fn twint_z_reprint_uses_saved_amount_and_presentation_not_live_settings() {
         let db = test_db();
         let frozen = serde_json::json!({"sales":{"twintSales":25},"paymentsBreakdown":{"twint":{"count":1,"total":25}},"presentation":{"twintPluginEnabled":true,"deliveryModuleEnabled":false},"staffReports":[{"staffName":"Cashier","role":"cashier","orders":{"cashAmount":10,"cardAmount":20,"twintAmount":25,"totalAmount":55}}]});
@@ -11528,6 +11575,46 @@ mod tests {
         let preview = build_z_report_doc_from_payload(&db, &frozen, "preview");
         assert_eq!(preview.twint_sales, doc.twint_sales);
         assert_eq!(preview.twint_plugin_enabled, doc.twint_plugin_enabled);
+    }
+
+    #[test]
+    fn rule10_staff_payload_reaches_print_without_changing_legacy_bytes() {
+        let db = test_db();
+        let mut payload = serde_json::json!({"currency":"EUR","staffReports":[{"staffName":"Collector B","role":"cashier",
+            "orders":{"count":1,"cashAmount":0,"cardAmount":60,"totalAmount":100}}]});
+        let cfg = receipt_renderer::LayoutConfig {
+            language: "en".into(),
+            ..Default::default()
+        };
+        let before = receipt_renderer::render_escpos(
+            &receipt_renderer::ReceiptDocument::ZReport(build_z_report_doc_from_payload(
+                &db, &payload, "legacy",
+            )),
+            &cfg,
+        )
+        .bytes;
+        payload["staffReports"][0]["netCollections"] = serde_json::json!({"version":1,"total":50,"totalCents":5000,
+            "refunded":10,"refundedCents":1000,"tips":5,"tipsCents":500,
+            "tenders":[{"tender":"card","received":60,"receivedCents":6000}]});
+        let after = receipt_renderer::render_html(
+            &receipt_renderer::ReceiptDocument::ZReport(build_z_report_doc_from_payload(
+                &db, &payload, "legacy",
+            )),
+            &cfg,
+        );
+        assert!(after.contains("Net collections"), "{after}");
+        payload["staffReports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("netCollections");
+        let reprint = receipt_renderer::render_escpos(
+            &receipt_renderer::ReceiptDocument::ZReport(build_z_report_doc_from_payload(
+                &db, &payload, "legacy",
+            )),
+            &cfg,
+        )
+        .bytes;
+        assert_eq!(reprint, before);
     }
 
     /// Founder rule 13/10/2026: a stored Z's `phoneShifts` reach the print

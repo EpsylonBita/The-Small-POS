@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { refundFinishesCompletedOrder } from '../../services/OrderRefundCancellation';
 import React, {
   useState,
@@ -306,6 +307,14 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const pinId = useId();
   const amountId = useId();
   const reasonId = useId();
@@ -945,51 +954,53 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
             aria-pressed={action === value}
             onClick={() => setAction(value)}
             disabled={busy}
-            className={`flex-1 liquid-glass-modal-button text-sm py-2 disabled:opacity-50 ${
+            className={`flex-1 min-h-touch rounded-xl px-3 text-sm py-2 disabled:opacity-50 ${
               action === value
-                ? "bg-(--pos-s-surface-2) text-purple-800 dark:text-purple-200 border-(--pos-s-border)"
-                : ""
+                ? "bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-(--pos-s-depth-card) active:shadow-(--pos-s-depth-press)"
+                : "pos-glass-field"
             }`}
           >
             {actionLabel(value)}
           </button>
         ))}
       </div>
-      {action === "refund" ? (
-        <div>
-          <label
-            htmlFor={amountId}
-            className="block text-sm font-medium liquid-glass-modal-text-muted mb-2"
+      <AnimatePresence initial={false}>
+        {action === "refund" ? (
+          <motion.div key="action-refund" {...revealMotion}>
+            <label
+              htmlFor={amountId}
+              className="mb-1.5 block text-xs font-semibold liquid-glass-modal-text-muted"
+            >
+              {t("modals.refund.gift.amountLabel", { currency: original.currency })}
+            </label>
+            <CentsMoneyInput
+              id={amountId}
+              data-testid="gift-return-amount"
+              value={amountText}
+              onValueChange={setAmountText}
+              disabled={busy}
+              placeholder="0,00"
+              className="w-full p-3 rounded-lg liquid-glass-modal-input pos-glass-field min-h-touch focus:ring-2 focus:ring-purple-500 transition-all text-sm liquid-glass-modal-text"
+            />
+            <p className="text-xs liquid-glass-modal-text-muted mt-1">
+              {t("modals.refund.gift.amountHint", {
+                amount: formatCents(original.remainingCents, original.currency),
+              })}
+            </p>
+          </motion.div>
+        ) : (
+          <motion.p key="action-refund-alternative" {...revealMotion}
+            data-testid="gift-return-void-note"
+            className="text-xs liquid-glass-modal-text-muted"
           >
-            {t("modals.refund.gift.amountLabel", { currency: original.currency })}
-          </label>
-          <CentsMoneyInput
-            id={amountId}
-            data-testid="gift-return-amount"
-            value={amountText}
-            onValueChange={setAmountText}
-            disabled={busy}
-            placeholder="0,00"
-            className="w-full p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-purple-500 transition-all text-sm liquid-glass-modal-text"
-          />
-          <p className="text-xs liquid-glass-modal-text-muted mt-1">
-            {t("modals.refund.gift.amountHint", {
-              amount: formatCents(original.remainingCents, original.currency),
-            })}
-          </p>
-        </div>
-      ) : (
-        <p
-          data-testid="gift-return-void-note"
-          className="text-xs liquid-glass-modal-text-muted"
-        >
-          {t("modals.refund.gift.voidNote")}
-        </p>
-      )}
+            {t("modals.refund.gift.voidNote")}
+          </motion.p>
+        )}
+      </AnimatePresence>
       <div>
         <label
           htmlFor={reasonId}
-          className="block text-sm font-medium liquid-glass-modal-text-muted mb-2"
+          className="mb-1.5 block text-xs font-semibold liquid-glass-modal-text-muted"
         >
           {t("modals.refund.gift.reasonLabel")} *
         </label>
@@ -1001,7 +1012,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
           placeholder={t("modals.refund.gift.reasonPlaceholder")}
           rows={2}
           disabled={busy}
-          className="w-full p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-purple-500 transition-all text-sm liquid-glass-modal-text resize-none"
+          className="w-full p-3 rounded-lg liquid-glass-modal-input pos-glass-field min-h-touch focus:ring-2 focus:ring-purple-500 transition-all text-sm liquid-glass-modal-text resize-none"
         />
       </div>
       <button
@@ -1019,7 +1030,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
   const renderReview = (original: UsableGiftOriginal, request: FrozenGiftRequest) => (
     <div
       data-testid="gift-return-review-panel"
-      className="space-y-3 rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3"
+      className="pos-glass-form-card space-y-3 p-3!"
     >
       <div className="text-sm font-semibold liquid-glass-modal-text">
         {t("modals.refund.gift.reviewTitle")}
@@ -1054,7 +1065,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
     return (
       <div
         data-testid="gift-return-retained"
-        className="space-y-2 rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3"
+        className="pos-glass-form-card space-y-2 p-3!"
       >
         <div className="text-sm font-semibold text-amber-700 dark:text-amber-400">
           {view.state === "pending"
@@ -1087,7 +1098,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
   const renderUnknown = (request: FrozenGiftRequest | null, returnKey: string | null) => (
     <div
       data-testid="gift-return-unknown"
-      className="space-y-2 rounded-lg border border-(--pos-s-border) bg-(--pos-s-surface-2) p-3"
+      className="pos-glass-form-card space-y-2 p-3!"
     >
       <div className="text-sm font-semibold text-amber-700 dark:text-amber-400">
         {t("modals.refund.gift.unknownTitle")}
@@ -1096,45 +1107,47 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
         {t("modals.refund.gift.unknownBody")}
       </p>
       {request && renderFrozen(request)}
-      {auth && (
-        <div className="flex gap-2">
-          {returnKey && (
+      <AnimatePresence initial={false}>
+        {auth && (
+          <motion.div key="auth" {...revealMotion} className="flex gap-2">
+            {returnKey && (
+              <button
+                type="button"
+                data-testid="gift-return-recover"
+                onClick={recover}
+                disabled={busy}
+                className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border-(--pos-s-border) gap-2 disabled:opacity-50"
+              >
+                {t("modals.refund.gift.recover")}
+              </button>
+            )}
             <button
               type="button"
-              data-testid="gift-return-recover"
-              onClick={recover}
+              data-testid="gift-return-check-status"
+              onClick={checkStatus}
               disabled={busy}
-              className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-200 border-(--pos-s-border) gap-2 disabled:opacity-50"
+              className="flex-1 liquid-glass-modal-button disabled:opacity-50"
             >
-              {t("modals.refund.gift.recover")}
+              {t("modals.refund.gift.checkStatus")}
             </button>
-          )}
-          <button
-            type="button"
-            data-testid="gift-return-check-status"
-            onClick={checkStatus}
-            disabled={busy}
-            className="flex-1 liquid-glass-modal-button disabled:opacity-50"
-          >
-            {t("modals.refund.gift.checkStatus")}
-          </button>
-        </div>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 
   const noticeClass =
     notice?.tone === "error"
-      ? "border-(--pos-s-border) bg-(--pos-s-surface-2) text-red-800 dark:text-red-300"
+      ? "text-red-800 dark:text-red-300"
       : notice?.tone === "success"
-        ? "border-(--pos-s-border) bg-(--pos-s-surface-2) text-green-800 dark:text-green-300"
-        : "border-slate-500/30 bg-slate-500/10 liquid-glass-modal-text";
+        ? "text-green-800 dark:text-green-300"
+        : "liquid-glass-modal-text";
 
   return (
     <section
       data-testid="gift-return-panel"
       aria-label={t("modals.refund.gift.title")}
-      className="liquid-glass-modal-card space-y-3 border border-(--pos-s-border)"
+      className="pos-glass-form-card space-y-3"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2">
@@ -1159,161 +1172,191 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
         </button>
       </div>
 
-      {notice && (
-        <div
-          data-testid="gift-return-notice"
-          role={notice.tone === "error" ? "alert" : "status"}
-          className={`rounded-lg border px-3 py-2 text-sm ${noticeClass}`}
-        >
-          {notice.text}
-        </div>
-      )}
+      <AnimatePresence initial={false}>
 
-      {!staffId ? (
-        <p data-testid="gift-return-no-staff" className="text-sm liquid-glass-modal-text-muted">
-          {t("modals.refund.gift.noStaff")}
-        </p>
-      ) : !auth ? (
-        <div data-testid="gift-return-authorize-form" className="space-y-2">
-          <label
-            htmlFor={pinId}
-            className="block text-sm font-medium liquid-glass-modal-text-muted"
+        {notice && (
+          <motion.div key="notice" {...revealMotion}
+            data-testid="gift-return-notice"
+            role={notice.tone === "error" ? "alert" : "status"}
+            className={`pos-glass-form-card px-3! py-2! text-sm ${noticeClass}`}
           >
-            {t("modals.refund.gift.authorizeTitle", { name: staffLabel })}
-          </label>
-          <div className="flex gap-2">
-            <input
-              id={pinId}
-              ref={pinRef}
-              data-testid="gift-return-pin"
-              type="password"
-              inputMode="numeric"
-              autoComplete="off"
-              placeholder={t("modals.refund.gift.pinLabel")}
-              disabled={busy}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") authorize();
-              }}
-              className="flex-1 p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-purple-500 transition-all text-sm liquid-glass-modal-text"
-            />
-            <button
-              type="button"
-              data-testid="gift-return-authorize"
-              onClick={authorize}
-              disabled={busy || !identity.ready}
-              className="liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-purple-800 dark:text-purple-200 border-(--pos-s-border) disabled:opacity-50"
-            >
-              {busy
-                ? t("modals.refund.gift.authorizing")
-                : t("modals.refund.gift.authorize")}
-            </button>
-          </div>
-        </div>
-      ) : null}
+            {notice.text}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {phase.kind === "loading" && (
-        <p data-testid="gift-return-loading" className="text-sm liquid-glass-modal-text-muted">
-          {t("modals.refund.gift.loading")}
-        </p>
-      )}
-      {phase.kind === "unavailable" && (
-        <div data-testid="gift-return-unavailable" className="space-y-2">
-          {auth && (
-            <button
-              type="button"
-              data-testid="gift-return-check-status"
-              onClick={checkStatus}
-              disabled={busy}
-              className="w-full liquid-glass-modal-button disabled:opacity-50"
+      <AnimatePresence initial={false}>
+
+        {!staffId ? (
+          <motion.p key="staffid" {...revealMotion} data-testid="gift-return-no-staff" className="text-sm liquid-glass-modal-text-muted">
+            {t("modals.refund.gift.noStaff")}
+          </motion.p>
+        ) : !auth ? (
+          <motion.div key="gift-return-authorize-form" {...revealMotion} data-testid="gift-return-authorize-form" className="space-y-2">
+            <label
+              htmlFor={pinId}
+              className="mb-1.5 block text-xs font-semibold liquid-glass-modal-text-muted"
             >
-              {t("modals.refund.gift.retry")}
-            </button>
-          )}
-        </div>
-      )}
-      {phase.kind === "blocked" && (
-        <p data-testid="gift-return-blocked" className="text-sm liquid-glass-modal-text-muted">
-          {phase.otherPending
-            ? t("modals.refund.gift.otherPending")
-            : phase.code
-              ? t("modals.refund.gift.notEligible", { code: phase.code })
-              : t("modals.refund.gift.nothingRemaining")}
-        </p>
-      )}
-      {phase.kind === "ready" && auth && renderForm(phase.original)}
-      {phase.kind === "review" && auth && renderReview(phase.original, phase.request)}
-      {phase.kind === "sending" && (
-        <div data-testid="gift-return-sending" className="space-y-2">
-          {renderFrozen(phase.request)}
-          <p className="text-sm liquid-glass-modal-text-muted">
-            {t("modals.refund.gift.sending")}
-          </p>
-        </div>
-      )}
-      {phase.kind === "retained" && renderRetained(phase.view)}
-      {phase.kind === "unknown" && renderUnknown(phase.request, phase.returnKey)}
-      {phase.kind === "completed" && (
-        <div data-testid="gift-return-completed" className="space-y-2">
-          {phase.reread === "running" ? (
-            <p className="text-sm liquid-glass-modal-text-muted">
-              {t("modals.refund.gift.rereading")}
-            </p>
-          ) : (
-            <>
-              <p role="alert" className="text-sm text-red-700 dark:text-red-400">
-                {t("modals.refund.gift.rereadFailed")}
-              </p>
+              {t("modals.refund.gift.authorizeTitle", { name: staffLabel })}
+            </label>
+            <div className="flex gap-2">
+              <input
+                id={pinId}
+                ref={pinRef}
+                data-testid="gift-return-pin"
+                type="password"
+                inputMode="numeric"
+                autoComplete="off"
+                placeholder={t("modals.refund.gift.pinLabel")}
+                disabled={busy}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") authorize();
+                }}
+                className="flex-1 p-3 rounded-lg liquid-glass-modal-input pos-glass-field min-h-touch focus:ring-2 focus:ring-purple-500 transition-all text-sm liquid-glass-modal-text"
+              />
               <button
                 type="button"
-                data-testid="gift-return-reread-retry"
-                onClick={retryReread}
+                data-testid="gift-return-authorize"
+                onClick={authorize}
+                disabled={busy || !identity.ready}
+                className="liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-purple-800 dark:text-purple-200 border-(--pos-s-border) disabled:opacity-50"
+              >
+                {busy
+                  ? t("modals.refund.gift.authorizing")
+                  : t("modals.refund.gift.authorize")}
+              </button>
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
+      <AnimatePresence initial={false}>
+
+        {phase.kind === "loading" && (
+          <motion.p key="phase-kind-loading" {...revealMotion} data-testid="gift-return-loading" className="text-sm liquid-glass-modal-text-muted">
+            {t("modals.refund.gift.loading")}
+          </motion.p>
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {phase.kind === "unavailable" && (
+          <motion.div key="phase-kind-unavailable" {...revealMotion} data-testid="gift-return-unavailable" className="space-y-2">
+            {auth && (
+              <button
+                type="button"
+                data-testid="gift-return-check-status"
+                onClick={checkStatus}
                 disabled={busy}
                 className="w-full liquid-glass-modal-button disabled:opacity-50"
               >
                 {t("modals.refund.gift.retry")}
               </button>
-            </>
-          )}
-        </div>
-      )}
-
-      {auth && attempts.length > 0 && (
-        <div data-testid="gift-return-attempts" className="space-y-1">
-          <div className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
-            {t("modals.refund.gift.attemptsTitle")}
-          </div>
-          {attempts.map((attempt) => (
-            <div
-              key={attempt.returnKey}
-              className="flex justify-between gap-2 text-xs liquid-glass-modal-text-muted"
-            >
-              <span>
-                {stateLabel(attempt.state)} · {actionLabel(attempt.action)}
-              </span>
-              <span className="flex items-center gap-2">
-                <span>
-                  {attempt.proof
-                    ? formatCents(attempt.proof.returnedCents, attempt.currency)
-                    : attempt.requestedCents !== null
-                      ? formatCents(attempt.requestedCents, attempt.currency)
-                      : "—"}
-                </span>
-                {attempt.state === "completed" && (
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {phase.kind === "blocked" && (
+          <motion.p key="phase-kind-blocked" {...revealMotion} data-testid="gift-return-blocked" className="text-sm liquid-glass-modal-text-muted">
+            {phase.otherPending
+              ? t("modals.refund.gift.otherPending")
+              : phase.code
+                ? t("modals.refund.gift.notEligible", { code: phase.code })
+                : t("modals.refund.gift.nothingRemaining")}
+          </motion.p>
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {phase.kind === "ready" && auth && <motion.div key="phase-kind-ready-auth" {...revealMotion}>{renderForm(phase.original)}</motion.div>}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {phase.kind === "review" && auth && <motion.div key="phase-kind-review-auth" {...revealMotion}>{renderReview(phase.original, phase.request)}</motion.div>}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {phase.kind === "sending" && (
+          <motion.div key="phase-kind-sending" {...revealMotion} data-testid="gift-return-sending" className="space-y-2">
+            {renderFrozen(phase.request)}
+            <p className="text-sm liquid-glass-modal-text-muted">
+              {t("modals.refund.gift.sending")}
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {phase.kind === "retained" && <motion.div key="phase-kind-retained" {...revealMotion}>{renderRetained(phase.view)}</motion.div>}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {phase.kind === "unknown" && <motion.div key="phase-kind-unknown" {...revealMotion}>{renderUnknown(phase.request, phase.returnKey)}</motion.div>}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {phase.kind === "completed" && (
+          <motion.div key="phase-kind-completed" {...revealMotion} data-testid="gift-return-completed" className="space-y-2">
+            <AnimatePresence initial={false}>
+              {phase.reread === "running" ? (
+                <motion.p key="phase-reread-running" {...revealMotion} className="text-sm liquid-glass-modal-text-muted">
+                  {t("modals.refund.gift.rereading")}
+                </motion.p>
+              ) : (
+                <>
+                  <p role="alert" className="text-sm text-red-700 dark:text-red-400">
+                    {t("modals.refund.gift.rereadFailed")}
+                  </p>
                   <button
                     type="button"
-                    data-testid={`gift-return-proof-check-${attempt.returnKey}`}
-                    onClick={() => checkProof(attempt)}
+                    data-testid="gift-return-reread-retry"
+                    onClick={retryReread}
                     disabled={busy}
-                    className="liquid-glass-modal-button px-2 py-1 text-xs disabled:opacity-50"
+                    className="w-full liquid-glass-modal-button disabled:opacity-50"
                   >
-                    {t("modals.refund.gift.checkProof")}
+                    {t("modals.refund.gift.retry")}
                   </button>
-                )}
-              </span>
+                </>
+              )}
+            </AnimatePresence>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence initial={false}>
+
+        {auth && attempts.length > 0 && (
+          <motion.div key="auth-attempts-length-0" {...revealMotion} data-testid="gift-return-attempts" className="space-y-1">
+            <div className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+              {t("modals.refund.gift.attemptsTitle")}
             </div>
-          ))}
-        </div>
-      )}
+            {attempts.map((attempt) => (
+              <div
+                key={attempt.returnKey}
+                className="flex justify-between gap-2 text-xs liquid-glass-modal-text-muted"
+              >
+                <span>
+                  {stateLabel(attempt.state)} · {actionLabel(attempt.action)}
+                </span>
+                <span className="flex items-center gap-2">
+                  <span>
+                    {attempt.proof
+                      ? formatCents(attempt.proof.returnedCents, attempt.currency)
+                      : attempt.requestedCents !== null
+                        ? formatCents(attempt.requestedCents, attempt.currency)
+                        : "—"}
+                  </span>
+                  {attempt.state === "completed" && (
+                    <button
+                      type="button"
+                      data-testid={`gift-return-proof-check-${attempt.returnKey}`}
+                      onClick={() => checkProof(attempt)}
+                      disabled={busy}
+                      className="liquid-glass-modal-button px-2 py-1 text-xs disabled:opacity-50"
+                    >
+                      {t("modals.refund.gift.checkProof")}
+                    </button>
+                  )}
+                </span>
+              </div>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </section>
   );
 };
@@ -1330,6 +1373,14 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const { staff, activeShift } = useShift();
 
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
@@ -1735,9 +1786,9 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       case "cash":
         return <CashHandIcon className="w-5 h-5 text-green-700 dark:text-green-400" />;
       case "card":
-        return <CreditCard className="w-5 h-5 text-slate-300" />;
+        return <CreditCard className="w-5 h-5 text-blue-600 dark:text-blue-400" />;
       default:
-        return <Clock className="w-5 h-5 text-gray-400" />;
+        return <Clock className="w-5 h-5 liquid-glass-modal-text-muted" />;
     }
   };
 
@@ -1777,7 +1828,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
         );
       default:
         return (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-gray-500/20 text-gray-400 border border-gray-500/30">
+          <span className="text-xs px-2 py-0.5 rounded-full liquid-glass-modal-text-muted">
             {status}
           </span>
         );
@@ -1791,7 +1842,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
   );
 
   const modalHeader = (
-    <div className="shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
+    <div className="shrink-0 px-6 py-4">
       <div className="flex justify-between items-start gap-4">
         <div className="flex-1">
           <h2 className="text-2xl font-bold liquid-glass-modal-text">
@@ -1818,11 +1869,11 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
   );
 
   const modalFooter = (
-    <div className="shrink-0 px-6 py-4 border-t liquid-glass-modal-border bg-white/5 dark:bg-black/20">
+    <div className="shrink-0 px-6 pb-5 pt-2">
       <button
         data-testid="refund-modal-close"
         onClick={requestClose}
-        className="w-full liquid-glass-modal-button bg-slate-600/20 active:bg-slate-600/30 text-slate-200 border-slate-500/30 gap-2"
+        className="w-full liquid-glass-modal-button liquid-glass-modal-text gap-2"
       >
         {t("common.actions.close", { defaultValue: "Close" })}
       </button>
@@ -1857,473 +1908,497 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
             />
           </div>
         )}
-        {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-500" />
-          </div>
-        ) : payments.length === 0 ? (
-          <div className="text-center py-12">
-            <CreditCard className="w-12 h-12 mx-auto mb-3 liquid-glass-modal-text-muted opacity-50" />
-            {tableSettledPaid ? (
-              <>
-                <p className="text-sm font-semibold liquid-glass-modal-text">
-                  {t("modals.refund.tableSettledTitle", {
-                    defaultValue: "Paid on the table check",
-                  })}
-                </p>
-                <p className="mx-auto mt-2 max-w-md text-sm liquid-glass-modal-text-muted">
-                  {t("modals.refund.tableSettledBody", {
-                    defaultValue:
-                      "This order was settled through its table session, so there is no order-level payment to void or refund here. Reopen the table check to adjust or refund the payment.",
-                  })}
-                </p>
-              </>
-            ) : (
-              <p className="text-sm liquid-glass-modal-text-muted">
-                {t("modals.refund.noPayments", {
-                  defaultValue: "No payments found for this order",
-                })}
-              </p>
-            )}
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {/* Active (completed) payments */}
-            {completedPayments.length > 0 && (
-              <div className="space-y-3">
-                <h3 className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
-                  {t("modals.refund.activePayments", {
-                    defaultValue: "Active Payments",
-                  })}
-                </h3>
-                {completedPayments.map((payment) => {
-                  const balance = balances[payment.id];
-                  const isRefunding = activeRefundId === payment.id;
-                  const isVoiding = activeVoidId === payment.id;
-                  const isGift = isGiftCardPayment(payment.method);
+        <AnimatePresence initial={false}>
+          {loading ? (
+            <motion.div key="loading" {...revealMotion} className="flex items-center justify-center py-12">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-500" />
+            </motion.div>
+          ) : payments.length === 0 ? (
+            <motion.div key="payment-view-1" {...revealMotion} className="text-center py-12">
+              <CreditCard className="w-12 h-12 mx-auto mb-3 liquid-glass-modal-text-muted opacity-50" />
+              <AnimatePresence initial={false}>
+                {tableSettledPaid ? (
+                  <>
+                    <p className="text-sm font-semibold liquid-glass-modal-text">
+                      {t("modals.refund.tableSettledTitle", {
+                        defaultValue: "Paid on the table check",
+                      })}
+                    </p>
+                    <p className="mx-auto mt-2 max-w-md text-sm liquid-glass-modal-text-muted">
+                      {t("modals.refund.tableSettledBody", {
+                        defaultValue:
+                          "This order was settled through its table session, so there is no order-level payment to void or refund here. Reopen the table check to adjust or refund the payment.",
+                      })}
+                    </p>
+                  </>
+                ) : (
+                  <motion.p key="tablesettledpaid-alternative" {...revealMotion} className="text-sm liquid-glass-modal-text-muted">
+                    {t("modals.refund.noPayments", {
+                      defaultValue: "No payments found for this order",
+                    })}
+                  </motion.p>
+                )}
+              </AnimatePresence>
+            </motion.div>
+          ) : (
+            <motion.div key="payment-view-2" {...revealMotion} className="space-y-4">
+              {/* Active (completed) payments */}
+              <AnimatePresence initial={false}>
+                {completedPayments.length > 0 && (
+                  <motion.div key="completedpayments-length-0" {...revealMotion} className="space-y-3">
+                    <h3 className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+                      {t("modals.refund.activePayments", {
+                        defaultValue: "Active Payments",
+                      })}
+                    </h3>
+                    {completedPayments.map((payment) => {
+                      const balance = balances[payment.id];
+                      const isRefunding = activeRefundId === payment.id;
+                      const isVoiding = activeVoidId === payment.id;
+                      const isGift = isGiftCardPayment(payment.method);
 
-                  return (
-                    <div
-                      key={payment.id}
-                      data-testid={`refund-payment-${payment.id}`}
-                      className="liquid-glass-modal-card space-y-3"
-                    >
-                      {/* Payment row */}
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          {getMethodIcon(payment.method)}
-                          <div>
-                            <div className="font-semibold liquid-glass-modal-text capitalize">
-                              {getMethodLabel(payment.method)}
-                            </div>
-                            <div className="text-xs liquid-glass-modal-text-muted">
-                              {receiptTimestamp(payment.created_at)}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <div className="font-bold liquid-glass-modal-text">
-                            {formatCurrency(payment.amount)}
-                          </div>
-                          {balance && balance.totalRefunds > 0 && (
-                            <div className="text-xs text-yellow-700 dark:text-yellow-400">
-                              {t("modals.refund.statusRefunded", {
-                                defaultValue: "Refunded",
-                              })}
-                              : {formatCurrency(balance.totalRefunds)} &middot;{" "}
-                              {t("modals.refund.remaining", {
-                                defaultValue: "Remaining",
-                              })}
-                              : {formatCurrency(balance.remaining)}
-                            </div>
-                          )}
-                          {getStatusBadge(payment.status)}
-                        </div>
-                      </div>
-
-                      {/* Gift card rows: only the original-card return */}
-                      {isGift && (
-                        <div className="flex gap-2 pt-1">
-                          <button
-                            type="button"
-                            data-testid={`gift-return-open-${payment.id}`}
-                            onClick={() => setActiveGift({ orderId, payment })}
-                            disabled={
-                              processing ||
-                              (activeGift?.orderId === orderId &&
-                                activeGift.payment.id === payment.id)
-                            }
-                            className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-purple-800 dark:text-purple-200 border-(--pos-s-border) gap-2 text-sm py-2 disabled:opacity-50"
-                          >
-                            <Gift className="w-4 h-4" />
-                            {t("modals.refund.gift.action")}
-                          </button>
-                        </div>
-                      )}
-
-                      {/* R1: the platform's settlement row is never reversed here */}
-                      {!isGift && !giftReturnOnly && payment.platformSettlement === true && (
+                      return (
                         <div
-                          data-testid={`refund-platform-settlement-${payment.id}`}
-                          className="liquid-glass-modal-inset rounded-2xl px-3 py-2 text-xs liquid-glass-modal-text-muted"
+                          key={payment.id}
+                          data-testid={`refund-payment-${payment.id}`}
+                          className="pos-glass-form-card space-y-3"
                         >
-                          {t("modals.refund.platformSettlementLocked", {
-                            defaultValue:
-                              "The delivery platform's settlement: it is never voided or refunded at the till. The server decides what becomes of it.",
-                          })}
-                        </div>
-                      )}
-
-                      {/* Action buttons */}
-                      {!isGift && !giftReturnOnly && payment.platformSettlement !== true && !isRefunding && !isVoiding && (
-                        <div className="flex gap-2 pt-1">
-                          <button
-                            onClick={() => {
-                              setActiveVoidId(payment.id);
-                              setActiveRefundId(null);
-                              setVoidReason("");
-                            }}
-                            disabled={processing || !balance || balance.remaining <= 0 || balance.totalRefunds > 0}
-                            className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 border-(--pos-s-border) gap-2 text-sm py-2 disabled:opacity-50"
-                          >
-                            <XCircle className="w-4 h-4" />
-                            {t("modals.refund.voidButton", {
-                              defaultValue: "Void",
-                            })}
-                          </button>
-                          <button
-                            onClick={() => {
-                              setActiveRefundId(payment.id);
-                              setActiveVoidId(null);
-                              const bal = balances[payment.id];
-                              // R5: the payment's own tender, never a guessed
-                              // cash drawer refund.
-                              setRefundMethod(
-                                refundFormDefaults(payment, bal).refundMethod,
-                              );
-                              setRefundAmount(
-                                bal
-                                  ? bal.remaining.toFixed(2)
-                                  : payment.amount.toFixed(2),
-                              );
-                              setRefundReason("");
-                            }}
-                            disabled={
-                              processing || (balance && balance.remaining <= 0)
-                            }
-                            className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-orange-800 dark:text-orange-300 border-(--pos-s-border) gap-2 text-sm py-2 disabled:opacity-50"
-                          >
-                            <RotateCcw className="w-4 h-4" />
-                            {t("modals.refund.refundButton", {
-                              defaultValue: "Refund",
-                            })}
-                          </button>
-                        </div>
-                      )}
-
-                      {/* Void form */}
-                      {isVoiding && !isGift && (
-                        <div className="space-y-3 pt-2 border-t border-(--pos-s-border) animate-in fade-in slide-in-from-top-2 duration-200">
-                          <div className="flex items-center gap-2 text-sm text-red-700 dark:text-red-400">
-                            <AlertTriangle className="w-4 h-4" />
-                            <span className="font-medium">
-                              {t("modals.refund.voidWarning", {
-                                defaultValue:
-                                  "This will fully reverse the payment of",
-                              })}{" "}
-                              {formatCurrency(payment.amount)}
-                            </span>
-                          </div>
-                          <textarea
-                            value={voidReason}
-                            onChange={(e) => setVoidReason(e.target.value)}
-                            placeholder={t("modals.refund.reasonPlaceholder", {
-                              defaultValue: "Enter reason for void...",
-                            })}
-                            rows={2}
-                            className="w-full p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-red-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted resize-none"
-                          />
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => handleVoid(payment.id)}
-                              disabled={processing || !voidReason.trim()}
-                              className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 border-(--pos-s-border) gap-2 disabled:opacity-50"
-                            >
-                              <XCircle className="w-4 h-4" />
-                              {processing
-                                ? t("common.loading", {
-                                    defaultValue: "Processing...",
-                                  })
-                                : t("modals.refund.confirmVoid", {
-                                    defaultValue: "Confirm Void",
-                                  })}
-                            </button>
-                            <button
-                              onClick={() => {
-                                setActiveVoidId(null);
-                                setVoidReason("");
-                              }}
-                              disabled={processing}
-                              className="liquid-glass-modal-button"
-                            >
-                              {t("common.actions.cancel", {
-                                defaultValue: "Cancel",
-                              })}
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Refund form */}
-                      {isRefunding && !isGift && (
-                        <div className="space-y-3 pt-2 border-t border-(--pos-s-border) animate-in fade-in slide-in-from-top-2 duration-200">
-                          <div>
-                            <label className="block text-sm font-medium liquid-glass-modal-text-muted mb-2">
-                              <CashHandIcon className="w-4 h-4 inline mr-1" />
-                              {t("modals.refund.refundAmount", {
-                                defaultValue: "Refund Amount",
-                              })}
-                            </label>
-                            <div className="relative">
-                              <CentsMoneyInput
-                                aria-label={t("modals.refund.refundAmount", {
-                                  defaultValue: "Refund Amount",
-                                })}
-                                value={refundAmount}
-                                onValueChange={setRefundAmount}
-                                placeholder="0,00"
-                                className="w-full p-3 pl-10 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-orange-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted"
-                              />
-                              <CashHandIcon className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted" />
+                          {/* Payment row */}
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              {getMethodIcon(payment.method)}
+                              <div>
+                                <div className="font-semibold liquid-glass-modal-text capitalize">
+                                  {getMethodLabel(payment.method)}
+                                </div>
+                                <div className="text-xs liquid-glass-modal-text-muted">
+                                  {receiptTimestamp(payment.created_at)}
+                                </div>
+                              </div>
                             </div>
-                            {balance && (
-                              <p className="text-xs liquid-glass-modal-text-muted mt-1">
-                                {t("modals.refund.maxRefund", {
-                                  defaultValue: "Maximum refundable: {{amount}}",
-                                  amount: formatCurrency(balance.remaining),
-                                })}
-                              </p>
+                            <div className="text-right">
+                              <div className="font-bold liquid-glass-modal-text">
+                                {formatCurrency(payment.amount)}
+                              </div>
+                              <AnimatePresence initial={false}>
+                                {balance && balance.totalRefunds > 0 && (
+                                  <motion.div key="refundbal" {...revealMotion} className="text-xs text-yellow-700 dark:text-yellow-400">
+                                    {t("modals.refund.statusRefunded", {
+                                      defaultValue: "Refunded",
+                                    })}
+                                    : {formatCurrency(balance.totalRefunds)} &middot;{" "}
+                                    {t("modals.refund.remaining", {
+                                      defaultValue: "Remaining",
+                                    })}
+                                    : {formatCurrency(balance.remaining)}
+                                  </motion.div>
+                                )}
+                              </AnimatePresence>
+                              {getStatusBadge(payment.status)}
+                            </div>
+                          </div>
+
+                          {/* Gift card rows: only the original-card return */}
+                          <AnimatePresence initial={false}>
+                            {isGift && (
+                              <motion.div key="isgift" {...revealMotion} className="flex gap-2 pt-1">
+                                <button
+                                  type="button"
+                                  data-testid={`gift-return-open-${payment.id}`}
+                                  onClick={() => setActiveGift({ orderId, payment })}
+                                  disabled={
+                                    processing ||
+                                    (activeGift?.orderId === orderId &&
+                                      activeGift.payment.id === payment.id)
+                                  }
+                                  className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-purple-800 dark:text-purple-200 border-(--pos-s-border) gap-2 text-sm py-2 disabled:opacity-50"
+                                >
+                                  <Gift className="w-4 h-4" />
+                                  {t("modals.refund.gift.action")}
+                                </button>
+                              </motion.div>
                             )}
-                          </div>
-                          <div>
-                            <label className="block text-sm font-medium liquid-glass-modal-text-muted mb-2">
-                              {t("modals.refund.reason", {
-                                defaultValue: "Reason",
-                              })}{" "}
-                              *
-                            </label>
-                            <textarea
-                              value={refundReason}
-                              onChange={(e) => setRefundReason(e.target.value)}
-                              placeholder={t(
-                                "modals.refund.reasonPlaceholder",
-                                { defaultValue: "Enter reason for refund..." },
-                              )}
-                              rows={2}
-                              className="w-full p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-orange-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted resize-none"
-                            />
-                          </div>
-                          <RefundAttributionFields
-                            refundMethod={refundMethod}
-                            onRefundMethodChange={setRefundMethod}
-                            allowOtherTender={
-                              refundRouteForTender(payment.method) === "other"
-                            }
-                            cashHandler={
-                              refundFormDefaults(payment, balances[payment.id])
-                                .cashHandler
-                            }
-                            disabled={processing}
-                          />
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => handleRefund(payment.id)}
-                              disabled={
-                                processing ||
-                                !refundMethod ||
-                                !refundReason.trim() ||
-                                !refundAmount ||
-                                parseFloat(refundAmount) <= 0
-                              }
-                              className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-orange-800 dark:text-orange-300 border-(--pos-s-border) gap-2 disabled:opacity-50"
-                            >
-                              <RotateCcw className="w-4 h-4" />
-                              {processing
-                                ? t("common.loading", {
-                                    defaultValue: "Processing...",
-                                  })
-                                : t("modals.refund.confirmRefund", {
-                                    defaultValue: "Confirm Refund",
+                          </AnimatePresence>
+
+                          {/* R1: the platform's settlement row is never reversed here */}
+                          <AnimatePresence initial={false}>
+                            {!isGift && !giftReturnOnly && payment.platformSettlement === true && (
+                              <motion.div key="isgift-giftreturnonly-payment-platformsettlement-true" {...revealMotion}
+                                data-testid={`refund-platform-settlement-${payment.id}`}
+                                className="pos-glass-form-card px-3! py-2! text-xs liquid-glass-modal-text-muted"
+                              >
+                                {t("modals.refund.platformSettlementLocked", {
+                                  defaultValue:
+                                    "The delivery platform's settlement: it is never voided or refunded at the till. The server decides what becomes of it.",
+                                })}
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
+
+                          {/* Action buttons */}
+                          <AnimatePresence initial={false}>
+                            {!isGift && !giftReturnOnly && payment.platformSettlement !== true && !isRefunding && !isVoiding && (
+                              <motion.div key="isgift-giftreturnonly-payment-platformsettlement-true-isrefunding-isvoiding" {...revealMotion} className="flex gap-2 pt-1">
+                                <button
+                                  onClick={() => {
+                                    setActiveVoidId(payment.id);
+                                    setActiveRefundId(null);
+                                    setVoidReason("");
+                                  }}
+                                  disabled={processing || !balance || balance.remaining <= 0 || balance.totalRefunds > 0}
+                                  className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 border-(--pos-s-border) gap-2 text-sm py-2 disabled:opacity-50"
+                                >
+                                  <XCircle className="w-4 h-4" />
+                                  {t("modals.refund.voidButton", {
+                                    defaultValue: "Void",
                                   })}
-                            </button>
-                            <button
-                              onClick={() => {
-                                setActiveRefundId(null);
-                                setRefundAmount("");
-                                setRefundReason("");
-                                setRefundMethod(null);
-                              }}
-                              disabled={processing}
-                              className="liquid-glass-modal-button"
-                            >
-                              {t("common.actions.cancel", {
-                                defaultValue: "Cancel",
-                              })}
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setActiveRefundId(payment.id);
+                                    setActiveVoidId(null);
+                                    const bal = balances[payment.id];
+                                    // R5: the payment's own tender, never a guessed
+                                    // cash drawer refund.
+                                    setRefundMethod(
+                                      refundFormDefaults(payment, bal).refundMethod,
+                                    );
+                                    setRefundAmount(
+                                      bal
+                                        ? bal.remaining.toFixed(2)
+                                        : payment.amount.toFixed(2),
+                                    );
+                                    setRefundReason("");
+                                  }}
+                                  disabled={
+                                    processing || (balance && balance.remaining <= 0)
+                                  }
+                                  className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-orange-800 dark:text-orange-300 border-(--pos-s-border) gap-2 text-sm py-2 disabled:opacity-50"
+                                >
+                                  <RotateCcw className="w-4 h-4" />
+                                  {t("modals.refund.refundButton", {
+                                    defaultValue: "Refund",
+                                  })}
+                                </button>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
 
-            {/* Non-active (voided/refunded) payments */}
-            {nonCompletedPayments.length > 0 && (
-              <div className="space-y-3">
-                <h3 className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
-                  {t("modals.refund.closedPayments", {
-                    defaultValue: "Voided / Refunded",
-                  })}
-                </h3>
-                {nonCompletedPayments.map((payment) => (
-                  <div
-                    key={payment.id}
-                    className="liquid-glass-modal-card opacity-60"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        {getMethodIcon(payment.method)}
-                        <div>
-                          <div className="font-semibold liquid-glass-modal-text capitalize">
-                            {isGiftCardPayment(payment.method)
-                              ? t("modals.refund.gift.methodLabel")
-                              : payment.method || "Unknown"}
-                          </div>
-                          <div className="text-xs liquid-glass-modal-text-muted">
-                            {receiptTimestamp(payment.created_at)}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="font-bold liquid-glass-modal-text line-through">
-                          {formatCurrency(payment.amount)}
-                        </div>
-                        {getStatusBadge(payment.status)}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+                          {/* Void form */}
+                          <AnimatePresence initial={false}>
+                            {isVoiding && !isGift && (
+                              <motion.div key="isvoiding-isgift" {...revealMotion} className="pos-glass-form-card space-y-3 mt-3">
+                                <div className="flex items-center gap-2 text-sm text-red-700 dark:text-red-400">
+                                  <AlertTriangle className="w-4 h-4" />
+                                  <span className="font-medium">
+                                    {t("modals.refund.voidWarning", {
+                                      defaultValue:
+                                        "This will fully reverse the payment of",
+                                    })}{" "}
+                                    {formatCurrency(payment.amount)}
+                                  </span>
+                                </div>
+                                <textarea
+                                  value={voidReason}
+                                  onChange={(e) => setVoidReason(e.target.value)}
+                                  placeholder={t("modals.refund.reasonPlaceholder", {
+                                    defaultValue: "Enter reason for void...",
+                                  })}
+                                  rows={2}
+                                  className="w-full p-3 rounded-lg liquid-glass-modal-input pos-glass-field min-h-touch focus:ring-2 focus:ring-red-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted resize-none"
+                                />
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => handleVoid(payment.id)}
+                                    disabled={processing || !voidReason.trim()}
+                                    className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-red-800 dark:text-red-300 border-(--pos-s-border) gap-2 disabled:opacity-50"
+                                  >
+                                    <XCircle className="w-4 h-4" />
+                                    {processing
+                                      ? t("common.loading", {
+                                          defaultValue: "Processing...",
+                                        })
+                                      : t("modals.refund.confirmVoid", {
+                                          defaultValue: "Confirm Void",
+                                        })}
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setActiveVoidId(null);
+                                      setVoidReason("");
+                                    }}
+                                    disabled={processing}
+                                    className="liquid-glass-modal-button"
+                                  >
+                                    {t("common.actions.cancel", {
+                                      defaultValue: "Cancel",
+                                    })}
+                                  </button>
+                                </div>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
 
-            {/* Adjustment History */}
-            {adjustments.length > 0 && (
-              <div className="space-y-3">
-                <button
-                  onClick={() => setShowHistory(!showHistory)}
-                  className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted active:text-white transition-colors"
-                >
-                  {showHistory ? (
-                    <ChevronUp className="w-4 h-4" />
-                  ) : (
-                    <ChevronDown className="w-4 h-4" />
-                  )}
-                  {t("modals.refund.adjustmentHistory", {
-                    defaultValue: "Adjustment History",
-                  })}
-                  <span className="text-xs liquid-glass-modal-badge ml-1">
-                    {adjustments.length}
-                  </span>
-                </button>
-                {showHistory && (
-                  <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-200">
-                    {adjustments.map((adj) => (
+                          {/* Refund form */}
+                          <AnimatePresence initial={false}>
+                            {isRefunding && !isGift && (
+                              <motion.div key="isrefunding-isgift" {...revealMotion} className="pos-glass-form-card space-y-3 mt-3">
+                                <div>
+                                  <label className="mb-1.5 block text-xs font-semibold liquid-glass-modal-text-muted">
+                                    <CashHandIcon className="w-4 h-4 inline mr-1" />
+                                    {t("modals.refund.refundAmount", {
+                                      defaultValue: "Refund Amount",
+                                    })}
+                                  </label>
+                                  <div className="relative">
+                                    <CentsMoneyInput
+                                      aria-label={t("modals.refund.refundAmount", {
+                                        defaultValue: "Refund Amount",
+                                      })}
+                                      value={refundAmount}
+                                      onValueChange={setRefundAmount}
+                                      placeholder="0,00"
+                                      className="w-full p-3 pl-10 rounded-lg liquid-glass-modal-input pos-glass-field min-h-touch focus:ring-2 focus:ring-orange-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted"
+                                    />
+                                    <CashHandIcon className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted" />
+                                  </div>
+                                  <AnimatePresence initial={false}>
+                                    {balance && (
+                                      <motion.p key="balance" {...revealMotion} className="text-xs liquid-glass-modal-text-muted mt-1">
+                                        {t("modals.refund.maxRefund", {
+                                          defaultValue: "Maximum refundable: {{amount}}",
+                                          amount: formatCurrency(balance.remaining),
+                                        })}
+                                      </motion.p>
+                                    )}
+                                  </AnimatePresence>
+                                </div>
+                                <div>
+                                  <label className="mb-1.5 block text-xs font-semibold liquid-glass-modal-text-muted">
+                                    {t("modals.refund.reason", {
+                                      defaultValue: "Reason",
+                                    })}{" "}
+                                    *
+                                  </label>
+                                  <textarea
+                                    value={refundReason}
+                                    onChange={(e) => setRefundReason(e.target.value)}
+                                    placeholder={t(
+                                      "modals.refund.reasonPlaceholder",
+                                      { defaultValue: "Enter reason for refund..." },
+                                    )}
+                                    rows={2}
+                                    className="w-full p-3 rounded-lg liquid-glass-modal-input pos-glass-field min-h-touch focus:ring-2 focus:ring-orange-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted resize-none"
+                                  />
+                                </div>
+                                <RefundAttributionFields
+                                  refundMethod={refundMethod}
+                                  onRefundMethodChange={setRefundMethod}
+                                  allowOtherTender={
+                                    refundRouteForTender(payment.method) === "other"
+                                  }
+                                  cashHandler={
+                                    refundFormDefaults(payment, balances[payment.id])
+                                      .cashHandler
+                                  }
+                                  disabled={processing}
+                                />
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => handleRefund(payment.id)}
+                                    disabled={
+                                      processing ||
+                                      !refundMethod ||
+                                      !refundReason.trim() ||
+                                      !refundAmount ||
+                                      parseFloat(refundAmount) <= 0
+                                    }
+                                    className="flex-1 liquid-glass-modal-button bg-(--pos-s-surface-2) active:bg-(--pos-s-surface-2) text-orange-800 dark:text-orange-300 border-(--pos-s-border) gap-2 disabled:opacity-50"
+                                  >
+                                    <RotateCcw className="w-4 h-4" />
+                                    {processing
+                                      ? t("common.loading", {
+                                          defaultValue: "Processing...",
+                                        })
+                                      : t("modals.refund.confirmRefund", {
+                                          defaultValue: "Confirm Refund",
+                                        })}
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setActiveRefundId(null);
+                                      setRefundAmount("");
+                                      setRefundReason("");
+                                      setRefundMethod(null);
+                                    }}
+                                    disabled={processing}
+                                    className="liquid-glass-modal-button"
+                                  >
+                                    {t("common.actions.cancel", {
+                                      defaultValue: "Cancel",
+                                    })}
+                                  </button>
+                                </div>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
+                        </div>
+                      );
+                    })}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Non-active (voided/refunded) payments */}
+              <AnimatePresence initial={false}>
+                {nonCompletedPayments.length > 0 && (
+                  <motion.div key="noncompletedpayments-length-0" {...revealMotion} className="space-y-3">
+                    <h3 className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+                      {t("modals.refund.closedPayments", {
+                        defaultValue: "Voided / Refunded",
+                      })}
+                    </h3>
+                    {nonCompletedPayments.map((payment) => (
                       <div
-                        key={adj.id}
-                        data-testid={`refund-adjustment-${adj.id}`}
-                        className={`p-3 rounded-lg border ${
-                          adj.adjustment_type === "void"
-                            ? "bg-(--pos-s-surface-2) border-(--pos-s-border)"
-                            : "bg-(--pos-s-surface-2) border-(--pos-s-border)"
-                        }`}
+                        key={payment.id}
+                        className="pos-glass-form-card opacity-60"
                       >
                         <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            {adj.adjustment_type === "void" ? (
-                              <XCircle className="w-4 h-4 text-red-700 dark:text-red-400" />
-                            ) : (
-                              <RotateCcw className="w-4 h-4 text-orange-700 dark:text-orange-400" />
-                            )}
-                            <span
-                              className={`text-sm font-medium ${
-                                adj.adjustment_type === "void"
-                                  ? "text-red-700 dark:text-red-400"
-                                  : "text-orange-700 dark:text-orange-400"
-                              }`}
-                            >
-                              {adj.adjustment_type === "void"
-                                ? t("modals.refund.voidLabel", {
-                                    defaultValue: "VOID",
-                                  })
-                                : t("modals.refund.refundLabel", {
-                                    defaultValue: "REFUND",
-                                  })}
-                            </span>
-                          </div>
-                          <span
-                            className={`font-bold ${
-                              adj.adjustment_type === "void"
-                                ? "text-red-700 dark:text-red-400"
-                                : "text-orange-700 dark:text-orange-400"
-                            }`}
-                          >
-                            -{formatCurrency(adj.amount)}
-                          </span>
-                        </div>
-                        <div className="mt-1 text-xs liquid-glass-modal-text-muted">
-                          {adj.reason}
-                        </div>
-                        {giftPaymentIds.has(adj.payment_id) && !adj.refundMethod ? (
-                          // A native gift return has no cash/card method: it went back to the original card, never a cash payout.
-                          <div className="mt-1 text-xs liquid-glass-modal-text-muted opacity-80">
-                            {t("modals.refund.gift.historyLabel")}
-                          </div>
-                        ) : (
-                          adj.adjustment_type === "refund" && (
-                            <div className="mt-1 text-xs liquid-glass-modal-text-muted opacity-80">
-                              {adj.refundMethod === "card"
-                                ? t("modals.refund.cardRefund", {
-                                    defaultValue: "Card Refund",
-                                  })
-                                : adj.refundMethod === "other"
-                                ? t("modals.refund.otherRefund", {
-                                    defaultValue: "Same tender (other)",
-                                  })
-                                : !adj.refundMethod && !adj.cashHandler
-                                  ? null
-                                  : adj.cashHandler === "driver_shift"
-                                  ? t("modals.refund.driverCash", {
-                                      defaultValue: "Driver Cash",
-                                    })
-                                  : t("modals.refund.cashierCash", {
-                                      defaultValue: "Cashier Cash",
-                                    })}
+                          <div className="flex items-center gap-3">
+                            {getMethodIcon(payment.method)}
+                            <div>
+                              <div className="font-semibold liquid-glass-modal-text capitalize">
+                                {isGiftCardPayment(payment.method)
+                                  ? t("modals.refund.gift.methodLabel")
+                                  : payment.method || "Unknown"}
+                              </div>
+                              <div className="text-xs liquid-glass-modal-text-muted">
+                                {receiptTimestamp(payment.created_at)}
+                              </div>
                             </div>
-                          )
-                        )}
-                        <div className="mt-1 text-xs liquid-glass-modal-text-muted opacity-60">
-                          {receiptTimestamp(adj.created_at)}
+                          </div>
+                          <div className="text-right">
+                            <div className="font-bold liquid-glass-modal-text line-through">
+                              {formatCurrency(payment.amount)}
+                            </div>
+                            {getStatusBadge(payment.status)}
+                          </div>
                         </div>
                       </div>
                     ))}
-                  </div>
+                  </motion.div>
                 )}
-              </div>
-            )}
-          </div>
-        )}
+              </AnimatePresence>
+
+              {/* Adjustment History */}
+              <AnimatePresence initial={false}>
+                {adjustments.length > 0 && (
+                  <motion.div key="adjustments-length-0" {...revealMotion} className="space-y-3">
+                    <button
+                      onClick={() => setShowHistory(!showHistory)}
+                      className="pos-glass-field min-h-touch flex items-center gap-2 px-3 py-2 text-xs font-bold uppercase tracking-wider"
+                    >
+                      {showHistory ? (
+                        <ChevronUp className="w-4 h-4" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4" />
+                      )}
+                      {t("modals.refund.adjustmentHistory", {
+                        defaultValue: "Adjustment History",
+                      })}
+                      <span className="text-xs liquid-glass-modal-badge ml-1">
+                        {adjustments.length}
+                      </span>
+                    </button>
+                    <AnimatePresence initial={false}>
+                      {showHistory && (
+                        <motion.div key="showhistory" {...revealMotion} className="space-y-3">
+                          {adjustments.map((adj) => (
+                            <div
+                              key={adj.id}
+                              data-testid={`refund-adjustment-${adj.id}`}
+                              className="pos-glass-form-card p-3!"
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  {adj.adjustment_type === "void" ? (
+                                    <XCircle className="w-4 h-4 text-red-700 dark:text-red-400" />
+                                  ) : (
+                                    <RotateCcw className="w-4 h-4 text-orange-700 dark:text-orange-400" />
+                                  )}
+                                  <span
+                                    className={`text-sm font-medium ${
+                                      adj.adjustment_type === "void"
+                                        ? "text-red-700 dark:text-red-400"
+                                        : "text-orange-700 dark:text-orange-400"
+                                    }`}
+                                  >
+                                    {adj.adjustment_type === "void"
+                                      ? t("modals.refund.voidLabel", {
+                                          defaultValue: "VOID",
+                                        })
+                                      : t("modals.refund.refundLabel", {
+                                          defaultValue: "REFUND",
+                                        })}
+                                  </span>
+                                </div>
+                                <span
+                                  className={`font-bold ${
+                                    adj.adjustment_type === "void"
+                                      ? "text-red-700 dark:text-red-400"
+                                      : "text-orange-700 dark:text-orange-400"
+                                  }`}
+                                >
+                                  -{formatCurrency(adj.amount)}
+                                </span>
+                              </div>
+                              <div className="mt-1 text-xs liquid-glass-modal-text-muted">
+                                {adj.reason}
+                              </div>
+                              <AnimatePresence initial={false}>
+                                {giftPaymentIds.has(adj.payment_id) && !adj.refundMethod ? (
+                                  // A native gift return has no cash/card method: it went back to the original card, never a cash payout.
+                                  <motion.div key="giftpaymentids-has-adj-payment_id-adj-refundmethod" {...revealMotion} className="mt-1 text-xs liquid-glass-modal-text-muted opacity-80">
+                                    {t("modals.refund.gift.historyLabel")}
+                                  </motion.div>
+                                ) : (
+                                  adj.adjustment_type === "refund" && (
+                                    <motion.div key="payment-view-3" {...revealMotion} className="mt-1 text-xs liquid-glass-modal-text-muted opacity-80">
+                                      {adj.refundMethod === "card"
+                                        ? t("modals.refund.cardRefund", {
+                                            defaultValue: "Card Refund",
+                                          })
+                                        : adj.refundMethod === "other"
+                                        ? t("modals.refund.otherRefund", {
+                                            defaultValue: "Same tender (other)",
+                                          })
+                                        : !adj.refundMethod && !adj.cashHandler
+                                          ? null
+                                          : adj.cashHandler === "driver_shift"
+                                          ? t("modals.refund.driverCash", {
+                                              defaultValue: "Driver Cash",
+                                            })
+                                          : t("modals.refund.cashierCash", {
+                                              defaultValue: "Cashier Cash",
+                                            })}
+                                    </motion.div>
+                                  )
+                                )}
+                              </AnimatePresence>
+                              <div className="mt-1 text-xs liquid-glass-modal-text-muted opacity-60">
+                                {receiptTimestamp(adj.created_at)}
+                              </div>
+                            </div>
+                          ))}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </LiquidGlassModal>
   );

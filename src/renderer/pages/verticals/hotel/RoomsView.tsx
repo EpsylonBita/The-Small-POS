@@ -13,7 +13,7 @@ import { getStoreCurrency } from '../../../utils/store-currency';
 import React, { memo, useState, useEffect, useMemo, useRef, useId } from 'react';
 import { renderModalPortal } from '../../../utils/render-modal-portal';
 import { useTranslation } from 'react-i18next';
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
@@ -129,6 +129,14 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const { resolvedTheme } = useTheme();
   const { organizationId, isModuleEnabled } = useModules();
   const isDark = resolvedTheme === 'dark';
@@ -622,43 +630,43 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
       {/* Room Action Modal */}
       {modalType === 'action' && actionRoom && (
         <Modal title={t('roomsView.roomTitle', { number: actionRoom.roomNumber, defaultValue: 'Room {{number}}' })} onClose={() => { setModalType('none'); setActionRoom(null); }} isDark={isDark}>
-          <div className="space-y-4">
+          <div className="space-y-3">
             {/* Room Info */}
-            <div className={`p-4 rounded-2xl ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
+            <div className="pos-glass-form-card">
               <div className="flex items-center justify-between mb-2">
-                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.status', { defaultValue: 'Status' })}</span>
+                <span className={`text-sm liquid-glass-modal-text-muted`}>{t('roomsView.fields.status', { defaultValue: 'Status' })}</span>
                 <span className={`font-medium ${statusConfig[getRoomEffectiveStatus(actionRoom)].color}`}>
                   {getStatusLabel(getRoomEffectiveStatus(actionRoom))}
                 </span>
               </div>
               <div className="flex items-center justify-between mb-2">
-                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.type', { defaultValue: 'Type' })}</span>
-                <span className={`font-medium capitalize ${isDark ? 'text-white' : 'text-gray-900'}`}>{translateRoomType(t, actionRoom.roomType)}</span>
+                <span className={`text-sm liquid-glass-modal-text-muted`}>{t('roomsView.fields.type', { defaultValue: 'Type' })}</span>
+                <span className={`font-medium capitalize liquid-glass-modal-text`}>{translateRoomType(t, actionRoom.roomType)}</span>
               </div>
               <div className="flex items-center justify-between mb-2">
-                <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.capacity', { defaultValue: 'Capacity' })}</span>
-                <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{t('roomsView.fields.guestsCount', { count: actionRoom.capacity, defaultValue: '{{count}} guests' })}</span>
+                <span className={`text-sm liquid-glass-modal-text-muted`}>{t('roomsView.fields.capacity', { defaultValue: 'Capacity' })}</span>
+                <span className={`font-medium liquid-glass-modal-text`}>{t('roomsView.fields.guestsCount', { count: actionRoom.capacity, defaultValue: '{{count}} guests' })}</span>
               </div>
               {actionRoom.ratePerNight && (
                 <div className="flex items-center justify-between">
-                  <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.ratePerNight', { defaultValue: 'Rate/Night' })}</span>
-                  <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{formatMoney(actionRoom.ratePerNight)}</span>
+                  <span className={`text-sm liquid-glass-modal-text-muted`}>{t('roomsView.fields.ratePerNight', { defaultValue: 'Rate/Night' })}</span>
+                  <span className={`font-medium liquid-glass-modal-text`}>{formatMoney(actionRoom.ratePerNight)}</span>
                 </div>
               )}
-              {getRoomGuestName(actionRoom) && (
-                <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-600">
-                  <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.guest', { defaultValue: 'Guest' })}</span>
-                  <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{getRoomGuestName(actionRoom)}</span>
-                </div>
-              )}
-              {actionRoom.activeFolio && (
-                <div className="flex items-center justify-between mt-2">
-                  <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.fields.folioBalance', { defaultValue: 'Folio Balance' })}</span>
-                  <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
+              <AnimatePresence initial={false}>{getRoomGuestName(actionRoom) && (
+                <motion.div key="glass-reveal-1" {...revealMotion}><div className="flex items-center justify-between mt-3 pt-2">
+                  <span className={`text-sm liquid-glass-modal-text-muted`}>{t('roomsView.fields.guest', { defaultValue: 'Guest' })}</span>
+                  <span className={`font-medium liquid-glass-modal-text`}>{getRoomGuestName(actionRoom)}</span>
+                </div></motion.div>
+              )}</AnimatePresence>
+              <AnimatePresence initial={false}>{actionRoom.activeFolio && (
+                <motion.div key="glass-reveal-2" {...revealMotion}><div className="flex items-center justify-between mt-2">
+                  <span className={`text-sm liquid-glass-modal-text-muted`}>{t('roomsView.fields.folioBalance', { defaultValue: 'Folio Balance' })}</span>
+                  <span className={`font-medium liquid-glass-modal-text`}>
                     {formatMoney(actionRoom.activeFolio.balanceCents / 100, actionRoom.activeFolio.currency ?? null)}
                   </span>
-                </div>
-              )}
+                </div></motion.div>
+              )}</AnimatePresence>
             </div>
 
             {/* Action Buttons */}
@@ -686,19 +694,17 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
 
             {/* Quick Status Change */}
             <div>
-              <p className={`text-xs font-medium mb-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('roomsView.changeStatus', { defaultValue: 'Change Status' })}</p>
+              <p className={`text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>{t('roomsView.changeStatus', { defaultValue: 'Change Status' })}</p>
               <div className="grid grid-cols-3 gap-2">
                 {(Object.keys(statusConfig) as RoomStatus[]).map(status => (
                   <button
                     key={status}
                     onClick={() => handleStatusChange(actionRoom.id, status)}
                     disabled={getRoomEffectiveStatus(actionRoom) === status}
-                    className={`py-2 px-2 rounded-2xl text-xs font-medium transition-transform active:scale-95 ${
+                    className={`min-h-11 py-2 px-2 rounded-2xl text-xs font-medium ${
                       getRoomEffectiveStatus(actionRoom) === status
-                        ? `${statusConfig[status].bgClass} ${statusConfig[status].color}`
-                        : isDark 
-                          ? 'bg-gray-700 text-gray-300 active:bg-gray-600'
-                          : 'bg-gray-100 text-gray-600 active:bg-gray-200'
+                        ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                        : 'pos-glass-field'
                     }`}
                   >
                     {getStatusLabel(status)}
@@ -724,11 +730,11 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
           onClose={() => setModalType('action')}
           isDark={isDark}
         >
-          <div className="space-y-4">
-            <div className={`p-4 rounded-2xl ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}>
+          <div className="space-y-3">
+            <div className="pos-glass-form-card">
               <div className="flex items-center justify-between">
-                <span className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>{t('roomsView.outstandingBalance', { defaultValue: 'Outstanding Balance' })}</span>
-                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                <span className={`text-sm liquid-glass-modal-text-muted`}>{t('roomsView.outstandingBalance', { defaultValue: 'Outstanding Balance' })}</span>
+                <span className={`text-2xl font-bold liquid-glass-modal-text`}>
                   {formatMoney(Number(checkoutPaymentData.amount || 0), checkoutPaymentData.room.activeFolio?.currency ?? null)}
                 </span>
               </div>
@@ -744,12 +750,10 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               required
             />
 
-            <div className="flex gap-3 pt-2">
+            <div className="flex gap-3 px-6 pb-5 pt-2">
               <button
                 onClick={() => setModalType('action')}
-                className={`flex-1 py-3 rounded-2xl font-medium ${
-                  isDark ? 'bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)' : 'bg-(--pos-s-surface-2) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'
-                }`}
+                className="liquid-glass-modal-button min-h-11 flex-1 py-3 font-medium"
               >
                 {t('common.actions.cancel', { defaultValue: 'Cancel' })}
               </button>
@@ -771,9 +775,9 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
           isDark={isDark}
           size="lg"
         >
-          <div className="space-y-4">
-            <div>
-              <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+          <div className="space-y-3">
+            <div className="pos-glass-form-card">
+              <label className={`block text-sm font-semibold mb-1.5 liquid-glass-modal-text-muted`}>
                 {t('roomsView.chargeType', { defaultValue: 'Charge Type' })}
               </label>
               <div className="grid grid-cols-3 gap-2">
@@ -781,10 +785,10 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
                   <button
                     key={type}
                     onClick={() => setFolioChargeData(prev => prev ? { ...prev, chargeType: type } : prev)}
-                    className={`py-2.5 px-3 rounded-xl text-sm font-medium capitalize transition-all ${
+                    className={`min-h-11 py-2.5 px-3 rounded-xl text-sm font-medium capitalize transition-all ${
                       folioChargeData.chargeType === type
-                        ? 'bg-(--pos-s-yellow) text-black'
-                        : isDark ? 'bg-gray-700 text-gray-300 active:bg-gray-600' : 'bg-gray-100 text-gray-600 active:bg-gray-200'
+                        ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg)'
+                        : 'pos-glass-field'
                     }`}
                   >
                     {t(`roomsView.chargeTypes.${type}`, { defaultValue: type })}
@@ -793,17 +797,19 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               </div>
             </div>
 
-            <HotelVatField value={folioChargeData.vatCategoryCode} onChange={vatCategoryCode => setFolioChargeData(prev => prev ? { ...prev, vatCategoryCode } : prev)} />
-            <InputField
-              icon={<Receipt className="w-4 h-4" />}
-              label={t('roomsView.description', { defaultValue: 'Description' })}
-              value={folioChargeData.description}
-              onChange={(value) => setFolioChargeData(prev => prev ? { ...prev, description: value } : prev)}
-              isDark={isDark}
-              required
-            />
+            <div className="pos-glass-form-card space-y-3">
+              <HotelVatField value={folioChargeData.vatCategoryCode} onChange={vatCategoryCode => setFolioChargeData(prev => prev ? { ...prev, vatCategoryCode } : prev)} />
+              <InputField
+                icon={<Receipt className="w-4 h-4" />}
+                label={t('roomsView.description', { defaultValue: 'Description' })}
+                value={folioChargeData.description}
+                onChange={(value) => setFolioChargeData(prev => prev ? { ...prev, description: value } : prev)}
+                isDark={isDark}
+                required
+              />
+            </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="pos-glass-form-card grid grid-cols-1 sm:grid-cols-2 gap-3">
               <InputField
                 icon={<DollarSign className="w-4 h-4" />}
                 label={t('roomsView.amount', { defaultValue: 'Amount' })}
@@ -824,26 +830,22 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               />
             </div>
 
-            <div>
-              <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+            <div className="pos-glass-form-card">
+              <label className={`block text-sm font-semibold mb-1.5 liquid-glass-modal-text-muted`}>
                 {t('roomsView.notes', { defaultValue: 'Notes' })}
               </label>
               <textarea
                 value={folioChargeData.notes}
                 onChange={(event) => setFolioChargeData(prev => prev ? { ...prev, notes: event.target.value } : prev)}
                 rows={3}
-                className={`w-full px-3 py-2.5 rounded-xl text-sm ${
-                  isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
-                } border focus:ring-2 focus:ring-amber-500 resize-none`}
+                className={`liquid-glass-modal-input pos-glass-field min-h-11 w-full px-3 py-2.5 text-sm resize-none`}
               />
             </div>
 
-            <div className="flex gap-3 pt-2">
+            <div className="flex gap-3 px-6 pb-5 pt-2">
               <button
                 onClick={() => setModalType('action')}
-                className={`flex-1 py-3 rounded-xl font-medium ${
-                  isDark ? 'bg-gray-700 text-gray-300 active:bg-gray-600' : 'bg-gray-100 text-gray-600 active:bg-gray-200'
-                }`}
+                className="liquid-glass-modal-button min-h-11 flex-1 py-3 font-medium"
               >
                 {t('common.actions.cancel', { defaultValue: 'Cancel' })}
               </button>
@@ -889,7 +891,7 @@ const RoomCard: React.FC<{ room: Room; onClick: () => void }> = ({ room, onClick
       variants={pageMotionItem}
       type="button"
       onClick={onClick}
-      className="table-workspace-card"
+      className="table-workspace-card pos-glass-tap-card bg-[var(--modal-glass-card)]! border-[var(--modal-glass-card-border)]! rounded-[20px]! shadow-[var(--pos-s-depth-card)]! active:shadow-[var(--pos-s-depth-press)]!"
       data-status={effectiveStatus}
       data-room-id={room.id}
       aria-label={`${room.roomNumber} · ${statusLabel}`}
@@ -967,7 +969,7 @@ const Modal: React.FC<{
         aria-labelledby={titleId}
         className={`liquid-glass-modal-shell relative flex w-full ${sizeClasses[size]} max-h-[90vh] flex-col overflow-hidden text-(--pos-s-fg)`}
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-(--modal-glass-line) p-4">
+        <div className="flex shrink-0 items-center justify-between p-4">
           <h2 id={titleId} className="text-lg font-bold text-(--pos-s-fg)">{title}</h2>
           <button
             onClick={onClose}
@@ -990,14 +992,14 @@ const ActionButton: React.FC<{
   className?: string;
 }> = ({ icon, label, color, onClick, className }) => {
   const colorClasses: Record<string, string> = {
-    emerald: 'bg-(--pos-s-surface-2) text-emerald-800 dark:text-emerald-300 active:bg-(--pos-s-surface-2)',
-    amber: 'bg-(--pos-s-surface-2) text-amber-800 dark:text-amber-300 active:bg-(--pos-s-surface-2)',
+    emerald: 'liquid-glass-modal-text',
+    amber: 'liquid-glass-modal-text',
   };
   
   return (
     <button
       onClick={onClick}
-      className={`flex items-center justify-center gap-2 py-3 px-4 rounded-2xl font-medium transition-transform active:scale-95 ${colorClasses[color]} ${className || ''}`}
+      className={`pos-glass-tap-card flex min-h-11 items-center justify-center gap-2 py-3 px-4 font-medium ${colorClasses[color]} ${className || ''}`}
     >
       {icon}
       <span>{label}</span>
@@ -1016,16 +1018,14 @@ const InputField: React.FC<{
   money?: boolean;
   required?: boolean;
 }> = ({ icon, label, value, onChange, isDark, type = 'text', money = false, required }) => {
-  const fieldClassName = `w-full pl-9 pr-3 py-2.5 rounded-xl text-sm ${
-    isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
-  } border focus:ring-2 focus:ring-yellow-400`;
+  const fieldClassName = 'liquid-glass-modal-input pos-glass-field min-h-11 w-full pl-9 pr-3 py-2.5 text-sm';
   return (
     <div>
-      <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+      <label className={`block text-sm font-semibold mb-1.5 liquid-glass-modal-text-muted`}>
         {label} {required && <span className="text-red-500">*</span>}
       </label>
       <div className="relative">
-        <span className={`absolute left-3 top-1/2 -translate-y-1/2 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+        <span className={`absolute left-3 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted`}>
           {icon}
         </span>
         {money ? (

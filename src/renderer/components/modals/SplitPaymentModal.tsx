@@ -3,7 +3,7 @@ import { getStoreCurrency } from '../../utils/store-currency';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { roundMoney } from '@shared/utils/money';
 import { useTranslation } from 'react-i18next';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useReducedMotion, useIsPresent } from 'framer-motion';
 import { BadgePercent, Check, ChevronDown, CreditCard, Loader2, Plus, ShoppingCart, Split, Trash2, Users } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { paymentRefusalMessage } from '../../utils/paymentRefusalMessage';
@@ -215,16 +215,28 @@ const SplitAmountInput: React.FC<{
 }> = ({ amount, label, disabled, onAmountChange }) => (
   <CentsMoneyInput
     aria-label={label}
-    className="split-payment-money-input w-full py-2 pl-12 pr-3 font-medium disabled:cursor-not-allowed disabled:opacity-70"
+    className="liquid-glass-modal-input pos-glass-field min-h-touch w-full py-2 pl-12 pr-3 text-base tabular-nums font-medium disabled:cursor-not-allowed disabled:opacity-70"
     value={amount}
     disabled={disabled}
     onValueChange={(_, next) => onAmountChange(next)}
   />
 );
 
+// Keep an obsolete payment explanation out of the accessibility tree while its wrapper collapses.
+const PaymentNoticeContent: React.FC<React.PropsWithChildren> = ({ children }) =>
+  useIsPresent() ? children : null;
+
 export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, onClose: onPaymentClose, orderId, orderTotal, items, onSplitComplete, existingPayments = EMPTY_EXISTING_PAYMENTS, initialMode = 'by-amount', isGhostOrder = false, collectionMode, allowDiscounts = true, isReconciliationPending = false, collectionScope, initialTender, currency, draft }) => {
   const formatCurrency = (value: number) => formatMoney(value, currency ?? getStoreCurrency());
   const { t } = useTranslation();
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const supportPayment = useSupportPaymentCritical(isOpen);
   const onClose = useCallback(() => { supportPayment.close(); onPaymentClose(); }, [supportPayment, onPaymentClose]);
   const bridge = getBridge();
@@ -967,15 +979,19 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         <p className="text-[11px] font-semibold text-(--pos-s-muted)">
           {collectionMode.label || t('splitPayment.collectedBy', { defaultValue: 'Collected By' })}
         </p>
-        {collectionMode.description ? (
-          <p className="text-xs liquid-glass-modal-text-muted">{collectionMode.description}</p>
-        ) : null}
-        <div className="flex gap-1 rounded-2xl bg-(--pos-s-surface-2) p-1 shadow-(--pos-s-well)">
+        <AnimatePresence initial={false}>
+
+          {collectionMode.description ? (
+            <motion.p key="collectionmode-description" {...revealMotion} className="text-xs liquid-glass-modal-text-muted">{collectionMode.description}</motion.p>
+          ) : null}
+
+        </AnimatePresence>
+        <div className="flex gap-2">
           <button
             type="button"
             disabled={locked}
             onClick={() => setPortionCollectedBy(portion.id, 'cashier_drawer')}
-            className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner !== 'driver_shift' ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-(--pos-s-depth-yellow)' : 'text-(--pos-s-muted)'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
+            className={`flex-1 min-h-touch rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner !== 'driver_shift' ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-(--pos-s-depth-yellow)' : 'pos-glass-field'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
           >
             {t('splitPayment.cashierDrawer', { defaultValue: 'Cashier' })}
           </button>
@@ -984,7 +1000,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
               type="button"
               disabled={locked}
               onClick={() => setPortionCollectedBy(portion.id, 'driver_shift')}
-              className={`flex-1 rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner === 'driver_shift' ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-(--pos-s-depth-yellow)' : 'text-(--pos-s-muted)'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
+              className={`flex-1 min-h-touch rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${selectedOwner === 'driver_shift' ? 'bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-(--pos-s-depth-yellow)' : 'pos-glass-field'} ${locked ? 'cursor-not-allowed opacity-70' : ''}`}
             >
               {t('splitPayment.driverShift', { defaultValue: 'Driver' })}
             </button>
@@ -1016,122 +1032,138 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         <span>{t('splitPayment.payable', { defaultValue: 'Payable' })}</span>
         <span>{formatCurrency(portion.amount)}</span>
       </div>
-      {portion.status === 'paid' ? (
-        <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-xs text-emerald-700 dark:text-emerald-200">
-          {t('modals.orderDetails.paid', { defaultValue: 'Paid' })} • {t(portion.method === 'card' ? 'modals.orderDetails.card' : 'modals.orderDetails.cash', { defaultValue: portion.method === 'card' ? 'Card' : 'Cash' })}
-          {portion.paymentOrigin === 'terminal' ? ` • ${t('splitPayment.terminalApproved', { defaultValue: 'Terminal' })}` : ''}
-        </div>
-      ) : portion.status === 'processing' ? (
-        <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-xs text-(--pos-s-fg)">
-          {t('splitPayment.waitingForApproval', { defaultValue: 'Waiting for card approval on the payment terminal...' })}
-        </div>
-      ) : portion.status === 'unsaved' ? (
-        <div data-testid={`split-portion-unsaved-${portion.id}`} className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-xs font-semibold text-red-800 dark:text-red-200">
-          {t('splitPayment.portionNotSaved', { defaultValue: 'Card charged, payment not saved yet. Do not charge again.' })}
-        </div>
-      ) : (
-        <>
-          {renderCollectionOwner(portion)}
-          {allowDiscounts && !isDraftView ? (
-            <>
-              <button
-                type="button"
-                disabled={portion.grossAmount <= 0.009}
-                onClick={() => openDiscountEditor(portion.id)}
-                className="split-payment-secondary"
-              >
-                <BadgePercent className="h-3.5 w-3.5" />
-                {t('splitPayment.discount', { defaultValue: 'Discount' })}
-              </button>
-              {discountEditorPortionId === portion.id ? (
-                <div className="flex items-center gap-2 rounded-2xl bg-(--pos-s-surface-2) p-2 shadow-(--pos-s-well)">
-                  <div className="relative flex-1">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-(--pos-s-muted)">{currency ?? getStoreCurrency() ?? '—'}</span>
-                    <SplitAmountInput
-                      amount={Number(discountDraftValue) || 0}
-                      label={t('splitPayment.discount', { defaultValue: 'Discount' })}
-                      disabled={isProcessing || isTerminalChargeInFlight}
-                      onAmountChange={(amount) => setDiscountDraftValue(amount.toFixed(2))}
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => saveDiscount(portion.id)}
-                    className="pos-solid-btn pos-solid-btn--sm"
-                  >
-                    {t('common.actions.apply', { defaultValue: 'Apply' })}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setDiscountEditorPortionId(null); setDiscountDraftValue(''); }}
-                    className="pos-solid-btn pos-solid-btn--sm"
-                  >
-                    {t('common.actions.cancel', { defaultValue: 'Cancel' })}
-                  </button>
+      <AnimatePresence initial={false}>
+
+        {portion.status === 'paid' ? (
+          <motion.div key="portion-status-paid" {...revealMotion} className="pos-glass-form-card px-3! py-2! text-xs text-emerald-700 dark:text-emerald-200">
+            {t('modals.orderDetails.paid', { defaultValue: 'Paid' })} • {t(portion.method === 'card' ? 'modals.orderDetails.card' : 'modals.orderDetails.cash', { defaultValue: portion.method === 'card' ? 'Card' : 'Cash' })}
+            {portion.paymentOrigin === 'terminal' ? ` • ${t('splitPayment.terminalApproved', { defaultValue: 'Terminal' })}` : ''}
+          </motion.div>
+        ) : portion.status === 'processing' ? (
+          <motion.div key="portion-processing" {...revealMotion} className="pos-glass-form-card px-3! py-2! text-xs liquid-glass-modal-text">
+            {t('splitPayment.waitingForApproval', { defaultValue: 'Waiting for card approval on the payment terminal...' })}
+          </motion.div>
+        ) : portion.status === 'unsaved' ? (
+          <motion.div key="portion-unsaved" {...revealMotion} data-testid={`split-portion-unsaved-${portion.id}`} className="pos-glass-form-card px-3! py-2! text-xs font-semibold text-red-800 dark:text-red-200">
+            {t('splitPayment.portionNotSaved', { defaultValue: 'Card charged, payment not saved yet. Do not charge again.' })}
+          </motion.div>
+        ) : (
+          <>
+            {renderCollectionOwner(portion)}
+            {allowDiscounts && !isDraftView ? (
+              <>
+                <button
+                  type="button"
+                  disabled={portion.grossAmount <= 0.009}
+                  onClick={() => openDiscountEditor(portion.id)}
+                  className="pos-glass-field inline-flex min-h-touch items-center justify-center gap-2 px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-55"
+                >
+                  <BadgePercent className="h-3.5 w-3.5" />
+                  {t('splitPayment.discount', { defaultValue: 'Discount' })}
+                </button>
+                <AnimatePresence initial={false}>
+
+                  {discountEditorPortionId === portion.id ? (
+                    <motion.div key="discounteditorportionid-portion-id" {...revealMotion} className="pos-glass-form-card flex items-center gap-2 p-2!">
+                      <div className="relative flex-1">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-(--pos-s-muted)">{currency ?? getStoreCurrency() ?? '—'}</span>
+                        <SplitAmountInput
+                          amount={Number(discountDraftValue) || 0}
+                          label={t('splitPayment.discount', { defaultValue: 'Discount' })}
+                          disabled={isProcessing || isTerminalChargeInFlight}
+                          onAmountChange={(amount) => setDiscountDraftValue(amount.toFixed(2))}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => saveDiscount(portion.id)}
+                        className="pos-solid-btn pos-solid-btn--sm"
+                      >
+                        {t('common.actions.apply', { defaultValue: 'Apply' })}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setDiscountEditorPortionId(null); setDiscountDraftValue(''); }}
+                        className="pos-solid-btn pos-solid-btn--sm"
+                      >
+                        {t('common.actions.cancel', { defaultValue: 'Cancel' })}
+                      </button>
+                    </motion.div>
+                  ) : null}
+
+                </AnimatePresence>
+              </>
+            ) : null}
+            <AnimatePresence initial={false}>
+
+              {portion.method === 'card' && portion.manualCardFallback ? (
+                <motion.div key="portion-method-card-portion-manualcardfallback" {...revealMotion}>
+                  <PaymentNoticeContent>
+                    <div role="status" className="pos-glass-form-card flex items-start gap-2.5 p-3! text-[13px] leading-5 liquid-glass-modal-text [&_svg]:size-[18px] [&_svg]:shrink-0 [&_p]:m-0">
+                  <CreditCard aria-hidden="true" />
+                  <p>{t('payment.manualCard.portionNotice', { defaultValue: "No card terminal is connected to this till. Take this amount on the shop's own card machine; on confirm it is recorded as a manual card payment." })}</p>
                 </div>
+                  </PaymentNoticeContent>
+                </motion.div>
               ) : null}
-            </>
-          ) : null}
-          {portion.method === 'card' && portion.manualCardFallback ? (
-            <div role="status" className="split-payment-card-notice">
-              <CreditCard aria-hidden="true" />
-              <p>{t('payment.manualCard.portionNotice', { defaultValue: "No card terminal is connected to this till. Take this amount on the shop's own card machine; on confirm it is recorded as a manual card payment." })}</p>
-            </div>
-          ) : null}
-        </>
-      )}
+
+            </AnimatePresence>
+          </>
+        )}
+
+      </AnimatePresence>
     </div>
     );
   };
   const renderByAmountTab = () => (
     <div className="space-y-3">
-      <div className="split-payment-quick flex gap-2">
+      <div className="flex gap-2">
         <button type="button" onClick={() => {
           const half = round2(adjustedDue / 2);
           setPortions([createPortion(personLabel(0), half), createPortion(personLabel(1), round2(adjustedDue - half))]);
-        }} className="liquid-glass-modal-button flex-1 text-sm font-medium liquid-glass-modal-text">
+        }} className="pos-glass-field min-h-touch flex-1 px-4 py-2 text-sm font-medium">
           {t('splitPayment.halfHalf', '50 / 50')}
         </button>
         <button type="button" onClick={() => {
           const third = round2(adjustedDue / 3);
           setPortions([createPortion(personLabel(0), third), createPortion(personLabel(1), third), createPortion(personLabel(2), round2(adjustedDue - third * 2))]);
-        }} className="liquid-glass-modal-button flex-1 text-sm font-medium liquid-glass-modal-text">
+        }} className="pos-glass-field min-h-touch flex-1 px-4 py-2 text-sm font-medium">
           {t('splitPayment.threeWay', '3-Way Equal')}
         </button>
         <button type="button" onClick={() => setPortions([createPortion(personLabel(0), 0), createPortion(personLabel(1), 0)])}
-          className="liquid-glass-modal-button flex-1 text-sm font-medium liquid-glass-modal-text">
+          className="pos-glass-field min-h-touch flex-1 px-4 py-2 text-sm font-medium">
           {t('splitPayment.custom', 'Custom')}
         </button>
       </div>
-      <div className="space-y-2">
-        <AnimatePresence mode="popLayout">
+      <div className="space-y-3">
+        <AnimatePresence initial={false}>
           {portions.map((portion) => (
-            <motion.div key={portion.id} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }}
-              className="split-payment-person space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-2 text-sm font-semibold liquid-glass-modal-text">
-                  <Users className="h-4 w-4 text-(--pos-s-muted)" />{portion.label}
-                </span>
-                {portions.length > 2 && portion.status === 'draft' && (
-                  <button type="button" onClick={() => removePerson(portion.id)}
-                    aria-label={t('splitPayment.removePerson', 'Remove person')}
-                    className="pos-icon-btn pos-icon-btn--danger">
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                )}
-              </div>
-              <div className="split-payment-amount-row flex items-center gap-3">
-                <div className="relative min-w-0 flex-1">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-(--pos-s-muted)">{currency ?? getStoreCurrency() ?? '—'}</span>
-                  <SplitAmountInput amount={portion.grossAmount} label={portion.label}
-                    disabled={portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight}
-                    onAmountChange={(amount) => updatePortionGrossAmount(portion.id, amount)} />
+              <motion.div key={portion.id} {...revealMotion}
+                className="pos-glass-form-card px-4! py-3! space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-2 text-sm font-semibold liquid-glass-modal-text">
+                    <Users className="h-4 w-4 text-(--pos-s-muted)" />{portion.label}
+                  </span>
+                  {portions.length > 2 && portion.status === 'draft' && (
+                    <button type="button" onClick={() => removePerson(portion.id)}
+                      aria-label={t('splitPayment.removePerson', 'Remove person')}
+                      className="pos-icon-btn pos-icon-btn--danger">
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  )}
                 </div>
-                <MethodToggle portion={portion} />
-              </div>
-              {renderPortionDetails(portion)}
-            </motion.div>
-          ))}
+                <div className="split-payment-amount-row flex items-center gap-3">
+                  <div className="relative min-w-0 flex-1">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-(--pos-s-muted)">{currency ?? getStoreCurrency() ?? '—'}</span>
+                    <SplitAmountInput amount={portion.grossAmount} label={portion.label}
+                      disabled={portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight}
+                      onAmountChange={(amount) => updatePortionGrossAmount(portion.id, amount)} />
+                  </div>
+                  <MethodToggle portion={portion} />
+                </div>
+                {renderPortionDetails(portion)}
+              </motion.div>
+            ))}
         </AnimatePresence>
       </div>
       <button type="button" onClick={addPerson} disabled={Boolean(processingPortionId) || isProcessing || isTerminalChargeInFlight}
@@ -1146,7 +1178,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     ).length;
     return (
       <div className="split-payment-items-grid grid grid-cols-2 gap-4">
-        <div className="space-y-2">
+        <div className="space-y-3">
           <h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-(--pos-s-muted)">
             <ShoppingCart className="h-3.5 w-3.5" />
             {t("splitPayment.orderItems", "Order Items")}
@@ -1160,7 +1192,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             return (
               <div
                 key={itemIndex}
-                className={`rounded-2xl border border-transparent p-2.5 shadow-(--pos-s-depth-card) transition-colors ${assignedTo ? "bg-(--pos-s-surface-2)" : "bg-(--pos-s-surface)"}`}
+                className="pos-glass-form-card p-2.5!"
               >
                 <div className="mb-1.5 flex items-center justify-between">
                   <span className="flex-1 truncate text-sm font-medium liquid-glass-modal-text">
@@ -1184,25 +1216,25 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                         current === itemIndex ? null : itemIndex,
                       )
                     }
-                    className="split-payment-assignment flex w-full items-center justify-between gap-2"
+                    className="pos-glass-field min-h-touch flex w-full items-center justify-between gap-2 px-3 py-2.5 text-sm"
                   >
                     <span
-                      className={`truncate ${assignedPortion ? "text-slate-900 dark:text-white" : "text-slate-600 dark:text-white/70"}`}
+                      className={`truncate ${assignedPortion ? "liquid-glass-modal-text" : "liquid-glass-modal-text-muted"}`}
                     >
                       {assignedPortion?.label ||
                         t("splitPayment.unassigned", "-- Unassigned --")}
                     </span>
                     <ChevronDown
-                      className={`h-3.5 w-3.5 text-slate-500 transition-transform dark:text-white/50 ${openAssignmentItemIndex === itemIndex ? "rotate-180" : ""}`}
+                      className={`h-3.5 w-3.5 liquid-glass-modal-text-muted transition-transform ${openAssignmentItemIndex === itemIndex ? "rotate-180" : ""}`}
                     />
                   </button>
                   {openAssignmentItemIndex === itemIndex && (
-                    <div className="split-payment-assignment-menu overflow-hidden">
+                    <div className="pos-glass-form-card space-y-1 p-1!">
                       <button
                         type="button"
                         aria-pressed={!assignedTo}
                         onClick={() => assignItem(itemIndex, null)}
-                        className={`w-full px-3 py-2 text-left text-xs transition-colors ${!assignedTo ? "bg-emerald-100 text-emerald-700 dark:bg-zinc-800 dark:text-emerald-300" : "text-slate-800 active:bg-slate-100 dark:text-white/80 dark:active:bg-white/8"}`}
+                        className={`min-h-touch w-full rounded-xl px-3 py-2 text-left text-xs transition-colors ${!assignedTo ? "bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-(--pos-s-depth-card) active:shadow-(--pos-s-depth-press)" : "pos-glass-tap-card"}`}
                       >
                         {t("splitPayment.unassigned", "-- Unassigned --")}
                       </button>
@@ -1214,7 +1246,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                             type="button"
                             aria-pressed={assignedTo === portion.id}
                             onClick={() => assignItem(itemIndex, portion.id)}
-                            className={`w-full px-3 py-2 text-left text-xs transition-colors ${assignedTo === portion.id ? "bg-emerald-100 text-emerald-700 dark:bg-zinc-800 dark:text-emerald-300" : "text-slate-900 active:bg-slate-100 dark:text-white dark:active:bg-white/8"}`}
+                            className={`min-h-touch w-full rounded-xl px-3 py-2 text-left text-xs transition-colors ${assignedTo === portion.id ? "bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) border-(--pos-s-sel-bg) shadow-(--pos-s-depth-card) active:shadow-(--pos-s-depth-press)" : "pos-glass-tap-card"}`}
                           >
                             {portion.label}
                           </button>
@@ -1225,27 +1257,35 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
               </div>
             );
           })}
-          {availableItems.length === 0 && (
-            <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-2 text-center">
-              <span className="text-xs font-medium text-emerald-500 dark:text-emerald-400">
-                {t("splitPayment.allItemsPaid", {
-                  defaultValue:
-                    "All remaining balance has already been allocated to previous item payments",
-                })}
-              </span>
-            </div>
-          )}
-          {availableItems.length > 0 && unassignedCount > 0 && (
-            <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-2 text-center">
-              <span className="text-xs font-medium text-amber-500 dark:text-amber-400">
-                {t("splitPayment.unassignedWarning", {
-                  count: unassignedCount,
-                })}
-              </span>
-            </div>
-          )}
+          <AnimatePresence initial={false}>
+
+            {availableItems.length === 0 && (
+              <motion.div key="splitnone" {...revealMotion} className="pos-glass-form-card p-2! text-center">
+                <span className="text-xs font-medium text-emerald-500 dark:text-emerald-400">
+                  {t("splitPayment.allItemsPaid", {
+                    defaultValue:
+                      "All remaining balance has already been allocated to previous item payments",
+                  })}
+                </span>
+              </motion.div>
+            )}
+
+          </AnimatePresence>
+          <AnimatePresence initial={false}>
+
+            {availableItems.length > 0 && unassignedCount > 0 && (
+              <motion.div key="splitleft" {...revealMotion} className="pos-glass-form-card p-2! text-center">
+                <span className="text-xs font-medium text-amber-500 dark:text-amber-400">
+                  {t("splitPayment.unassignedWarning", {
+                    count: unassignedCount,
+                  })}
+                </span>
+              </motion.div>
+            )}
+
+          </AnimatePresence>
         </div>
-        <div className="space-y-2">
+        <div className="space-y-3">
           <h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-(--pos-s-muted)">
             <Users className="h-3.5 w-3.5" />
             {t("splitPayment.people", "People")}
@@ -1253,7 +1293,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           {portions.map((portion) => (
             <div
               key={portion.id}
-              className={`space-y-2 rounded-2xl border p-2.5 shadow-(--pos-s-depth-card) ${portion.status === "paid" ? "border-transparent bg-(--pos-s-surface-2)" : portion.status === "processing" ? "border-(--pos-s-border) bg-(--pos-s-surface-2)" : "border-transparent bg-(--pos-s-surface)"}`}
+              className="pos-glass-form-card space-y-2 p-2.5!"
             >
               <div className="flex items-center justify-between">
                 <span className="text-sm font-semibold liquid-glass-modal-text">
@@ -1284,29 +1324,33 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                 </>
               ) : (
                 <>
-                  {portion.items.length > 0 ? (
-                    <ul className="space-y-0.5">
-                      {portion.items.map((item) => (
-                        <li
-                          key={`${portion.id}-${item.itemIndex}`}
-                          className="flex justify-between text-xs liquid-glass-modal-text-muted"
-                        >
-                          <span className="truncate">
-                            {item.quantity > 1 && `${item.quantity}x `}
-                            {item.name}
-                          </span>
-                          <span className="ml-1 whitespace-nowrap">
-                            {formatCurrency(item.totalPrice)}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="split-payment-empty text-xs">
-                      {t("splitPayment.noItems", "No items assigned")}
-                    </p>
-                  )}
-                  <div className="border-t border-(--pos-s-border) pt-2">
+                  <AnimatePresence initial={false}>
+
+                    {portion.items.length > 0 ? (
+                      <ul className="space-y-0.5">
+                        {portion.items.map((item) => (
+                          <li
+                            key={`${portion.id}-${item.itemIndex}`}
+                            className="flex justify-between text-xs liquid-glass-modal-text-muted"
+                          >
+                            <span className="truncate">
+                              {item.quantity > 1 && `${item.quantity}x `}
+                              {item.name}
+                            </span>
+                            <span className="ml-1 whitespace-nowrap">
+                              {formatCurrency(item.totalPrice)}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <motion.p key="portion-items-length-0-alternative" {...revealMotion} className="split-payment-empty text-xs">
+                        {t("splitPayment.noItems", "No items assigned")}
+                      </motion.p>
+                    )}
+
+                  </AnimatePresence>
+                  <div className="pt-3">
                     <div className="mb-2 flex items-center justify-between">
                       <span className="text-sm font-bold text-emerald-500 dark:text-emerald-400">
                         {formatCurrency(portion.amount)}
@@ -1337,19 +1381,19 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     );
   };
   const footer = (
-    <div className="split-payment-footer">
-      <div className="flex gap-1 rounded-2xl bg-(--pos-s-surface-2) p-1 shadow-(--pos-s-well)">
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 bg-(--pos-s-surface) px-6 pb-5 pt-2">
+      <div className="flex gap-2">
         <button
           type="button"
           onClick={() => setReceiptMode("combined")}
-          className={`rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === "combined" ? "border border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) split-payment-segment-selected" : "text-(--pos-s-muted) active:text-(--pos-s-fg)"}`}
+          className={`min-h-touch rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === "combined" ? "border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) split-payment-segment-selected" : "pos-glass-field"}`}
         >
           {t("splitPayment.receiptCombined", "All Together")}
         </button>
         <button
           type="button"
           onClick={() => setReceiptMode("individual")}
-          className={`rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === "individual" ? "border border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) split-payment-segment-selected" : "text-(--pos-s-muted) active:text-(--pos-s-fg)"}`}
+          className={`min-h-touch rounded-2xl px-3 py-1.5 text-xs font-medium transition-all ${receiptMode === "individual" ? "border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) split-payment-segment-selected" : "pos-glass-field"}`}
         >
           {t("splitPayment.receiptIndividual", "Separate")}
         </button>
@@ -1425,7 +1469,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         onClose={onClose}
         title={t("splitPayment.title", "Split Payment")}
         size="xl"
-        className="split-payment-modal max-w-4xl! max-h-[96vh]!"
+        className="split-payment-modal max-w-4xl! max-h-[96vh]! [&>.liquid-glass-modal-header]:border-b-0!"
         closeMode="request"
         closeDisabled={isCloseLocked}
         closeOnBackdrop={false}
@@ -1438,35 +1482,43 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             aria-busy={isReconciliationPending}
             inert={isReconciliationPending ? true : undefined}
           >
-            {isReconciliationPending && (
-              <div className="absolute inset-0 z-50 flex items-center justify-center rounded-2xl bg-white/70 backdrop-blur-sm dark:bg-slate-950/70">
-                <Loader2 className="h-8 w-8 animate-spin text-emerald-600 dark:text-emerald-300" />
-              </div>
-            )}
+            <AnimatePresence initial={false}>
+
+              {isReconciliationPending && (
+                <motion.div key="isreconciliationpending" {...revealMotion} className="pos-glass-form-card absolute inset-0 z-50 flex items-center justify-center backdrop-blur-sm">
+                  <Loader2 className="h-8 w-8 animate-spin text-emerald-600 dark:text-emerald-300" />
+                </motion.div>
+              )}
+
+            </AnimatePresence>
           <PlatformHeldPaymentNotice
             notice={platformHeldNotice}
             showBlockedAction
             className="shrink-0"
           />
-          {draftSale ? (
-            <div role="alert" data-testid="split-checkout-sale" className="split-payment-card-notice shrink-0">
-              <CreditCard aria-hidden="true" />
-              <div className="min-w-0 flex-1 space-y-2">
-                <p>{draftSale.recoverable
-                  ? t('splitPayment.checkoutSaleHeld', { defaultValue: 'A card payment of {{amount}} was already charged for this order and is not saved yet. Save it as this order\'s payment; do not charge the card again.', amount: formatCurrency((draftSale.amountCents ?? 0) / 100) })
-                  : t('splitPayment.checkoutSaleUnknown', { defaultValue: 'The card terminal did not answer for {{amount}}. Check the terminal\'s last transaction before taking another payment. This order cannot be left until the card is checked.', amount: formatCurrency((draftSale.amountCents ?? 0) / 100) })}</p>
-                {draftSale.recoverable ? (
-                  <button type="button" className="pos-solid-btn pos-solid-btn--sm" disabled={isTerminalChargeInFlight || isProcessing} onClick={saveDraftSale}>
-                    {t('splitPayment.saveCardPayment', 'Save card payment')}
-                  </button>
-                ) : (
-                  <button type="button" className="pos-solid-btn pos-solid-btn--sm" onClick={() => void refreshDraftSale()}>
-                    {t('splitPayment.checkAgain', 'Check again')}
-                  </button>
-                )}
-              </div>
-            </div>
-          ) : null}
+          <AnimatePresence initial={false}>
+
+            {draftSale ? (
+              <motion.div key="draftsale" {...revealMotion} role="alert" data-testid="split-checkout-sale" className="pos-glass-form-card flex items-start gap-2.5 p-3! text-[13px] leading-5 liquid-glass-modal-text [&_svg]:size-[18px] [&_svg]:shrink-0 [&_p]:m-0 shrink-0">
+                <CreditCard aria-hidden="true" />
+                <div className="min-w-0 flex-1 space-y-2">
+                  <p>{draftSale.recoverable
+                    ? t('splitPayment.checkoutSaleHeld', { defaultValue: 'A card payment of {{amount}} was already charged for this order and is not saved yet. Save it as this order\'s payment; do not charge the card again.', amount: formatCurrency((draftSale.amountCents ?? 0) / 100) })
+                    : t('splitPayment.checkoutSaleUnknown', { defaultValue: 'The card terminal did not answer for {{amount}}. Check the terminal\'s last transaction before taking another payment. This order cannot be left until the card is checked.', amount: formatCurrency((draftSale.amountCents ?? 0) / 100) })}</p>
+                  {draftSale.recoverable ? (
+                    <button type="button" className="pos-solid-btn pos-solid-btn--sm" disabled={isTerminalChargeInFlight || isProcessing} onClick={saveDraftSale}>
+                      {t('splitPayment.saveCardPayment', 'Save card payment')}
+                    </button>
+                  ) : (
+                    <button type="button" className="pos-solid-btn pos-solid-btn--sm" onClick={() => void refreshDraftSale()}>
+                      {t('splitPayment.checkAgain', 'Check again')}
+                    </button>
+                  )}
+                </div>
+              </motion.div>
+            ) : null}
+
+          </AnimatePresence>
           <UnsavedChargedPaymentBanner
             payments={unsaved.payments}
             onSaveAgain={async () => supportPayment.run(async () => {
@@ -1483,58 +1535,66 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             <p className="text-2xl font-bold tracking-tight text-emerald-500 dark:text-emerald-400">
               {formatCurrency(orderFinancials.totalAmount)}
             </p>
-            {alreadyPaidAmount > 0 && (
-              <p className="mt-2 text-sm liquid-glass-modal-text-muted">
-                {t("splitPayment.alreadyPaidSummary", {
-                  defaultValue: "Already paid {{paid}}. Remaining due {{due}}",
-                  paid: formatCurrency(alreadyPaidAmount),
-                  due: formatCurrency(persistedOutstanding),
-                })}
-              </p>
-            )}
-          </div>
-          {isInitializing ? (
-            <div className="flex shrink-0 items-center gap-3 rounded-2xl bg-(--pos-s-surface) p-4 shadow-(--pos-s-depth-card)">
-              <Loader2 className="h-5 w-5 animate-spin text-slate-600 dark:text-white/70" />
-              <div>
-                <h3 className="font-semibold liquid-glass-modal-text">
-                  {t("splitPayment.loading", "Loading split payment")}
-                </h3>
-                <p className="text-sm liquid-glass-modal-text-muted">
-                  {t("splitPayment.loadingHint", {
-                    defaultValue:
-                      "Checking existing split payments and paid items...",
+            <AnimatePresence initial={false}>
+
+              {alreadyPaidAmount > 0 && (
+                <motion.p key="alreadypaidamount-0" {...revealMotion} className="mt-2 text-sm liquid-glass-modal-text-muted">
+                  {t("splitPayment.alreadyPaidSummary", {
+                    defaultValue: "Already paid {{paid}}. Remaining due {{due}}",
+                    paid: formatCurrency(alreadyPaidAmount),
+                    due: formatCurrency(persistedOutstanding),
                   })}
-                </p>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="flex shrink-0 gap-1 rounded-xl bg-(--pos-s-surface-2) p-1 shadow-(--pos-s-well)">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("by-amount")}
-                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-amount" ? "bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-xs split-payment-segment-selected" : "text-(--pos-s-muted) active:text-(--pos-s-fg)"}`}
-                >
-                  <Split className="h-4 w-4" />
-                  {t("splitPayment.byAmount", "By Amount")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("by-items")}
-                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-items" ? "bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-xs split-payment-segment-selected" : "text-(--pos-s-muted) active:text-(--pos-s-fg)"}`}
-                >
-                  <ShoppingCart className="h-4 w-4" />
-                  {t("splitPayment.byItems", "By Items")}
-                </button>
-              </div>
-              <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide pb-24 scroll-pb-24">
-                {activeTab === "by-amount"
-                  ? renderByAmountTab()
-                  : renderByItemsTab()}
-              </div>
-            </>
-          )}
+                </motion.p>
+              )}
+
+            </AnimatePresence>
+          </div>
+          <AnimatePresence initial={false}>
+
+            {isInitializing ? (
+              <motion.div key="isinitializing" {...revealMotion} className="pos-glass-form-card flex shrink-0 items-center gap-3">
+                <Loader2 className="h-5 w-5 animate-spin liquid-glass-modal-text-muted" />
+                <div>
+                  <h3 className="font-semibold liquid-glass-modal-text">
+                    {t("splitPayment.loading", "Loading split payment")}
+                  </h3>
+                  <p className="text-sm liquid-glass-modal-text-muted">
+                    {t("splitPayment.loadingHint", {
+                      defaultValue:
+                        "Checking existing split payments and paid items...",
+                    })}
+                  </p>
+                </div>
+              </motion.div>
+            ) : (
+              <>
+                <div className="flex shrink-0 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("by-amount")}
+                    className={`flex flex-1 min-h-touch items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-amount" ? "bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-xs split-payment-segment-selected" : "pos-glass-field"}`}
+                  >
+                    <Split className="h-4 w-4" />
+                    {t("splitPayment.byAmount", "By Amount")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("by-items")}
+                    className={`flex flex-1 min-h-touch items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-items" ? "bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-xs split-payment-segment-selected" : "pos-glass-field"}`}
+                  >
+                    <ShoppingCart className="h-4 w-4" />
+                    {t("splitPayment.byItems", "By Items")}
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide pb-24 scroll-pb-24">
+                  {activeTab === "by-amount"
+                    ? renderByAmountTab()
+                    : renderByItemsTab()}
+                </div>
+              </>
+            )}
+
+          </AnimatePresence>
         </div>
       </LiquidGlassModal>
       {paymentPrintPromptModal}

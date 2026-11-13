@@ -9,10 +9,14 @@ vi.mock('../../../lib', () => ({ getBridge: () => ({
   settings: { updateTerminalCredentials: mocks.updateCredentials },
   terminalConfig: { syncFromAdmin: mocks.sync },
 }) }));
-vi.mock('../../contexts/i18n-context', () => ({ useI18n: () => ({
-  language: 'en', setLanguage: vi.fn().mockResolvedValue(undefined),
-  t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? key,
-}) }));
+vi.mock('../../contexts/i18n-context', async () => {
+  const { default: en } = await import('../../../locales/en.json');
+  return { useI18n: () => ({
+    language: 'en', setLanguage: vi.fn().mockResolvedValue(undefined),
+    t: (key: string, options?: { defaultValue?: string }) => key === 'modals.connectionSettings.unsyncedQueue'
+      ? en.modals.connectionSettings.unsyncedQueue : options?.defaultValue ?? key,
+  }) };
+});
 vi.mock('../../components/recovery/RecoveryPanel', () => ({ default: () => null }));
 vi.mock('react-hot-toast', () => ({
   Toaster: () => null, toast: { error: mocks.toastError, success: mocks.toastSuccess },
@@ -55,6 +59,36 @@ it.each(['credentials', 'sync'])('shows the native string rejection from %s with
   expect(screen.getByRole('button', { name: 'Connect & Sync' })).toBeEnabled();
   expect(localStorage.getItem('pos-terminal-configured')).toBeNull();
   if (stage === 'credentials') expect(mocks.sync).not.toHaveBeenCalled();
+});
+
+it.each([
+  'UNSYNCED_QUEUE',
+  new Error('UNSYNCED_QUEUE'),
+  { message: 'UNSYNCED_QUEUE' },
+  { code: 'UNSYNCED_QUEUE', message: 'Rebind refused' },
+])('explains unsent money instead of a raw code or network retry hint for %j', async (error) => {
+  mocks.updateCredentials.mockRejectedValue(error);
+  await submitConnection();
+  const message = 'This till still has money that was not sent to the server. Sync first, then connect it to the other store.';
+  await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(message));
+  const alert = screen.getByRole('alert');
+  expect(alert).toHaveTextContent(message);
+  expect(alert).not.toHaveTextContent('UNSYNCED_QUEUE');
+  expect(alert).not.toHaveTextContent('Check your internet connection');
+  expect(mocks.sync).not.toHaveBeenCalled();
+  expect(mocks.toastSuccess).not.toHaveBeenCalled();
+  expect(localStorage.getItem('pos-terminal-configured')).toBeNull();
+  expect(localStorage.getItem('admin_dashboard_url')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Connect & Sync' })).toBeEnabled();
+});
+
+it.each(['Network is unavailable', new Error('Network is unavailable')])('preserves a real connection network error: %j', async (error) => {
+  mocks.updateCredentials.mockRejectedValue(error);
+  await submitConnection();
+  await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('Network is unavailable'));
+  expect(screen.getByRole('alert')).toHaveTextContent('Network is unavailable');
+  expect(screen.getByRole('alert')).toHaveTextContent('Check your internet connection');
+  expect(mocks.sync).not.toHaveBeenCalled();
 });
 
 it('keeps a readable fallback when the native rejection has no message', async () => {

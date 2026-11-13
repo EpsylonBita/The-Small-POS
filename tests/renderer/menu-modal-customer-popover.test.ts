@@ -65,12 +65,13 @@ test('pickup customer popover is portaled app-level above the LiquidGlassModal v
 // customer popover X was an icon-only <button> with no accessible name, so the nested
 // dialog exposed a blank "button" in the a11y tree.
 test('pickup customer popover close button exposes a localized accessible name', () => {
-  // The icon-only X close control carries aria-label + title from the same close key
+  // founder 11/11/2026: aria-label names the touch control; no native tooltip.
+  // The icon-only X close control carries aria-label from the same close key
   // the parent MenuModal close uses (common.actions.close -> "Κλείσιμο" in Greek).
   assert.match(
     source,
-    /onClick=\{\(\) => setShowCustomerPopover\(false\)\}\s*aria-label=\{t\('common\.actions\.close', \{ defaultValue: 'Close' \}\)\}\s*title=\{t\('common\.actions\.close', \{ defaultValue: 'Close' \}\)\}\s*className="liquid-glass-modal-close/,
-    'the popover close button must have a localized aria-label and title',
+    /onClick=\{\(\) => setShowCustomerPopover\(false\)\}\s*aria-label=\{t\('common\.actions\.close', \{ defaultValue: 'Close' \}\)\}\s*className="liquid-glass-modal-close/,
+    'the popover close button must have a localized aria-label',
   );
   // The original unlabeled icon-only close button (blank "button" in the a11y tree) is gone.
   assert.doesNotMatch(
@@ -129,12 +130,13 @@ test('MenuModal header cannot horizontally clip the full/edit modal off the view
   // Long titles and the edit badge wrap within the bounded first grid column.
   assert.doesNotMatch(source, /liquid-glass-modal-title text-xl shrink-0/);
   assert.match(source, /className="liquid-glass-modal-title text-xl flex flex-wrap items-center gap-2 min-w-0"/);
-  assert.match(source, /title=\{getModalTitle\(\)\}/);
+  // founder 11/11/2026: visible wrapping title, without a native tooltip.
+  assert.doesNotMatch(source, /title=\{getModalTitle\(\)\}/);
   assert.match(source, /<span className="whitespace-normal wrap-break-word">\{getModalTitle\(\)\}<\/span>/);
   assert.match(source, /shrink-0 whitespace-normal[\s\S]*?editModeMessage/);
 
   // The header flex chain can shrink below its content so it never forces the shell wide.
-  assert.match(source, /flex flex-col gap-1 px-5 py-2\.5 border-b border-white\/10 shrink-0 min-w-0/);
+  assert.match(source, /flex flex-col gap-1 px-5 py-2\.5 shrink-0 min-w-0/);
   assert.match(source, /grid grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-3 w-full min-w-0/);
   assert.match(source, /col-span-2 row-start-2/);
 

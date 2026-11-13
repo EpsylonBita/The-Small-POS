@@ -3,6 +3,16 @@ import i18next from 'i18next'
 import { I18nextProvider } from 'react-i18next'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+// founder 11/11/2026: exercise the same behavior with motion reduced and exits synchronous.
+vi.mock('framer-motion', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('framer-motion')>();
+  return {
+    ...actual,
+    useReducedMotion: () => true,
+    AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  };
+});
+
 const messagingMocks = vi.hoisted(() => ({
   history: vi.fn(),
   preference: vi.fn(),

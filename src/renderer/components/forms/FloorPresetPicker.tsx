@@ -61,7 +61,8 @@ export const FloorPresetPicker: React.FC<FloorPresetPickerProps> = ({
         />
       </div>
       <div
-        // Founder 31/10: one row of solid picks (the two named floors a little wider than the numbers).
+        // Founder 31/10: one row of picks (the two named floors a little wider than the numbers).
+        // Founder 11/11: frosted with depth like every tappable control on glass; the chosen one is solid.
         className="mt-2 grid grid-cols-[1.5fr_1.5fr_repeat(6,1fr)] gap-1.5"
         role="group"
         aria-label={t('common.floorPresets.quickPick', 'Quick floor selection')}
@@ -74,10 +75,10 @@ export const FloorPresetPicker: React.FC<FloorPresetPickerProps> = ({
               type="button"
               onClick={() => onChange(preset.value)}
               aria-pressed={isSelected}
-              className={`min-h-11 rounded-xl border px-1 py-1.5 text-xs font-semibold transition-colors active:scale-[0.98] ${
+              className={`min-h-11 rounded-xl border px-1 py-1.5 text-xs font-semibold ${
                 isSelected
                   ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg)'
-                  : 'border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)'
+                  : 'pos-glass-field'
               }`}
             >
               {preset.label}

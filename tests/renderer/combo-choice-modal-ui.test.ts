@@ -17,16 +17,20 @@ test('ComboChoiceModal keeps the glass shell, hidden scrollbars, and combo confi
   assert.match(source, /handleSelectItem\(index, item, menuItem\)/);
 });
 
-test('ComboChoiceModal uses yellow selection, green add-to-cart, and tap feedback', () => {
+// founder 11/11/2026: frost/depth replaces the former flat selected surfaces.
+test('ComboChoiceModal uses frosted choices, yellow selection, solid add-to-cart, and tap depth', () => {
   const source = readFileSync(sourcePath, 'utf8');
 
   assert.match(source, /border-\(--pos-s-yellow\) bg-\(--pos-s-yellow\) text-black active:scale-\[0\.98\] active:bg-yellow-500/);
   // Wave ΣΤ8b: a chosen dropdown is an fg line, not yellow.
-  assert.match(source, /border-\(--pos-s-sel-bg\) ring-1 ring-\(--pos-s-sel-bg\) bg-\(--pos-s-surface-2\)/); // founder 31/10: selection = the yellow kit sel
+  assert.match(source, /bg-\(--pos-s-sel-bg\) text-\(--pos-s-sel-fg\) border-\(--pos-s-sel-bg\)/); // founder 31/10: selection = the yellow kit sel
   assert.doesNotMatch(source, /'border-\(--pos-s-yellow\) bg-\(--pos-s-surface-2\)'/);
-  assert.match(source, /bg-\(--pos-s-surface-2\)/);
+  assert.match(source, /pos-glass-form-card p-3!/);
   assert.match(source, /border-2 border-yellow-400 border-t-transparent/);
-  assert.match(source, /active:scale-\[0\.99\]/);
+  assert.match(source, /pos-glass-field min-h-touch flex w-full/);
+  assert.match(source, /pos-glass-tap-card liquid-glass-modal-text/);
+  const css = readFileSync(path.join(projectRoot, 'src/renderer/styles/glassmorphism.css'), 'utf8');
+  assert.match(css, /\.pos-glass-tap-card:is\(:active, \[data-pressed\]\):not\(:disabled\)[\s\S]*?translate: 0 1px/);
   assert.match(source, /type="button"/);
 });
 

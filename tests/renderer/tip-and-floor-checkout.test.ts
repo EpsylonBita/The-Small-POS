@@ -126,11 +126,13 @@ test('tip controls have raised touch depth and role-colored icons in both themes
     'glassmorphism.css',
   );
 
-  assert.match(
-    tipModal,
-    /const tipChoiceButtonBaseClass =\s*'[^']*bg-\(--pos-s-surface\) shadow-\[0_8px_20px_rgba\(0,0,0,0\.10\)\][^']*dark:shadow-\[0_10px_24px_rgba\(0,0,0,0\.28\)\][^']*active:translate-y-px[^']*'/,
-    'percentage and recipient choices should use a shared raised touch surface',
-  );
+  // founder 11/11/2026: neutral choices get their depth/press response from the glass kit.
+  assert.match(tipModal, /const tipChoiceButtonBaseClass =\s*'rounded-xl border transition-all focus-visible:outline-2 focus-visible:outline-yellow-400'/);
+  assert.match(tipModal, /pos-glass-field/);
+  assert.match(tipModal, /pos-glass-tap-card/);
+  assert.match(tipModal, /min-h-touch text-sm font-bold/);
+  assert.match(glassStyles, /button\.pos-glass-field:is\(:active, \[data-pressed\]\):not\(:disabled\)[\s\S]*?box-shadow: var\(--pos-s-depth-press\)/);
+  assert.match(glassStyles, /\.pos-glass-tap-card:is\(:active, \[data-pressed\]\):not\(:disabled\)[\s\S]*?translate: 0 1px/);
   assert.match(tipModal, /cashier:\s*'tip-recipient-icon-cashier'/);
   assert.match(tipModal, /waiter:\s*'tip-recipient-icon-waiter'/);
   assert.match(tipModal, /driver:\s*'tip-recipient-icon-driver'/);

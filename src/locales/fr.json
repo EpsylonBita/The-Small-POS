@@ -1948,7 +1948,8 @@
       "last5Days": "5 derniers jours",
       "last7Days": "7 derniers jours",
       "last30Days": "30 derniers jours",
-      "last90Days": "90 derniers jours"
+      "last90Days": "90 derniers jours",
+      "sinceLastZ": "Depuis le dernier Z"
     },
     "sales": {
       "title": "Ventes",
@@ -5170,7 +5171,9 @@
         "releaseWrongPin": "Ce PIN ne permet pas de la libérer. Un responsable autorisé à annuler des commandes saisit son propre PIN.",
         "releaseFailed": "La remise n'a pas pu être libérée. Rien n'a changé ; réessayez.",
         "released": "Libérée. Les espèces de la caisse secondaire n'ont pas été ajoutées à ce tiroir-caisse. Vous pouvez maintenant clôturer le service."
-      }
+      },
+      "netCollections": "Encaissements nets",
+      "ofWhichTips": "dont pourboires"
     },
     "zReport": {
       "title": "Rapport Z - {{date}}",
@@ -5531,7 +5534,12 @@
       "heldEditClosed": "La correction a été clôturée. Aucun argent n’a été enregistré.",
       "heldEditCloseFailed": "La correction n’a pas pu être clôturée. Elle reste en attente ; rien n’a été enregistré.",
       "unsavedSaved": "Paiement enregistré.",
-      "unsavedStillNotSaved": "Toujours pas enregistré sur cette caisse. Ne débitez pas à nouveau. Réessayez, ou rendez l'argent au client et confirmez-le ici."
+      "unsavedStillNotSaved": "Toujours pas enregistré sur cette caisse. Ne débitez pas à nouveau. Réessayez, ou rendez l'argent au client et confirmez-le ici.",
+      "tenderReconciliation": {
+        "received": "Encaissé",
+        "refunded": "Remboursé",
+        "kept": "Conservé"
+      }
     },
     "expense": {
       "title": "Sorties de caisse",
@@ -5690,6 +5698,8 @@
       "managerApprovalSubtitle": "L'annulation d'une commande payée nécessite le droit d'annuler. Un responsable qui l'a saisit son propre code PIN. Rien n'est débité."
     },
     "addCustomer": {
+      "mapStreetNameDiffers": "La carte nomme cette rue « {{street}} ». Vérifiez qu’il s’agit de la bonne rue.",
+      "mapPostalCodeDiffers": "La carte indique le code postal {{code}} pour cette adresse.",
       "title": "Ajouter un nouveau client",
       "editTitle": "Modifier le client",
       "addAddressTitle": "Ajouter une nouvelle adresse",
@@ -5965,6 +5975,7 @@
       "unknownError": "Erreur inconnue"
     },
     "connectionSettings": {
+      "unsyncedQueue": "Cette caisse contient encore des mouvements d’argent qui n’ont pas été envoyés au serveur. Synchronisez d’abord, puis connectez-la à l’autre magasin.",
       "pinSaveError": "Impossible d'enregistrer le PIN",
       "connectionSavedSyncing": "Connexion enregistrée. Synchronisation des données…",
       "themeAutoDayNight": "Automatique (jour / nuit)",
@@ -6516,7 +6527,8 @@
     "addressValidationError": "Échec de la validation de l'adresse",
     "orderCreated": "Commande créée avec succès !",
     "markDeliveredFailed": "Échec du marquage de la commande {{orderNumber}} comme livrée",
-    "pickupDelivered": "{{count}} commande(s) à emporter marquée(s) comme livrée(s)",
+    "pickupDelivered_one": "Commande livrée",
+    "pickupDelivered_other": "{{count}} commandes livrées",
     "platformReadySent": "Marquée prête",
     "platformReadyFailed": "Échec de la notification de la plateforme pour {{orderNumber}}",
     "deliveriesCompleted": "{{count}} commande(s) en livraison terminée(s)",
@@ -8947,6 +8959,7 @@
         "serviceStep": "Service"
       },
       "loadingSlots": "Chargement...",
+      "pickDay": "Choisissez un jour pour voir les horaires",
       "availability": {
         "available": "Disponible",
         "booked": "Réservé"
@@ -10347,6 +10360,18 @@
     "clearAttemptSubtitle": "Un responsable saisit son propre PIN. Rien n'est encaissé ni remboursé."
   },
   "reservationForm": {
+    "today": "Aujourd'hui",
+    "tomorrow": "Demain",
+    "dayStrip": "Prochains jours",
+    "dayFree": "Libre",
+    "dayReserved": "{{count}} réservations",
+    "dayReserved_one": "{{count}} réservation",
+    "dayReserved_other": "{{count}} réservations",
+    "dayFull": "Complet",
+    "slotFree": "Libre",
+    "slotTaken": "Réservé",
+    "pickDay": "Choisissez un jour pour voir les heures",
+    "noTimesLeft": "Il ne reste aucune heure pour ce jour. Choisissez un autre jour ou saisissez une heure.",
     "toasts": {
       "created": "Réservation créée",
       "updated": "Réservation mise à jour",

@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useState, useEffect } from 'react'
 import { LiquidGlassModal } from '../ui/pos-glass-components'
 import { useTranslation } from 'react-i18next'
@@ -27,6 +28,14 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const { t } = useTranslation()
+  const reduceMotion = useReducedMotion();
+  const revealMotion = {
+    initial: reduceMotion ? false as const : { opacity: 0, height: 0, y: 12, overflow: 'hidden' },
+    animate: { opacity: 1, height: 'auto', y: 0, overflow: 'visible' },
+    exit: reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0, overflow: 'hidden', transition: { overflow: { delay: 0, duration: 0 } } },
+    transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.2, 0.8, 0.2, 1] as const, overflow: { delay: reduceMotion ? 0 : 0.24, duration: 0 } },
+  };
+
   const titleToShow = title ?? t('auth.login.title')
   const subtitleToShow = subtitle ?? t('auth.login.subtitle')
   const maskChar = '\u2022'
@@ -119,35 +128,35 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
       title={titleToShow}
       size="sm"
       closeOnBackdrop={false}
-      className="max-w-[400px]! max-h-[calc(100dvh-1.5rem)]"
+      className="max-w-[400px]! max-h-[calc(100dvh-1.5rem)] [&_.liquid-glass-modal-header]:border-b-0"
       contentClassName="space-y-3"
     >
-      {!blockedMessage && <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2.5 text-emerald-950 shadow-xs dark:text-emerald-50">
+      <AnimatePresence initial={false}>{!blockedMessage && <motion.div key="glass-reveal-1" {...revealMotion}><div className="pos-glass-form-card px-3! py-2.5! liquid-glass-modal-text">
         <div className="flex items-start gap-3">
-          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-700 text-white">
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-emerald-700 dark:text-emerald-300">
             <ShieldCheck size={16} aria-hidden="true" />
           </div>
           <div className="min-w-0">
             <p className="text-sm font-semibold">
               {t('auth.login.pinConfirmationRequired', 'PIN confirmation required')}
             </p>
-            <p className="mt-1 text-sm leading-4 text-slate-700 dark:text-slate-200">
+            <p className="mt-1 text-sm leading-4 liquid-glass-modal-text-muted">
               {subtitleToShow}
             </p>
           </div>
         </div>
-      </div>}
+      </div></motion.div>}</AnimatePresence>
 
       {blockedMessage ? (
-        <p role="status" className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-3 text-sm text-slate-900 dark:text-slate-100">
+        <p role="status" className="pos-glass-form-card p-3! text-sm liquid-glass-modal-text">
           {blockedMessage}
         </p>
       ) : <>
       <div data-support-secret
         aria-label={t('auth.login.pinEntry', 'PIN entry')}
-        className="rounded-2xl border border-slate-300 bg-white p-3 text-center shadow-inner dark:border-white/15 dark:bg-slate-950/80"
+        className="pos-glass-form-card p-3! text-center"
       >
-        <div className="mb-2 flex items-center justify-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
+        <div className="mb-2 flex items-center justify-center gap-2 text-sm font-semibold liquid-glass-modal-text-muted">
           <LockKeyhole size={16} aria-hidden="true" />
           <span>{t('auth.login.enterPin', 'Enter PIN')}</span>
         </div>
@@ -162,7 +171,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
                   'flex h-9 items-center justify-center rounded-md border text-lg font-semibold',
                   filled
                     ? 'border-(--pos-s-sel-bg) bg-(--pos-s-sel-bg) text-(--pos-s-sel-fg) shadow-xs'
-                    : 'border-slate-300 bg-slate-100 text-slate-400 dark:border-white/15 dark:bg-slate-900 dark:text-slate-500',
+                    : 'pos-glass-field liquid-glass-modal-text-muted',
                 ].join(' ')}
               >
                 {filled ? maskChar : ''}
@@ -172,14 +181,14 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
         </div>
       </div>
 
-      {(errorMessage || error) && (
-        <div
+      <AnimatePresence initial={false}>{(errorMessage || error) && (
+        <motion.div key="glass-reveal-2" {...revealMotion}><div
           role="alert"
-          className="rounded-2xl border border-red-600 bg-(--pos-s-surface-2) px-3 py-2 text-center text-sm font-semibold text-red-700 dark:text-red-200"
+          className="pos-glass-form-card border-red-600! px-3! py-2! text-center text-sm font-semibold text-red-700 dark:text-red-200"
         >
           {errorMessage || error}
-        </div>
-      )}
+        </div></motion.div>
+      )}</AnimatePresence>
 
       <div className="grid grid-cols-3 gap-2">
         {[...'123456789'].map(n => (
@@ -188,7 +197,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
             type="button"
             onClick={() => handleNumber(n)}
             disabled={loading}
-            className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-lg font-semibold text-slate-950 shadow-xs transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white"
+            className="pos-glass-field inline-flex min-h-[48px] items-center justify-center text-center text-lg font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
           >
             {n}
           </button>
@@ -197,7 +206,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
           type="button"
           onClick={handleClear}
           disabled={loading || !pin}
-          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white px-2 text-center text-sm font-semibold text-slate-800 shadow-xs transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100"
+          className="pos-glass-field inline-flex min-h-[48px] items-center justify-center px-2 text-center text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
         >
           {t('common.clear', 'Clear')}
         </button>
@@ -205,7 +214,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
           type="button"
           onClick={() => handleNumber('0')}
           disabled={loading}
-          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-lg font-semibold text-slate-950 shadow-xs transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white"
+          className="pos-glass-field inline-flex min-h-[48px] items-center justify-center text-center text-lg font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
         >
           0
         </button>
@@ -214,7 +223,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
           onClick={handleBack}
           disabled={loading || !pin}
           aria-label={t('common.actions.backspace', 'Backspace')}
-          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-slate-800 shadow-xs transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100"
+          className="pos-glass-field inline-flex min-h-[48px] items-center justify-center text-center transition disabled:cursor-not-allowed disabled:opacity-50"
         >
           <DeleteIcon size={20} className="shrink-0" aria-hidden="true" />
         </button>
