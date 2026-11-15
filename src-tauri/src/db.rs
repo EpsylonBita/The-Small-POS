@@ -57,7 +57,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 107;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 108;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -895,8 +895,25 @@ where
     if current < 107 {
         run_migration_tx(conn, 107, migrate_v107)?;
     }
+    if current < 108 {
+        run_migration_tx(conn, 108, migrate_v108)?;
+    }
 
     Ok(())
+}
+
+/// Retain refused status changes after an authoritative server adoption. The
+/// new terminal state never participates in replay, failed counts or Z gates.
+fn migrate_v108(conn: &Connection) -> Result<(), String> {
+    crate::order_state::migrate_queue(conn)?;
+    conn.execute_batch(crate::order_state::REFUSED_STATUS_INDEX_SQL)
+        .map_err(|e| e.to_string())?;
+    if !column_exists(conn, "orders", "cancelled_at")? {
+        conn.execute_batch("ALTER TABLE orders ADD COLUMN cancelled_at TEXT;")
+            .map_err(|e| e.to_string())?;
+    }
+    conn.execute_batch("INSERT OR IGNORE INTO schema_version(version) VALUES(108);")
+        .map_err(|e| e.to_string())
 }
 
 /// An order's completed payments by key (migration v107): the business-day
@@ -2411,7 +2428,7 @@ enum PreMigrationRecoveryMode {
 
 const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[
     56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-    98, 99, 100, 101, 102, 103, 104, 105, 106, 107,
+    98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108,
 ];
 
 fn computed_pending_migrations(
@@ -10054,7 +10071,7 @@ mod tests {
 
         assert_eq!(
             computed_pending_migrations(102, false, false, false, false),
-            vec![103, 104, 105, 106, 107]
+            vec![103, 104, 105, 106, 107, 108]
         );
         run_migrations(&conn).expect("v102 to the current schema");
 
@@ -10218,21 +10235,21 @@ mod tests {
             computed_pending_migrations(75, true, false, false, false),
             vec![
                 56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
-                96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107
+                96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108
             ]
         );
         assert_eq!(
             computed_pending_migrations(78, false, false, false, false),
             vec![
                 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-                100, 101, 102, 103, 104, 105, 106, 107
+                100, 101, 102, 103, 104, 105, 106, 107, 108
             ]
         );
         assert_eq!(
             computed_pending_migrations(79, false, true, false, false),
             vec![
                 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-                100, 101, 102, 103, 104, 105, 106, 107
+                100, 101, 102, 103, 104, 105, 106, 107, 108
             ]
         );
         // A v81 whose columns went missing is re-run even though it is no longer
@@ -10285,7 +10302,12 @@ mod tests {
         // v106 (remote-support marker) and v107 (indexes only) read and write
         // no native repair state either.
         assert!(native_repair_atomic_only_allowed(105, &[106, 107]));
-        assert!(!native_repair_atomic_only_allowed(107, &[108]));
+        // v108 atomically widens the parity status CHECK, retaining every
+        // native repair payload, claim and index byte-for-byte, and adds a
+        // nullable order timestamp. The queue-upgrade regression proves both
+        // preservation and rollback; it invokes no repair dispatcher.
+        assert!(native_repair_atomic_only_allowed(107, &[108]));
+        assert!(!native_repair_atomic_only_allowed(108, &[109]));
         assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
@@ -10570,7 +10592,7 @@ mod tests {
             computed_pending_migrations(85, false, false, false, false),
             vec![
                 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104,
-                105, 106, 107
+                105, 106, 107, 108
             ]
         );
         assert!(native_repair_atomic_only_allowed(85, &[86]));
@@ -10584,7 +10606,7 @@ mod tests {
             computed_pending_migrations(86, false, false, false, false),
             vec![
                 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105,
-                106, 107
+                106, 107, 108
             ]
         );
         assert!(native_repair_atomic_only_allowed(86, &[87]));
@@ -10693,7 +10715,7 @@ mod tests {
             computed_pending_migrations(87, false, false, false, false),
             vec![
                 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
-                107
+                107, 108
             ]
         );
         assert!(native_repair_atomic_only_allowed(87, &[88]));
@@ -10736,7 +10758,7 @@ mod tests {
             computed_pending_migrations(83, false, false, false, true),
             vec![
                 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102,
-                103, 104, 105, 106, 107
+                103, 104, 105, 106, 107, 108
             ]
         );
         let error = run_migrations_with_preflight(
@@ -13464,10 +13486,10 @@ mod support_marker_migration_tests {
         std::fs::create_dir_all(&root).unwrap();
         let c = rusqlite::Connection::open(root.join("pos.db")).unwrap();
         super::run_migrations(&c).unwrap();
-        // A till at v105: v107 (Health's indexes) follows v106 and must come off
-        // too, or `current` stays at 107 and v106 is never reached.
+        // A till at v105: remove every later version marker so the
+        // support marker migration is actually exercised on re-entry.
         c.execute_batch(
-            "DROP TABLE support_txn_marker; DELETE FROM schema_version WHERE version IN (106, 107);",
+            "DROP TABLE support_txn_marker; DELETE FROM schema_version WHERE version >= 106;",
         )
         .unwrap();
         c.execute(

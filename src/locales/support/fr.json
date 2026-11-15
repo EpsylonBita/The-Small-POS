@@ -473,6 +473,8 @@
       "failed": "Non terminé",
       "unknown": "À vérifier",
       "rolled_back": "Modification annulée"
-    }
+    },
+    "shiftVoidEmpty": "Supprimer la prise de service {{shift_id}} : aucune vente, aucun paiement ni mouvement de caisse",
+    "orderAdoptServer": "Reprendre la commande {{order_id}} telle que sur le serveur et clore ses changements de statut refusés"
   }
 }

@@ -473,6 +473,8 @@
       "failed": "Nuk përfundoi",
       "unknown": "Duhet kontrolluar",
       "rolled_back": "Ndryshimi u kthye mbrapsht"
-    }
+    },
+    "shiftVoidEmpty": "Fshi hyrjen {{shift_id}}: nuk u bë asnjë shitje, pagesë apo lëvizje parash",
+    "orderAdoptServer": "Merr porosinë {{order_id}} siç është në server dhe mbyll ndryshimet e refuzuara të statusit"
   }
 }

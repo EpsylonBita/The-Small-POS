@@ -38,6 +38,8 @@ describe('confirmed commands in the existing pill', () => {
       expect(typeof value, key).toBe('string'); expect(value.length, key).toBeGreaterThan(1); expect(value).not.toMatch(/\?\?\?|�/);
     }
     expect(locale.confirmed.shiftClose).toContain('{{shift_id}}');
+    expect(locale.confirmed.shiftVoidEmpty).toContain('{{shift_id}}');
+    expect(locale.confirmed.orderAdoptServer).toContain('{{order_id}}');
     expect(locale.confirmed.queueRetry).toContain('{{queue_id}}');
     expect(locale.confirmed.undoSnapshot).toContain('{{snapshot_id}}');
   });

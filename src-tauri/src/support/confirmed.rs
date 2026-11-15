@@ -251,49 +251,96 @@ pub fn run(
     if c.payload["step"] == "sql_dry_run" {
         return super::confirmed_sql::dry(store, &live, c, &scope, now, &permit);
     }
-    let snap = super::snapshot::take(store, &live, &c.session_id, None, "pre_command", &permit)?;
-    if permit.is_cancelled() || handoff.is_cancelled() {
-        return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
-    }
-    drop(permit);
-    let writer = gate.try_begin_support(true, None).map_err(str::to_string)?;
-    current(app, rt, c)?;
-    let (now, end) = {
-        let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
-        let session = core.session.as_ref().ok_or("SESSION_ENDED")?;
-        (
-            core.now(),
-            clock::parse(&session.admission.max_expires_at)
-                .map_err(str::to_string)?
-                .min(clock::parse(&c.expires_at).map_err(str::to_string)?),
+    let prepared = if super::confirmed_state_actions::handles(c) {
+        current(app, rt, c)?;
+        let _watch = watch_authority(app, c, permit.cancelled.clone())?;
+        Some(
+            super::confirmed_state_actions::prepare(app, c, &live, &scope, &permit)
+                .map_err(super::confirmed_state_actions::failure)?,
         )
+    } else {
+        None
     };
-    let authority_start = Instant::now();
-    let remaining = end
-        .checked_sub(now)
-        .filter(|n| *n > 0)
-        .ok_or("COMMAND_EXPIRED")? as u64;
-    let _watch = watch_authority(app, c, writer.cancelled.clone())?;
-    let recheck = || {
-        if handoff.is_cancelled()
-            || writer.is_cancelled()
-            || !rt.banner_ready.load(Ordering::Acquire)
-        {
+    let server_void = matches!(
+        prepared.as_ref(),
+        Some(super::confirmed_state_actions::Prepared::Shift { .. })
+    );
+    let result: Result<Value, String> = (|| {
+        let snap =
+            super::snapshot::take(store, &live, &c.session_id, None, "pre_command", &permit)?;
+        if permit.is_cancelled() || handoff.is_cancelled() {
             return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
         }
-        if authority_start.elapsed() >= std::time::Duration::from_millis(remaining) {
-            return Err("COMMAND_EXPIRED".into());
+        drop(permit);
+        let writer = gate.try_begin_support(true, None).map_err(str::to_string)?;
+        current(app, rt, c)?;
+        let (now, end) = {
+            let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
+            let session = core.session.as_ref().ok_or("SESSION_ENDED")?;
+            (
+                core.now(),
+                clock::parse(&session.admission.max_expires_at)
+                    .map_err(str::to_string)?
+                    .min(clock::parse(&c.expires_at).map_err(str::to_string)?),
+            )
+        };
+        let authority_start = Instant::now();
+        let remaining = end
+            .checked_sub(now)
+            .filter(|n| *n > 0)
+            .ok_or("COMMAND_EXPIRED")? as u64;
+        let _watch = watch_authority(app, c, writer.cancelled.clone())?;
+        let recheck = || {
+            if handoff.is_cancelled()
+                || writer.is_cancelled()
+                || !rt.banner_ready.load(Ordering::Acquire)
+            {
+                return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+            }
+            if authority_start.elapsed() >= std::time::Duration::from_millis(remaining) {
+                return Err("COMMAND_EXPIRED".into());
+            }
+            Ok(())
+        };
+        recheck()?;
+        match c.payload["step"].as_str() {
+            Some("sql_execute") => {
+                super::confirmed_sql::execute(store, &live, c, &scope, now, &writer, &snap, recheck)
+            }
+            Some("action") => {
+                let result = if let Some(prepared) = prepared {
+                    super::confirmed_state_actions::run(
+                        store, &live, c, &scope, now, &writer, &snap, prepared, recheck,
+                    )
+                    .map_err(super::confirmed_state_actions::failure)
+                } else {
+                    super::confirmed_actions::run(
+                        store, &live, c, &scope, now, &writer, &snap, recheck,
+                    )
+                }?;
+                use tauri::Emitter;
+                if result["evidence"]["kind"] == "shift_void" {
+                    let _ = app.emit(
+                        "shift_updated",
+                        json!({"action":"void","shiftId":result["evidence"]["shift_id"]}),
+                    );
+                } else if result["evidence"]["kind"] == "order_adopt" {
+                    let _ = app.emit(
+                        "order_realtime_update",
+                        json!({"orderId":result["evidence"]["order_id"]}),
+                    );
+                    let _=app.emit("order_status_updated",json!({"orderId":result["evidence"]["order_id"],"status":result["evidence"]["after_status"]}));
+                }
+                Ok(result)
+            }
+            _ => Err("INVALID_INPUT".into()),
         }
-        Ok(())
-    };
-    recheck()?;
-    match c.payload["step"].as_str() {
-        Some("sql_execute") => {
-            super::confirmed_sql::execute(store, &live, c, &scope, now, &writer, &snap, recheck)
-        }
-        Some("action") => {
-            super::confirmed_actions::run(store, &live, c, &scope, now, &writer, &snap, recheck)
-        }
-        _ => Err("INVALID_INPUT".into()),
+    })();
+    // The server has already deleted this check-in. A snapshot, End, critical
+    // preemption or local-phase failure must never claim that nothing happened.
+    if server_void {
+        result.map_err(|_| "OUTCOME_UNKNOWN".into())
+    } else {
+        result
     }
 }

@@ -19,6 +19,9 @@ pub fn sql_error(error: rusqlite::Error) -> String {
         Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt) => {
             return super::evidence::error("BUSINESS_DATABASE_OPEN_FAILED")
         }
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            return super::evidence::error("BUSINESS_DATABASE_BUSY")
+        }
         Some(rusqlite::ErrorCode::OperationInterrupted) => "QUERY_TIMEOUT",
         _ => "POLICY_REFUSED",
     }
@@ -55,6 +58,79 @@ pub fn read_connection(
 }
 pub fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+fn schema_indexes(conn: &Connection, table: &str) -> Result<Vec<Value>, String> {
+    let mut list = conn
+        .prepare(&format!("PRAGMA index_list({})", quote(table)))
+        .map_err(sql_error)?;
+    let names = list
+        .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))
+        .map_err(sql_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(sql_error)?;
+    let mut indexes = Vec::new();
+    for (name, unique) in names {
+        let mut q = conn
+            .prepare(&format!("PRAGMA index_info({})", quote(&name)))
+            .map_err(sql_error)?;
+        let columns = q
+            .query_map([], |r| r.get::<_, Option<String>>(2))
+            .map_err(sql_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sql_error)?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        indexes.push(json!({"name":name,"columns":columns,"unique":unique}));
+    }
+    Ok(indexes)
+}
+/// Metadata has no need for a data replica. Never export schema SQL, defaults,
+/// trigger bodies or index expressions, all of which can contain credentials.
+pub fn schema(live: &Path, permit: &SupportPermit) -> Result<Value, String> {
+    let conn = read_connection(live, permit, Instant::now() + Duration::from_secs(5))?;
+    let mut tables = Vec::new();
+    let mut q = conn.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").map_err(sql_error)?;
+    let names = q
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(sql_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(sql_error)?;
+    for name in names {
+        if permit.is_cancelled() {
+            return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+        }
+        let mut q = conn
+            .prepare(&format!("PRAGMA table_xinfo({})", quote(&name)))
+            .map_err(sql_error)?;
+        let cols = q.query_map([], |r| Ok(json!({"name":r.get::<_,String>(1)?,"type":r.get::<_,String>(2)?,"not_null":r.get::<_,bool>(3)?,"pk":r.get::<_,i64>(5)?>0})))
+            .map_err(sql_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(sql_error)?;
+        let columns: Vec<_> = cols
+            .into_iter()
+            .map(|mut c| {
+                c["classification"] =
+                    json!(classification(&name, c["name"].as_str().unwrap_or("")));
+                c
+            })
+            .collect();
+        // Count only admitted tables. Secret table occupancy is secret too.
+        let secret = desktop_map()["tables"]
+            .get(&name)
+            .is_none_or(|t| t["classification"] == "secret");
+        let count: i64 = if secret {
+            0
+        } else {
+            conn.query_row(&format!("SELECT count(*) FROM {}", quote(&name)), [], |r| {
+                r.get(0)
+            })
+            .map_err(sql_error)?
+        };
+        let indexes = schema_indexes(&conn, &name)?;
+        tables.push(json!({"name":name,"row_count":count,"emptied_as_secret":secret,"columns":columns,"indexes":indexes}));
+    }
+    Ok(
+        json!({"database":"main","replica_taken_at":chrono::Utc::now().to_rfc3339(),"sqlite_version":rusqlite::version(),"tables":tables}),
+    )
 }
 pub fn desktop_map() -> &'static Value {
     contracts::shared().other["classification"]["maps"]
@@ -205,13 +281,19 @@ pub fn build_evidence(
     personal: bool,
 ) -> Result<Replica, String> {
     build_inner(live, permit, personal).map_err(|code| {
-        if super::evidence::split_error(&code).1.is_some()
+        if permit.is_cancelled() {
+            "PREEMPTED_BY_CRITICAL_OPERATION".into()
+        } else if super::evidence::split_error(&code).1 == Some("HEALTH_OBSERVATION_MISSING") {
+            super::evidence::error("REPLICA_BUILD_FAILED")
+        } else if super::evidence::split_error(&code).1.is_some()
             || matches!(
                 code.as_str(),
-                "PREEMPTED_BY_CRITICAL_OPERATION" | "QUERY_TIMEOUT" | "RATE_LIMITED"
+                "PREEMPTED_BY_CRITICAL_OPERATION" | "RATE_LIMITED"
             )
         {
             code
+        } else if code == "QUERY_TIMEOUT" {
+            super::evidence::error("REPLICA_BUILD_TIMEOUT")
         } else if code == "INSUFFICIENT_DISK" {
             format!("{code}|INSUFFICIENT_FREE_DISK")
         } else {

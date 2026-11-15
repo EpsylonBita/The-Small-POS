@@ -22,6 +22,23 @@ pub const DETAILS: &[&str] = &[
     "TABLE_MISSING",
     "COLUMN_MISSING",
     "REPLICA_BUILD_FAILED",
+    "REPLICA_BUILD_TIMEOUT",
+    "BUSINESS_DATABASE_BUSY",
+    "SHIFT_NOT_FOUND",
+    "SHIFT_NOT_EMPTY",
+    "SHIFT_NOT_ACTIVE",
+    "SHIFT_SCOPE_DENIED",
+    "SHIFT_COVERED_BY_CLOSEOUT",
+    "SHIFT_HAS_FISCAL_ACTIVITY",
+    "SHIFT_DRAWER_NOT_EXCLUSIVE",
+    "SHIFT_DRAWER_NOT_OPEN",
+    "SHIFT_HAS_LOCAL_WORK",
+    "ORDER_NOT_FOUND",
+    "ORDER_HAS_LOCAL_WORK",
+    "ORDER_STATUS_ROWS_INELIGIBLE",
+    "INVALID_SERVER_ORDER_STATE",
+    "SERVER_ORDER_STATE_UNAVAILABLE",
+    "SERVER_UNAVAILABLE",
     "INSUFFICIENT_FREE_DISK",
     "HEALTH_OBSERVATION_MISSING",
     "SCREEN_CAPTURE_UNAVAILABLE",
@@ -424,11 +441,23 @@ fn mask_known(text: &str, known: &[String]) -> String {
             .flat_map(char::to_lowercase)
             .map(|c| if c == '\u{03c2}' { '\u{03c3}' } else { c })
             .collect();
-        if needle.is_empty() {
+        // PII columns can contain placeholders such as `0`, `1`, `-` or `.`.
+        // They are redacted in their own fields, but are not identities to
+        // substitute inside unrelated operational evidence.
+        if needle.chars().count() < 2
+            || needle.chars().count() < 4 && !needle.chars().all(char::is_alphabetic)
+        {
             continue;
         }
         for (at, matched) in folded.match_indices(&needle) {
-            ranges.push((starts[at], ends[at + matched.len() - 1]));
+            let start = starts[at];
+            let end = ends[at + matched.len() - 1];
+            let word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.');
+            if text[..start].chars().next_back().is_none_or(|c| !word(c))
+                && text[end..].chars().next().is_none_or(|c| !word(c))
+            {
+                ranges.push((start, end));
+            }
         }
     }
     ranges.sort_unstable();
@@ -498,7 +527,7 @@ impl Policy {
                             return Err(error("HEALTH_OBSERVATION_MISSING"));
                         }
                         if let Ok(value) = row.get::<_, String>(0) {
-                            if !value.trim().is_empty() && value.len() <= 8192 {
+                            if value.trim().chars().count() >= 2 && value.len() <= 8192 {
                                 values.insert(value);
                             }
                         }

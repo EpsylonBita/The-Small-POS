@@ -5,6 +5,46 @@ use super::{
 };
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
+
+/// SQLite proves that a constant query reads no database cells. It need not
+/// copy and sanitize an entire day's ledger to answer `SELECT 1`.
+pub fn tableless(input: &Value, permit: &SupportPermit) -> Result<Option<Value>, String> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let sql = input["sql"].as_str().ok_or("INVALID_INPUT")?;
+    if !single_read(sql) {
+        return Err("POLICY_REFUSED".into());
+    }
+    let conn = rusqlite::Connection::open_in_memory().map_err(replica::sql_error)?;
+    let read = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let accessed = read.clone();
+    conn.authorizer(Some(move |ctx: AuthContext<'_>| match ctx.action {
+        AuthAction::Read { .. } => {
+            accessed.store(true, std::sync::atomic::Ordering::Release);
+            Authorization::Deny
+        }
+        _ => Authorization::Allow,
+    }));
+    permit.guard_connection(&conn, Instant::now() + Duration::from_secs(5));
+    if let Err(error) = conn.prepare(sql) {
+        return if read.load(std::sync::atomic::Ordering::Acquire)
+            || super::evidence::sql_error(&error) == Some("TABLE_MISSING")
+        {
+            Ok(None)
+        } else {
+            Err(replica::sql_error(error))
+        };
+    }
+    // The normal query owner still applies its function allowlist, readonly
+    // flag, SQL-tail check, cell and output budgets on this empty replica.
+    let path = std::env::temp_dir().join(format!("support-constant-{}.db", uuid::Uuid::new_v4()));
+    drop(rusqlite::Connection::open(&path).map_err(replica::sql_error)?);
+    let r = Replica {
+        path,
+        taken_at: chrono::Utc::now().to_rfc3339(),
+        schema: json!([]),
+    };
+    query(&r, input, permit).map(Some)
+}
 // The engine authorizer and readonly flag remain the security boundary. This
 // lexical pass additionally rejects a nonempty SQL tail without extra_check.
 pub fn single_read(sql: &str) -> bool {

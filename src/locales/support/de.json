@@ -473,6 +473,8 @@
       "failed": "Nicht abgeschlossen",
       "unknown": "Prüfung erforderlich",
       "rolled_back": "Änderung zurückgenommen"
-    }
+    },
+    "shiftVoidEmpty": "Anmeldung {{shift_id}} löschen: Es gab keinen Verkauf, keine Zahlung und keine Bargeldbewegung",
+    "orderAdoptServer": "Bestellung {{order_id}} vom Server übernehmen und ihre abgelehnten Statusänderungen abschließen"
   }
 }

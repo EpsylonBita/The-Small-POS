@@ -416,6 +416,47 @@ fn known_people_are_masked_case_insensitively_without_corrupting_unicode_boundar
 }
 
 #[test]
+fn placeholder_pii_never_masks_characters_inside_operational_values() {
+    let policy = evidence::Policy {
+        personal: false,
+        known: vec![
+            "0".into(),
+            "1".into(),
+            "-".into(),
+            ".".into(),
+            "15".into(),
+            "02".into(),
+            "18".into(),
+            "24".into(),
+            "server".into(),
+            "Li".into(),
+        ],
+    };
+    for text in [
+        "fa45af00-e86c-4f92-a2e4-7727a8845dfc",
+        "fa45af..-e86c-4f92-a2e4-7727a8845dfc",
+        "2026-11-15T02:18:24.123+00:00",
+        "HTTP_400_CLIENT_ERROR",
+        "server-wins",
+    ] {
+        assert_eq!(policy.string(text), text);
+        assert_eq!(
+            crate::support::redaction::record(json!({"message":text})).unwrap()["message"],
+            text
+        );
+        assert_eq!(
+            crate::diagnostics::redact_remote_diagnostics_value(json!({"message":text}))["message"],
+            text
+        );
+    }
+    assert_eq!(policy.string("Li / server"), "[REDACTED] / [REDACTED]");
+    assert_eq!(
+        policy.record(json!({"password":"1","customer_name":"0"})),
+        json!({"password":"[REDACTED]","customer_name":"[REDACTED]"})
+    );
+}
+
+#[test]
 fn older_diagnostics_owner_messages_keep_only_a_closed_native_cause() {
     for (message, detail) in [
         (

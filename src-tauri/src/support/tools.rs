@@ -162,6 +162,27 @@ impl Tools {
                 if input["database"].as_str().is_some_and(|db| db != "main") {
                     return Err("UNSUPPORTED_ON_PLATFORM".into());
                 }
+                if c.kind == "till_sql_schema" {
+                    return replica::schema(&self.live, permit)
+                        .and_then(|v| evidence_meta(v, evidence_policy));
+                }
+                if c.kind == "till_sql_query" {
+                    // Even a cell-free query must report a missing, corrupt or
+                    // locked business path truthfully. Validate only its header;
+                    // no user SQL or business cells execute on this handle.
+                    let source = replica::read_connection(
+                        &self.live,
+                        permit,
+                        Instant::now() + Duration::from_secs(5),
+                    )?;
+                    source
+                        .query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))
+                        .map_err(replica::sql_error)?;
+                    drop(source);
+                    if let Some(value) = sql_query::tableless(input, permit)? {
+                        return evidence_meta(value, evidence_policy);
+                    }
+                }
                 if c.kind == "till_sql_query" && personal {
                     let replica = replica::build_evidence(&self.live, permit, true)?;
                     let value = sql_query::query(&replica, input, permit)?;
@@ -527,7 +548,7 @@ mod tests {
         }
     }
     #[test]
-    fn every_native_tier_one_handler_is_registered_and_business_schema_is_v106() {
+    fn every_native_tier_one_handler_is_registered_and_business_schema_is_current() {
         let _keyring = crate::tests::fake_keyring::install_empty();
         let _test_gate = super::super::critical_op::install_test_gate();
         let db = crate::tests::harness::TestDb::open();
@@ -576,10 +597,9 @@ mod tests {
         let count:i64=evidence.query_row("SELECT json_extract(parameters_json,'$.native_result.devices') FROM support_network_evidence WHERE command_id=?1",[&command.command_id],|r|r.get(0)).unwrap();
         assert_eq!(count, 1);
         assert!(!include_str!("network/info.rs").contains("storage::"));
-        // Support adds exactly one business-schema change: the break-glass
-        // commit marker (v106, design 11.3). Everything else lives in support.db.
-        // v107 is Health's order-payment index, not support.
-        assert_eq!(crate::db::CURRENT_SCHEMA_VERSION, 107);
+        // v106 is the commit marker; v107 adds Health indexes; v108 retains
+        // adopted status rows and the server's cancellation timestamp.
+        assert_eq!(crate::db::CURRENT_SCHEMA_VERSION, 108);
     }
 }
 

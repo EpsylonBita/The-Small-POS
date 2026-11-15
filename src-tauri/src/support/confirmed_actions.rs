@@ -149,12 +149,12 @@ fn not_claimed(c: &Connection, id: &str) -> Result<(), String> {
     }
     Ok(())
 }
-struct Effects {
+pub(super) struct Effects {
     count: std::sync::Arc<std::sync::atomic::AtomicU64>,
     protected: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl Effects {
-    fn install(c: &Connection) -> Self {
+    pub(super) fn install(c: &Connection) -> Self {
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::Arc;
         let count = Arc::new(AtomicU64::new(0));
@@ -181,7 +181,7 @@ impl Effects {
         Self { count, protected }
     }
 }
-fn changes(_c: &Connection, before: &Effects, cap: u64) -> Result<usize, String> {
+pub(super) fn changes(_c: &Connection, before: &Effects, cap: u64) -> Result<usize, String> {
     use std::sync::atomic::Ordering;
     let n = before.count.load(Ordering::Acquire);
     if n > cap || before.protected.load(Ordering::Acquire) {
@@ -613,7 +613,7 @@ pub fn run(
         json!({"step":"action","kind":"untrusted_till_data","outcome":if pending{"pending"}else{"resolved"},"observation_time":clock::iso(now+start.elapsed().as_millis() as i64),"snapshot_id":snap.id,"snapshot":snapshot::metadata(store,&snap.id).map_err(|_|"OUTCOME_UNKNOWN")?,"affected_ids":affected,"changed_rows":changed,"verification":{"fresh":true,"matches_expected":true,"sync":if pending{"pending"}else{"not_applicable"}},"evidence":evidence,"undo":{"kind":if group{"set_aside_group"}else{"snapshot"},"reference":if group{input["queue_id"].clone()}else{json!(snap.id)},"reason":null}}),
     )
 }
-fn finish_tx(
+pub(super) fn finish_tx(
     conn: &Connection,
     tx: rusqlite::Transaction<'_>,
     c: &Command,

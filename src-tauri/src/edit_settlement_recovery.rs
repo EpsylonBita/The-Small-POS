@@ -1111,7 +1111,7 @@ pub(crate) fn capture_preflight(conn: &Connection, order: &str) -> Result<Value,
     {
         return Err("EDIT_ORIGINAL_PAYMENT_SYNC_REQUIRED".into());
     }
-    let pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND status NOT IN ('completed','synced'))",[order],|row|row.get(0)).map_err(storage_error)?;
+    let pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND status NOT IN ('completed','synced','superseded'))",[order],|row|row.get(0)).map_err(storage_error)?;
     if pending {
         return Err("EDIT_PREVIOUS_SETTLEMENT_SYNC_REQUIRED".into());
     }
@@ -1430,7 +1430,7 @@ pub(crate) enum DriftResolution {
 pub(crate) fn order_has_local_queue(conn: &Connection, order: &str) -> Result<bool, String> {
     let queued: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM parity_sync_queue q WHERE q.status NOT IN ('completed','synced') AND (
+            "SELECT EXISTS(SELECT 1 FROM parity_sync_queue q WHERE q.status NOT IN ('completed','synced','superseded') AND (
                 (q.table_name='orders' AND q.record_id=?1)
                 OR (q.table_name='payments' AND q.record_id IN (SELECT id FROM order_payments WHERE order_id=?1))
                 OR (q.table_name='payment_adjustments' AND q.record_id IN (SELECT id FROM payment_adjustments WHERE order_id=?1))

@@ -8,6 +8,289 @@ use crate::support::{
 use serde_json::{json, Value};
 
 const SHIFT: &str = "b0000000-0000-4000-a000-000000000001";
+
+fn empty_check_in() -> (crate::tests::harness::TestDb, String) {
+    let db = fixture();
+    {
+        let c = db.state.conn.lock().unwrap();
+        c.execute_batch(
+            "DELETE FROM parity_sync_queue; DELETE FROM orders; DELETE FROM staff_shifts;",
+        )
+        .unwrap();
+    }
+    let opened=crate::shifts::open_shift(&db.state,&json!({"staffId":"your-cashier","staffName":"Your Cashier","branchId":"your-branch","terminalId":"your-terminal","roleType":"cashier","openingCash":221.08})).unwrap();
+    let shift = opened["shiftId"].as_str().unwrap().to_string();
+    (db, shift)
+}
+
+fn state_action(
+    db: &crate::tests::harness::TestDb,
+    store: &SupportDb,
+    c: &contracts::Command,
+    prepared: crate::support::confirmed_state_actions::Prepared,
+) -> Result<Value, String> {
+    let gate = critical_op::global();
+    let reader = gate
+        .try_begin_support(false, None)
+        .map_err(str::to_string)?;
+    let snap = snapshot::take(
+        &store.conn,
+        &db.state.db_path,
+        &c.session_id,
+        None,
+        "pre_command",
+        &reader,
+    )?;
+    drop(reader);
+    let writer = gate.try_begin_support(true, None).map_err(str::to_string)?;
+    crate::support::confirmed_state_actions::run(
+        &store.conn,
+        &db.state.db_path,
+        c,
+        &scope(),
+        chrono::Utc::now().timestamp_millis(),
+        &writer,
+        &snap,
+        prepared,
+        || Ok(()),
+    )
+}
+
+#[test]
+fn support_void_empty_removes_real_check_in_drawer_and_own_queue_and_keeps_evidence() {
+    let _keyring = crate::tests::fake_keyring::install_empty();
+    let _gate = critical_op::install_test_gate();
+    let (db, shift) = empty_check_in();
+    let drawer = {
+        let c = db.state.conn.lock().unwrap();
+        crate::support::confirmed_state_actions::empty_shift(&c, &shift, &scope()).unwrap()
+    };
+    assert!(drawer.is_some());
+    let store = SupportDb::open(db.state.db_path.parent().unwrap()).unwrap();
+    let result = state_action(
+        &db,
+        &store,
+        &command("shift.void_empty.v1", json!({"shift_id":shift})),
+        crate::support::confirmed_state_actions::Prepared::Shift {
+            server: "deleted".into(),
+            drawer: drawer.clone(),
+        },
+    )
+    .unwrap();
+    crate::support::tools::desktop_output_contract_tests::confirmed_result(&result);
+    assert_eq!(result["outcome"], "resolved");
+    assert_eq!(result["evidence"]["kind"], "shift_void");
+    assert_eq!(result["evidence"]["server"], "deleted");
+    assert_eq!(
+        result["evidence"]["removed"],
+        json!([{"table":"parity_sync_queue","count":1},{"table":"cash_drawer_sessions","count":1},{"table":"staff_shifts","count":1}])
+    );
+    assert_eq!(result["undo"]["kind"], "unavailable");
+    assert!(result["snapshot_id"].is_string());
+    // No snapshot may bring back the check-in the server deleted.
+    {
+        let c = db.state.conn.lock().unwrap();
+        let listed = crate::support::restore::list(&store.conn, &c).unwrap();
+        let listed = listed.as_array().unwrap();
+        assert!(!listed.is_empty());
+        assert!(
+            listed.iter().all(|s| s["restorable"] == false),
+            "{listed:?}"
+        );
+        let newest = snapshot::load(&store.conn, result["snapshot_id"].as_str().unwrap()).unwrap();
+        assert!(crate::support::restore::validate(&store.conn, &c, &newest).is_err());
+    }
+    let c = db.state.conn.lock().unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM staff_shifts WHERE id=?1",
+            [&shift],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM cash_drawer_sessions WHERE staff_shift_id=?1",
+            [&shift],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn support_void_checks_activity_fresh_and_refuses_closed_drawers_foreign_scope_and_handoffs() {
+    let _keyring = crate::tests::fake_keyring::install_empty();
+    let _gate = critical_op::install_test_gate();
+    let (db, shift) = empty_check_in();
+    let c = db.state.conn.lock().unwrap();
+    for sql in [
+        "UPDATE cash_drawer_sessions SET total_cash_sales=1 WHERE staff_shift_id=?1",
+        "UPDATE cash_drawer_sessions SET closed_at='2026-11-15T12:00:00Z' WHERE staff_shift_id=?1",
+        "UPDATE staff_shifts SET status='closed' WHERE id=?1",
+        "UPDATE staff_shifts SET branch_id='other' WHERE id=?1",
+        "UPDATE staff_shifts SET is_transfer_pending=1 WHERE id=?1",
+        "INSERT INTO orders(id,items,total_amount,status,staff_shift_id,created_at,updated_at) VALUES('empty-order','[]',0,'cancelled',?1,'now','now')",
+        "INSERT INTO shift_expenses(id,staff_shift_id,staff_id,branch_id,expense_type,amount,description,created_at,updated_at) VALUES('expense',?1,'your-cashier','your-branch','other',1,'test','now','now')",
+        "UPDATE parity_sync_queue SET operation='UPDATE' WHERE record_id=?1",
+        "UPDATE parity_sync_queue SET status='processing' WHERE record_id=?1",
+    ] {
+        c.execute_batch("SAVEPOINT activity_case").unwrap();
+        c.execute(sql,[&shift]).unwrap();
+        assert!(crate::support::confirmed_state_actions::empty_shift(&c,&shift,&scope()).is_err(),"{sql}");
+        c.execute_batch("ROLLBACK TO activity_case; RELEASE activity_case").unwrap();
+    }
+    crate::shifts::ensure_staff_payments_table(&c).unwrap();
+    c.execute("INSERT INTO staff_payments(id,cashier_shift_id,paid_to_staff_id,amount,payment_type,created_at) VALUES('staff-pay',?1,'other-staff',1,'wage','now')",[&shift]).unwrap();
+    assert_eq!(
+        crate::support::confirmed_state_actions::empty_shift(&c, &shift, &scope()).unwrap_err(),
+        "SHIFT_NOT_EMPTY"
+    );
+}
+
+#[test]
+fn support_void_checks_the_migrated_in_memory_ledger_including_payment_and_adjustment_links() {
+    let _keyring = crate::tests::fake_keyring::install_empty();
+    let _gate = critical_op::install_test_gate();
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    crate::db::run_migrations_for_test(&c);
+    for (key, value) in [
+        ("organization_id", "your-org"),
+        ("branch_id", "your-branch"),
+        ("terminal_id", "your-terminal"),
+    ] {
+        crate::db::set_setting(&c, "terminal", key, value).unwrap();
+    }
+    c.execute("INSERT INTO staff_shifts(id,staff_id,branch_id,terminal_id,role_type,check_in_time,status,opening_cash_amount,opening_cash_amount_cents,currency,created_at,updated_at) VALUES(?1,'cashier','your-branch','your-terminal','cashier','2026-11-15T10:04:00Z','active',221.08,22108,'EUR','2026-11-15T10:04:00Z','2026-11-15T10:04:00Z')",[SHIFT]).unwrap();
+    c.execute("INSERT INTO cash_drawer_sessions(id,staff_shift_id,cashier_id,branch_id,terminal_id,opening_amount,opening_amount_cents,currency,opened_at,created_at,updated_at) VALUES('drawer',?1,'cashier','your-branch','your-terminal',221.08,22108,'EUR','2026-11-15T10:04:00Z','2026-11-15T10:04:00Z','2026-11-15T10:04:00Z')",[SHIFT]).unwrap();
+    assert_eq!(
+        crate::support::confirmed_state_actions::empty_shift(&c, SHIFT, &scope()).unwrap(),
+        Some("drawer".into())
+    );
+    c.execute("INSERT INTO orders(id,items,total_amount,status,created_at,updated_at) VALUES('payment-order','[]',1,'completed','now','now')",[]).unwrap();
+    c.execute("INSERT INTO order_payments(id,order_id,method,amount,currency,status,staff_shift_id,created_at,updated_at) VALUES('payment','payment-order','cash',1,'EUR','completed',?1,'now','now')",[SHIFT]).unwrap();
+    assert_eq!(
+        crate::support::confirmed_state_actions::empty_shift(&c, SHIFT, &scope()).unwrap_err(),
+        "SHIFT_NOT_EMPTY"
+    );
+    c.execute("UPDATE order_payments SET staff_shift_id=NULL", [])
+        .unwrap();
+    c.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,reason,staff_shift_id,created_at,updated_at) VALUES('refund','payment','payment-order','refund',1,'return',?1,'now','now')",[SHIFT]).unwrap();
+    assert_eq!(
+        crate::support::confirmed_state_actions::empty_shift(&c, SHIFT, &scope()).unwrap_err(),
+        "SHIFT_NOT_EMPTY"
+    );
+    c.execute("INSERT INTO staff_shifts(id,staff_id,branch_id,terminal_id,role_type,check_in_time,status,opening_cash_amount,opening_cash_amount_cents,transferred_to_cashier_shift_id,currency,created_at,updated_at) VALUES('empty-driver','driver','your-branch','your-terminal','driver','2026-11-15T10:04:01Z','active',0,0,?1,'EUR','2026-11-15T10:04:01Z','2026-11-15T10:04:01Z')",[SHIFT]).unwrap();
+    assert_eq!(
+        crate::support::confirmed_state_actions::empty_shift(&c, "empty-driver", &scope()).unwrap(),
+        None
+    );
+    c.execute("UPDATE staff_shifts SET opening_cash_amount=10,opening_cash_amount_cents=1000 WHERE id='empty-driver'",[]).unwrap();
+    assert_eq!(
+        crate::support::confirmed_state_actions::empty_shift(&c, "empty-driver", &scope())
+            .unwrap_err(),
+        "SHIFT_NOT_EMPTY"
+    );
+}
+
+#[test]
+fn support_void_rechecks_after_the_server_answer_and_rolls_back_a_row_cap_refusal() {
+    let _keyring = crate::tests::fake_keyring::install_empty();
+    let _gate = critical_op::install_test_gate();
+    let (db, shift) = empty_check_in();
+    let drawer = {
+        let c = db.state.conn.lock().unwrap();
+        crate::support::confirmed_state_actions::empty_shift(&c, &shift, &scope()).unwrap()
+    };
+    let store = SupportDb::open(db.state.db_path.parent().unwrap()).unwrap();
+    let mut cmd = command("shift.void_empty.v1", json!({"shift_id":shift}));
+    cmd.payload["rows_cap"] = json!(2);
+    assert!(state_action(
+        &db,
+        &store,
+        &cmd,
+        crate::support::confirmed_state_actions::Prepared::Shift {
+            server: "already_absent".into(),
+            drawer: drawer.clone()
+        }
+    )
+    .is_err());
+    let c = db.state.conn.lock().unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM staff_shifts WHERE id=?1",
+            [&shift],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM parity_sync_queue WHERE record_id=?1",
+            [&shift],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn support_adopt_uses_the_owner_and_returns_the_snapshot_and_refused_rows() {
+    let _keyring = crate::tests::fake_keyring::install_empty();
+    let _gate = critical_op::install_test_gate();
+    let db = fixture();
+    let remote = "b9062fca-5b0b-4064-901c-7fe040d6a01f";
+    let local = "b0000000-0000-4000-a000-000000000007";
+    {
+        let c = db.state.conn.lock().unwrap();
+        c.execute(
+            "UPDATE orders SET id=?1,supabase_id=?2,sync_status='pending' WHERE id='your-order'",
+            rusqlite::params![local, remote],
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE parity_sync_queue SET record_id=?1,data=?2 WHERE id='your-row'",
+            rusqlite::params![
+                local,
+                json!({"orderId":local,"status":"confirmed"}).to_string()
+            ],
+        )
+        .unwrap();
+    }
+    let store = SupportDb::open(db.state.db_path.parent().unwrap()).unwrap();
+    let server = json!({"id":remote,"status":"ready","version":3,"updated_at":"2026-11-11T12:00:01Z","cancelled_at":null,"cancellation_reason":null,"payment_status":"pending","total_amount":10});
+    let result = state_action(
+        &db,
+        &store,
+        &command("order.adopt_server_state.v1", json!({"order_id":remote})),
+        crate::support::confirmed_state_actions::Prepared::Order(server),
+    )
+    .unwrap();
+    crate::support::tools::desktop_output_contract_tests::confirmed_result(&result);
+    assert_eq!(result["outcome"], "resolved");
+    assert_eq!(result["evidence"]["after_status"], "ready");
+    assert_eq!(result["evidence"]["rows"][0]["after_status"], "superseded");
+    assert_eq!(result["undo"]["kind"], "snapshot");
+    assert_eq!(result["undo"]["reference"], result["snapshot_id"]);
+    let reader = critical_op::global()
+        .try_begin_support(false, None)
+        .unwrap();
+    let conn = db.state.conn.lock().unwrap();
+    let queue = crate::support::collectors::sync_queue::collect_evidence(
+        &conn,
+        &json!({}),
+        &reader,
+        &crate::support::evidence::Policy::default(),
+    )
+    .unwrap();
+    assert_eq!(queue["counts_by_status"]["failed"], 0);
+    assert_eq!(queue["items"], json!([]));
+}
 fn scope() -> Scope {
     Scope {
         organization_id: "your-org".into(),

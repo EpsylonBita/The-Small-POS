@@ -6133,6 +6133,7 @@ async fn force_parity_sync_once(
         Ok(result) => result,
         Err(_) => return ParitySyncExecutionOutcome::Failed("PARITY_SYNC_FAILED"),
     };
+    emit_adopted_order_events(db, app);
     emit_monetary_dead_letters(app, &result.monetary_dead_letters);
     emit_shift_conflicts(app, &result.shift_conflicts);
     classify_finished_parity_pass(db, sync_state, app, source, scope, &result)
@@ -14332,6 +14333,26 @@ struct RemoteOrdersPageApply {
 }
 
 fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrdersPageApply {
+    apply_remote_orders_page_inner(conn, orders, None)
+}
+
+pub(crate) fn apply_authoritative_order_state(
+    conn: &Connection,
+    local: &str,
+    state: Value,
+) -> Result<(), String> {
+    let applied = apply_remote_orders_page_inner(conn, vec![state], Some(local));
+    if let Some(error) = applied.error {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn apply_remote_orders_page_inner(
+    conn: &Connection,
+    orders: Vec<Value>,
+    force: Option<&str>,
+) -> RemoteOrdersPageApply {
     let mut reconciled = 0usize;
     let mut newest_updated_at: Option<String> = None;
     let mut newly_materialized_order_ids: Vec<String> = Vec::new();
@@ -14451,10 +14472,45 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
             &remote_order,
             &["cancellation_reason", "cancellationReason"],
         );
+        let cancelled_at = str_any(&remote_order, &["cancelled_at", "cancelledAt"]);
+        let has_cancelled_at = remote_order
+            .get("cancelled_at")
+            .or_else(|| remote_order.get("cancelledAt"))
+            .is_some();
 
         // Check if order has genuinely unsynced queue entries rather than
         // relying on orders.sync_status which can be reset by concurrent edits.
-        let has_pending_queue = has_outstanding_local_order_queue(conn, &local_id);
+        let mut has_pending_queue = has_outstanding_local_order_queue(conn, &local_id);
+        if force.is_none()
+            && has_pending_queue
+            && matches!(status, "cancelled" | "canceled")
+            && crate::order_state::eligible(conn, &local_id, false).is_ok()
+        {
+            match crate::order_state::adopt(conn, &local_id, &remote_order, false) {
+                Ok(_) => {
+                    reconciled += 1;
+                    reconciled_order_events.push((local_id.clone(), Some(status.to_string())));
+                    continue;
+                }
+                Err(error)
+                    if [
+                        "ORDER_HAS_LOCAL_WORK",
+                        "ORDER_STATUS_ROWS_INELIGIBLE",
+                        "PROTECTED_RECORD",
+                    ]
+                    .contains(&error.as_str()) =>
+                {
+                    has_pending_queue = true
+                }
+                Err(error) => {
+                    page_error = Some(format!("Failed to adopt server cancellation: {error}"));
+                    break;
+                }
+            }
+        }
+        if force == Some(local_id.as_str()) {
+            has_pending_queue = false;
+        }
 
         if has_pending_queue {
             // Still set supabase_id (needed for resolution)
@@ -14483,7 +14539,9 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                 .ok()
                 .flatten();
 
-            let should_update = if updated_at.is_empty() {
+            let should_update = if force == Some(local_id.as_str()) {
+                true
+            } else if updated_at.is_empty() {
                 local_updated_at.is_none()
             } else {
                 local_updated_at
@@ -14493,7 +14551,9 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
             };
 
             if should_update {
-                if should_preserve_local_cancelled(previous_status.as_deref(), status) {
+                if force.is_none()
+                    && should_preserve_local_cancelled(previous_status.as_deref(), status)
+                {
                     let _ = conn.execute(
                         "UPDATE orders
                          SET supabase_id = COALESCE(?1, supabase_id),
@@ -14582,7 +14642,10 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                              sync_status = 'synced',
                              last_synced_at = datetime('now'),
                              updated_at = ?6,
-                             cancellation_reason = COALESCE(?4, cancellation_reason),
+                             cancellation_reason = CASE WHEN ?17 THEN ?4 ELSE COALESCE(?4, cancellation_reason) END,
+                             cancelled_at = CASE WHEN ?18 THEN ?15 ELSE cancelled_at END,
+                             version = COALESCE(?16,version),
+                             remote_version = COALESCE(?16,remote_version),
                              items = COALESCE(?8, items),
                              total_amount = COALESCE(?9, total_amount),
                              total_amount_cents = COALESCE(?12, total_amount_cents),
@@ -14606,6 +14669,8 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                              OR (?12 IS NOT NULL AND COALESCE(total_amount_cents, -1) != ?12)
                              OR (?13 IS NOT NULL AND COALESCE(subtotal_cents, -1) != ?13)
                              OR (?14 IS NOT NULL AND COALESCE(tax_amount_cents, -1) != ?14)
+                             OR (?18 AND COALESCE(cancelled_at,'') != COALESCE(?15,''))
+                             OR (?16 IS NOT NULL AND COALESCE(remote_version,-1) != ?16)
                            )",
                     params![
                         remote_id,
@@ -14622,6 +14687,10 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                         remote_total_cents,
                         remote_subtotal_cents,
                         remote_tax_cents,
+                        cancelled_at,
+                        remote_order.get("version").and_then(Value::as_i64),
+                        force == Some(local_id.as_str()),
+                        has_cancelled_at,
                     ],
                 ) {
                     Ok(v) => v,
@@ -14714,6 +14783,45 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
     }
 }
 
+fn emit_adopted_order_events(db: &DbState, app: &impl TerminalEventSink) {
+    let observations: Vec<(String,String)> = db.conn.lock().ok().and_then(|c| {
+        let mut q=c.prepare("SELECT setting_key,setting_value FROM local_settings WHERE setting_category='sync' AND setting_key LIKE 'adopted_server_order:%' LIMIT 50").ok()?;
+        let rows=q.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).ok()?.collect::<rusqlite::Result<Vec<_>>>().ok()?;
+        Some(rows)
+    }).unwrap_or_default();
+    for (key, status) in observations {
+        let Some(id) = key.strip_prefix("adopted_server_order:") else {
+            continue;
+        };
+        app.emit_json(
+            "order_realtime_update",
+            get_order_by_id(db, id).unwrap_or_else(|_| json!({"orderId":id})),
+        );
+        let still_current = db
+            .conn
+            .lock()
+            .ok()
+            .and_then(|c| {
+                c.query_row(
+                    "SELECT status=?1 FROM orders WHERE id=?2",
+                    params![status, id],
+                    |r| r.get::<_, bool>(0),
+                )
+                .ok()
+            })
+            .unwrap_or(false);
+        if still_current {
+            app.emit_json(
+                "order_status_updated",
+                json!({"orderId":id,"status":status}),
+            );
+        }
+        if let Ok(c) = db.conn.lock() {
+            let _=c.execute("DELETE FROM local_settings WHERE setting_category='sync' AND setting_key=?1 AND setting_value=?2",params![key,status]);
+        }
+    }
+}
+
 fn enqueue_materialized_remote_order_prints(
     db: &DbState,
     local_id: &str,
@@ -14746,6 +14854,7 @@ async fn reconcile_remote_orders<H: SyncCycleHost>(
     api_key: &str,
     app: &H,
 ) -> Result<RemoteOrderReconcileOutcome, String> {
+    emit_adopted_order_events(db, app);
     let mut since_cursor =
         sanitize_orders_since_cursor(local_setting_get(db, "sync", "orders_since"));
     let _ = local_setting_set(db, "sync", "orders_since", &since_cursor);

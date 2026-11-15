@@ -473,6 +473,8 @@
       "failed": "Could not finish",
       "unknown": "Needs checking",
       "rolled_back": "Change rolled back"
-    }
+    },
+    "shiftVoidEmpty": "Delete check-in {{shift_id}}: no sale, payment or cash movement was made on it",
+    "orderAdoptServer": "Take order {{order_id}} as the server has it and close its refused status changes"
   }
 }

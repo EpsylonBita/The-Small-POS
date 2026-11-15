@@ -1744,7 +1744,7 @@ pub fn create_tables(conn: &Connection) -> Result<(), String> {
             -- claim. See `project_w10_h8_claim_generation_deferred.md`.
             claim_generation INTEGER NOT NULL DEFAULT 0,
             status          TEXT NOT NULL DEFAULT 'pending'
-                CHECK (status IN ('pending', 'processing', 'failed', 'conflict'))
+                CHECK (status IN ('pending', 'processing', 'failed', 'conflict', 'superseded'))
         );
 
         CREATE INDEX IF NOT EXISTS idx_parity_sq_priority_created
@@ -1804,6 +1804,8 @@ pub fn create_tables(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("sync_queue create_tables: {e}"))?;
 
+    conn.execute_batch(crate::order_state::REFUSED_STATUS_INDEX_SQL)
+        .map_err(|e| format!("refused order index: {e}"))?;
     info!("Parity sync queue tables initialized");
     Ok(())
 }
@@ -6531,9 +6533,11 @@ pub(crate) fn renderer_clear(conn: &Connection) -> Result<(), String> {
 
 /// Get the current number of items in the queue.
 pub fn get_length(conn: &Connection) -> Result<i64, String> {
-    conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
-        row.get(0)
-    })
+    conn.query_row(
+        "SELECT COUNT(*) FROM parity_sync_queue WHERE status<>'superseded'",
+        [],
+        |row| row.get(0),
+    )
     .map_err(|e| format!("sync_queue length: {e}"))
 }
 
@@ -6543,7 +6547,7 @@ pub(crate) fn renderer_get_length(conn: &Connection) -> Result<i64, String> {
     let sql = format!(
         "SELECT COUNT(*) FROM parity_sync_queue
          WHERE {generic_owner}
-           AND {ownership_exclusion}"
+           AND {ownership_exclusion} AND status<>'superseded'"
     );
     conn.query_row(&sql, [], |row| row.get(0))
         .map_err(|e| format!("sync_queue renderer length: {e}"))
@@ -6573,9 +6577,11 @@ fn oldest_queue_item_age_ms(
 /// Get detailed queue status including counts by status and oldest item age.
 pub fn get_status(conn: &Connection) -> Result<QueueStatus, String> {
     let total: i64 = conn
-        .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM parity_sync_queue WHERE status<>'superseded'",
+            [],
+            |row| row.get(0),
+        )
         .map_err(|e| format!("sync_queue status total: {e}"))?;
 
     let pending: i64 = conn
@@ -6630,7 +6636,7 @@ pub fn get_status(conn: &Connection) -> Result<QueueStatus, String> {
         )
         .map_err(|e| format!("sync_queue status dead_lettered: {e}"))?;
 
-    let oldest_item_age = oldest_queue_item_age_ms(conn, None)?;
+    let oldest_item_age = oldest_queue_item_age_ms(conn, Some("status<>'superseded'"))?;
 
     Ok(QueueStatus {
         total,
@@ -6652,7 +6658,7 @@ pub(crate) fn get_closeout_blocking_status(conn: &Connection) -> Result<QueueSta
     // A row a manager set aside no longer holds the Z (Ω4): it stays queued
     // and is listed on the Z as "not on the server".
     let predicate = format!(
-        "NOT {} AND {}",
+        "status<>'superseded' AND NOT {} AND {}",
         closeout_exempt_row_predicate(),
         set_aside_exclusion_sql("parity_sync_queue")
     );
@@ -6795,7 +6801,7 @@ pub(crate) fn renderer_get_status(conn: &Connection) -> Result<QueueStatus, Stri
                 END
          FROM parity_sync_queue
          WHERE {generic_owner}
-           AND {ownership_exclusion}"
+           AND {ownership_exclusion} AND status<>'superseded'"
     );
     conn.query_row(
         &sql,
@@ -7111,6 +7117,10 @@ fn with_live_generic_claim<T>(
 
 pub fn retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
     in_own_transaction(conn, |conn| {
+        let terminal: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE id=?1 AND status='superseded')",[item_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if terminal {
+            return Err("ORDER_STATUS_ALREADY_ADOPTED".into());
+        }
         quarantine_existing_refused_table_batches(conn)?;
         refuse_terminal_table_retry(conn, item_id)?;
         let semantic_reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
@@ -7188,6 +7198,16 @@ pub(crate) fn support_retry_dependencies_ready(
 }
 
 pub(crate) fn renderer_retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
+    let terminal: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE id=?1 AND status='superseded')",
+            [item_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if terminal {
+        return Err("ORDER_STATUS_ALREADY_ADOPTED".into());
+    }
     retry_transaction(conn, |conn| {
         quarantine_existing_refused_table_batches(conn)?;
         refuse_terminal_table_retry(conn, item_id)?;
@@ -7222,7 +7242,7 @@ pub(crate) fn renderer_retry_item(conn: &Connection, item_id: &str) -> Result<()
                  next_retry_at = NULL, last_attempt = NULL, retry_delay_ms = ?1
              WHERE id = ?2
                AND {generic_owner}
-               AND {ownership_exclusion}"
+               AND {ownership_exclusion} AND status<>'superseded'"
         );
         conn.execute(
             &update_sql,
@@ -14764,7 +14784,7 @@ fn project_insert_ack_lines(
     let newer: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND id<>?2
-             AND status NOT IN ('completed','synced'))",
+             AND status NOT IN ('completed','synced','superseded'))",
             params![item.record_id, item.id],
             |row| row.get(0),
         )
@@ -16888,6 +16908,14 @@ where
         None
     };
 
+    if selection == QueueProcessSelection::All
+        && visibility == QueueProcessVisibility::InternalAll
+        && rate_limit_pause_remaining(api_base_url).is_none()
+    {
+        let _heal_lease = acquire_claim_gate().map_err(|_| "PARITY_CLAIM_BLOCKED")?;
+        crate::order_state::heal_pass(conn, api_base_url, api_key).await;
+    }
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .build()
@@ -18385,6 +18413,23 @@ where
                     let Some((resolved, failure)) = outcome else {
                         continue;
                     };
+                    if !resolved
+                        && item.table_name == "orders"
+                        && crate::order_state::status_only(&item.operation, &item.data)
+                        && crate::order_state::transition_refused(status, &response_body)
+                        && crate::order_state::heal_one(
+                            conn,
+                            api_base_url,
+                            api_key,
+                            &item.record_id,
+                        )
+                        .await
+                        .is_ok()
+                    {
+                        processed += 1;
+                        telemetry.record_outcome(&item, "processed", "server_order_state_adopted");
+                        continue;
+                    }
                     if resolved {
                         processed += 1;
                         telemetry.record_outcome(&item, "processed", "payment_total_auto_repaired");
@@ -18672,6 +18717,9 @@ fn parity_fiscal_refusal_code(response_body: &str) -> Option<String> {
 /// recovery and diagnostics already match.
 fn parity_client_error_code(table_name: &str, status: u16, response_body: &str) -> String {
     let base = format!("HTTP_{status}_CLIENT_ERROR");
+    if table_name == "orders" && crate::order_state::transition_refused(status, response_body) {
+        return format!("{base}:ORDER_STATUS_TRANSITION_REFUSED");
+    }
     let code = match table_name {
         "customers" | "customer_addresses" => parity_server_machine_code(response_body),
         "fiscal_submission" => parity_fiscal_refusal_code(response_body),

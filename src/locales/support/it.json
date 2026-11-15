@@ -473,6 +473,8 @@
       "failed": "Non completato",
       "unknown": "Da verificare",
       "rolled_back": "Modifica annullata"
-    }
+    },
+    "shiftVoidEmpty": "Elimina la timbratura {{shift_id}}: nessuna vendita, pagamento o movimento di cassa",
+    "orderAdoptServer": "Adotta lo stato del server per l’ordine {{order_id}} e chiudi le modifiche di stato rifiutate"
   }
 }

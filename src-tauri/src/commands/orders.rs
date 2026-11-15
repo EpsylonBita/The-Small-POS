@@ -7442,7 +7442,7 @@ fn validate_journaled_edit_target_superseding(
             .as_deref(),
         &replacements,
     )?;
-    let prior_pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND status NOT IN ('completed','synced') AND json_valid(data) AND json_extract(data,'$.settlement_context.version')=1 AND COALESCE(json_extract(data,'$.client_event_id'),'')<>?2)",rusqlite::params![order,payload.client_event_id.as_deref().unwrap_or("")],|row|row.get(0)).map_err(crate::edit_settlement_recovery::storage_error)?;
+    let prior_pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND status NOT IN ('completed','synced','superseded') AND json_valid(data) AND json_extract(data,'$.settlement_context.version')=1 AND COALESCE(json_extract(data,'$.client_event_id'),'')<>?2)",rusqlite::params![order,payload.client_event_id.as_deref().unwrap_or("")],|row|row.get(0)).map_err(crate::edit_settlement_recovery::storage_error)?;
     if prior_pending {
         return Err("EDIT_PREVIOUS_SETTLEMENT_SYNC_REQUIRED".into());
     }
@@ -7753,7 +7753,7 @@ fn tag_edit_settlement_child(
     order: &str,
     event: &str,
 ) -> Result<(), String> {
-    let count=conn.execute("UPDATE parity_sync_queue SET data=json_set(data,'$.parentEditEventId',?1,'$.parentEditOrderId',?2) WHERE table_name=?3 AND record_id=?4 AND status NOT IN ('completed','synced')",
+    let count=conn.execute("UPDATE parity_sync_queue SET data=json_set(data,'$.parentEditEventId',?1,'$.parentEditOrderId',?2) WHERE table_name=?3 AND record_id=?4 AND status NOT IN ('completed','synced','superseded')",
         rusqlite::params![event,order,table,id]).map_err(crate::edit_settlement_recovery::storage_error)?;
     if count == 0 {
         return Err("EDIT_SETTLEMENT_CHILD_OUTBOX_REQUIRED".into());

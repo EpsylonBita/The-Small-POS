@@ -10,6 +10,7 @@ pub mod confirmed_actions;
 pub mod confirmed_hash;
 pub mod confirmed_restore;
 pub mod confirmed_sql;
+mod confirmed_state_actions;
 pub mod contracts;
 pub mod critical_op;
 pub mod db;
