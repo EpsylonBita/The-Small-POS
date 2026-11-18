@@ -55,6 +55,7 @@ import { ProgressStepper, Step, StepStatus } from '../ui/ProgressStepper';
 import { ConfirmDialog, ConfirmVariant } from '../ui/ConfirmDialog';
 import { ErrorAlert } from '../ui/ErrorAlert';
 import { UnsettledPaymentBlockersPanel } from '../ui/UnsettledPaymentBlockersPanel';
+import { ShiftOrderSyncNotices } from '../recovery/OrderSyncNotice';
 import { useKeyboardShortcut } from '../../hooks/useKeyboardShortcut';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import {
@@ -3130,9 +3131,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
     try {
       // Resolve terminal + branch from TerminalConfig first (avoid stale 'local-branch')
-      let resolvedTerminalId: string | undefined = staff.terminalId;
-      let resolvedBranchId: string | undefined = staff.branchId;
-      let resolvedOrganizationId = normalizeContextId(staff.organizationId);
+      let resolvedTerminalId: string | undefined = normalizeContextId(getSetting?.('terminal', 'terminal_id'));
+      let resolvedBranchId: string | undefined = normalizeContextId(getSetting?.('terminal', 'branch_id'));
+      let resolvedOrganizationId = normalizeContextId(getSetting?.('terminal', 'organization_id'));
       try { resolvedTerminalId = (await bridge.terminalConfig.getTerminalId()) || resolvedTerminalId; } catch { }
       try { resolvedBranchId = (await bridge.terminalConfig.getBranchId()) || resolvedBranchId; } catch { }
       try {
@@ -7598,6 +7599,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           </ShiftRevealContent></motion.div>}
           </AnimatePresence>
           <AnimatePresence initial={false}>
+          {mode === 'checkout' && <ShiftOrderSyncNotices onOpen={onClose} />}
           {checkoutPaymentBlockers.length > 0 && <motion.div key="reveal-41" {...revealMotion}><ShiftRevealContent>
             <UnsettledPaymentBlockersPanel
               blockers={checkoutPaymentBlockers}

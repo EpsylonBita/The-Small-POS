@@ -140,6 +140,56 @@ pub fn health_monitor_failed_candidate(
 pub fn classify_incidents(health: &Value) -> Vec<PosIncidentCandidate> {
     let terminal_id = terminal_id_from_health(health);
     let mut incidents = Vec::new();
+    if health["orderNoticeGate"]["status"] == "unavailable"
+        || health["orderNoticeGate"]["pending_report"] == true
+    {
+        // The gate's own classifier wrote this code: it names the kind of
+        // failure. Anything else is replaced, never forwarded.
+        let code = health["orderNoticeGate"]["code"]
+            .as_str()
+            .filter(|code| crate::order_notice_recovery::is_notice_failure_code(code))
+            .unwrap_or("ORDER_NOTICE_OBSERVATION_FAILED")
+            .to_string();
+        let refusals = health["orderNoticeGate"]["refusal_count"]
+            .as_u64()
+            .unwrap_or(1);
+        incidents.push(PosIncidentCandidate {
+            issue_code: "sync.active_error".into(),
+            severity: PosIncidentSeverity::High,
+            fingerprint: format!(
+                "{terminal_id}:sync.active_error:order_issue:issue_check_unavailable:{code}"
+            ),
+            summary: "The till could not check order issues before completion.".into(),
+            // Same keys as the Android report; `order_issue_count` is the
+            // count the alert and the super-admin view read.
+            evidence: json!({"issue_kind":"issue_check_unavailable","refusal_code":code,
+                "refusal_count":refusals,"order_issue_count":refusals}),
+            should_report: true,
+        });
+    }
+    let mut groups: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
+    if let Some(issues) = health["orderIssueEvidence"].as_array() {
+        for issue in issues {
+            if let (Some(kind), Some(code)) =
+                (issue["issue_kind"].as_str(), issue["refusal_code"].as_str())
+            {
+                groups
+                    .entry((kind.into(), code.into()))
+                    .or_default()
+                    .push(issue.clone());
+            }
+        }
+    }
+    for ((kind, code), issues) in groups {
+        incidents.push(PosIncidentCandidate {
+            issue_code: "sync.active_error".into(),
+            severity: PosIncidentSeverity::High,
+            fingerprint: format!("{terminal_id}:sync.active_error:order_issue:{kind}:{code}"),
+            summary: "An order needs attention after an unsuccessful change.".into(),
+            evidence: crate::order_notice_evidence::report_payload(&issues),
+            should_report: true,
+        });
+    }
 
     let financial_failed =
         i64_path(health, &["financialQueueStatus", "totalFailed"]).max(i64_path(
@@ -824,6 +874,9 @@ fn write_open_reports(db: &db::DbState, open: &OpenIncidentReports) {
 /// whose `readFailures` names the reads that failed. `None`: an unknown code.
 fn incident_sources(issue_code: &str) -> Option<&'static [&'static str]> {
     Some(match issue_code {
+        // Read-only compatibility: close fingerprints already reported by the
+        // earlier desktop build. New reports use sync.active_error below.
+        "sync.order_issue_open" => &["orderIssueEvidence"],
         "sync.failed_financial_queue" => &["financialQueueStatus", "syncStatusSummary"],
         "sync.active_error" | "sync.remote_auth_paused" => &["syncStatusSummary"],
         "sync.blocked_backlog" => &[
@@ -860,6 +913,12 @@ fn is_unknown_terminal_fingerprint(fingerprint: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(':'))
 }
 
+fn is_order_issue_fingerprint(fingerprint: &str) -> bool {
+    let mut parts = fingerprint.splitn(5, ':');
+    matches!((parts.next(),parts.next(),parts.next(),parts.next(),parts.next()),
+        (Some(terminal),Some("sync.active_error"),Some("order_issue"),Some(_),Some(_)) if !terminal.is_empty())
+}
+
 /// The fingerprints this observation cannot speak for: everything while the
 /// terminal id is the `unknown-terminal` fallback (every fingerprint changes),
 /// the incidents of a read that failed (`readFailures`), and an unknown code
@@ -867,6 +926,11 @@ fn is_unknown_terminal_fingerprint(fingerprint: &str) -> bool {
 /// PR #367, 15/10/2026: a failed financial-queue read could have auto-resolved
 /// a critical incident).
 pub fn unreadable_fingerprints(health: &Value) -> impl Fn(&str) -> bool {
+    let gate_read_succeeded = health["orderNoticeGate"]["status"] == "clear"
+        && health["orderNoticeGate"]["pending_report"] != true;
+    let order_evidence_unavailable = health["observerFailures"]
+        .as_array()
+        .is_some_and(|failures| failures.iter().any(|source| source == "orderIssueEvidence"));
     let failures: BTreeSet<String> = health
         .get("readFailures")
         .and_then(Value::as_array)
@@ -883,7 +947,25 @@ pub fn unreadable_fingerprints(health: &Value) -> impl Fn(&str) -> bool {
         if !terminal_known || is_unknown_terminal_fingerprint(fingerprint) {
             return true;
         }
-        match incident_sources(incident_issue_code(fingerprint)) {
+        if is_order_issue_fingerprint(fingerprint)
+            && fingerprint.split(':').nth(3) == Some("issue_check_unavailable")
+        {
+            // This independent process observation does not read the failed
+            // notice tables. Only a later gate read proves it can clear.
+            return !gate_read_succeeded;
+        }
+        if order_evidence_unavailable
+            && (is_order_issue_fingerprint(fingerprint)
+                || incident_issue_code(fingerprint) == "sync.order_issue_open")
+        {
+            return true;
+        }
+        let sources = if is_order_issue_fingerprint(fingerprint) {
+            Some(&["orderIssueEvidence"][..])
+        } else {
+            incident_sources(incident_issue_code(fingerprint))
+        };
+        match sources {
             Some(sources) => sources.iter().any(|source| failures.contains(*source)),
             None => !failures.is_empty(),
         }
@@ -1042,6 +1124,26 @@ pub fn should_send_candidate(
         return false;
     }
 
+    if is_order_issue_fingerprint(&candidate.fingerprint) {
+        let issues = crate::order_notice_evidence::report_entries(&candidate.evidence);
+        let all_saving = {
+            !issues.is_empty()
+                && issues.iter().all(|issue| {
+                    issue["automatic_attempt"]["ran"] == true
+                        && matches!(
+                            issue["automatic_attempt"]["outcome"].as_str(),
+                            Some("pending")
+                        )
+                        && issue["open_for_ms"].as_i64().unwrap_or(600_000) < 600_000
+                })
+        };
+        // Keep observing the fingerprint while proof is pending, but do not
+        // open a new incident for a short automatic save in progress.
+        if all_saving && !read_open_reports(db).contains_key(&candidate.fingerprint) {
+            return false;
+        }
+    }
+
     match candidate.severity {
         PosIncidentSeverity::Critical => {
             if is_suppressed(db, &candidate.fingerprint, CRITICAL_SUPPRESS_MINUTES) {
@@ -1056,6 +1158,12 @@ pub fn should_send_candidate(
             if count < 2 {
                 store_status(db, &candidate.fingerprint, "waiting");
                 return false;
+            }
+            if is_order_issue_fingerprint(&candidate.fingerprint)
+                && read_setting(db, &order_evidence_key(candidate)).as_deref()
+                    != Some(order_evidence_signature(candidate).as_str())
+            {
+                return true;
             }
             if is_suppressed(db, &candidate.fingerprint, HIGH_SUPPRESS_MINUTES) {
                 store_status(db, &candidate.fingerprint, "suppressed");
@@ -1072,6 +1180,26 @@ pub fn should_send_candidate(
         }
         PosIncidentSeverity::Info => false,
     }
+}
+
+fn order_evidence_key(candidate: &PosIncidentCandidate) -> String {
+    format!(
+        "incident_order_evidence.{}",
+        fingerprint_hash(&candidate.fingerprint)
+    )
+}
+fn order_evidence_signature(candidate: &PosIncidentCandidate) -> String {
+    let mut issues: Vec<Value> = crate::order_notice_evidence::report_entries(&candidate.evidence)
+        .into_iter()
+        .cloned()
+        .collect();
+    for issue in issues.iter_mut() {
+        if let Some(fields) = issue.as_object_mut() {
+            fields.remove("open_for_ms");
+        }
+    }
+    issues.sort_by_key(Value::to_string);
+    fingerprint_hash(&json!(issues).to_string())
 }
 
 pub async fn send_candidate_report(
@@ -1091,7 +1219,11 @@ pub async fn send_candidate_report_with_bundle(
     use base64::Engine;
     use sha2::{Digest, Sha256};
     let about = diagnostics::get_about_info();
-    let redacted_health = diagnostics::redact_remote_diagnostics_value(health.clone());
+    let mut public_health = health.clone();
+    if let Some(fields) = public_health.as_object_mut() {
+        fields.remove("orderNotices");
+    }
+    let redacted_health = diagnostics::redact_remote_diagnostics_value(public_health);
     let mut body = json!({
         "severity": candidate.severity.as_str(),
         "issueCode": candidate.issue_code,
@@ -1140,6 +1272,13 @@ pub async fn send_candidate_report_with_bundle(
                 }
             }
             record_send_success(db, &candidate.fingerprint, &response);
+            if is_order_issue_fingerprint(&candidate.fingerprint) {
+                write_setting(
+                    db,
+                    &order_evidence_key(candidate),
+                    &order_evidence_signature(candidate),
+                );
+            }
             Ok(response)
         }
         Err(error) => {
@@ -1150,6 +1289,11 @@ pub async fn send_candidate_report_with_bundle(
 }
 
 fn record_send_success(db: &db::DbState, fingerprint: &str, response: &Value) {
+    if is_order_issue_fingerprint(fingerprint)
+        && fingerprint.split(':').nth(3) == Some("issue_check_unavailable")
+    {
+        crate::order_notice_gate::reported(&db.db_path);
+    }
     let now = Utc::now().to_rfc3339();
     let key_hash = fingerprint_hash(fingerprint);
     let incident_id = response
@@ -1403,6 +1547,304 @@ fn printer_failed_job_count(health: &Value) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn order_notice_first_refusal_is_reported_even_if_the_next_gate_read_succeeds_before_health() {
+        let dir = crate::tests::harness::TempDir::new();
+        let path = dir.path().join("gate-first.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        crate::order_notice_gate::record(&conn, Some("ORDER_NOTICE_READ_FAILED: private SQL"));
+        crate::order_notice_gate::record(&conn, None);
+        let mut health = term_health();
+        health["orderNoticeGate"] = crate::order_notice_gate::health(&path);
+        assert_eq!(health["orderNoticeGate"]["status"], "clear");
+        let candidate = classify_incidents(&health).remove(0);
+        assert!(candidate
+            .fingerprint
+            .ends_with(":issue_check_unavailable:ORDER_NOTICE_READ_FAILED"));
+        assert!(unreadable_fingerprints(&health)(&candidate.fingerprint));
+        let mut db = test_db();
+        db.db_path = path.clone();
+        assert!(!should_send_candidate(&db, &candidate, false));
+        assert!(should_send_candidate(&db, &candidate, false));
+        record_send_success(&db, &candidate.fingerprint, &json!({}));
+        health["orderNoticeGate"] = crate::order_notice_gate::health(&path);
+        assert!(classify_incidents(&health).is_empty());
+        assert!(!unreadable_fingerprints(&health)(&candidate.fingerprint));
+    }
+
+    #[test]
+    fn order_notice_gate_incident_survives_failed_tables_and_clears_only_after_gate_success() {
+        use crate::commands::orders::driver_restore_tests as fixture;
+        let memory = fixture::test_conn();
+        fixture::paid_delivery_order(&memory);
+        let dir = crate::tests::harness::TempDir::new();
+        let path = dir.path().join("gate.sqlite");
+        memory
+            .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+            .unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='parity_sync_queue'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute_batch("DROP TABLE parity_sync_queue").unwrap();
+        let gate = || {
+            crate::order_notice_recovery::require_no_open_notice(&conn, fixture::ORDER, "completed")
+        };
+        assert_eq!(gate(), Err("ORDER_NOTICE_CHECK_UNAVAILABLE".into()));
+        let mut health = term_health();
+        health["observerFailures"] = json!(["orderIssueEvidence"]);
+        health["orderNoticeGate"] = crate::order_notice_gate::health(&path);
+        let candidate = classify_incidents(&health).remove(0);
+        assert_eq!(
+            candidate.fingerprint,
+            "term-1:sync.active_error:order_issue:issue_check_unavailable:NOTICE_TABLE_MISSING_PARITY_SYNC_QUEUE"
+        );
+        assert_eq!(
+            candidate.evidence,
+            json!({"issue_kind":"issue_check_unavailable","refusal_code":"NOTICE_TABLE_MISSING_PARITY_SYNC_QUEUE","refusal_count":1,"order_issue_count":1})
+        );
+        // A code that did not come from the classifier is never forwarded.
+        let mut forged = health.clone();
+        forged["orderNoticeGate"]["code"] = json!("no such table: customers");
+        assert!(classify_incidents(&forged)[0]
+            .fingerprint
+            .ends_with(":issue_check_unavailable:ORDER_NOTICE_OBSERVATION_FAILED"));
+        let db = test_db();
+        assert!(!should_send_candidate(&db, &candidate, false));
+        assert!(should_send_candidate(&db, &candidate, false));
+        record_send_success(&db, &candidate.fingerprint, &json!({}));
+        crate::order_notice_gate::reported(&path);
+        write_setting(
+            &db,
+            &order_evidence_key(&candidate),
+            &order_evidence_signature(&candidate),
+        );
+        assert!(gate().is_err());
+        health["orderNoticeGate"] = crate::order_notice_gate::health(&path);
+        let repeated = classify_incidents(&health).remove(0);
+        assert_eq!(repeated.fingerprint, candidate.fingerprint);
+        assert!(!should_send_candidate(&db, &repeated, false));
+        let now = Utc::now();
+        let mut open = BTreeMap::new();
+        mark_incident_reported(&mut open, &candidate.fingerprint, now);
+        let unreadable = unreadable_fingerprints(&health);
+        for _ in 0..3 {
+            assert!(
+                advance_incident_clearance(&mut open, &BTreeSet::new(), &unreadable, now)
+                    .is_empty()
+            );
+        }
+        conn.execute_batch(&schema).unwrap();
+        gate().unwrap();
+        health["orderNoticeGate"] = crate::order_notice_gate::health(&path);
+        assert!(classify_incidents(&health).is_empty());
+        let unreadable = unreadable_fingerprints(&health);
+        assert!(
+            advance_incident_clearance(&mut open, &BTreeSet::new(), &unreadable, now).is_empty()
+        );
+        assert_eq!(
+            advance_incident_clearance(&mut open, &BTreeSet::new(), &unreadable, now),
+            vec![candidate.fingerprint]
+        );
+    }
+
+    #[test]
+    fn order_issue_report_updates_attempt_evidence_without_age_only_spam() {
+        let db = test_db();
+        let mut health = term_health();
+        health["orderIssueEvidence"] = json!([{"issue_kind":"change_refused","refusal_code":"ORDER_EDIT_CONFLICT","open_for_ms":5,"automatic_attempt":{"ran":false},"employee_attempt":{"ran":false}}]);
+        let original = classify_incidents(&health).remove(0);
+        assert!(!should_send_candidate(&db, &original, false));
+        assert!(should_send_candidate(&db, &original, false));
+        record_send_success(&db, &original.fingerprint, &json!({}));
+        write_setting(
+            &db,
+            &order_evidence_key(&original),
+            &order_evidence_signature(&original),
+        );
+        health["orderIssueEvidence"][0]["open_for_ms"] = json!(80);
+        let aged = classify_incidents(&health).remove(0);
+        assert!(!should_send_candidate(&db, &aged, false));
+        health["orderIssueEvidence"][0]["employee_attempt"] =
+            json!({"ran":true,"outcome":"failed","reason":"ORDER_EDIT_CONFLICT"});
+        let changed = classify_incidents(&health).remove(0);
+        assert!(should_send_candidate(&db, &changed, false));
+        assert_eq!(original.fingerprint, changed.fingerprint);
+    }
+    #[test]
+    fn order_issue_reports_group_by_kind_and_code_and_clear_only_on_fresh_proof() {
+        let mut health = super::json!({"terminalContext":{"terminalId":"term-1"},"orderIssueEvidence":[
+            {"issue_kind":"customer_correction_refused","refusal_code":"UNKNOWN_CONFLICT_REVIEW"},
+            {"issue_kind":"customer_correction_refused","refusal_code":"UNKNOWN_CONFLICT_REVIEW"},
+            {"issue_kind":"change_refused","refusal_code":"UNKNOWN_CONFLICT_REVIEW"},
+            {"issue_kind":"change_refused","refusal_code":"ORDER_EDIT_CONFLICT"}
+        ]});
+        let candidates = super::classify_incidents(&health);
+        assert_eq!(candidates.len(), 3);
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.issue_code == "sync.active_error"
+                && candidate
+                    .fingerprint
+                    .starts_with("term-1:sync.active_error:order_issue:")));
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.fingerprint.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        let now = chrono::Utc::now();
+        let mut open = super::OpenIncidentReports::new();
+        for candidate in &candidates {
+            super::mark_incident_reported(&mut open, &candidate.fingerprint, now);
+        }
+        health["orderIssueEvidence"] = super::json!([]);
+        health["readFailures"] = super::json!(["orderIssueEvidence"]);
+        let absent = std::collections::BTreeSet::new();
+        for _ in 0..3 {
+            assert!(super::advance_incident_clearance(
+                &mut open,
+                &absent,
+                &super::unreadable_fingerprints(&health),
+                now
+            )
+            .is_empty());
+        }
+        health["readFailures"] = super::json!([]);
+        assert!(super::advance_incident_clearance(
+            &mut open,
+            &absent,
+            &super::unreadable_fingerprints(&health),
+            now
+        )
+        .is_empty());
+        assert_eq!(
+            super::advance_incident_clearance(
+                &mut open,
+                &absent,
+                &super::unreadable_fingerprints(&health),
+                now
+            )
+            .len(),
+            3
+        );
+    }
+    #[test]
+    fn order_issue_reports_clear_one_pair_independently_of_general_sync_errors() {
+        assert!(is_order_issue_fingerprint(
+            "t:sync.active_error:order_issue:payment_not_on_server:AWAITING_CONFIRMATION"
+        ));
+        assert!(!is_order_issue_fingerprint("t:sync.active_error:general"));
+        assert!(!is_order_issue_fingerprint(
+            "t:sync.active_error:order_issue"
+        ));
+        assert!(!is_order_issue_fingerprint(
+            ":sync.active_error:order_issue:kind:code"
+        ));
+        let health = json!({"terminalContext":{"terminalId":"term-1"},
+            "syncStatusSummary":{"syncErrors":1,"error":"network failure"},
+            "orderIssueEvidence":[{"issue_kind":"change_refused","refusal_code":"ORDER_EDIT_CONFLICT"},
+                {"issue_kind":"payment_not_on_server","refusal_code":"AWAITING_CONFIRMATION"}]});
+        let candidates = classify_incidents(&health);
+        assert_eq!(candidates.len(), 3);
+        let removed = "term-1:sync.active_error:order_issue:change_refused:ORDER_EDIT_CONFLICT";
+        let mut open = OpenIncidentReports::new();
+        let now = Utc::now();
+        for candidate in &candidates {
+            mark_incident_reported(&mut open, &candidate.fingerprint, now);
+        }
+        let observed = candidates
+            .iter()
+            .map(|c| c.fingerprint.clone())
+            .filter(|fp| fp != removed)
+            .collect();
+        assert!(advance_incident_clearance(
+            &mut open,
+            &observed,
+            &unreadable_fingerprints(&health),
+            now
+        )
+        .is_empty());
+        assert_eq!(
+            advance_incident_clearance(
+                &mut open,
+                &observed,
+                &unreadable_fingerprints(&health),
+                now
+            ),
+            vec![removed.to_string()]
+        );
+        let mut failed = health.clone();
+        failed["readFailures"] = json!(["orderIssueEvidence"]);
+        assert!(unreadable_fingerprints(&failed)(removed));
+        let general = candidates
+            .iter()
+            .find(|c| !is_order_issue_fingerprint(&c.fingerprint))
+            .unwrap();
+        assert!(!unreadable_fingerprints(&failed)(&general.fingerprint));
+        failed["readFailures"] = json!(["syncStatusSummary"]);
+        assert!(!unreadable_fingerprints(&failed)(removed));
+        assert!(unreadable_fingerprints(&failed)(&general.fingerprint));
+    }
+
+    #[test]
+    fn notice_containment_evidence_failure_keeps_only_order_reports_unreadable() {
+        let health = json!({"terminalContext":{"terminalId":"term-1"},
+            "readFailures":[], "observerFailures":["orderNotices","orderIssueEvidence"],
+            "orderIssueEvidence":null});
+        let unreadable = unreadable_fingerprints(&health);
+        let order = "term-1:sync.active_error:order_issue:change_refused:ORDER_EDIT_CONFLICT";
+        let general = "term-1:sync.active_error:general";
+        assert!(unreadable(order));
+        assert!(!unreadable(general));
+        assert!(!unreadable("term-1:sync.blocked_backlog:orders"));
+        let now = Utc::now();
+        let mut open = OpenIncidentReports::new();
+        mark_incident_reported(&mut open, order, now);
+        mark_incident_reported(&mut open, general, now);
+        assert!(
+            advance_incident_clearance(&mut open, &Default::default(), &unreadable, now).is_empty()
+        );
+        assert_eq!(
+            advance_incident_clearance(&mut open, &Default::default(), &unreadable, now),
+            vec![general.to_string()]
+        );
+    }
+
+    #[test]
+    fn order_issue_reports_admission_and_updates_include_overflow_pages() {
+        let db = test_db();
+        let mut issues = vec![
+            json!({"issue_kind":"change_refused","refusal_code":"ORDER_EDIT_CONFLICT","open_for_ms":5000,"automatic_attempt":{"ran":true,"outcome":"pending","reason":"AWAITING_CONFIRMATION"}});
+            51
+        ];
+        let mut health = term_health();
+        health["orderIssueEvidence"] = json!(issues);
+        let saving = classify_incidents(&health).remove(0);
+        assert!(!should_send_candidate(&db, &saving, false));
+        issues[50]["automatic_attempt"]["outcome"] = json!("failed");
+        health["orderIssueEvidence"] = json!(issues);
+        let failed = classify_incidents(&health).remove(0);
+        assert!(!should_send_candidate(&db, &failed, false));
+        assert!(should_send_candidate(&db, &failed, false));
+        let before = order_evidence_signature(&failed);
+        let mut aged = failed.clone();
+        aged.evidence["order_issue_pages"][0][0]["open_for_ms"] = json!(9000);
+        assert_eq!(order_evidence_signature(&aged), before);
+        aged.evidence["order_issue_pages"][0][0]["automatic_attempt"]["reason"] =
+            json!("ORDER_VERSION_CONFLICT");
+        assert_ne!(order_evidence_signature(&aged), before);
+        // An already open pair stays observed while its replacement is pending.
+        note_reported(&db, &saving.fingerprint, Utc::now());
+        assert!(note_observation(&db, &health, &[saving.clone()], Utc::now()).is_empty());
+        assert!(note_observation(&db, &health, &[saving], Utc::now()).is_empty());
+    }
     use super::*;
 
     /// The failure counter above cannot see this: a wedged print lane never

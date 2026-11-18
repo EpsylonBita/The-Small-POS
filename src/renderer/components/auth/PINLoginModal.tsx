@@ -140,7 +140,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
             <p className="text-sm font-semibold">
               {t('auth.login.pinConfirmationRequired', 'PIN confirmation required')}
             </p>
-            <p className="mt-1 text-sm leading-4 liquid-glass-modal-text-muted">
+            <p className="mt-1 text-sm leading-4 liquid-glass-modal-text-muted [overflow-wrap:anywhere]">
               {subtitleToShow}
             </p>
           </div>

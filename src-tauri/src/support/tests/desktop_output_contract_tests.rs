@@ -688,6 +688,7 @@ fn all_desktop_tier_one_real_collectors_conform_to_closed_goldens() {
     let tools = super::Tools {
         live: db.db_path().into(),
         replicas: Default::default(),
+        personal_replicas: Default::default(),
         network: Default::default(),
         personal_mask: Default::default(),
     };
@@ -700,7 +701,29 @@ fn all_desktop_tier_one_real_collectors_conform_to_closed_goldens() {
         ),
     ] {
         let command=serde_json::from_value(json!({"command_id":"your-command","session_id":"your-session","sequence":1,"kind":kind,"tier":1,"payload":data,"payload_sha256":"your-hash","idempotency_key":"your-key","call_id":"your-call","created_at":"2026-11-01T00:00:00Z","expires_at":"2026-11-01T00:01:00Z","server_time":"2026-11-01T00:00:00Z","approval":null})).unwrap();
-        let value = tools.run(&command, &permit).unwrap();
+        let value = if kind == "till_sql_refresh_replica" {
+            assert_eq!(
+                tools.run(&command, &permit).unwrap_err(),
+                "REPLICA_BUILDING"
+            );
+            let until = Instant::now() + Duration::from_secs(10);
+            let r = loop {
+                match tools.replicas.lock().unwrap().get(
+                    db.db_path(),
+                    "your-session",
+                    false,
+                    &permit,
+                ) {
+                    Err(code) if code == "REPLICA_BUILDING" && Instant::now() < until => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    result => break result.unwrap(),
+                }
+            };
+            super::evidence_meta(json!({"replica_taken_at":r.taken_at,"databases":["main"],"build_ms":0,"size_bytes":std::fs::metadata(&r.path).unwrap().len()}), &Default::default()).unwrap()
+        } else {
+            tools.run(&command, &permit).unwrap()
+        };
         conforms(kind, &value);
         if kind == "till_sql_schema" {
             assert!(value["tables"]

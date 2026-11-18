@@ -1,3 +1,5 @@
+import { announceOrderNoticeMoveRefusal } from '../services/OrderNoticeStatusGuard';
+import { isOrderOpenNoticeRefusal, orderNoticeRefusalCode, type OrderNoticeRefusalCode } from '../../lib/order-open-notice';
 import { platformCancellationFailureMessageKey, platformOrderCancellationError } from '../../../../shared/platforms/order-cancellation';
 import { createElement } from 'react';
 import { create } from 'zustand';
@@ -717,7 +719,7 @@ interface UpdateOrderStatusDetailedResult {
    * refused the change at its ceiling and nothing changed (13/10/2026);
    * `errorMessage` says so in the operator's language.
    */
-  errorCode?: 'ORDER_HAS_PAYMENTS' | 'ORDER_PAYMENT_NOT_RECORDED' | SyncQueueFullErrorCode;
+  errorCode?: 'ORDER_HAS_PAYMENTS' | 'ORDER_PAYMENT_NOT_RECORDED' | OrderNoticeRefusalCode | SyncQueueFullErrorCode;
 }
 
 /** The till's refusal to cancel an order money was taken on. */
@@ -1699,6 +1701,10 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         get()._setLoading(operation, false);
         return { success: true };
       } catch (error) {
+        if (isOrderOpenNoticeRefusal(error)) {
+          get()._setLoading(operation, false);
+          return { success: false, errorCode: orderNoticeRefusalCode(error) };
+        }
         const paymentIntegrityPayload =
           ((error as any)?.paymentIntegrityPayload as PaymentIntegrityErrorPayload | undefined) ||
           extractPaymentIntegrityPayload((error as any)?.details) ||
@@ -2355,6 +2361,9 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       });
 
 
+          if (isOrderOpenNoticeRefusal(result)) {
+            announceOrderNoticeMoveRefusal([{ id: orderId, number: targetOrder?.orderNumber || targetOrder?.order_number || orderId, errorCode: orderNoticeRefusalCode(result) }], i18n.t.bind(i18n));
+          }
           get()._invalidateCache();
           return true;
         }

@@ -1172,6 +1172,7 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 0.75rem;
   padding: 1.5rem 2rem;
   border-bottom: 1px solid var(--modal-glass-line);
   background: transparent !important;
@@ -1183,7 +1184,12 @@ html:not(.dark) .plugin-setup-modal .liquid-glass-modal-secondary {
   background: transparent !important;
 }
 
+/* The title wraps inside the header and may break a word that cannot fit (Tomikro 17/11/2026: a title with no
+   break point made the header wider than the shell, and focus on the close button scrolled the whole window
+   sideways, so only the keypad's last column showed). */
 .liquid-glass-modal-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 1.625rem;
   font-weight: 700;
   color: #0f172a !important;  /* Slate-900 - vivid dark */

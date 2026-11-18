@@ -15,19 +15,15 @@
  * - **Remove / re-scan / reorder are always there and never required.** Every
  *   one of them is skippable on the happy path; the primary Done button stays
  *   reachable without touching any of them (R5.2, R15.6).
- * - **The page cap is a sentence, not a wall.** Hitting ten pages offers to
- *   finish this invoice and start the next one, because a long delivery note
- *   is a real thing and refusing it outright would strand the user (R12.3).
+ * - At the page cap the complete invoice stays here for recovery. Never split
+ *   one invoice into separately recordable documents.
  * - **A run that did not finish never looks like one that did.** A scanner that
  *   goes busy mid-stack hands back real pages with sheets possibly still in the
  *   feeder. Those pages are kept, and the panel says the run was cut short,
  *   because the alternative is a normal-looking success the user ends by
  *   pressing Done over half an invoice (R12.1).
  *
- * Re-scanning a page replaces it *in place*: the new page is acquired onto the
- * end, the old one is removed, and the order is rewritten so the replacement
- * sits exactly where the original was. The user sees a page get better; they
- * never see it move.
+ * Re-scanning requests exactly one sheet and atomically replaces its row.
  */
 
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
@@ -39,6 +35,7 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  RotateCw,
   Trash2,
   X,
 } from 'lucide-react';
@@ -51,6 +48,7 @@ import {
   getCapturePagePreview,
   removeCapturePage,
   reorderCapturePages,
+  rotateCapturePage,
   type CapturePageRow,
 } from '../../services/capture-client';
 import { deviceKey } from '../../utils/capture-review';
@@ -61,12 +59,14 @@ interface CapturePagesPanelProps {
   /** Present for a connected scanner; absent for watched-folder documents. */
   deviceId?: string | null;
   sourceName?: string | null;
+  acquisitionBusy?: boolean;
+  refreshToken?: boolean | number;
   /** Close without finishing — the document stays in `capturing`, nothing lost. */
   onClose: () => void;
   /** Finish this document and hand it to the recognition queue. */
   onDone: (captureId: string) => Promise<unknown> | void;
   /** Finish this one and immediately begin the next — the page-cap escape. */
-  onFinishAndStartAnother: (captureId: string) => Promise<unknown> | void;
+  onFinishAndStartAnother?: (captureId: string) => Promise<unknown> | void;
 }
 
 /**
@@ -91,7 +91,8 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
   sourceName,
   onClose,
   onDone,
-  onFinishAndStartAnother,
+  acquisitionBusy = false,
+  refreshToken,
 }) => {
   const { t } = useTranslation();
 
@@ -101,13 +102,16 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
   const [pages, setPages] = useState<CapturePageRow[]>([]);
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [scanDetail, setScanDetail] = useState<string | null>(null);
+  const [incomplete, setIncomplete] = useState(false);
+  const [nativeBusy, setNativeBusy] = useState(false);
+  const blocked = acquisitionBusy || nativeBusy;
   const [notice, setNotice] = useState<string | null>(null);
 
   // Founder 01/11: the shared glass window, frost sections, kit buttons and kit icon buttons. The two forward
   // choices below stay equal (R5.1), so both carry the kit primary; every other action is neutral.
   const subtleClass = 'text-(--pos-s-muted)';
   const cardClass = 'pos-frost';
-  const secondaryButtonClass = 'pos-solid-btn pos-solid-btn--md';
   const primaryButtonClass = 'pos-solid-btn pos-solid-btn--md pos-solid-btn--primary';
 
   /**
@@ -121,16 +125,24 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
     if (!captureId) return [];
     const { document } = await getCaptureDocument(captureId);
     const next = document?.pages ?? [];
+    setNativeBusy(document?.acquiring === true);
+    setScanDetail(document?.scanDetail ?? null);
+    const held = document?.reasonCode === 'scan_incomplete' || document?.reasonCode === 'CAPTURE_TOO_MANY_PAGES';
+    setIncomplete(held);
+    if (held && !document?.acquiring) setNotice(t(document.reasonCode === 'CAPTURE_TOO_MANY_PAGES'
+      ? 'suppliers.capture.pages.capReached' : 'suppliers.capture.pages.stoppedEarly'));
     setPages((current) =>
       JSON.stringify(current) === JSON.stringify(next) ? current : next,
     );
     return next;
-  }, [captureId]);
+  }, [captureId, t]);
 
   useEffect(() => {
     if (!isOpen || !captureId) return;
     void refreshPages();
-  }, [isOpen, captureId, refreshPages]);
+    const timer = window.setInterval(() => { void refreshPages(); }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isOpen, captureId, refreshPages, refreshToken]);
 
   // Thumbnails are keyed by content hash, so a page that did not change keeps
   // its already-loaded preview across reorders and refreshes.
@@ -187,7 +199,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
       setNotice(
         t(
           'suppliers.capture.pages.capReached',
-          'That is as many pages as one invoice can hold. Finish this one and start another for the rest.',
+          'That is as many pages as one invoice can hold. Keep this invoice together. Its pages are saved here; do not finish an incomplete invoice.',
         ),
       );
     } else if (outcome.stoppedEarly) {
@@ -213,10 +225,14 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
     try {
       await acquire();
       await refreshPages();
+    } catch (error) {
+      const message = t('suppliers.capture.device.device_error');
+      setNotice(message); toast.error(message);
+      console.error('[capture] acquisition failed:', error);
     } finally {
       setBusy(null);
     }
-  }, [acquire, captureId, refreshPages]);
+  }, [acquire, captureId, refreshPages, t]);
 
   const handleRemove = useCallback(
     async (pageIndex: number) => {
@@ -226,11 +242,14 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
       try {
         await removeCapturePage(captureId, pageIndex);
         await refreshPages();
+      } catch (error) {
+        setNotice(t('suppliers.capture.reason.unknown'));
+        console.error('[capture] removal failed:', error);
       } finally {
         setBusy(null);
       }
     },
-    [captureId, refreshPages],
+    [captureId, refreshPages, t],
   );
 
   const handleMove = useCallback(
@@ -241,11 +260,14 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
       try {
         await reorderCapturePages(captureId, movedOrder(pages.length, from, to));
         await refreshPages();
+      } catch (error) {
+        setNotice(t('suppliers.capture.reason.unknown'));
+        console.error('[capture] reorder failed:', error);
       } finally {
         setBusy(null);
       }
     },
-    [captureId, pages.length, refreshPages],
+    [captureId, pages.length, refreshPages, t],
   );
 
   /**
@@ -261,31 +283,23 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
       setNotice(null);
       setBusy(`rescan-${pageIndex}`);
       try {
-        const acquired = await acquire();
-        if (!acquired || acquired.length === 0) return;
-
-        const afterAcquire = await refreshPages();
-        // Drop any surplus an ADF fed beyond the one page being replaced,
-        // newest first so the indexes below it stay put.
-        const surplus = afterAcquire.length - (pages.length + 1);
-        for (let extra = 0; extra < surplus; extra += 1) {
-          await removeCapturePage(captureId, afterAcquire.length - 1 - extra);
-        }
-
-        await removeCapturePage(captureId, pageIndex);
-        const compacted = await refreshPages();
-        // The replacement is now the last page; put it where the old one was.
-        await reorderCapturePages(
-          captureId,
-          movedOrder(compacted.length, compacted.length - 1, pageIndex),
-        );
+        const outcome = await acquireFromScanner({ captureId, deviceId, replacePageIndex: pageIndex });
         await refreshPages();
+        if (!outcome.ok) {
+          const message = t(deviceKey(outcome.code));
+          setNotice(message);
+          toast.error(message);
+          return;
+        }
         toast.success(t('suppliers.capture.pages.rescanned', 'Page replaced.'));
+      } catch (error) {
+        setNotice(t('suppliers.capture.device.device_error'));
+        console.error('[capture] replacement failed:', error);
       } finally {
         setBusy(null);
       }
     },
-    [acquire, captureId, deviceId, pages.length, refreshPages, t],
+    [captureId, deviceId, refreshPages, t],
   );
 
   const handleDone = useCallback(async () => {
@@ -297,16 +311,6 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
       setBusy(null);
     }
   }, [captureId, onDone]);
-
-  const handleFinishAndStartAnother = useCallback(async () => {
-    if (!captureId) return;
-    setBusy('another');
-    try {
-      await onFinishAndStartAnother(captureId);
-    } finally {
-      setBusy(null);
-    }
-  }, [captureId, onFinishAndStartAnother]);
 
   const canAddPage = useMemo(() => Boolean(deviceId) && !atPageCap, [atPageCap, deviceId]);
 
@@ -353,19 +357,8 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
               className={`mb-4 rounded-xl border px-3 py-2 text-sm ${cardClass}`}
             >
               <p>{notice}</p>
-              {atPageCap && (
-                <button
-                  type="button"
-                  onClick={() => void handleFinishAndStartAnother()}
-                  className={`mt-3 ${secondaryButtonClass}`}
-                >
-                  <Plus className="h-4 w-4" />
-                  {t(
-                    'suppliers.capture.pages.finishAndStartAnother',
-                    'Finish this one and start another',
-                  )}
-                </button>
-              )}
+              {scanDetail && <p className="mt-2 break-words text-xs opacity-80">{scanDetail}</p>}
+
             </div>
           )}
 
@@ -411,7 +404,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
                       type="button"
-                      disabled={position === 0 || busy !== null}
+                      disabled={position === 0 || (busy !== null || blocked)}
                       onClick={() => void handleMove(position, position - 1)}
                       aria-label={t('suppliers.capture.pages.moveEarlier', 'Move earlier')}
                       className="pos-icon-btn"
@@ -420,7 +413,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
                     </button>
                     <button
                       type="button"
-                      disabled={position === pages.length - 1 || busy !== null}
+                      disabled={position === pages.length - 1 || (busy !== null || blocked)}
                       onClick={() => void handleMove(position, position + 1)}
                       aria-label={t('suppliers.capture.pages.moveLater', 'Move later')}
                       className="pos-icon-btn"
@@ -430,7 +423,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
                     {deviceId && (
                       <button
                         type="button"
-                        disabled={busy !== null}
+                        disabled={(busy !== null || blocked)}
                         onClick={() => void handleRescan(page.pageIndex)}
                         aria-label={t('suppliers.capture.pages.rescan', 'Scan this page again')}
                         className="pos-icon-btn"
@@ -438,9 +431,17 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
                         <RefreshCw className="h-4 w-4" />
                       </button>
                     )}
+                    <button type="button" disabled={busy !== null || blocked}
+                      aria-label={t('suppliers.capture.pages.rotate', 'Rotate page clockwise')}
+                      className="pos-icon-btn" onClick={() => {
+                        setBusy(`rotate-${page.pageIndex}`);
+                        void rotateCapturePage(captureId, page.pageIndex).then(refreshPages)
+                          .catch(() => toast.error(t('suppliers.capture.device.device_error')))
+                          .finally(() => setBusy(null));
+                      }}><RotateCw className="h-4 w-4" /></button>
                     <button
                       type="button"
-                      disabled={busy !== null}
+                      disabled={(busy !== null || blocked)}
                       onClick={() => void handleRemove(page.pageIndex)}
                       aria-label={t('suppliers.capture.pages.remove', 'Remove this page')}
                       className="pos-icon-btn"
@@ -457,7 +458,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
             <p data-testid="capture-page-cap" className={`mt-4 text-sm ${subtleClass}`}>
               {t(
                 'suppliers.capture.pages.capReached',
-                'That is as many pages as one invoice can hold. Finish this one and start another for the rest.',
+                'That is as many pages as one invoice can hold. Keep this invoice together. Its pages are saved here; do not finish an incomplete invoice.',
               )}
             </p>
           )}
@@ -472,7 +473,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
           <button
             type="button"
             data-testid="capture-add-page"
-            disabled={!canAddPage || busy !== null}
+            disabled={!canAddPage || (busy !== null || blocked)}
             onClick={() => void handleAddPage()}
             className={primaryButtonClass}
           >
@@ -486,7 +487,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
           <button
             type="button"
             data-testid="capture-done"
-            disabled={pages.length === 0 || busy !== null}
+            disabled={pages.length === 0 || incomplete || atPageCap || (busy !== null || blocked)}
             onClick={() => void handleDone()}
             className={primaryButtonClass}
           >

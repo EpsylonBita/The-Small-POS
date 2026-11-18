@@ -63,6 +63,24 @@ interface RecoveryRecipeDefinition extends RecoveryKnownSolution {
 }
 
 export const RECOVERY_RECIPES = {
+  resendOrderCustomerCorrection: {
+    recipeId: 'order-customer-correction.resend',
+    version: 1,
+    actionId: 'resendOrderCustomerCorrection',
+    labelKey: 'recovery.recipes.orderCustomerCorrection.resend',
+    explanationKey: 'recovery.recipes.orderCustomerCorrection.resendExplanation',
+    verificationKey: 'recovery.recipes.orderCustomerCorrection.pending',
+    requiresSnapshot: true,
+  },
+  keepServerOrderCustomerDetails: {
+    recipeId: 'order-customer-correction.keep-server',
+    version: 1,
+    actionId: 'keepServerOrderCustomerDetails',
+    labelKey: 'recovery.recipes.orderCustomerCorrection.keep',
+    explanationKey: 'recovery.recipes.orderCustomerCorrection.keepExplanation',
+    verificationKey: 'recovery.recipes.orderCustomerCorrection.confirmed',
+    requiresSnapshot: true,
+  },
   restoreLastKnownPrinterBrand: {
     recipeId: 'printer.restore_last_known_brand',
     version: 1,
@@ -165,6 +183,34 @@ export const RECOVERY_RECIPES = {
     requiresSnapshot: true,
   },
 } as const satisfies Record<string, RecoveryRecipeDefinition>;
+
+export function customerCorrectionIssue(notice: import('../../../lib/order-sync-notices').OrderSyncNotice): RecoveryIssue {
+  const actions = [RECOVERY_RECIPES.resendOrderCustomerCorrection, RECOVERY_RECIPES.keepServerOrderCustomerDetails]
+    .filter(recipe => notice.state !== 'pending' && notice.actions.includes(recipe.actionId))
+    .map((recipe, index): RecoveryActionDescriptor => ({ id: recipe.actionId, labelKey: recipe.labelKey,
+      descriptionKey: recipe.explanationKey, recipeId: recipe.recipeId, recipeVersion: recipe.version,
+      requiresSnapshot: true, requiresOnline: true, confirmationRequired: false, safetyLevel: 'safe', recommended: index === 0 }));
+  return { id: `customer-correction:${notice.queueId}`, code: 'customer_correction_refused', severity: 'warning',
+    status: notice.state === 'pending' ? 'recovering' : 'blocking', entityType: 'order', entityId: notice.queueId,
+    orderId: notice.orderId, orderNumber: notice.orderNumber, titleKey: 'recovery.recipes.orderCustomerCorrection.title',
+    summaryKey: 'recovery.recipes.orderCustomerCorrection.summary', guidanceKey: notice.state === 'pending' ? 'recovery.recipes.orderCustomerCorrection.pending' : 'recovery.recipes.orderCustomerCorrection.guidance',
+    params: { queueId: notice.queueId }, actions,
+    knownSolution: { ...RECOVERY_RECIPES.resendOrderCustomerCorrection } };
+}
+
+/** Focus existing guided recovery on an order. A waiting payment can have no
+ * failed-row recipe yet; keep guidance visible instead of claiming healthy. */
+export function orderRecoveryIssues(issues: RecoveryIssue[], orderId: string,
+  notices: import('../../../lib/order-sync-notices').OrderSyncNotice[], parityItems: SyncQueueItem[], financialItems: SyncFinancialQueueItem[]): RecoveryIssue[] {
+  const related = issues.filter(issue => issue.orderId === orderId || issue.entityId === orderId || issue.params?.sampleRecordId === orderId ||
+    parityItems.some(item => item.id === issue.entityId || item.id === issue.params?.sampleItemId || item.recordId === issue.entityId) ||
+    financialItems.some(item => item.queueId === issue.queueId || item.entityId === issue.entityId));
+  if (related.length || !notices.some(notice => notice.orderId === orderId)) { return related; }
+  const notice = notices.find(notice => notice.orderId === orderId)!;
+  return [{ id: `order-guidance:${orderId}`, code: notice.kind, entityType: 'order', entityId: orderId, orderId,
+    orderNumber: notice.orderNumber, severity: 'warning', status: 'blocking', titleKey: 'orderSyncNotice.needsAction',
+    summaryKey: `orderSyncNotice.${notice.kind}`, guidanceKey: 'orderSyncNotice.guided', actions: [createContactDevAction()] }];
+}
 
 const knownSolutionFromRecipe = (
   recipe: RecoveryRecipeDefinition,
@@ -2192,6 +2238,18 @@ export function buildSyncRecoveryIssues({
   }
 
   const issues: RecoveryIssue[] = [];
+  const corrections = (systemHealth.orderNotices ?? []).filter(notice => notice.kind === 'customer_correction_refused');
+  if (systemHealth.orderNoticeGate?.status === 'unavailable') {
+    pushIssue(issues, {
+      id: 'order-notice-check-unavailable', code: 'issue_check_unavailable',
+      severity: 'warning', status: 'blocking', entityType: 'sync', entityId: 'order-notice-check',
+      titleKey: 'orderSyncNotice.needsAction', summaryKey: 'orderSyncNotice.checkUnavailableHealth',
+      guidanceKey: 'orderSyncNotice.checkUnavailableGuidance',
+      actions: [createContactDevAction()],
+    });
+  }
+  for (const notice of corrections) { pushIssue(issues, customerCorrectionIssue(notice)); }
+  parityItems = parityItems.filter(item => !corrections.some(notice => notice.queueId === item.id));
   const legacyFinancialParityRows = new Set(
     parityItems
       .filter((item) => LEGACY_FINANCIAL_PARITY_TABLES.has(item.tableName))

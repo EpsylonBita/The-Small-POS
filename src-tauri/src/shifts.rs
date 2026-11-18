@@ -8557,9 +8557,19 @@ mod tests {
         let mut db = test_db();
         db.db_path = dir.join("pos.db");
         seed_operating_currency_for_test(&db, "branch-1", "EUR");
+        for (key, value) in [
+            ("organization_id", "org-1"),
+            ("branch_id", "branch-1"),
+            ("terminal_id", "term-1"),
+            ("admin_dashboard_url", "https://admin.test"),
+        ] {
+            assert!(crate::tests::fake_keyring::set(key, value));
+        }
         crate::core_helpers::write_module_cache(
             &db,
-            &serde_json::json!({ "apiModules": [{ "module_id": "gift_cards" }] }),
+            &serde_json::json!({ "storeScopeVersion": 3, "organizationId": "org-1",
+                "branchId": "branch-1", "terminalId": "term-1", "adminDashboardUrl": "https://admin.test",
+                "apiModules": [{ "module_id": "gift_cards" }] }),
         )
         .unwrap();
         (db, dir)

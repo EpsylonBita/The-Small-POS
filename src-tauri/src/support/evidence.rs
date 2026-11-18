@@ -415,7 +415,47 @@ pub fn secrets(text: &str) -> String {
         .collect::<Vec<String>>()
         .join("\n")
 }
-fn mask_known(text: &str, known: &[String]) -> String {
+#[derive(Clone, Default)]
+struct MaskNode {
+    edges: std::collections::BTreeMap<u8, usize>,
+    terminal: bool,
+}
+#[derive(Clone, Default)]
+pub(super) struct KnownMask {
+    nodes: Vec<MaskNode>,
+}
+impl KnownMask {
+    fn new(people: &[String]) -> Self {
+        let mut index = Self {
+            nodes: vec![MaskNode::default()],
+        };
+        for person in people {
+            let needle: String = person
+                .chars()
+                .flat_map(char::to_lowercase)
+                .map(|c| if c == '\u{03c2}' { '\u{03c3}' } else { c })
+                .collect();
+            let length = needle.chars().count();
+            if length < 2 || length < 4 && !needle.chars().all(char::is_alphabetic) {
+                continue;
+            }
+            let mut node = 0;
+            for byte in needle.bytes() {
+                node = if let Some(next) = index.nodes[node].edges.get(&byte) {
+                    *next
+                } else {
+                    let next = index.nodes.len();
+                    index.nodes.push(MaskNode::default());
+                    index.nodes[node].edges.insert(byte, next);
+                    next
+                };
+            }
+            index.nodes[node].terminal = true;
+        }
+        index
+    }
+}
+fn mask_known(text: &str, known: &KnownMask) -> String {
     let mut folded = String::new();
     let mut starts = Vec::new();
     let mut ends = Vec::new();
@@ -435,28 +475,23 @@ fn mask_known(text: &str, known: &[String]) -> String {
         }
     }
     let mut ranges = Vec::new();
-    for person in known {
-        let needle: String = person
-            .chars()
-            .flat_map(char::to_lowercase)
-            .map(|c| if c == '\u{03c2}' { '\u{03c3}' } else { c })
-            .collect();
-        // PII columns can contain placeholders such as `0`, `1`, `-` or `.`.
-        // They are redacted in their own fields, but are not identities to
-        // substitute inside unrelated operational evidence.
-        if needle.chars().count() < 2
-            || needle.chars().count() < 4 && !needle.chars().all(char::is_alphabetic)
-        {
+    for (at, _) in folded.char_indices() {
+        let start = starts[at];
+        let word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.');
+        if text[..start].chars().next_back().is_some_and(word) {
             continue;
         }
-        for (at, matched) in folded.match_indices(&needle) {
-            let start = starts[at];
-            let end = ends[at + matched.len() - 1];
-            let word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.');
-            if text[..start].chars().next_back().is_none_or(|c| !word(c))
-                && text[end..].chars().next().is_none_or(|c| !word(c))
-            {
-                ranges.push((start, end));
+        let mut node = 0;
+        for (offset, byte) in folded.as_bytes()[at..].iter().enumerate() {
+            let Some(next) = known.nodes[node].edges.get(byte) else {
+                break;
+            };
+            node = *next;
+            if known.nodes[node].terminal {
+                let end = ends[at + offset];
+                if text[end..].chars().next().is_none_or(|c| !word(c)) {
+                    ranges.push((start, end));
+                }
             }
         }
     }
@@ -483,12 +518,25 @@ fn mask_known(text: &str, known: &[String]) -> String {
 pub struct Policy {
     pub personal: bool,
     pub(super) known: Vec<String>,
+    pub(super) known_index: std::sync::OnceLock<KnownMask>,
 }
 impl Policy {
     pub fn load(conn: &Connection, personal: bool, permit: &SupportPermit) -> Result<Self, String> {
+        Self::load_until(
+            conn,
+            personal,
+            permit,
+            Instant::now() + Duration::from_secs(5),
+        )
+    }
+    pub(super) fn load_until(
+        conn: &Connection,
+        personal: bool,
+        permit: &SupportPermit,
+        deadline: Instant,
+    ) -> Result<Self, String> {
         let mut values = BTreeSet::new();
         if !personal {
-            let start = Instant::now();
             let tables = super::collectors::rows(
                 conn,
                 "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
@@ -523,7 +571,7 @@ impl Policy {
                         if permit.is_cancelled() {
                             return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
                         }
-                        if start.elapsed() > Duration::from_secs(5) || values.len() >= 100_000 {
+                        if Instant::now() >= deadline || values.len() >= 100_000 {
                             return Err(error("HEALTH_OBSERVATION_MISSING"));
                         }
                         if let Ok(value) = row.get::<_, String>(0) {
@@ -537,7 +585,11 @@ impl Policy {
         }
         let mut known: Vec<_> = values.into_iter().collect();
         known.sort_by_key(|s| std::cmp::Reverse(s.len()));
-        Ok(Self { personal, known })
+        Ok(Self {
+            personal,
+            known,
+            ..Default::default()
+        })
     }
     pub fn string(&self, text: &str) -> String {
         if text == MARKER {
@@ -557,7 +609,12 @@ impl Policy {
         }
         let mut clean = secrets(text);
         if !self.personal {
-            clean = mask_known(&clean, &self.known);
+            if !self.known.is_empty() {
+                clean = mask_known(
+                    &clean,
+                    self.known_index.get_or_init(|| KnownMask::new(&self.known)),
+                );
+            }
             clean =
                 crate::diagnostics::scrub_and_bound_text(&clean, clean.chars().count().max(1024));
         }

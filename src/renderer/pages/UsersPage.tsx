@@ -198,6 +198,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
   const hasDeliveryZonesModule = useModuleAccess('delivery_zones').isEnabled;
   const hasDeliveryPro = hasDeliveryModule && hasDeliveryZonesModule;
   const [users, setUsers] = useState<UserProfile[]>([]);
+  const directoryGeneration = useRef(0);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState(initialSearchTerm);
   const [currentPage, setCurrentPage] = useState(1);
@@ -366,22 +367,34 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
       }
     };
 
+    const invalidateSharedDirectory = (event: any) => {
+      if (event?.reason !== 'group-change' && !['customers','customer_addresses'].includes(event?.table)) return;
+      ++directoryGeneration.current;
+      if (event?.reason === 'group-change') {
+        setUsers([]);
+        closeDetailsModal();
+        setSelectedUser(null);
+      }
+      void loadUsers();
+    };
+    onEvent('shared-data-invalidated', invalidateSharedDirectory);
     onEvent('customer-updated', handleCustomerUpdate);
     onEvent('customer-realtime-update', handleCustomerUpdate);
 
     // Cleanup
     return () => {
+      ++directoryGeneration.current;
+      offEvent('shared-data-invalidated', invalidateSharedDirectory);
       offEvent('customer-updated', handleCustomerUpdate);
       offEvent('customer-realtime-update', handleCustomerUpdate);
     };
   }, []);
 
   const loadUsers = async () => {
+    const generation = ++directoryGeneration.current;
     setLoading(true);
     try {
-      // Use the native POS sync first. It can read customers directly from
-      // Supabase with terminal credentials, avoiding tenant admin-host
-      // timeouts. The POS HTTP API remains a compatibility fallback.
+      // Native reads use the terminal group and its scoped offline directory.
       const sources: Array<{ name: string; users: UserProfile[] }> = [];
 
       try {
@@ -404,6 +417,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
         }
       }
 
+      if (generation !== directoryGeneration.current) return;
       const unified = sources
         .sort((left, right) => right.users.length - left.users.length)[0]?.users || [];
 

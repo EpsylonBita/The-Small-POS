@@ -1,3 +1,4 @@
+import { isOrderOpenNoticeRefusal, orderNoticeRefusalCode } from '../lib/order-open-notice';
 import i18n from '../lib/i18n';
 import { getStoreCurrency } from '../renderer/utils/store-currency';
 import { freezeRoomChargeCurrency, recordedFolioCurrency } from '../renderer/utils/folio-currency';
@@ -569,6 +570,7 @@ export class OrderService {
             console.log('[RENDERER OrderService] ✅ Bridge update successful, returning');
             return;
           }
+          if (isOrderOpenNoticeRefusal(resp)) throw new Error(orderNoticeRefusalCode(resp));
           // Bridge returned a non-success response
           const paymentIntegrityPayload = extractPaymentIntegrityPayload(resp);
           const ipcError = formatPaymentIntegrityError(
@@ -589,6 +591,7 @@ export class OrderService {
           console.warn('[RENDERER OrderService] ⚠️ Bridge returned error:', ipcError);
           debugLogger.warn('Bridge update-status returned error; will try Admin API', ipcError, 'OrderService');
         } catch (ipcErr) {
+          if (isOrderOpenNoticeRefusal(ipcErr)) throw new Error(orderNoticeRefusalCode(ipcErr));
           const paymentIntegrityPayload =
             ((ipcErr as any)?.paymentIntegrityPayload as
               | ReturnType<typeof extractPaymentIntegrityPayload>

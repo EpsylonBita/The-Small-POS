@@ -1,3 +1,5 @@
+import { isOrderOpenNoticeRefusal, orderNoticeRefusalCode } from '../../../lib/order-open-notice';
+import { announceOrderNoticeMoveRefusal } from '../../services/OrderNoticeStatusGuard';
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
@@ -82,6 +84,10 @@ export function OrderStatusControls({
       if (result?.alreadyClosed) {
         return;
       }
+      if (isOrderOpenNoticeRefusal(result)) {
+        announceOrderNoticeMoveRefusal([{ id: order.id, number: order.orderNumber || order.order_number || order.id, errorCode: orderNoticeRefusalCode(result) }], t);
+        return;
+      }
       const platformName = getPlatformName(orderPlugin);
       toast.success(t('orders.messages.platformNotified', { platform: platformName }));
     } catch (error) {
@@ -108,12 +114,16 @@ export function OrderStatusControls({
         const statusKey = newStatus === 'out_for_delivery' ? 'outForDelivery' : newStatus;
         toast.success(t('orders.messages.statusUpdated', { status: t(`orders.status.${statusKey}`) }));
       } catch (error) {
+        if (isOrderOpenNoticeRefusal(error)) {
+          announceOrderNoticeMoveRefusal([{ id: order.id, errorCode: orderNoticeRefusalCode(error), number: order.orderNumber || order.order_number || order.id }], t);
+          return;
+        }
         toast.error(t('orders.messages.statusUpdateFailed'));
       } finally {
         setIsLoading(false);
       }
     },
-    [isBox, order.id, order.status, onStatusChange, t]
+    [isBox, order.id, order.orderNumber, order.order_number, order.status, onStatusChange, t]
   );
 
   const handleBoxApprove = useCallback(

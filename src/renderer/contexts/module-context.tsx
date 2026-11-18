@@ -89,6 +89,8 @@ interface ModuleCacheData {
   lockedModulePlans: Record<string, string>;
   businessType: BusinessType;
   organizationId: string;
+  branchId?: string;
+  scopeVersion?: number;
   terminalId?: string;
   adminDashboardUrl?: string;
   timestamp: number;
@@ -102,7 +104,7 @@ interface ModuleCacheData {
 // CONSTANTS
 // =============================================
 
-const CACHE_KEY = 'pos-modules-cache';
+const CACHE_KEY = 'pos-store-modules-v3';
 const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 const MODULE_IDENTITY_SETTING_KEYS = new Set([
@@ -111,6 +113,8 @@ const MODULE_IDENTITY_SETTING_KEYS = new Set([
   'api_key',
   'business_type',
   'businessType',
+  'branch_id',
+  'branchId',
   'organization_id',
   'organizationId',
   'pos_api_key',
@@ -289,11 +293,11 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
   const bridge = getBridge();
   const [businessType, setBusinessType] = useState<BusinessType | null>(null);
   const [organizationId, setOrganizationId] = useState<string | null>(null);
-  const [enabledModules, setEnabledModules] = useState<EnabledModule[]>([]);
-  const [lockedModules, setLockedModules] = useState<EnabledModule[]>([]);
+  const [storedEnabledModules, setEnabledModules] = useState<EnabledModule[]>([]);
+  const [storedLockedModules, setLockedModules] = useState<EnabledModule[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [apiModules, setApiModules] = useState<POSModuleInfo[]>([]);
+  const [storedApiModules, setApiModules] = useState<POSModuleInfo[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   
   // Ref to track sync in progress (doesn't cause re-renders)
@@ -303,6 +307,14 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
   // (Used by the "removed modules" detector — compares previous API response
   // ids against the new ones — and is updated each cycle in
   // `syncModulesFromAdmin`.)
+  const stateScopeRef = useRef<string | null>(null);
+  const currentIdentity = getCachedTerminalCredentials();
+  const renderScope = currentIdentity.organizationId && currentIdentity.branchId && currentIdentity.terminalId && localStorage.getItem('admin_dashboard_url')
+    ? JSON.stringify([3, currentIdentity.organizationId, currentIdentity.branchId, currentIdentity.terminalId, (localStorage.getItem('admin_dashboard_url') || '').trim()]) : null;
+  const stateIsCurrent = !!renderScope && stateScopeRef.current === renderScope;
+  const enabledModules = stateIsCurrent ? storedEnabledModules : ensureCoreModulesPresent([]);
+  const lockedModules = stateIsCurrent ? storedLockedModules : [];
+  const apiModules = stateIsCurrent ? storedApiModules : [];
   const prevApiModulesRef = useRef<POSModuleInfo[]>([]);
 
   // Refs that mirror the current state variables for `syncModulesFromAdmin`'s
@@ -331,11 +343,20 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         : '';
 
     return {
+      organizationId: creds.organizationId,
+      branchId: creds.branchId,
       terminalId: (creds.terminalId || '').trim(),
       adminDashboardUrl,
     };
   }, []);
 
+  const moduleScope = useCallback(() => {
+    const identity = getModuleCacheIdentity();
+    return identity.organizationId && identity.branchId && identity.terminalId && identity.adminDashboardUrl
+      ? JSON.stringify([3, identity.organizationId, identity.branchId, identity.terminalId, identity.adminDashboardUrl]) : null;
+  }, [getModuleCacheIdentity]);
+  const requestGenerationRef = useRef(0);
+  const resyncPendingRef = useRef(false);
   /**
    * Reconstruct EnabledModule array from cached module IDs.
    * Looks up each ID in the local fallback metadata helper and drops unknown IDs.
@@ -414,18 +435,20 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
           lockedModulePlans,
           businessType: bType,
           organizationId: orgId,
+          scopeVersion: 3,
+          branchId: getModuleCacheIdentity().branchId,
           terminalId: getModuleCacheIdentity().terminalId,
           adminDashboardUrl: getModuleCacheIdentity().adminDashboardUrl,
           timestamp: Date.now(),
           apiModules: apiMods,
           apiTimestamp: apiTs,
         };
-        localStorage.setItem(CACHE_KEY, JSON.stringify(cacheData));
+        localStorage.setItem(`${CACHE_KEY}:${moduleScope()}`, JSON.stringify(cacheData));
       } catch (err) {
         console.warn('[ModuleContext] Failed to save cache:', err);
       }
     },
-    [getModuleCacheIdentity]
+    [getModuleCacheIdentity, moduleScope]
   );
 
   /**
@@ -492,9 +515,13 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
    * Requirements: 1.1, 1.2, 2.1, 3.4
    */
   const syncModulesFromAdmin = useCallback(async (options: SyncModulesOptions = {}): Promise<void> => {
+    const requestScope = moduleScope();
+    if (!requestScope) return;
+    const requestGeneration = requestGenerationRef.current;
     const reportSyncing = options.reportSyncing !== false;
     // Prevent concurrent syncs - if already syncing, skip (use ref to avoid re-renders)
     if (isSyncingRef.current) {
+      if (stateScopeRef.current !== requestScope) resyncPendingRef.current = true;
       console.log('[ModuleContext] Sync already in progress, skipping');
       return;
     }
@@ -508,7 +535,23 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
       // Fetch modules from admin dashboard via typed bridge
       const result: any = await bridge.modules.fetchFromAdmin();
 
+      if (requestScope !== moduleScope() || requestGeneration !== requestGenerationRef.current) {
+        resyncPendingRef.current = true;
+        return;
+      }
+      if (result.identityMatch === false) {
+        localStorage.removeItem(`${CACHE_KEY}:${requestScope}`);
+        stateScopeRef.current = null;
+        setEnabledModules(ensureCoreModulesPresent([]));
+        setLockedModules([]);
+        setApiModules([]);
+        return;
+      }
       if (result.success && result.modules) {
+        const scopeChanged = stateScopeRef.current !== requestScope;
+        const cacheBusinessType = normalizeBusinessTypeAlias(await bridge.terminalConfig.getBusinessType()) || businessType;
+        if (requestScope !== moduleScope() || requestGeneration !== requestGenerationRef.current) return;
+        stateScopeRef.current = requestScope;
         const response = result.modules as POSModulesEnabledResponse;
         const excludedModules = response.modules.filter((m) => isModuleExcludedFromPos(m.module_id));
         if (excludedModules.length > 0) {
@@ -539,13 +582,13 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         }
 
         // Transform to EnabledModule format with POS filtering
-        const transformed = transformApiModules(response.modules);
+        const transformed = ensureCoreModulesPresent(transformApiModules(response.modules));
 
         // Update enabled modules with API data only when the (id, enabled)
         // signature changed. This automatically removes modules not in the
         // latest API response (Requirement 3.4) without flickering on
         // no-op refreshes.
-        if (!areEnabledModuleListsEquivalent(enabledModulesStateRef.current, transformed)) {
+        if (scopeChanged || !areEnabledModuleListsEquivalent(enabledModulesStateRef.current, transformed)) {
           setEnabledModules(transformed);
         }
 
@@ -558,12 +601,12 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         }
 
         // Save to cache for future cache-first loading (Requirement 5.2)
-        if (businessType && organizationId) {
+        if (isValidBusinessType(cacheBusinessType) && response.organization_id) {
           saveToCache(
             transformed,
             [],
-            businessType,
-            organizationId,
+            cacheBusinessType,
+            response.organization_id,
             response.modules,
             response.timestamp
           );
@@ -597,13 +640,17 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
       }
     } finally {
       isSyncingRef.current = false;
+      if (resyncPendingRef.current) {
+        resyncPendingRef.current = false;
+        setTimeout(() => { void syncModulesFromAdmin({ reportSyncing: false }); }, 0);
+      }
       if (reportSyncing) {
         setIsSyncing(false);
       }
     }
     // Note: Using refs for apiModules comparison and sync guard to prevent infinite loops
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bridge.modules, transformApiModules, businessType, organizationId, saveToCache]);
+  }, [bridge.modules, transformApiModules, businessType, organizationId, saveToCache, moduleScope]);
 
   /**
    * Load cached modules from localStorage.
@@ -620,7 +667,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
     apiModules?: POSModuleInfo[];
   } | null => {
     try {
-      const cached = localStorage.getItem(CACHE_KEY);
+      const cached = localStorage.getItem(`${CACHE_KEY}:${moduleScope()}`);
       if (!cached) return null;
 
       const data: ModuleCacheData = JSON.parse(cached);
@@ -628,28 +675,20 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
       // Check if cache is still valid (Requirement 5.1 - 24 hour TTL)
       if (Date.now() - data.timestamp > CACHE_TTL_MS) {
-        localStorage.removeItem(CACHE_KEY);
+        localStorage.removeItem(`${CACHE_KEY}:${moduleScope()}`);
         return null;
       }
 
-      if (
-        (data.organizationId && organizationId && data.organizationId !== organizationId) ||
-        (data.terminalId && identity.terminalId && data.terminalId !== identity.terminalId) ||
-        (
-          data.adminDashboardUrl &&
-          identity.adminDashboardUrl &&
-          data.adminDashboardUrl !== identity.adminDashboardUrl
-        )
-      ) {
-        localStorage.removeItem(CACHE_KEY);
-        return null;
-      }
+      if (!moduleScope() || data.scopeVersion !== 3 || data.organizationId !== identity.organizationId ||
+          data.branchId !== identity.branchId || data.terminalId !== identity.terminalId ||
+          data.adminDashboardUrl !== identity.adminDashboardUrl) return null;
+      stateScopeRef.current = moduleScope();
 
       // If we have API modules in cache, use them directly
-      if (data.apiModules && data.apiModules.length > 0) {
+      if (data.apiModules) {
         const transformed = transformApiModules(data.apiModules);
         return {
-          enabledModules: transformed,
+          enabledModules: ensureCoreModulesPresent(transformed),
           lockedModules: [],
           businessType: normalizeBusinessTypeAlias(data.businessType),
           organizationId: data.organizationId,
@@ -692,7 +731,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
     } catch {
       return null;
     }
-  }, [getModuleCacheIdentity, organizationId, reconstructModulesFromIds, transformApiModules]);
+  }, [getModuleCacheIdentity, moduleScope, reconstructModulesFromIds, transformApiModules]);
 
   // Known valid business types for runtime validation
   // Must match BusinessType from shared/types/organization.ts
@@ -744,6 +783,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
    * Resolve modules from main process
    */
   const resolveModules = useCallback(async (options: ResolveModulesOptions = {}) => {
+    const requestScope = moduleScope();
     const showLoading = options.showLoading !== false;
     if (showLoading) {
       setIsLoading(true);
@@ -754,6 +794,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
       // Fetch org configuration via typed bridge
       const orgId = await bridge.terminalConfig.getOrganizationId();
       const bType = normalizeBusinessTypeAlias(await bridge.terminalConfig.getBusinessType());
+      if (requestScope !== moduleScope()) return;
 
       // Handle missing organization ID
       if (!orgId) {
@@ -857,16 +898,16 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         setIsLoading(false);
       }
     }
-  }, [bridge.terminalConfig, loadFromCache, saveToCache]);
+  }, [bridge.terminalConfig, loadFromCache, saveToCache, moduleScope]);
 
   /**
    * Force refresh modules
    */
   const refreshModules = useCallback(async () => {
     // Clear cache before refreshing
-    localStorage.removeItem(CACHE_KEY);
+    localStorage.removeItem(`${CACHE_KEY}:${moduleScope()}`);
     await resolveModules();
-  }, [resolveModules]);
+  }, [resolveModules, moduleScope]);
 
   /**
    * Check if a specific module is enabled
@@ -874,11 +915,12 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
   const isModuleEnabled = useCallback(
     (moduleId: ModuleId): boolean => {
       return (
+        (isCoreModule(moduleId) || stateScopeRef.current === moduleScope()) &&
         enabledModules.some((m) => m.module.id === moduleId) &&
         hasRequiredModuleDependencies(enabledModules, moduleId)
       );
     },
-    [enabledModules]
+    [enabledModules, moduleScope]
   );
 
   /**
@@ -956,6 +998,13 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
   useEffect(() => {
     const handleSettingsUpdate = (payload: unknown) => {
       if (shouldResolveModulesForTerminalSettingsEvent(payload)) {
+        requestGenerationRef.current++;
+        stateScopeRef.current = null;
+        prevApiModulesRef.current = [];
+        setEnabledModules(ensureCoreModulesPresent([]));
+        setLockedModules([]);
+        setApiModules([]);
+        resyncPendingRef.current = isSyncingRef.current;
         console.log('[ModuleContext] Terminal identity settings updated, refreshing modules');
         refreshModules();
         syncModulesFromAdmin();

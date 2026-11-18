@@ -314,6 +314,18 @@ pub(crate) fn load() -> Result<Option<VaultDoc>, String> {
 /// The vault a fresh directory of `branch_id` gives. A person the directory
 /// lists without a hash keeps the one already held, unless it says the PIN is
 /// gone; a person no longer listed is dropped, with their wrong-PIN count.
+fn legacy_scope_matches(legacy_branch: &str, scope_key: &str) -> bool {
+    // A legacy vault is adopted only with org-as-group compatibility and the same
+    // trusted branch. Actual group changes always require a fresh online directory.
+    let Ok(scope): Result<Vec<String>, _> = serde_json::from_str(scope_key) else {
+        return false;
+    };
+    scope.len() == 3
+        && scope[0] == scope[1]
+        && !legacy_branch.starts_with('[')
+        && crate::storage::get_credential("branch_id").as_deref() == Some(legacy_branch)
+}
+
 pub(crate) fn vault_from_directory(
     branch_id: &str,
     directory: &[DirectoryPinEntry],
@@ -321,7 +333,9 @@ pub(crate) fn vault_from_directory(
     now: DateTime<Utc>,
 ) -> VaultDoc {
     let branch_id = branch_id.trim();
-    let previous = previous.filter(|doc| doc.branch_id == branch_id);
+    let previous = previous.filter(|doc| {
+        doc.branch_id == branch_id || legacy_scope_matches(&doc.branch_id, branch_id)
+    });
     let mut staff = BTreeMap::new();
     let mut failures = BTreeMap::new();
     for entry in directory {
@@ -393,7 +407,18 @@ pub(crate) fn save_directory(
 pub(crate) fn hash_for(branch_id: &str, staff_id: &str) -> Option<String> {
     let _guard = vault_lock();
     let doc = match load_unlocked() {
-        Ok(Some(doc)) if doc.branch_id == branch_id.trim() => doc,
+        Ok(Some(mut doc))
+            if doc.branch_id == branch_id.trim()
+                || legacy_scope_matches(&doc.branch_id, branch_id.trim()) =>
+        {
+            if doc.branch_id != branch_id.trim() {
+                doc.branch_id = branch_id.trim().into();
+                if store_unlocked(&doc).is_err() {
+                    return None;
+                }
+            }
+            doc
+        }
         Ok(_) => return None,
         Err(error) => {
             warn!(%error, "Staff PIN vault unreadable");
@@ -423,7 +448,18 @@ pub(crate) fn verify_offline(
 ) -> OfflinePinCheck {
     let _guard = vault_lock();
     let mut doc = match load_unlocked() {
-        Ok(Some(doc)) if doc.branch_id == branch_id.trim() => doc,
+        Ok(Some(mut doc))
+            if doc.branch_id == branch_id.trim()
+                || legacy_scope_matches(&doc.branch_id, branch_id.trim()) =>
+        {
+            if doc.branch_id != branch_id.trim() {
+                doc.branch_id = branch_id.trim().into();
+                if store_unlocked(&doc).is_err() {
+                    return OfflinePinCheck::Unavailable;
+                }
+            }
+            doc
+        }
         Ok(_) => return OfflinePinCheck::Unavailable,
         Err(error) => {
             warn!(%error, "Staff PIN vault unreadable; offline check-in unavailable");

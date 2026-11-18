@@ -72,6 +72,27 @@ describe('DesktopRealtimeLifecycleCoordinator', () => {
     vi.useRealTimers()
   })
 
+  it('rebinds a running terminal when only its trusted group changes', async () => {
+    const auth = new RealtimeAuthService(
+      { realtime: { setAuth: vi.fn() } },
+      { requestToken: vi.fn().mockResolvedValue(tokenResponse('jwt-1')) },
+    )
+    let groupKey = 'first'
+    const first = new RecordingRuntime()
+    const second = new RecordingRuntime()
+    const createManager = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second)
+    const coordinator = new DesktopRealtimeLifecycleCoordinator({
+      authService: auth, resolveIdentity: async () => ({ ...identity(), groupKey }),
+      createManager, subscribeAuthenticatedFeatures: () => vi.fn(),
+    })
+    await coordinator.start()
+    groupKey = 'second'
+    await coordinator.refreshIdentity()
+    expect(first.disconnect).toHaveBeenCalled()
+    expect(second.connect).toHaveBeenCalledTimes(1)
+    coordinator.dispose()
+  })
+
   it('does not resolve identity or subscribe before the authenticated app lifecycle starts', () => {
     const requestToken = vi.fn().mockResolvedValue(tokenResponse('jwt-1'))
     const auth = new RealtimeAuthService(

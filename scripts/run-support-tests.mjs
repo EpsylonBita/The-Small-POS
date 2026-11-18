@@ -44,3 +44,16 @@ await new Promise((resolve, reject) => {
 
   child.on('error', reject);
 });
+
+// Incident 17/11/2026: order notices and guided correction recovery are part
+// of the blocking support check, including every shipped translation.
+await new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, [path.join(projectRoot, 'node_modules/vitest/vitest.mjs'), 'run',
+    'src/renderer/components/recovery/__tests__/OrderSyncNotice.test.tsx',
+    'src/renderer/components/recovery/__tests__/OrderNoticeHost.test.tsx',
+    'src/renderer/components/order/__tests__/OrderCard.notice.test.tsx',
+    'src/renderer/services/__tests__/OrderSyncNoticeStore.test.ts',
+    'src/renderer/services/support/__tests__/OrderNoticeCopy.test.ts'], { cwd: projectRoot, stdio: 'inherit' });
+  child.on('error', reject);
+  child.on('exit', code => code === 0 ? resolve() : reject(new Error(`Order notice regression tests failed: ${code}`)));
+});

@@ -26,6 +26,62 @@ import type {
   CaptureStatus,
 } from '../types/supplier-capture';
 
+import type { SupplierCaptureAdmissionOutcome, SupplierCapturePageManifestEntry } from '../../../../shared/types/supplier-capture';
+
+export type CaptureCommitDecision =
+  | { kind: 'recorded'; result: Record<string, unknown> }
+  | { kind: 'waiting' | 'needs_review' | 'failed' | 'excluded'; jobId: string }
+  | { kind: 'invalid' };
+
+/** A success envelope alone never proves that the invoice was recorded. */
+export function captureCommitDecision(value: unknown): CaptureCommitDecision {
+  if (!value || typeof value !== 'object') return { kind: 'invalid' };
+  const body = value as Record<string, unknown>;
+  if (body.success !== true) return { kind: 'invalid' };
+  const uuid = (v: unknown): v is string => typeof v === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+  if ('admission' in body) {
+    if (!body.admission || typeof body.admission !== 'object') return { kind: 'invalid' };
+    const admission = body.admission as Record<string, unknown>;
+    if (!uuid(admission.jobId)) return { kind: 'invalid' };
+    if (admission.status === 'recorded' && uuid(admission.invoiceId) && uuid(admission.undoId)
+      && ['applied', 'pending_mapping', 'none'].includes(String(admission.stock))
+      && typeof admission.balanceConfirmed === 'boolean') {
+      const recorded = admission as unknown as Extract<SupplierCaptureAdmissionOutcome, { status: 'recorded' }>;
+      return { kind: 'recorded', result: { ...recorded } };
+    }
+    if (admission.status === 'waiting' && ['daily_cap', 'module_required', 'queued'].includes(String(admission.reason))) {
+      return { kind: 'waiting', jobId: admission.jobId };
+    }
+    if (admission.status === 'excluded' && typeof admission.reason === 'string') {
+      return { kind: 'excluded', jobId: admission.jobId };
+    }
+    if ((admission.status === 'needs_review' || admission.status === 'failed') && Array.isArray(admission.reasons)) {
+      return { kind: admission.status, jobId: admission.jobId };
+    }
+    // Never fall back to an old result block when admission refused recording.
+    return { kind: 'invalid' };
+  }
+  const legacy = body.result;
+  if (legacy && typeof legacy === 'object'
+    && uuid((legacy as Record<string, unknown>).supplierInvoiceId)) {
+    return { kind: 'recorded', result: legacy as Record<string, unknown> };
+  }
+  return { kind: 'invalid' };
+}
+
+/** Receipt hashes travel in logical order, including legacy captures on Save. */
+export function capturePageManifest(pages: CapturePageRow[]): SupplierCapturePageManifestEntry[] {
+  if (!pages.length || pages.length > MAX_CAPTURE_PAGES) throw new Error('Incomplete capture page manifest');
+  return pages.map((page, index) => {
+    if (page.pageIndex !== index || !/^[a-f0-9]{64}$/.test(page.contentHash)) throw new Error('Incomplete capture page manifest');
+    return { index, sha256: page.contentHash };
+  });
+}
+
+/** Desktop-only source profile, persisted in the existing settings JSON. */
+export type DesktopCaptureSourceConfig = CaptureSourceConfig & { feedMode?: 'flatbed' | 'feeder' };
+
 /** `local_settings` category the watched-folder engine reads its sources from. */
 export const CAPTURE_SETTINGS_CATEGORY = 'capture';
 export const CAPTURE_SOURCES_KEY = 'capture.sources';
@@ -72,6 +128,12 @@ export interface CaptureDocumentRow {
   status: CaptureStatus;
   sourceKind: string;
   sourceName: string | null;
+  deviceId?: string | null;
+  sourceId?: string | null;
+  acquiring?: boolean;
+  needsRender?: boolean;
+  renderRetryAt?: string | null;
+  scanDetail?: string | null;
   staffId: string | null;
   capturedAt: string;
   pageCount: number;
@@ -157,9 +219,15 @@ export async function startCaptureDocument(input: {
   sourceKind: CaptureSourceKind;
   sourceName?: string | null;
   staffId?: string | null;
+  sourceId?: string;
+  deviceId?: string;
+  feedMode?: 'flatbed' | 'feeder';
 }): Promise<string> {
   const result = await call<{ captureId?: string }>('capture_start_document', {
     sourceKind: input.sourceKind,
+    sourceId: input.sourceId,
+    deviceId: input.deviceId,
+    feedMode: input.feedMode,
     sourceName: input.sourceName ?? undefined,
     staffId: input.staffId ?? undefined,
   });
@@ -167,6 +235,33 @@ export async function startCaptureDocument(input: {
     throw new Error('Could not start a new scan');
   }
   return result.captureId;
+}
+
+/** Retain the original before starting the existing durable capture pipeline. */
+export async function importCaptureFile(file: File, staffId: string | null): Promise<string> {
+  if (!file.size || file.size > 10 * 1024 * 1024) throw new Error('CAPTURE_TOO_LARGE');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 8192) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+  }
+  const result = await call<{ captureId?: string }>('capture_start_document', {
+    sourceKind: 'file_pick', sourceName: file.name, staffId: staffId ?? undefined,
+    fileBase64: btoa(binary), fileName: file.name,
+  });
+  if (!result.success || !result.captureId) throw new Error(result.code ?? 'Document could not be retained');
+  return result.captureId;
+}
+
+export function captureSubtype(document: CaptureDocumentRow): 'scanner' | 'camera' | 'file' | 'unknown' {
+  const admission = document.recognition?.admission as { captureSubtype?: unknown } | undefined;
+  const subtype = admission?.captureSubtype;
+  if (subtype === 'scanner' || subtype === 'camera' || subtype === 'file') return subtype;
+  // Local source identity is acquisition provenance, never inferred from a reading.
+  if (document.sourceKind === 'connected_scanner' || document.sourceKind === 'usb_scanner') return 'scanner';
+  if (document.sourceKind === 'file_pick') return 'file';
+  if (document.sourceKind === 'camera') return 'camera';
+  return 'unknown';
 }
 
 export interface AdvanceResult {
@@ -188,12 +283,14 @@ export async function advanceCapture(input: {
   status: CaptureStatus;
   reason?: string | null;
   staffId?: string | null;
+  admissionResponse?: Record<string, unknown>;
 }): Promise<AdvanceResult> {
   const result = await call<{ status?: CaptureStatus }>('capture_advance', {
     captureId: input.captureId,
     status: input.status,
     reason: input.reason ?? undefined,
     staffId: input.staffId ?? undefined,
+    ...(input.admissionResponse ? { admissionResponse: input.admissionResponse } : {}),
   });
   return {
     success: result.success === true,
@@ -235,10 +332,8 @@ export async function removeCapturePage(
     captureId,
     pageIndex,
   });
-  return {
-    success: result.success === true,
-    pageCount: typeof result.pageCount === 'number' ? result.pageCount : 0,
-  };
+  if (!result.success) throw new Error(typeof result.code === 'string' ? result.code : 'Could not remove page');
+  return { success: true, pageCount: typeof result.pageCount === 'number' ? result.pageCount : 0 };
 }
 
 /** `order` lists the current page indexes in the order the user wants them. */
@@ -247,10 +342,16 @@ export async function reorderCapturePages(
   order: number[],
 ): Promise<boolean> {
   const result = await call('capture_reorder_pages', { captureId, order });
+  if (!result.success) throw new Error(typeof result.code === 'string' ? result.code : 'Could not reorder pages');
   return result.success === true;
 }
 
 /** A thumbnail `data:` URL for one stored page, or null when unreadable. */
+export async function rotateCapturePage(captureId: string, pageIndex: number): Promise<void> {
+  const result = await call('capture_reorder_pages', { captureId, rotatePageIndex: pageIndex });
+  if (!result.success) throw new Error(typeof result.code === 'string' ? result.code : 'Page rotation failed');
+}
+
 export async function getCapturePagePreview(
   captureId: string,
   pageIndex: number,
@@ -294,6 +395,8 @@ export type ScannerOutcome<T> =
        * under the plain sentence, never instead of it.
        */
       detail?: string;
+      pages?: CapturePageRow[];
+      stoppedEarly?: boolean;
     };
 
 function toOutcome<T extends object>(
@@ -308,6 +411,7 @@ function toOutcome<T extends object>(
     ok: false,
     code: typeof result.code === 'string' ? result.code : 'device_error',
     ...(detail ? { detail } : {}),
+    ...(Array.isArray(result.pages) ? { pages: result.pages as CapturePageRow[], stoppedEarly: result.stoppedEarly === true } : {}),
   };
 }
 
@@ -322,8 +426,9 @@ export async function listScanners(): Promise<ScannerOutcome<{ devices: ScannerD
 /** One silent test page, saved under `captures/_test/` (R2.2). */
 export async function testScanner(
   deviceId: string,
+  feedMode: 'flatbed' | 'feeder' = 'flatbed',
 ): Promise<ScannerOutcome<{ path: string }>> {
-  const result = await call<{ path?: string }>('capture_scanner_test', { deviceId });
+  const result = await call<{ path?: string }>('capture_scanner_test', { deviceId, feedMode });
   return toOutcome(result, (value) => ({
     path: typeof value.path === 'string' ? value.path : '',
   }));
@@ -356,6 +461,7 @@ export interface AcquiredPages {
 export async function acquireFromScanner(input: {
   captureId: string;
   deviceId: string;
+  replacePageIndex?: number;
 }): Promise<ScannerOutcome<AcquiredPages>> {
   const result = await call<{
     pages?: CapturePageRow[];
@@ -463,7 +569,7 @@ export async function saveCaptureSources(
 export function resolveDefaultSource(
   sources: CaptureSourceConfig[],
   defaultSourceId: string | null,
-): CaptureSourceConfig | null {
+): DesktopCaptureSourceConfig | null {
   if (sources.length === 0) return null;
   return (
     sources.find((source) => source.id === defaultSourceId) ??

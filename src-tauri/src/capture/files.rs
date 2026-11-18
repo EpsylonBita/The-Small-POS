@@ -4,7 +4,7 @@
 //! **D-Rust1**. Requirements R11.1, R17.2, R17.5.
 //!
 //! ```text
-//! {app_data_dir}/captures/{captureId}/page-000.png
+//! {app_data_dir}/captures/{captureId}/page-{immutableUuid}.jpg
 //! {app_data_dir}/captures/{captureId}/original.pdf
 //! ```
 //!
@@ -73,7 +73,7 @@ const PAGE_MIME_EXTENSIONS: &[(&str, &str)] = &[
 /// Only [`write_page_blocking`] can produce one, which is what lets the store
 /// layer require file-first ordering at the type level: a `capture_pages` row
 /// cannot be recorded for bytes that never landed.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WrittenPage {
     pub page_index: usize,
     pub file_path: PathBuf,
@@ -343,11 +343,9 @@ fn assert_written_within(path: &Path, dir: &Path) -> Result<(), String> {
 /// blocking body and the entry point for synchronous contexts (the WIA host
 /// thread, the watcher's poll sweep).
 ///
-/// Durability: bytes go to `page-000.png.part`, the file is `fsync`ed, then
-/// renamed onto the final name. The rename is atomic on both NTFS and POSIX,
-/// so an interrupted write can never leave a half page that later uploads as
-/// evidence. The rename also replaces an existing page in place, which is
-/// exactly what re-scanning page N must do.
+/// Bytes go to a fresh UUID-named `.part`, are fsynced, then atomically
+/// renamed. Logical order is only in SQLite. A re-scan always creates separate
+/// storage; its row is swapped only after the new bytes and receipt are durable.
 pub fn write_page_blocking(
     app_data_dir: &Path,
     capture_id: &str,
@@ -378,39 +376,113 @@ pub(crate) fn write_page_blocking_guarded(
     }
 
     let dir = capture_dir(app_data_dir, capture_id)?;
-    let file_name = page_file_name(page_index, mime)?;
+    // Identity is independent of order. Never overwrite an earlier acquisition,
+    // including an unregistered page left by a crash or a replacement scan.
+    page_file_name(page_index, mime)?;
+    let file_name = format!("page-{}.{}", uuid::Uuid::new_v4(), page_extension(mime)?);
     let final_path = dir.join(&file_name);
     assert_parent_is(&final_path, &dir)?;
 
-    let temp_path = dir.join(format!("{file_name}.part"));
-    assert_parent_is(&temp_path, &dir)?;
-
-    {
-        let mut file =
-            fs::File::create(&temp_path).map_err(|e| format!("create capture page: {e}"))?;
-        file.write_all(bytes)
-            .map_err(|e| format!("write capture page: {e}"))?;
-        // The fsync is the whole point: without it the rename can land while
-        // the data is still only in the page cache.
-        file.sync_all()
-            .map_err(|e| format!("flush capture page: {e}"))?;
-    }
-
-    fs::rename(&temp_path, &final_path).map_err(|e| {
-        // Leave nothing half-written behind if the rename itself fails.
-        let _ = fs::remove_file(&temp_path);
-        format!("commit capture page: {e}")
-    })?;
-
-    assert_written_within(&final_path, &dir)?;
-
-    Ok(WrittenPage {
+    let page = WrittenPage {
         page_index,
         file_path: final_path,
         content_hash: sha256_hex(bytes),
         byte_size,
         mime: mime.trim().to_ascii_lowercase(),
-    })
+    };
+    commit_prepared_page(guard, app_data_dir, capture_id, &page, bytes)?;
+    Ok(page)
+}
+
+/// Complete a pre-journalled immutable page (also used by restart recovery).
+pub(crate) fn commit_prepared_page(
+    guard: &CaptureLifecycleGuard,
+    app_data_dir: &Path,
+    capture_id: &str,
+    page: &WrittenPage,
+    bytes: &[u8],
+) -> Result<(), String> {
+    guard.check(capture_id)?;
+    if page.page_index >= MAX_CAPTURE_PAGES
+        || bytes.is_empty()
+        || bytes.len() as u64 > super::MAX_CAPTURE_PAGE_BYTES
+        || bytes.len() as u64 != page.byte_size
+        || sha256_hex(bytes) != page.content_hash
+    {
+        return Err("Prepared page does not match its receipt".into());
+    }
+    page_extension(&page.mime)?;
+    let dir = capture_dir(app_data_dir, capture_id)?;
+    assert_parent_is(&page.file_path, &dir)?;
+    if page.file_path.exists() {
+        return Err("Immutable page identity already exists".into());
+    }
+    let name = page
+        .file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Invalid page identity")?;
+    let temp_path = dir.join(format!("{name}.part"));
+    // A prior interrupted part is never an uploaded page. Preserve it under a
+    // fresh name before restoring the exact pre-journalled derivative.
+    if temp_path.exists() {
+        fs::rename(
+            &temp_path,
+            dir.join(format!("interrupted-{}.part", uuid::Uuid::new_v4())),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(bytes).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    drop(file);
+    fs::rename(&temp_path, &page.file_path).map_err(|e| e.to_string())?;
+    assert_written_within(&page.file_path, &dir)
+}
+
+/// Read the immutable path recorded in the row, validating containment and hash.
+pub fn read_stored_page(
+    app_data_dir: &Path,
+    capture_id: &str,
+    stored_path: &Path,
+    expected_hash: &str,
+) -> Result<Vec<u8>, String> {
+    let dir = capture_dir(app_data_dir, capture_id)?;
+    let path = fs::canonicalize(stored_path).map_err(|e| format!("resolve stored page: {e}"))?;
+    if path.parent() != Some(dir.as_path()) {
+        return Err("Stored page escapes its capture directory".into());
+    }
+    let bytes = fs::read(path).map_err(|e| format!("read stored page: {e}"))?;
+    if bytes.is_empty()
+        || bytes.len() as u64 > super::MAX_CAPTURE_PAGE_BYTES
+        || sha256_hex(&bytes) != expected_hash
+    {
+        return Err("Stored page bytes do not match their receipt".into());
+    }
+    Ok(bytes)
+}
+
+/// File-first journal. A receipt remains pending until its row transaction commits.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ScanReceipt {
+    pub page: WrittenPage,
+    pub replace_hash: Option<String>,
+    pub dpi: Option<u32>,
+}
+
+pub(crate) fn journal_receipt(receipt: &ScanReceipt) -> Result<PathBuf, String> {
+    let path = receipt.page.file_path.with_extension("receipt.json");
+    let temporary = path.with_extension("part");
+    let bytes = serde_json::to_vec(receipt).map_err(|e| e.to_string())?;
+    let mut file = fs::File::create(&temporary).map_err(|e| e.to_string())?;
+    file.write_all(&bytes).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    fs::rename(temporary, &path).map_err(|e| e.to_string())?;
+    Ok(path)
 }
 
 /// Write one page durably without parking the async runtime.
@@ -686,13 +758,22 @@ mod tests {
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .collect();
-        assert_eq!(leftovers, vec!["page-000.png".to_string()]);
+        assert_eq!(
+            leftovers,
+            vec![written
+                .file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()]
+        );
     }
 
     #[test]
     fn re_scanning_a_page_replaces_it_in_place() {
         let temp = TempDir::new();
-        write_page_blocking(temp.path(), "capture-a", 1, PNG, b"first").expect("first write");
+        let first =
+            write_page_blocking(temp.path(), "capture-a", 1, PNG, b"first").expect("first write");
         let second =
             write_page_blocking(temp.path(), "capture-a", 1, PNG, b"second-take").expect("re-scan");
 
@@ -703,7 +784,12 @@ mod tests {
 
         let dir = capture_dir(temp.path(), "capture-a").expect("capture dir");
         let page_files = fs::read_dir(&dir).expect("list").count();
-        assert_eq!(page_files, 1, "a re-scan replaces, never appends");
+        assert_eq!(
+            page_files, 2,
+            "both old and replacement bytes survive until row swap"
+        );
+        assert_ne!(first.file_path, second.file_path);
+        assert_eq!(fs::read(first.file_path).unwrap(), b"first");
     }
 
     #[test]
@@ -720,33 +806,35 @@ mod tests {
     }
 
     #[test]
-    fn pages_are_index_addressed_so_write_order_never_decides_page_order() {
+    fn immutable_paths_are_independent_of_write_order_and_logical_index() {
         let temp = TempDir::new();
-
-        // Deliberately out of order: the last page lands first.
-        for (index, body) in [(2usize, "third"), (0, "first"), (1, "second")] {
-            write_page_blocking(temp.path(), "capture-a", index, PNG, body.as_bytes())
-                .unwrap_or_else(|e| panic!("write page {index}: {e}"));
-        }
-
-        let dir = capture_dir(temp.path(), "capture-a").expect("capture dir");
-        let mut names: Vec<String> = fs::read_dir(&dir)
-            .expect("list capture dir")
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.file_name().to_string_lossy().to_string())
-            .collect();
-        names.sort();
-
-        // Lexical order is document order — that is what the zero padding buys.
-        assert_eq!(names, ["page-000.png", "page-001.png", "page-002.png"]);
+        let third = write_page_blocking(temp.path(), "capture-a", 2, PNG, b"third").unwrap();
+        let first = write_page_blocking(temp.path(), "capture-a", 0, PNG, b"first").unwrap();
+        assert_ne!(third.file_path, first.file_path);
         assert_eq!(
-            read_page_blocking(temp.path(), "capture-a", 0, PNG).expect("page 0"),
-            b"first"
-        );
-        assert_eq!(
-            read_page_blocking(temp.path(), "capture-a", 2, PNG).expect("page 2"),
+            read_stored_page(
+                temp.path(),
+                "capture-a",
+                &third.file_path,
+                &third.content_hash
+            )
+            .unwrap(),
             b"third"
         );
+        assert!(read_stored_page(
+            temp.path(),
+            "capture-a",
+            &first.file_path,
+            &third.content_hash
+        )
+        .is_err());
+        assert!(read_stored_page(
+            temp.path(),
+            "another-capture",
+            &first.file_path,
+            &first.content_hash
+        )
+        .is_err());
     }
 
     /// R17.2: accepting page N must not block capturing page N+1. Both writes

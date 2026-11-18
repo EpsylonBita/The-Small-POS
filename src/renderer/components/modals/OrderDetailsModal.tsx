@@ -39,6 +39,8 @@ import {
 import { isExternalDeliveryPlatform } from '../../../../../shared/platforms/order-platforms';
 import { isFullyRefundedCompletedTable } from '../../../../../shared/pos/orders/returned-table-check';
 import { CashHandIcon } from '../icons/PaymentMethodIcons';
+import { OrderSyncNotice } from '../recovery/OrderSyncNotice';
+import { listenSupportEvent } from '../../services/support/SupportRemedyRunner';
 
 interface OrderDetailsModalProps {
   isOpen: boolean;
@@ -308,6 +310,8 @@ function flattenOrderCustomizationInput(customizations: any): any[] {
   return Object.values(parsed).flatMap((entry) => flattenOrderCustomizationEntry(entry));
 }
 
+import { useOrderNoticeEditing } from '../../hooks/useOrderNoticeEditing';
+
 const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   isOpen,
   orderId,
@@ -333,6 +337,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const [customerProfile, setCustomerProfile] = useState<any>(null);
   const [customerProfileLoading, setCustomerProfileLoading] = useState(false);
   const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
+  useOrderNoticeEditing([isOpen && editingAddressId ? orderId ?? order?.id : null]);
   const [catalogLookups, setCatalogLookups] = useState<OrderCatalogLookups>(() => createEmptyOrderCatalogLookups());
   const paymentAutoOpenKeyRef = useRef<string | null>(null);
   // Net paid and outstanding of an order with a gift card row, from the native settlement read.
@@ -451,6 +456,12 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     latestOrderReadRef.current = read;
     return read;
   };
+  useEffect(() => {
+    if (!isOpen) { return; }
+    return listenSupportEvent('order_realtime_update', value => {
+      if (value && typeof value === 'object' && 'id' in value && value.id === orderId) { void loadOrderData(orderId); }
+    });
+  }, [isOpen, orderId]);
 
   // Opening a delivery-platform order whose items never arrived asks the native
   // item fetch once per open view. Native persists them under the order's own
@@ -1533,6 +1544,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       footer={modalFooter}
     >
       <div className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 pt-16 pb-24 scroll-pb-24 scrollbar-hide">
+        <OrderSyncNotice orderId={orderId} />
         <button
           onClick={onClose}
           className="liquid-glass-modal-close absolute right-4 top-3 z-20 shrink-0"

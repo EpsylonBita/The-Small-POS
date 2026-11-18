@@ -1,3 +1,4 @@
+import { onEvent, offEvent } from '../../lib';
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -37,7 +38,8 @@ import { useShift } from '../contexts/shift-context';
 import { useOnBarcodeScan } from '../contexts/barcode-scanner-context';
 import { formatCurrency, formatDate } from '../utils/format';
 import { posApiFetch, posApiGet, posApiPatch, posApiPost } from '../utils/api-helpers';
-import { extractSupplierImportFile } from '../utils/supplier-import-parser';
+import { supplierCommandHeaders, supplierHumanCommand, supplierHumanRecorded, supplierSessionRequired, type SupplierHumanResult } from '../services/supplier-human-client';
+import { supplierImportFileKind } from '../utils/supplier-import-parser';
 import { renderModalPortal } from '../utils/render-modal-portal';
 import PurchaseOrdersTab from '../components/procurement/PurchaseOrdersTab';
 import CaptureScanSettingsModal from '../components/suppliers/CaptureScanSettingsModal';
@@ -50,7 +52,11 @@ import {
   acquireFromScanner,
   advanceCapture,
   confirmCaptureCommit,
+  captureCommitDecision,
+  captureSubtype,
+  capturePageManifest,
   getCaptureDocument,
+  importCaptureFile,
   listCaptureDocuments,
   loadCaptureSources,
   loadDefaultCaptureSourceId,
@@ -138,6 +144,7 @@ interface Invoice {
 }
 
 interface ImportRawRow {
+  source?: 'manual' | 'file' | 'ocr';
   name: string;
   nameEl?: string | null;
   sku?: string | null;
@@ -163,6 +170,7 @@ interface SupplierImportRow extends ImportRawRow {
 }
 
 interface SupplierImportDraft {
+  humanImportTicket?: string;
   organizationId: string;
   branchId: string;
   supplier: {
@@ -433,6 +441,9 @@ const SuppliersPage: React.FC = () => {
   const [draftRows, setDraftRows] = useState<ImportRawRow[]>([emptyImportRow()]);
   const [manualBarcode, setManualBarcode] = useState('');
   const [importDraft, setImportDraft] = useState<SupplierImportDraft | null>(null);
+  const humanActionKey = useRef<string | null>(null);
+  const humanPreview = useRef<{ ticket?: string } | null>(null);
+  const [importResult, setImportResult] = useState<SupplierHumanResult | null>(null);
   const [fileNotice, setFileNotice] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [currencyCode, setCurrencyCode] = useState('');
@@ -698,7 +709,9 @@ const SuppliersPage: React.FC = () => {
     };
   }, [invoices, supplierById, supplierSummaryId]);
 
+  const directoryGeneration = useRef(0);
   const fetchData = useCallback(async () => {
+    const generation = ++directoryGeneration.current;
     setLoading(true);
     setError(null);
     try {
@@ -707,6 +720,7 @@ const SuppliersPage: React.FC = () => {
         posApiGet<{ invoices?: Invoice[]; currency?: string }>('pos/supplier-invoices'),
       ]);
 
+      if (generation !== directoryGeneration.current) return;
       if (!supplierResult.success) throw new Error(supplierResult.error || 'Failed to load suppliers');
       if (!invoiceResult.success) throw new Error(invoiceResult.error || 'Failed to load supplier invoices');
 
@@ -729,6 +743,14 @@ const SuppliersPage: React.FC = () => {
 
   useEffect(() => {
     fetchData();
+    const invalidate = (event: any) => {
+      if (event?.reason !== 'group-change' && event?.table !== 'suppliers') return;
+      ++directoryGeneration.current;
+      if (event?.reason === 'group-change') { setSuppliers([]); setSelectedSupplierId(''); setSupplierSummaryId(null); }
+      void fetchData();
+    };
+    onEvent('shared-data-invalidated', invalidate);
+    return () => { ++directoryGeneration.current; offEvent('shared-data-invalidated', invalidate); };
   }, [fetchData]);
 
   const appendBarcodeRow = useCallback((barcode: string) => {
@@ -843,44 +865,21 @@ const SuppliersPage: React.FC = () => {
   const handleFileImport = async (file: File) => {
     setFileNotice(null);
     setImportError(null);
-    const extension = file.name.split('.').pop()?.toLowerCase() || '';
-    let parsedRows: ImportRawRow[];
-
+    if (supplierImportFileKind(file) === 'spreadsheet') {
+      setFileNotice(t('suppliers.import.tillSpreadsheetUnavailable'));
+      return;
+    }
+    setSaving(true);
     try {
-      const parsedFile = await extractSupplierImportFile(file);
-      parsedRows = parsedFile.rows;
-      if (parsedFile.supplier) {
-        setSupplierName(current => current.trim() || parsedFile.supplier?.name || '');
-        setSupplierEmail(current => current.trim() || parsedFile.supplier?.email || '');
-        setSupplierPhone(current => current.trim() || parsedFile.supplier?.phone || '');
-        setSupplierNotes(current => current.trim() || parsedFile.supplier?.notes || '');
-        setInvoiceNumber(current => current.trim() || parsedFile.supplier?.invoiceNumber || '');
-        setInvoiceDate(current => current.trim() || parsedFile.supplier?.invoiceDate || '');
-      }
-    } catch (importError) {
-      console.error('Supplier file import failed:', importError);
-      const message = t('suppliers.import.fileReadFailed', 'Could not read that file. Try another file or add rows manually.');
-      setFileNotice(message);
-      toast.error(message);
-      return;
+      await importCaptureFile(file, captureStaffId);
+      setFileNotice(t(/\.docx?$/i.test(file.name)
+        ? 'suppliers.import.documentRetainedUnsupported' : 'suppliers.import.documentRetained'));
+      setCaptureQueueOpen(true);
+    } catch (fileError) {
+      setFileNotice(t('suppliers.import.fileReadFailed', 'Could not read that file. Try another file or add rows manually.'));
+    } finally {
+      setSaving(false);
     }
-
-    if (parsedRows.length === 0) {
-      setFileNotice(t('suppliers.import.fileNeedsReview', 'No table rows were detected. Add or correct rows manually before preview.'));
-      setDraftRows(rows => [emptyImportRow(), ...rows]);
-      return;
-    }
-
-    if (['pdf', 'doc', 'docx', 'xls', 'xlsx'].includes(extension)) {
-      setFileNotice(t('suppliers.import.importedRows', {
-        count: parsedRows.length,
-        defaultValue: '{{count}} rows imported. Scroll the draft list to review every item before saving.',
-      }));
-    }
-
-    setDraftRows(rows => [...parsedRows, ...rows.filter(row => row.name || row.barcode || row.sku)]);
-    setImportDraft(null);
-    setImportError(null);
   };
 
   const handleCameraFile = async (file: File) => {
@@ -908,7 +907,8 @@ const SuppliersPage: React.FC = () => {
   };
 
   const previewImport = async () => {
-    const rows = draftRows.filter(row => row.name.trim() || row.barcode?.trim() || row.sku?.trim());
+    const rows = draftRows.filter(row => row.name.trim() || row.barcode?.trim() || row.sku?.trim())
+      .map(row => reviewCapture ? row : { ...row, source: 'manual' as const });
     if (!supplierName.trim()) {
       toast.error(t('suppliers.import.supplierRequired', 'Supplier name is required'));
       return;
@@ -921,7 +921,7 @@ const SuppliersPage: React.FC = () => {
     setSaving(true);
     setImportError(null);
     try {
-      const result = await posApiPost<{ success: boolean; draft?: SupplierImportDraft; error?: string }>('pos/suppliers/import/preview', {
+      const payload = {
         supplier: {
           name: supplierName.trim(),
           email: supplierEmail.trim() || null,
@@ -936,14 +936,25 @@ const SuppliersPage: React.FC = () => {
           notes: supplierNotes.trim() || null,
         },
         rows,
-      });
+      };
+      humanActionKey.current ??= crypto.randomUUID();
+      const result = reviewCapture
+        ? await posApiPost<{ success: boolean; draft?: SupplierImportDraft; error?: string }>('pos/suppliers/import/preview', payload)
+        : await supplierHumanCommand<{ success: boolean; draft?: SupplierImportDraft; error?: string }>(
+          'pos/suppliers/import/preview', payload, captureStaffId, humanActionKey.current);
       if (!result.success || !result.data?.draft) {
-        throw new Error(result.error || result.data?.error || 'Preview failed');
+        throw new Error(`${result.code ?? ''} ${result.error || result.data?.error || 'Preview failed'}`);
       }
-      setImportDraft(result.data.draft);
+      // Missing tickets are the old server response, not a guessed version.
+      // Preview and edits must not rotate a server-minted action on retry.
+      const ticket = humanPreview.current?.ticket ?? result.data.draft.humanImportTicket;
+      humanPreview.current = { ticket };
+      setImportDraft({ ...result.data.draft, ...(ticket ? { humanImportTicket: ticket } : {}) });
+      setImportResult(null);
       toast.success(t('suppliers.import.previewReady', 'Import review is ready'));
     } catch (previewError) {
-      const message = getSupplierImportErrorMessage(t, previewError, 'previewFailed');
+      const message = supplierSessionRequired(previewError) ? t('suppliers.import.staffSessionRequired')
+        : getSupplierImportErrorMessage(t, previewError, 'previewFailed');
       setImportError(message);
       toast.error(message);
     } finally {
@@ -955,6 +966,8 @@ const SuppliersPage: React.FC = () => {
     correctionRequest.current += 1;
     setSaving(false);
     setImportOpen(false);
+    humanActionKey.current = null;
+    humanPreview.current = null;
     setSupplierName('');
     setSupplierEmail('');
     setSupplierPhone('');
@@ -964,6 +977,7 @@ const SuppliersPage: React.FC = () => {
     setDraftRows([emptyImportRow()]);
     setImportDraft(null);
     setImportError(null);
+    setFileNotice(null);
     setReviewCapture(null);
     setReviewConfidence([]);
     setReviewQuality('good');
@@ -1322,6 +1336,9 @@ const SuppliersPage: React.FC = () => {
     try {
       const captureId = await startCaptureDocument({
         sourceKind: source.kind,
+        sourceId: source.id,
+        deviceId: source.deviceId,
+        feedMode: source.feedMode,
         sourceName: source.name,
         staffId: captureStaffId,
       });
@@ -1374,7 +1391,7 @@ const SuppliersPage: React.FC = () => {
   const finishCapture = useCallback(
     async (captureId: string) => {
       const outcome = await advanceCapture({ captureId, status: 'waiting' });
-      if (!outcome.success && outcome.code === 'no_pages') {
+      if (!outcome.success) {
         toast.error(
           t('suppliers.capture.pages.needAPage', 'Add at least one page before finishing.')
         );
@@ -1388,15 +1405,6 @@ const SuppliersPage: React.FC = () => {
       return true;
     },
     [refreshCaptureQueue, t]
-  );
-
-  const finishCaptureAndStartAnother = useCallback(
-    async (captureId: string) => {
-      if (await finishCapture(captureId)) {
-        await startScan();
-      }
-    },
-    [finishCapture, startScan]
   );
 
   /**
@@ -1431,6 +1439,7 @@ const SuppliersPage: React.FC = () => {
       ? {
           captureId: reviewCapture.captureId,
           sourceKind: reviewCapture.sourceKind,
+          captureSubtype: captureSubtype(reviewCapture),
           sourceName: reviewCapture.sourceName ?? undefined,
           capturedAt: reviewCapture.capturedAt,
           capturedByStaffId: reviewCapture.staffId ?? undefined,
@@ -1441,46 +1450,78 @@ const SuppliersPage: React.FC = () => {
         }
       : null;
     const poLinkage = reviewPoId
-      ? { purchaseOrderId: reviewPoId, mode: 'record_delivery' as const }
+      ? { purchaseOrderId: reviewPoId, mode: 'confirm_existing' as const }
       : null;
 
     try {
+      humanActionKey.current ??= crypto.randomUUID();
+      const commandHeaders = supplierCommandHeaders(captureStaffId, capture?.captureId ?? humanActionKey.current);
+      const capturePayload = capture && reviewCapture
+        ? { ...capture, page_manifest: capturePageManifest(reviewCapture.pages) } : null;
       if (capture) {
         await advanceCapture({ captureId: capture.captureId, status: 'committing' });
       }
 
       const result = await posApiFetch<{
         success: boolean;
-        result?: { createdInventoryCount: number; updatedInventoryCount: number };
+        result?: SupplierHumanResult;
+        admission?: unknown;
+        poLink?: { warnings?: string[] };
         error?: string;
       }>('pos/suppliers/import/commit', {
         method: 'POST',
+        headers: commandHeaders,
         body: JSON.stringify({
           draft: importDraft,
-          ...(capture ? { capture } : {}),
+          ...(capturePayload ? { capture: capturePayload } : {}),
           ...(poLinkage ? { poLinkage } : {}),
         }),
       });
 
-      if (!result.success || !result.data?.result) {
-        const message = result.error || result.data?.error || 'Commit failed';
+      const decision = capture && result.success ? captureCommitDecision(result.data) : null;
+      if (capture && decision && decision.kind !== 'invalid') {
+        if (decision.kind === 'recorded') {
+          await confirmCaptureCommit({ captureId: capture.captureId, result: decision.result, staffId: captureStaffId });
+          toast.success(t('suppliers.capture.review.saved', 'Invoice saved.'));
+          resetImportForm();
+          await refreshCaptureQueue();
+          await fetchData();
+          return;
+        }
+        // The server owns admission. Rejoin the durable capture worker, which
+        // fetches the same capture/job with its manifest and persists its state.
+        // Going through needs_attention is the legal edge out of committing.
+        const held = await advanceCapture({ captureId: capture.captureId, status: 'needs_attention',
+          reason: decision.kind === 'excluded' ? 'CAPTURE_EXCLUDED' : decision.kind === 'failed' ? 'CAPTURE_UNREADABLE' : 'CAPTURE_REVIEW_REQUIRED',
+          admissionResponse: result.data as unknown as Record<string, unknown> });
+        if (!held.success) throw new Error('Could not retain invoice admission state');
+        if (decision.kind === 'excluded') {
+          toast.error(t('suppliers.capture.status.excluded'));
+          resetImportForm();
+          await refreshCaptureQueue();
+          return;
+        }
+        if (decision.kind === 'waiting') {
+          const queued = await advanceCapture({ captureId: capture.captureId, status: 'waiting' });
+          if (!queued.success) throw new Error('Could not resume invoice admission');
+          toast.success(t('suppliers.capture.pages.admissionWaiting'));
+        } else toast.error(t('suppliers.capture.pages.admissionReview'));
+        resetImportForm();
+        await refreshCaptureQueue();
+        return;
+      }
+
+      if (!result.success || !supplierHumanRecorded(result.data) || capture) {
+        const message = `${result.code ?? ''} ${result.error || result.data?.error || 'Commit failed'}`;
 
         // No HTTP status means the request never reached the server. The
         // reviewed invoice is queued with the SAME capture id as its
         // idempotency key, so if it did land after all the server collapses
         // the replay onto one invoice. [R9.5, R11.6]
-        if (capture && typeof result.status !== 'number') {
+        if (capture && !poLinkage && !supplierSessionRequired(message) && typeof result.status !== 'number') {
           await offlineCommitSupplierImport({
             draft: importDraft as unknown as Record<string, unknown>,
-            capture: {
-              captureId: capture.captureId,
-              sourceKind: capture.sourceKind,
-              capturedAt: capture.capturedAt,
-              sourceName: capture.sourceName,
-              capturedByStaffId: capture.capturedByStaffId,
-              committedByStaffId: capture.committedByStaffId,
-              storageKeys: capture.storageKeys,
-            },
+            capture: capturePayload!,
             ...(poLinkage ? { poLinkage } : {}),
             staffId: captureStaffId ?? '',
           });
@@ -1509,24 +1550,20 @@ const SuppliersPage: React.FC = () => {
         throw new Error(message);
       }
 
-      if (capture) {
-        await confirmCaptureCommit({
-          captureId: capture.captureId,
-          result: result.data as unknown as Record<string, unknown>,
-          staffId: captureStaffId,
-        });
-        await refreshCaptureQueue();
-      }
-
       toast.success(
         capture
           ? t('suppliers.capture.review.saved', 'Invoice saved.')
           : t('suppliers.import.saved', 'Supplier items saved to inventory'),
       );
+      const recorded = result.data!.result!;
+      const sentRows = importDraft.rows.filter(row => row.status !== 'skip' && row.status !== 'error');
+      setImportResult({ ...recorded, warnings: [...(recorded.warnings ?? []), ...(result.data?.poLink?.warnings ?? [])],
+        stockLines: recorded.stockLines?.map(line => ({ ...line, itemName: sentRows[line.line_index]?.name })) });
       resetImportForm();
       await fetchData();
     } catch (commitError) {
-      const message = getSupplierImportErrorMessage(t, commitError, 'saveFailed');
+      const message = supplierSessionRequired(commitError) ? t('suppliers.import.staffSessionRequired')
+        : getSupplierImportErrorMessage(t, commitError, 'saveFailed');
       setImportError(message);
       toast.error(message);
     } finally {
@@ -2324,6 +2361,18 @@ const SuppliersPage: React.FC = () => {
           </motion.div>
       )}
 
+      {importResult && <section data-testid="supplier-import-result" role="status" className={`pos-card p-4 ${tileClass}`}>
+        <p className="font-semibold">{t('suppliers.import.saved')}</p>
+        {(importResult.warnings ?? []).map((warning, index) => <p key={index} className="mt-2 text-(--pos-s-warn)">
+          {warning === 'negative_balance' ? t('suppliers.import.negativeStockWarning') : warning}
+        </p>)}
+        {(importResult.stockLines ?? []).map((line, index) => <p key={line.movement_id || index} className="mt-2 text-sm">
+          {t('suppliers.import.stockLineResult', { row: line.line_index + 1, item: line.itemName || line.inventory_item_id, movement: line.movement_id })}
+          {(['number', 'string'].includes(typeof line.applied_quantity))
+            ? ` · ${t('suppliers.import.appliedStockQuantity', { quantity: line.applied_quantity })}` : ''}
+        </p>)}
+      </section>}
+
       {importOpen && renderModalPortal(
           <motion.div
             className="fixed inset-0 z-1200 flex items-center justify-end p-0 sm:p-4 md:p-6"
@@ -2575,7 +2624,7 @@ const SuppliersPage: React.FC = () => {
                       <input
                         ref={fileInputRef}
                         type="file"
-                        accept=".csv,.txt,.tsv,.xlsx,.xls,.pdf,.doc,.docx"
+                        accept=".csv,.txt,.tsv,.xlsx,.xls,.pdf,.doc,.docx,.png,.jpg,.jpeg,.webp"
                         className="hidden"
                         onChange={(event) => {
                           const file = event.target.files?.[0];
@@ -2672,7 +2721,7 @@ const SuppliersPage: React.FC = () => {
                         className="pos-frost rounded-xl border p-4"
                       >
                         <p className="font-semibold">
-                          {t('suppliers.capture.review.poTitle', 'This delivery was expected — is this it?')}
+                          {t('suppliers.import.poLinkOnly')}
                         </p>
                         <div className="mt-3 space-y-2">
                           {reviewPoOptions.map(order => (
@@ -2836,6 +2885,8 @@ const SuppliersPage: React.FC = () => {
         <CapturePagesPanel
           isOpen={activeCapture !== null}
           captureId={activeCapture?.captureId ?? null}
+          acquisitionBusy={scanStarting}
+          refreshToken={scanStarting}
           deviceId={activeCapture?.deviceId ?? null}
           sourceName={activeCapture?.sourceName ?? null}
           onClose={() => {
@@ -2845,7 +2896,6 @@ const SuppliersPage: React.FC = () => {
             void refreshCaptureQueue();
           }}
           onDone={finishCapture}
-          onFinishAndStartAnother={finishCaptureAndStartAnother}
         />
       )}
 
@@ -2884,7 +2934,7 @@ const SuppliersPage: React.FC = () => {
                   setCaptureQueueOpen(false);
                   setActiveCapture({
                     captureId: document.captureId,
-                    deviceId: resolveDefaultSource(captureSources, captureDefaultId)?.deviceId ?? null,
+                    deviceId: document.deviceId ?? null,
                     sourceName: document.sourceName,
                   });
                 }}

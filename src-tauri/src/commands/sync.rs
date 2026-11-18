@@ -243,13 +243,27 @@ pub(crate) fn query_financial_queue_items(
     limit: i64,
     db: &db::DbState,
 ) -> Result<serde_json::Value, String> {
+    query_financial_queue_items_for_order(limit, db, None)
+}
+
+fn query_financial_queue_items_for_order(
+    limit: i64,
+    db: &db::DbState,
+    order: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let scope = order
+        .map(|_| crate::table_session_cache::current_scope(&conn))
+        .transpose()?;
     let mut stmt = conn
         .prepare(&format!(
             "SELECT id, entity_type, entity_id, operation, payload, status, last_error, retry_count, created_at
              FROM sync_queue
              WHERE status IN ({ACTIONABLE_FINANCIAL_QUEUE_STATUSES_SQL})
                AND entity_type IN ({ACTIONABLE_FINANCIAL_ENTITY_TYPES_SQL})
+               AND (?2 IS NULL OR EXISTS(SELECT 1 FROM orders o WHERE o.id=?2 AND o.organization_id=?3 AND o.branch_id=?4 AND
+                 ((sync_queue.entity_type='payment' AND sync_queue.entity_id IN (SELECT id FROM order_payments WHERE order_id=o.id)) OR
+                  (sync_queue.entity_type='payment_adjustment' AND sync_queue.entity_id IN (SELECT id FROM payment_adjustments WHERE order_id=o.id)))))
              ORDER BY
                CASE status
                  WHEN 'failed' THEN 0
@@ -275,19 +289,27 @@ pub(crate) fn query_financial_queue_items(
         i64,
         String,
     )> = stmt
-        .query_map([limit], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-            ))
-        })
+        .query_map(
+            rusqlite::params![
+                limit,
+                order,
+                scope.as_ref().map(|s| s.organization.as_str()),
+                scope.as_ref().map(|s| s.branch.as_str())
+            ],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
@@ -897,6 +919,7 @@ pub async fn sync_get_status(app: tauri::AppHandle) -> Result<serde_json::Value,
 #[tauri::command]
 pub async fn sync_get_network_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let status = sync::check_network_status().await;
+    crate::order_notice_recovery::set_server_reachable(status["isOnline"] == true);
     let _ = app.emit("network_status", status.clone());
     Ok(status)
 }
@@ -961,8 +984,12 @@ pub async fn sync_get_failed_financial_items(
 ) -> Result<serde_json::Value, String> {
     run_blocking_command("sync_get_failed_financial_items", move || {
         let db = app.state::<db::DbState>();
+        let order = arg0
+            .as_ref()
+            .and_then(|v| v["orderId"].as_str())
+            .map(str::to_string);
         let limit = parse_failed_financial_items_limit(arg0);
-        query_financial_queue_items(limit, &db)
+        query_financial_queue_items_for_order(limit, &db, order.as_deref())
     })
     .await
 }

@@ -930,6 +930,16 @@ fn repair_envelope() -> String {
 }
 
 fn create_repair_transport_queue_tables(connection: &Connection) {
+    // Queue admission now reads the phase-2 ownership sidecars even when
+    // dispatching native repair rows. Bootstrap the shipped schema instead
+    // of silently omitting those dependencies from this older fixture.
+    let scoped: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='view' AND name='pos_shared_scope')",
+        [], |row| row.get(0),
+    ).unwrap();
+    if !scoped {
+        crate::db::run_migrations_for_test(connection);
+    }
     create_tables(connection).expect("create parity queue tables");
     connection
         .execute_batch(crate::gift_financial_opening::SCHEMA_SQL)

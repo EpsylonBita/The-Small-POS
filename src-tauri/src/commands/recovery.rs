@@ -452,6 +452,9 @@ pub async fn recovery_record_action_log(
     run_blocking_command("recovery_record_action_log", move || {
         let db = app.state::<db::DbState>();
         let mut raw_entry = arg0.ok_or_else(|| "Missing recovery action log entry".to_string())?;
+        if raw_entry.get("nativeOrderCorrection").is_some() || raw_entry.get("automatic").is_some() || raw_entry.get("automaticIntent").is_some() {
+            return Err("Native correction evidence cannot be supplied by the renderer".into());
+        }
         let entry = recovery_log_entry_from_payload(&raw_entry);
         let target_refs = entry
             .get("targetRefs")
@@ -468,6 +471,8 @@ pub async fn recovery_record_action_log(
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+        let native: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM recovery_action_log WHERE id=?1 AND (json_extract(payload_json,'$.nativeOrderCorrection')=1 OR json_extract(payload_json,'$.automaticIntent')=1))", [&id], |r|r.get(0)).map_err(|e|e.to_string())?;
+        if native { return Err("Native correction evidence cannot be replaced".into()); }
         raw_entry = crate::incident_reporting::recipe_audit_scope(&conn, raw_entry);
         let payload_json = serde_json::to_string(&raw_entry)
             .map_err(|e| format!("serialize recovery log: {e}"))?;
@@ -811,10 +816,16 @@ pub async fn recovery_execute_action(
             _ => unreachable!(),
         };
     }
-    if arg0
-        .as_ref()
-        .is_some_and(|request| request["actionId"] == "nativeCustomerAddressDefaultRetry")
-    {
+    if arg0.as_ref().is_some_and(|request| {
+        matches!(
+            request["actionId"].as_str(),
+            Some(
+                "nativeCustomerAddressDefaultRetry"
+                    | "resendOrderCustomerCorrection"
+                    | "keepServerOrderCustomerDetails"
+            )
+        )
+    }) {
         // The address owner takes business locks, including its local-mutation
         // fence. Keep the whole local action on the blocking pool.
         return run_blocking_command("recovery_address_retry", move || {
@@ -903,6 +914,93 @@ async fn recovery_execute_action_core(
         .unwrap_or("");
 
     match action_id {
+        "resendOrderCustomerCorrection" | "keepServerOrderCustomerDetails" => {
+            use crate::order_notice_recovery as owner;
+            if !support_authorized {
+                auth::authorize_privileged_action(
+                    auth::PrivilegedActionScope::CashDrawerControl,
+                    db,
+                    auth_state,
+                )?;
+            }
+            let snapshot = request["snapshotPointId"]
+                .as_str()
+                .ok_or("SNAPSHOT_FAILED")?;
+            if !crate::recovery::list_recovery_points(db)?
+                .iter()
+                .any(|point| {
+                    point.id == snapshot
+                        && point.kind == crate::recovery::RecoveryPointKind::PreRecoveryAction
+                        && std::path::Path::new(&point.snapshot_path).is_file()
+                })
+            {
+                return Err("SNAPSHOT_FAILED".into());
+            }
+            let permit = crate::support::critical_op::global()
+                .try_begin_support(true, None)
+                .map_err(|_| "CONCURRENT_OPERATION")?;
+            let isolated = db::DbState {
+                conn: std::sync::Mutex::new(owner::observer_connection(&db.db_path, true)?),
+                db_path: db.db_path.clone(),
+            };
+            let db = &isolated;
+            let (row, before) = {
+                let conn = db.conn.lock().map_err(|_| "REMEDY_NOT_APPLICABLE")?;
+                health_action_admission(
+                    &conn,
+                    &request,
+                    chrono::Utc::now().timestamp_millis(),
+                    false,
+                    false,
+                )?;
+                let id = request["params"]["queueId"]
+                    .as_str()
+                    .or_else(|| request["entityId"].as_str())
+                    .ok_or("REMEDY_NOT_APPLICABLE")?;
+                let Some(row) = owner::refused(&conn, id)? else {
+                    return Ok(
+                        json!({"success":true,"requiresRefresh":true,"verification":{"status":"pending"}}),
+                    );
+                };
+                let before = owner::capture(&conn, &row)?;
+                (row, before)
+            };
+            let remote = crate::order_header_preflight::remote_id(&before)?
+                .ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
+            let answer = crate::admin_fetch_detailed(
+                Some(db),
+                &format!("/api/pos/orders/sync?order_id={remote}"),
+                "GET",
+                None,
+            )
+            .await
+            .map_err(|_| "EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
+            owner::verify(&before, &answer)?;
+            let result = sync::guarded_renderer_local_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                |conn| {
+                    let result = (|| {
+                        let tx = permit.begin_write_nowait(conn)?;
+                        let value = owner::apply(&tx, &row, &before, &answer, action_id, snapshot)?;
+                        if permit.is_cancelled() {
+                            return Err("CONCURRENT_OPERATION".into());
+                        }
+                        tx.commit().map_err(|e| e.to_string())?;
+                        Ok(value)
+                    })();
+                    conn.progress_handler(0, None::<fn() -> bool>);
+                    result
+                },
+            )
+            .await?;
+            if let Ok(order) = sync::get_order_by_id(db, &row.order) {
+                app.emit_json("order_realtime_update", order);
+            }
+            app.emit_json("order_sync_notices_changed", json!({}));
+            Ok(result)
+        }
         "nativeCustomerAddressDefaultRetry" => {
             {
                 let conn = db.conn.lock().map_err(|_| "REMEDY_NOT_APPLICABLE")?;
@@ -2395,6 +2493,16 @@ mod tests {
     }
 
     fn seed_failed_recovery_row(conn: &Connection, id: &str, module: &str, priority: i64) {
+        for (key, value) in [
+            (
+                "group_organization_id",
+                "00000000-0000-4000-8000-000000000001",
+            ),
+            ("group_terminal_id", "terminal-recovery"),
+            ("group_branch_id", "branch-recovery"),
+        ] {
+            db::set_setting(conn, "terminal", key, value).unwrap();
+        }
         sync_queue::enqueue_payload_item(
             conn,
             "customers",

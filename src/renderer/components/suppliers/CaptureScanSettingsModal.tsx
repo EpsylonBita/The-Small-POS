@@ -49,7 +49,7 @@ import {
   type ScannerDevice,
 } from '../../services/capture-client';
 import { deviceKey, sourceKindKey, sourceStatusKey } from '../../utils/capture-review';
-import type { CaptureSourceConfig } from '../../types/supplier-capture';
+import type { DesktopCaptureSourceConfig as CaptureSourceConfig } from '../../services/capture-client';
 
 /** Live status of one source, as reported by the watched-folder engine. */
 type SourceLiveStatus = 'ready' | 'unavailable' | 'watching';
@@ -93,6 +93,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
   const [defaultSourceId, setDefaultSourceId] = useState<string | null>(null);
   const [liveStatus, setLiveStatus] = useState<Record<string, SourceLiveStatus>>({});
   const [step, setStep] = useState<Step>({ kind: 'list' });
+  const [feedMode, setFeedMode] = useState<'flatbed' | 'feeder'>('flatbed');
   const [devices, setDevices] = useState<ScannerDevice[]>([]);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -173,7 +174,9 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
   useEffect(() => {
     if (!isOpen || step.kind !== 'folder_test') return;
 
-    const handleArrived = () => setFolderArrived(true);
+    const handleArrived = (payload: { sourceId?: string }) => {
+      if (payload?.sourceId === step.source.id) setFolderArrived(true);
+    };
     onEvent('capture:document-arrived', handleArrived);
     return () => offEvent('capture:document-arrived', handleArrived);
   }, [isOpen, step]);
@@ -209,6 +212,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
   );
 
   const startScannerFlow = useCallback(async () => {
+    setFeedMode('flatbed');
     setBusy(true);
     setProblem(null);
     setProblemDetail(null);
@@ -235,7 +239,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
       setTestImage(null);
       setStep({ kind: 'test_scanner', device });
       try {
-        const outcome = await testScanner(device.deviceId);
+        const outcome = await testScanner(device.deviceId, feedMode);
         if (!outcome.ok) {
           setProblem(t(deviceKey(outcome.code), t('suppliers.capture.device.device_error', 'The scanner did not answer. Check it is on and connected.')));
           setProblemDetail(outcome.detail ?? null);
@@ -246,7 +250,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
         setBusy(false);
       }
     },
-    [t],
+    [t, feedMode],
   );
 
   const saveScanner = useCallback(
@@ -258,6 +262,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
         name: friendlyName.trim() || device.name,
         isDefault: makeDefault || sources.length === 0,
         deviceId: device.deviceId,
+        feedMode,
       };
       await persist([...sources, next], next.isDefault ? id : defaultSourceId);
       toast.success(t('suppliers.capture.settings.saved', 'Saved. You can scan from here now.'));
@@ -265,7 +270,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
       setTestImage(null);
       setFriendlyName('');
     },
-    [defaultSourceId, friendlyName, makeDefault, persist, sources, t],
+    [defaultSourceId, friendlyName, makeDefault, persist, sources, t, feedMode],
   );
 
   const addWatchedFolder = useCallback(async () => {
@@ -468,6 +473,14 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
         </div>
       )}
 
+      <label className="block text-sm">
+        {t('suppliers.capture.pages.paperSource', 'Paper source')}
+        <select value={feedMode} onChange={(event) => setFeedMode(event.target.value === 'feeder' ? 'feeder' : 'flatbed')}
+          className="pos-solid-btn ml-2" disabled={busy}>
+          <option value="flatbed">{t('suppliers.capture.pages.flatbed', 'Flatbed / one sheet')}</option>
+          <option value="feeder">{t('suppliers.capture.pages.feeder', 'Feeder / one-sided stack')}</option>
+        </select>
+      </label>
       {devices.map((device) => (
         <button
           key={device.deviceId}
@@ -476,7 +489,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
           className="pos-choice-card pos-choice-card--row"
         >
           <Printer className="h-5 w-5 shrink-0 text-(--pos-s-muted)" aria-hidden="true" />
-          <span className="min-w-0 flex-1 truncate font-semibold">{device.name}</span>
+          <span className="min-w-0 flex-1 truncate font-semibold">{device.name}<small className="block truncate font-normal">{device.deviceId}</small></span>
           <Plus className="h-4 w-4 shrink-0" />
         </button>
       ))}
@@ -591,6 +604,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
       <div className={`rounded-xl border p-4 text-sm ${cardClass}`}>
         <p className="font-semibold">{source.name}</p>
         <p className={`mt-1 break-all ${subtleClass}`}>{source.folderPath}</p>
+        <p className={`mt-2 ${subtleClass}`}>{t('suppliers.capture.pages.folderBoundary', 'One invoice per capture. Save a multi-page invoice as one PDF; separate image files become separate captures.')}</p>
       </div>
 
       {folderArrived ? (

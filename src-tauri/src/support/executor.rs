@@ -370,9 +370,12 @@ impl Executor {
         .map_err(db_error)?;
         tx.execute("UPDATE support_accepted_commands SET result_json=NULL,result_bytes=NULL,envelope_json=NULL WHERE finished_at<?1",[clock::iso(oldest)]).map_err(db_error)?;
         let strings: Vec<String> = {
-            let mut stmt=tx.prepare("SELECT result_json FROM support_result_outbox WHERE delivered=0 ORDER BY created_ms,command_id LIMIT ?1").map_err(db_error)?;
+            let mut stmt=tx.prepare("SELECT o.result_json FROM support_result_outbox o LEFT JOIN support_result_delivery d ON d.command_id=o.command_id WHERE o.delivered=0 AND COALESCE(d.next_attempt_ms,0)<=?1 ORDER BY CASE WHEN COALESCE(d.consecutive_failures,0)>=?2 THEN d.next_attempt_ms ELSE o.created_ms END,o.created_ms,o.command_id LIMIT ?3").map_err(db_error)?;
             let rows = stmt
-                .query_map([limit as i64], |r| r.get(0))
+                .query_map(
+                    params![now, result_failure_threshold(), limit as i64],
+                    |r| r.get(0),
+                )
                 .map_err(db_error)?;
             rows.collect::<rusqlite::Result<_>>().map_err(db_error)?
         };
@@ -415,6 +418,54 @@ impl Executor {
         self.db.conn.execute("UPDATE support_accepted_commands SET delivered=1,state=CASE WHEN finished_at IS NOT NULL THEN 'reported' ELSE state END WHERE command_id=?1 AND json_extract(result_json,'$.result_sha256')=?2",params![id,hash]).map_err(db_error)?;
         Ok(())
     }
+
+    /// Reserve before the await: a crash must not reset the per-result send cap.
+    pub fn reserve_result_send(&self, id: &str, now: i64) -> Result<bool, String> {
+        self.db.conn.execute("INSERT INTO support_result_delivery(command_id,next_attempt_ms,last_attempt_ms) SELECT command_id,?2,?3 FROM support_result_outbox WHERE command_id=?1 ON CONFLICT(command_id) DO UPDATE SET next_attempt_ms=excluded.next_attempt_ms,last_attempt_ms=excluded.last_attempt_ms WHERE support_result_delivery.next_attempt_ms<=?3",
+            params![id, now.saturating_add(contracts::cap("transport", "heartbeatMs") as i64), now])
+            .map(|changed| changed == 1).map_err(db_error)
+    }
+
+    /// The Nth failure yields this cycle too; subsequent retries are lower priority.
+    pub fn result_send_failed(&self, id: &str, now: i64) -> Result<bool, String> {
+        let tx = super::db::transaction(&self.db.conn).map_err(db_error)?;
+        let failures: u32 = tx.query_row("UPDATE support_result_delivery SET consecutive_failures=MIN(consecutive_failures+1,32) WHERE command_id=?1 RETURNING consecutive_failures", [id], |r| r.get(0)).map_err(db_error)?;
+        let exponent = failures.saturating_sub(result_failure_threshold()).min(16);
+        let delay = (contracts::cap("transport", "heartbeatMs") * (1u64 << exponent))
+            .min(contracts::cap("transport", "deliveryExpiryMs"));
+        tx.execute(
+            "UPDATE support_result_delivery SET next_attempt_ms=?1 WHERE command_id=?2",
+            params![now.saturating_add(delay as i64), id],
+        )
+        .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        Ok(failures >= result_failure_threshold())
+    }
+
+    pub fn retire_result(&self, result: &Value, code: &str, now: i64) -> Result<(), String> {
+        let id = result["command_id"].as_str().ok_or("INVALID_INPUT")?;
+        let session = result["session_id"].as_str().ok_or("INVALID_INPUT")?;
+        let hash = result["result_sha256"].as_str().ok_or("INVALID_INPUT")?;
+        let tx = super::db::transaction(&self.db.conn).map_err(db_error)?;
+        // Caller passes only a closed/sanitized server code, never error prose.
+        tx.execute("INSERT INTO support_result_refusals(command_id,session_id,server_code,refused_at) VALUES(?1,?2,?3,?4) ON CONFLICT(command_id) DO NOTHING", params![id,session,code,clock::iso(now)]).map_err(db_error)?;
+        tx.execute("DELETE FROM support_result_outbox WHERE command_id=?1 AND json_extract(result_json,'$.result_sha256')=?2", params![id,hash]).map_err(db_error)?;
+        tx.execute("UPDATE support_accepted_commands SET delivered=1,state=CASE WHEN finished_at IS NOT NULL THEN 'reported' ELSE state END WHERE command_id=?1 AND json_extract(result_json,'$.result_sha256')=?2", params![id,hash]).map_err(db_error)?;
+        tx.execute(
+            "DELETE FROM support_result_refusals WHERE refused_at<?1",
+            [clock::iso(
+                now - contracts::cap("accountability", "localAuditMinimumMs") as i64,
+            )],
+        )
+        .map_err(db_error)?;
+        tx.commit().map_err(db_error)
+    }
+}
+
+pub(super) fn result_failure_threshold() -> u32 {
+    // Three failures from the existing 10 s pause / 3 s fallback caps.
+    (contracts::cap("transport", "showPausedMs") / contracts::cap("transport", "fallbackPollMs"))
+        .max(1) as u32
 }
 
 fn complete_on(
@@ -547,7 +598,10 @@ fn make_result(
                 .ok_or("INTERNAL_ERROR")?
                 .remove("data");
             result["failure_detail_code"] = json!("SCREENSHOT_ALREADY_CONSUMED");
-        } else {
+        } else if !matches!(
+            c.kind.as_str(),
+            "till_run_catalogue_action" | "breakglass_propose_catalogue_action"
+        ) {
             result["data"] = json!({"verification_guidance":"Verify the current till state and audit before proposing another action. This command will never execute again."});
         }
     }
@@ -555,6 +609,16 @@ fn make_result(
     Ok(result)
 }
 fn store_result(conn: &Connection, c: &Command, result: &Value, now: i64) -> Result<(), String> {
+    let retired: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM support_result_refusals WHERE command_id=?1)",
+            [&c.command_id],
+            |r| r.get(0),
+        )
+        .map_err(db_error)?;
+    if retired {
+        return Ok(());
+    }
     let encoded = storage_result(result).to_string();
     if encoded.len() as u64 > result_cap(c) {
         return Err("RESULT_TOO_LARGE".into());

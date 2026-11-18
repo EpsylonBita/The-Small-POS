@@ -4739,6 +4739,7 @@ pub fn start_sync_loop(
                 serde_json::json!({ "isOnline": network_is_online })
             };
             let _ = app.emit("network_status", &network_status_for_ui);
+            crate::order_notice_recovery::set_server_reachable(network_is_online);
 
             // Parity-queue capacity early warning. Runs on every tick --
             // including offline and auth-paused ticks, which is exactly when
@@ -6150,6 +6151,9 @@ fn classify_finished_parity_pass(
     scope: ParityFailureScope,
     result: &sync_queue::SyncResult,
 ) -> ParitySyncExecutionOutcome {
+    // Reads are order-scoped in the renderer. A pass completion makes newly
+    // parked corrections visible immediately, even when the order is synced.
+    app.emit_json("order_sync_notices_changed", serde_json::json!({}));
     let status_after = match read_parity_queue_status_for_scope(db, scope) {
         Ok(status) => status,
         Err(_) => return ParitySyncExecutionOutcome::Failed("PARITY_STATUS_UNAVAILABLE"),
@@ -19755,6 +19759,8 @@ fn mark_order_synced_via_direct_fallback(
         )
         .map_err(|e| format!("update orders.supabase_id: {e}"))?;
 
+        crate::sync_queue::acknowledge_created_order_version(&conn, entity_id, response)?;
+
         // The created row's VAT is the order's canonical VAT (07/10/2026).
         if let Some(created) = response
             .and_then(|answer| answer.get("data"))
@@ -22006,7 +22012,7 @@ async fn sync_payment_items(
                             Ok(PaymentClaimOutcome::Deferred)
                         }
                         Some(sid) => {
-                            if has_outstanding_local_order_queue(&conn, local_order_id) {
+                            if sync_queue::order_write_holds_payment(&conn, local_order_id)? {
                                 conn.execute(
                                     "UPDATE sync_queue
                                      SET status = 'deferred',
@@ -22033,7 +22039,7 @@ async fn sync_payment_items(
                                 Ok(PaymentClaimOutcome::Deferred)
                             } else {
                             conn.execute(
-                                "UPDATE order_payments SET sync_state = 'syncing', updated_at = datetime('now') WHERE id = ?1",
+                                "UPDATE order_payments SET sync_state = 'syncing', sync_last_error = NULL, updated_at = datetime('now') WHERE id = ?1",
                                 params![entity_id],
                             )
                             .map_err(|e| format!("mark payment syncing: {e}"))?;
@@ -23260,6 +23266,11 @@ async fn sync_loyalty_items(
             _,
         ) = item;
 
+        let scope_allowed = db.conn.lock().ok().and_then(|conn| conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM shared_legacy_queue_scope s,pos_shared_scope active WHERE s.queue_id=?1 AND s.organization_id=active.organization_id AND s.group_key=active.group_key AND s.terminal_id=active.terminal_id AND s.branch_id=active.branch_id)",params![id],|row|row.get::<_,bool>(0)).ok()).unwrap_or(false);
+        if !scope_allowed {
+            continue;
+        }
         match sync_loyalty_transaction(admin_url, api_key, entity_id, payload).await {
             Ok(applied) => {
                 if !applied {
@@ -24115,7 +24126,7 @@ pub(crate) fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String>
     let mut promoted = 0;
 
     for (payment_id, order_id) in &rows {
-        if has_outstanding_local_order_queue(&conn, order_id) {
+        if sync_queue::order_write_holds_payment(&conn, order_id)? {
             debug!(
                 payment_id = %payment_id,
                 order_id = %order_id,
@@ -24154,7 +24165,7 @@ pub(crate) fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String>
 
         // Promote the payment record
         let _ = conn.execute(
-            "UPDATE order_payments SET sync_state = 'pending', updated_at = ?1
+            "UPDATE order_payments SET sync_state = 'pending', sync_last_error = NULL, updated_at = ?1
              WHERE id = ?2
                AND (sync_state = 'waiting_parent'
                     OR (sync_state = 'failed' AND ?3 IS NOT NULL))",
@@ -25317,7 +25328,7 @@ pub(crate) async fn repair_orphaned_financial_queue_items(
 /// order. This provides low-latency sync for the common case (order + payment
 /// in the same sync cycle).
 pub(crate) fn promote_payments_for_order(conn: &rusqlite::Connection, order_id: &str) {
-    if has_outstanding_local_order_queue(conn, order_id) {
+    if sync_queue::order_write_holds_payment(conn, order_id).unwrap_or(true) {
         debug!(
             order_id = %order_id,
             "Skipping inline payment promotion while order has outstanding sync queue rows"
@@ -25330,7 +25341,7 @@ pub(crate) fn promote_payments_for_order(conn: &rusqlite::Connection, order_id: 
     // Promote order_payments rows
     let updated = conn
         .execute(
-            "UPDATE order_payments SET sync_state = 'pending', updated_at = ?1
+            "UPDATE order_payments SET sync_state = 'pending', sync_last_error = NULL, updated_at = ?1
              WHERE order_id = ?2 AND sync_state = 'waiting_parent'",
             params![now, order_id],
         )
@@ -27056,6 +27067,21 @@ mod tests {
 
     fn enqueue_renderer_probe(db: &DbState, record_id: &str, priority: i64) {
         let conn = db.conn.lock().expect("lock renderer probe db");
+        let terminal = db::get_setting(&conn, "terminal", "terminal_id")
+            .or_else(|| crate::tests::fake_keyring::get("terminal_id"))
+            .unwrap_or_else(|| "renderer-terminal".into());
+        let branch = db::get_setting(&conn, "terminal", "branch_id")
+            .unwrap_or_else(|| "renderer-store".into());
+        for (key, value) in [
+            (
+                "group_organization_id",
+                "00000000-0000-4000-8000-000000000001",
+            ),
+            ("group_terminal_id", terminal.as_str()),
+            ("group_branch_id", branch.as_str()),
+        ] {
+            db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
         sync_queue::enqueue_payload_item(
             &conn,
             "customers",
@@ -35499,6 +35525,61 @@ mod tests {
     }
 
     #[test]
+    fn precreate_legacy_direct_fallback_stores_committed_version_and_binds_header() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            crate::sync_queue::create_tables(&conn).unwrap();
+            conn.execute("INSERT INTO orders(id,organization_id,items,total_amount,total_amount_cents,status,version,created_at,updated_at)
+                VALUES('legacy-precreate','org-precreate','[]',14.5,1450,'pending',9,datetime('now'),datetime('now'))",[]).unwrap();
+            conn.execute("INSERT INTO sync_queue(entity_type,entity_id,operation,payload,idempotency_key,status)
+                VALUES('order','legacy-precreate','insert','{}','legacy-precreate-key','in_progress')",[]).unwrap();
+            let queue_id = conn.last_insert_rowid();
+            conn.execute("INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,created_at,module_type,conflict_strategy,version,status)
+                VALUES('legacy-precreate-edit','orders','legacy-precreate','UPDATE',?1,'org-precreate',datetime('now'),'orders','manual',1,'pending')",
+                [serde_json::json!({"orderId":"legacy-precreate","client_event_id":"legacy-precreate-event","expected_version":1,"status":"pending","customer_name":"Corrected"}).to_string()]).unwrap();
+            drop(conn);
+            mark_order_synced_via_direct_fallback(
+                &db,
+                queue_id,
+                "legacy-precreate",
+                "remote-precreate",
+                Some(&serde_json::json!({"data":{"id":"remote-precreate","version":6}})),
+            )
+            .unwrap();
+        }
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT version,remote_version FROM orders WHERE id='legacy-precreate'",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+            (9, 6)
+        );
+        let payload: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE id='legacy-precreate-edit'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["expected_version"], 6);
+        assert_eq!(payload["client_event_id"], "legacy-precreate-event");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM recovery_action_log WHERE action_id='bind_order_create_base'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn test_sync_order_batch_via_direct_api_creates_orphaned_update_rows_before_patch() {
         let _keyring =
             crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-sync-test")]);
@@ -37550,9 +37631,26 @@ mod tests {
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind status mock server");
+        listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().expect("status mock server address");
         let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept status mock request");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(stream) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("queue did not send status mock request: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(15)))
+                .unwrap();
             let mut buffer = vec![0u8; 16 * 1024];
             let _ = stream.read(&mut buffer).expect("read status mock request");
             let retry_header = retry_after
@@ -37572,6 +37670,13 @@ mod tests {
 
     fn seed_closeout_terminal_context(db: &DbState) {
         let conn = db.conn.lock().expect("lock closeout db");
+        for (key, value) in [
+            ("group_organization_id", "org-closeout"),
+            ("group_terminal_id", CLOSEOUT_TEST_TERMINAL_ID),
+            ("group_branch_id", "11111111-1111-1111-1111-111111111111"),
+        ] {
+            db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
         db::set_setting(&conn, "terminal", "terminal_id", CLOSEOUT_TEST_TERMINAL_ID)
             .expect("store terminal id");
         db::set_setting(
@@ -37624,6 +37729,7 @@ mod tests {
             params![id, table_name, format!("record-{id}"), status, module_type],
         )
         .expect("seed failed parity row");
+        crate::group_scope::record_queue_scope(&conn, id, table_name, "org-closeout").unwrap();
     }
 
     /// The parity half of `force_sync_once_scoped`'s mapping.

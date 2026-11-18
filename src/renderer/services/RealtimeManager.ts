@@ -57,6 +57,10 @@ export interface DesktopRealtimeManagerConfig {
   supabaseUrl: string;
   supabaseKey: string;
   organizationId: string;
+  branchId?: string;
+  terminalId?: string;
+  groupKey?: string;
+  onSharedDataChange?: (payload: RealtimePayload) => void;
   /** Callback for order table changes */
   onOrderChange: (payload: RealtimePayload) => void;
   /** Callback for pos_terminal_settings changes */
@@ -110,7 +114,7 @@ function getCallbackForSubscription(
     case 'organization-modules':
       return config.onModuleChange;
     default:
-      return null;
+      return id.startsWith("shared-") ? config.onSharedDataChange ?? null : null;
   }
 }
 
@@ -215,9 +219,13 @@ export class DesktopRealtimeManager {
    * filtered by `organization_id`.
    */
   private async subscribeAll(generation: number): Promise<void> {
-    const channelName = getRealtimeChannelName('POS_TAURI', this.config.organizationId);
+    const channelName = `${getRealtimeChannelName('POS_TAURI', this.config.organizationId)}-${this.config.groupKey ?? this.config.organizationId}-${this.config.branchId ?? ''}-${this.config.terminalId ?? ''}`;
 
-    for (const sub of POS_REALTIME_SUBSCRIPTIONS) {
+    const sharedSubscriptions: RealtimeTableSubscriptionConfig[] = this.config.onSharedDataChange
+      ? ['customers', 'customer_addresses', 'loyalty_settings', 'customer_loyalty_points', 'loyalty_points', 'coupons', 'suppliers', 'staff', 'staff_branch_assignments'].map(table => ({
+          id: `shared-${table}`, table, schema: 'public', events: ['*'], filterColumn: 'organization_id', priority: 5,
+        })) : [];
+    for (const sub of [...POS_REALTIME_SUBSCRIPTIONS, ...sharedSubscriptions]) {
       if (!this.isCurrentGeneration(generation)) {
         return;
       }
@@ -266,12 +274,20 @@ export class DesktopRealtimeManager {
           event: pgEvent,
           schema: sub.schema,
           table: sub.table,
-          filter: `${sub.filterColumn}=eq.${this.config.organizationId}`,
+          filter: sub.table === "orders" && this.config.branchId
+            ? `branch_id=eq.${this.config.branchId}`
+            : `${sub.filterColumn}=eq.${this.config.organizationId}`,
         },
         (payload: any) => {
           if (!this.isCurrentGeneration(generation)) {
             return;
           }
+          const row = Object.keys(payload.new ?? {}).length ? payload.new : payload.old;
+          if (sub.id.startsWith('shared-') && typeof row?.group_id === 'string' &&
+              row.group_id !== (this.config.groupKey ?? this.config.organizationId)) return;
+          if (sub.table === 'orders' && this.config.branchId && row?.branch_id && row.branch_id !== this.config.branchId) return;
+          // Legacy / key-only DELETE events invalidate through a scoped API pull;
+          // their row contents are never installed into a local cache.
           try {
             callback({
               eventType: payload.eventType ?? payload.type ?? event,

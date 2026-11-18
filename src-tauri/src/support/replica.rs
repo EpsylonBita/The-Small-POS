@@ -193,16 +193,37 @@ impl Drop for Replica {
     }
 }
 #[derive(Default)]
-pub struct ReplicaManager {
-    pub session: String,
-    pub replica: Option<Replica>,
+struct ReplicaState {
+    session: String,
+    replica: Option<std::sync::Arc<Replica>>,
     last_refresh: Option<Instant>,
+    building: bool,
+    error: Option<String>,
+    retry_at: Option<Instant>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+#[derive(Default)]
+pub struct ReplicaManager {
+    state: std::sync::Arc<std::sync::Mutex<ReplicaState>>,
 }
 impl ReplicaManager {
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.state.lock().unwrap().replica.is_none()
+    }
     pub fn clear(&mut self) {
-        self.replica = None;
-        self.last_refresh = None;
-        self.session.clear();
+        if let Ok(mut state) = self.state.lock() {
+            state
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+            if let Some(cancel) = &state.worker_cancel {
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
+            state.replica = None;
+        }
+        // The cancelled worker owns the old state until its scratch files drop.
+        self.state = Default::default();
     }
     pub fn get(
         &mut self,
@@ -210,24 +231,107 @@ impl ReplicaManager {
         session: &str,
         refresh: bool,
         permit: &SupportPermit,
-    ) -> Result<&Replica, String> {
-        if self.session != session {
+    ) -> Result<std::sync::Arc<Replica>, String> {
+        self.get_evidence(live, session, refresh, permit, false)
+    }
+    pub fn get_evidence(
+        &mut self,
+        live: &Path,
+        session: &str,
+        refresh: bool,
+        permit: &SupportPermit,
+        personal: bool,
+    ) -> Result<std::sync::Arc<Replica>, String> {
+        if self.state.lock().map_err(|_| "INTERNAL_ERROR")?.session != session {
             self.clear();
-            self.session = session.into();
+            self.state.lock().map_err(|_| "INTERNAL_ERROR")?.session = session.into();
         }
-        if (refresh || self.replica.is_none())
-            && self
-                .last_refresh
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(120))
+        let mut state = self.state.lock().map_err(|_| "INTERNAL_ERROR")?;
+        if !refresh {
+            if let Some(replica) = &state.replica {
+                return Ok(replica.clone());
+            }
+        }
+        if state.building {
+            return Err("REPLICA_BUILDING".into());
+        }
+        if let Some(error) = &state.error {
+            if state.retry_at.is_some_and(|at| Instant::now() < at) {
+                return Err(error.clone());
+            }
+            state.error = None;
+        }
+        if state.replica.is_some()
+            && state.last_refresh.is_some_and(|at| {
+                at.elapsed() < Duration::from_millis(contracts::cap("tools", "replicaRefreshMs"))
+            })
         {
             return Err("RATE_LIMITED".into());
         }
-        if refresh || self.replica.is_none() {
-            self.last_refresh = Some(Instant::now());
-            let replica = build(live, permit)?;
-            self.replica = Some(replica);
+        if permit.is_cancelled() {
+            return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
         }
-        self.replica.as_ref().ok_or("INTERNAL_ERROR".into())
+        state.building = true;
+        let shared = self.state.clone();
+        let cancelled = state.cancelled.clone();
+        let live = live.to_path_buf();
+        let gate = permit.gate();
+        drop(state);
+        // One bounded worker per session. Never hold Core, a business write
+        // transaction or the manager mutex while copying/redacting the database.
+        if std::thread::Builder::new()
+            .name("support-replica".into())
+            .spawn(move || {
+                let result = (|| {
+                    let permit = gate
+                        .try_begin_support(false, None)
+                        .map_err(|_| "PREEMPTED_BY_CRITICAL_OPERATION")?;
+                    {
+                        let mut state = shared.lock().map_err(|_| "INTERNAL_ERROR")?;
+                        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                            return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+                        }
+                        state.worker_cancel = Some(permit.cancelled.clone());
+                    }
+                    build_evidence(&live, &permit, personal)
+                })();
+                if let Ok(mut state) = shared.lock() {
+                    state.building = false;
+                    state.worker_cancel = None;
+                    if !cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        match result {
+                            Ok(replica) => {
+                                state.replica = Some(std::sync::Arc::new(replica));
+                                // Measure cooldown from the completed publication,
+                                // not the beginning of a potentially long copy.
+                                state.last_refresh = Some(Instant::now());
+                                state.error = None;
+                            }
+                            Err(error) => {
+                                let delay = if error == "PREEMPTED_BY_CRITICAL_OPERATION" {
+                                    contracts::cap("performance", "replicaRetryAfterMs")
+                                } else {
+                                    contracts::cap("tools", "replicaRefreshMs")
+                                };
+                                state.retry_at =
+                                    Some(Instant::now() + Duration::from_millis(delay));
+                                state.error = Some(error);
+                            }
+                        }
+                    }
+                }
+            })
+            .is_err()
+        {
+            self.state.lock().map_err(|_| "INTERNAL_ERROR")?.building = false;
+            return Err(super::evidence::error("REPLICA_BUILD_FAILED"));
+        }
+        Err("REPLICA_BUILDING".into())
+    }
+}
+impl Drop for ReplicaManager {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 pub fn cleanup_startup(dir: &Path) -> Result<(), String> {
@@ -272,6 +376,55 @@ fn free_bytes(_path: &Path) -> Result<u64, String> {
 pub(super) fn build_budget() -> Duration {
     Duration::from_millis(contracts::cap("performance", "replicaBuildMs"))
 }
+pub(super) fn background_budget() -> Duration {
+    Duration::from_millis(contracts::cap("performance", "replicaBackgroundBuildMs"))
+}
+/// Incremental backup releases the live read lock between 64-page steps.
+/// Only private scratch is written; checkout admission never waits on support.
+fn copy_snapshot(
+    live: &Path,
+    raw: &Path,
+    permit: &SupportPermit,
+    deadline: Instant,
+) -> Result<(), String> {
+    let source = read_connection(live, permit, deadline)?;
+    let target = Connection::open(raw).map_err(sql_error)?;
+    target
+        .busy_timeout(Duration::from_millis(100))
+        .map_err(sql_error)?;
+    unsafe {
+        let backup = rusqlite::ffi::sqlite3_backup_init(
+            target.handle(),
+            c"main".as_ptr(),
+            source.handle(),
+            c"main".as_ptr(),
+        );
+        if backup.is_null() {
+            return Err(super::evidence::error("REPLICA_BUILD_FAILED"));
+        }
+        let result = loop {
+            if permit.is_cancelled() {
+                break Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+            }
+            if Instant::now() >= deadline {
+                break Err("QUERY_TIMEOUT".into());
+            }
+            match rusqlite::ffi::sqlite3_backup_step(backup, 64) {
+                rusqlite::ffi::SQLITE_DONE => break Ok(()),
+                rusqlite::ffi::SQLITE_OK
+                | rusqlite::ffi::SQLITE_BUSY
+                | rusqlite::ffi::SQLITE_LOCKED => std::thread::sleep(Duration::from_millis(2)),
+                _ => break Err(super::evidence::error("REPLICA_BUILD_FAILED")),
+            }
+        };
+        let finished = rusqlite::ffi::sqlite3_backup_finish(backup);
+        result?;
+        if finished != rusqlite::ffi::SQLITE_OK {
+            return Err(super::evidence::error("REPLICA_BUILD_FAILED"));
+        }
+    }
+    Ok(())
+}
 pub fn build(live: &Path, permit: &SupportPermit) -> Result<Replica, String> {
     build_evidence(live, permit, false)
 }
@@ -302,7 +455,7 @@ pub fn build_evidence(
     })
 }
 fn build_inner(live: &Path, permit: &SupportPermit, personal: bool) -> Result<Replica, String> {
-    let source = read_connection(live, permit, Instant::now() + build_budget())?;
+    let source = read_connection(live, permit, Instant::now() + background_budget())?;
     drop(source);
     let dir = live
         .parent()
@@ -322,18 +475,16 @@ fn build_inner(live: &Path, permit: &SupportPermit, personal: bool) -> Result<Re
     }
     let raw = Scratch(dir.join(format!("raw-{}.db", uuid::Uuid::new_v4())));
     let clean = Scratch(dir.join(format!("redacted-{}.db", uuid::Uuid::new_v4())));
-    let deadline = Instant::now() + build_budget();
-    {
-        let source = read_connection(live, permit, deadline)?;
-        // VACUUM INTO works on a READ_ONLY source; never BEGIN a live read transaction.
-        source
-            .execute("VACUUM INTO ?1", [raw.0.to_string_lossy().as_ref()])
-            .map_err(sql_error)?;
-    }
+    let deadline = Instant::now() + background_budget();
+    copy_snapshot(live, &raw.0, permit, deadline)?;
+    let taken_at = chrono::Utc::now().to_rfc3339();
     let snapshot = read_connection(&raw.0, permit, deadline)?;
-    let policy = super::evidence::Policy::load(&snapshot, personal, permit)?;
+    let policy = super::evidence::Policy::load_until(&snapshot, personal, permit, deadline)?;
     let dest = Connection::open(&clean.0).map_err(sql_error)?;
     permit.guard_connection(&dest, deadline);
+    // Scratch is disposable and published only after commit. Bound the page
+    // cache; avoid journal syncs and keep sort spill on disk.
+    dest.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-2048; PRAGMA temp_store=FILE").map_err(sql_error)?;
     let write = crate::db::immediate_transaction(&dest).map_err(sql_error)?;
     // Reconstruct data-only tables: raw triggers, views, generated expressions,
     // CHECK/default expressions and sqlite_stat samples must never reach a query.
@@ -424,10 +575,15 @@ fn build_inner(live: &Path, permit: &SupportPermit, personal: bool) -> Result<Re
                     quote(&name)
                 ))
                 .map_err(sql_error)?;
+            let mut copied = 0usize;
             while let Some(row) = rows.next().map_err(sql_error)? {
                 if permit.is_cancelled() || Instant::now() >= deadline {
                     return Err("QUERY_TIMEOUT".into());
                 }
+                if copied > 0 && copied % 64 == 0 {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                copied += 1;
                 let mut values = (0..cols.len())
                     .map(|i| row.get::<_, rusqlite::types::Value>(i))
                     .collect::<rusqlite::Result<Vec<_>>>()
@@ -497,7 +653,7 @@ fn build_inner(live: &Path, permit: &SupportPermit, personal: bool) -> Result<Re
     let path = clean.persist();
     Ok(Replica {
         path,
-        taken_at: chrono::Utc::now().to_rfc3339(),
+        taken_at,
         schema: json!(schema),
     })
 }
@@ -548,4 +704,89 @@ pub fn query_connection(
         _ => Authorization::Deny,
     }));
     Ok(conn)
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+    use crate::support::critical_op::CriticalOpGate;
+    fn wait_ready(
+        manager: &mut ReplicaManager,
+        live: &Path,
+        permit: &SupportPermit,
+    ) -> std::sync::Arc<Replica> {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match manager.get(live, "session", false, permit) {
+                Err(code) if code == "REPLICA_BUILDING" && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                result => return result.unwrap(),
+            }
+        }
+    }
+    #[test]
+    fn failed_background_refresh_keeps_the_last_good_replica() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let db = crate::tests::harness::TestDb::open();
+        let gate = CriticalOpGate::new();
+        let permit = gate.try_begin_support(false, None).unwrap();
+        let mut manager = ReplicaManager::default();
+        let prior = wait_ready(&mut manager, db.db_path(), &permit);
+        manager.state.lock().unwrap().last_refresh = None;
+        let missing = db.dir().join("missing-business.db");
+        assert!(
+            matches!(manager.get(&missing, "session", true, &permit), Err(code) if code == "REPLICA_BUILDING")
+        );
+        // A query remains served even when the replacement build fails.
+        assert_eq!(
+            manager
+                .get(db.db_path(), "session", false, &permit)
+                .unwrap()
+                .path,
+            prior.path
+        );
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while manager.state.lock().unwrap().building {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            matches!(manager.get(&missing, "session", true, &permit), Err(code) if code.contains("BUSINESS_DATABASE_MISSING"))
+        );
+        let current = manager
+            .get(db.db_path(), "session", false, &permit)
+            .unwrap();
+        assert_eq!(current.path, prior.path);
+        assert!(super::super::sql_query::query(
+            &current,
+            &json!({"sql":"SELECT count(*) FROM orders"}),
+            &permit
+        )
+        .is_ok());
+    }
+    #[test]
+    fn session_clear_cancels_inflight_publication_and_disposes_scratch() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let db = crate::tests::harness::TestDb::open();
+        let gate = CriticalOpGate::new();
+        let permit = gate.try_begin_support(false, None).unwrap();
+        let mut manager = ReplicaManager::default();
+        assert!(
+            matches!(manager.get(db.db_path(), "session", false, &permit), Err(code) if code == "REPLICA_BUILDING")
+        );
+        let old = manager.state.clone();
+        manager.clear();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while old.lock().unwrap().building {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(old.lock().unwrap().replica.is_none());
+        assert!(manager.is_empty());
+        let scratch = db.dir().join("support-replicas");
+        if scratch.exists() {
+            assert_eq!(std::fs::read_dir(scratch).unwrap().count(), 0);
+        }
+    }
 }

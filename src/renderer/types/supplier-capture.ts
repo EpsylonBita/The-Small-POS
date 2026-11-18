@@ -14,15 +14,4 @@
  * changing the root file (and its mobile mirror), never this one.
  */
 
-export type {
-  CaptureCommitRequestExtras,
-  CaptureOrigin,
-  CaptureOutcomeCode,
-  CaptureRecognitionPage,
-  CaptureSourceConfig,
-  CaptureSourceKind,
-  CaptureStatus,
-  ConfidenceTier,
-} from '../../../../shared/types/supplier-capture';
-
-export { captureOutcomeCodes } from '../../../../shared/types/supplier-capture';
+export * from '../../../../shared/types/supplier-capture';

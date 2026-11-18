@@ -137,6 +137,7 @@ pub fn start_remote_incident_reporter(
     cancel: tokio_util::sync::CancellationToken,
 ) {
     let cadence = Duration::from_secs(interval_secs.clamp(30, 60));
+    crate::order_notice_auto::start(db.clone(), sync_state.clone(), cancel.clone());
     tauri::async_runtime::spawn(async move {
         info!(
             interval_secs = cadence.as_secs(),

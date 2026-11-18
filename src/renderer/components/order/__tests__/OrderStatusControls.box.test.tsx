@@ -189,6 +189,34 @@ const boxOrder = (overrides: Record<string, unknown> = {}) =>
 const efoodOrder = (overrides: Record<string, unknown> = {}) =>
   makeOrder({ id: 'efood-order-1', plugin: 'efood', external_plugin_order_id: 'EF2002', ...overrides });
 
+it('keeps completion tappable and opens the order with one plain message on an open-notice refusal', async () => {
+  const opened = vi.fn();
+  window.addEventListener('pos:open-order-notice', opened);
+  const onStatusChange = vi.fn().mockRejectedValue(new Error('ORDER_HAS_OPEN_NOTICE'));
+  render(<OrderStatusControls order={makeOrder({ status: 'ready', order_type: 'pickup', orderType: 'pickup' })} onStatusChange={onStatusChange} onDriverAssign={vi.fn()} />);
+  const button = screen.getByRole('button', { name: t('orders.actions.completeOrder') });
+  expect((button as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(button);
+  await waitFor(() => expect(opened).toHaveBeenCalledTimes(1));
+  expect(opened.mock.calls[0][0].detail.orderId).toBe('order-1');
+  expect(mocks.toastError).toHaveBeenCalledExactlyOnceWith('Order ORD-0042 has an issue that must be solved first. Open it to see what to do.', expect.any(Object));
+  expect(mocks.toastSuccess).not.toHaveBeenCalled();
+  window.removeEventListener('pos:open-order-notice', opened);
+});
+
+it('explains an unavailable completion check once without opening an empty order window', async () => {
+  const opened = vi.fn();
+  window.addEventListener('pos:open-order-notice', opened);
+  const onStatusChange = vi.fn().mockRejectedValue(new Error('ORDER_NOTICE_CHECK_UNAVAILABLE'));
+  render(<OrderStatusControls order={makeOrder({ status: 'ready', order_type: 'pickup', orderType: 'pickup' })} onStatusChange={onStatusChange} onDriverAssign={vi.fn()} />);
+  fireEvent.click(screen.getByRole('button', { name: t('orders.actions.completeOrder') }));
+  await waitFor(() => expect(mocks.toastError).toHaveBeenCalledTimes(1));
+  expect(mocks.toastError).toHaveBeenCalledWith('The till cannot check right now whether order #ORD-0042 has an open issue, so it stays in the active orders. Try again in a moment. If it keeps happening, call support.', expect.any(Object));
+  expect(opened).not.toHaveBeenCalled();
+  expect(mocks.toastSuccess).not.toHaveBeenCalled();
+  window.removeEventListener('pos:open-order-notice', opened);
+});
+
 function renderControls(order: Order, wrap?: (controls: React.ReactElement) => React.ReactElement) {
   const onStatusChange = vi.fn(async (_orderId: string, _status: OrderStatus) => undefined);
   const onDriverAssign = vi.fn();

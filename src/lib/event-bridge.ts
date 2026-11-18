@@ -105,7 +105,9 @@ const EVENT_MAP: Record<string, string> = {
   // --- Module sync events ---
   'modules_sync_complete': 'modules:sync-complete',
   'modules_sync_error': 'modules:sync-error',
-  'modules_refresh_needed': 'modules:refresh-needed',
+  // No native `modules_refresh_needed` since per-store modules: only the
+  // native fetch publishes the module cache (it emits modules_sync_complete).
+  // The renderer still raises 'modules:refresh-needed' itself (App.tsx).
 
   // --- Repairs --------------------------------------------------------------
   // Rust already emits these canonical channel names. Identity mappings are

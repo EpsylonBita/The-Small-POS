@@ -1,3 +1,6 @@
+import { isOrderOpenNoticeRefusal, orderNoticeRefusalCode } from '../../lib/order-open-notice';
+import { useOrderNoticeEditing } from '../hooks/useOrderNoticeEditing';
+import { announceOrderNoticeMoveRefusal, moveOrdersWithNoticeGate } from '../services/OrderNoticeStatusGuard';
 import { saveOrderWithLoyalty, LoyaltyCheckoutRefused, LoyaltyRedemptionUnconfirmed, loyaltyCheckoutMessageKey } from '../services/LoyaltyCheckout';
 import React, {
   lazy,
@@ -73,6 +76,7 @@ import {
   type SinglePaymentCollectionResult,
 } from "./modals/SinglePaymentCollectionModal";
 import OrderDetailsModal from "./modals/OrderDetailsModal";
+import { useOrderNotices } from '../services/OrderSyncNoticeStore';
 import {
   observeQueuedPrintJob,
   printQueueReasonText,
@@ -576,6 +580,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       resolveConflict,
       createOrder,
     } = useOrderStore();
+    useOrderNotices(orders.map(order => order.id));
 
     // Item E (30/09/2026): a card charged at new-order checkout whose order
     // this till could not save yet. Read from its durable record, so it is
@@ -1089,6 +1094,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [currentEditOrderId, setCurrentEditOrderId] = useState<
       string | undefined
     >(undefined);
+    useOrderNoticeEditing([...pendingEditOrders, ...editCustomerOrderIds, editingSingleOrder, currentEditOrderId]);
     const [currentEditOrderNumber, setCurrentEditOrderNumber] = useState<
       string | undefined
     >(undefined);
@@ -6276,6 +6282,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return true;
         }
 
+        if (isOrderOpenNoticeRefusal(result)) {
+          const order = [...orders, ...pendingExternalOrders].find(order => order.id === orderId);
+          announceOrderNoticeMoveRefusal([{ id: orderId, errorCode: orderNoticeRefusalCode(result), number: order ? formatCompactOrderNumberForDisplay(getVisibleOrderNumber(order)) || orderId : orderId }], t);
+          return false;
+        }
+
         if (result.paymentIntegrityPayload) {
           const targetOrder =
             orders.find((order) => order.id === orderId) ||
@@ -6524,90 +6536,36 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         }
 
         if (action === "delivered") {
-          // Handle pickup orders immediately (mark as completed)
-          if (pickupOrders.length > 0) {
-            for (const order of pickupOrders) {
-              const result = await updateOrderStatusDetailed(
-                order.id,
-                "completed",
-              );
-              if (!result.success) {
-                // A payment-integrity blocker is fully owned by the handler (it opens
-                // the repair UI or shows one localized toast); never emit a second toast.
+          const candidates = [
+            ...pickupOrders.map(order => ({ order, target: "completed" as const })),
+            ...deliveryOrdersInTransit.map(order => ({ order, target: "delivered" as const })),
+          ].map(item => ({ ...item, id: item.order.id, number: formatCompactOrderNumberForDisplay(getVisibleOrderNumber(item.order)) || item.order.id }));
+          const outcome = await moveOrdersWithNoticeGate(candidates,
+            item => updateOrderStatusDetailed(item.id, item.target),
+            (item, result) => {
+              if (item.target === "completed") {
                 if (result.paymentIntegrityPayload) {
-                  handlePaymentIntegrityBlocker(
-                    order,
-                    "completed",
-                    result.paymentIntegrityPayload,
-                  );
+                  handlePaymentIntegrityBlocker(item.order, "completed", result.paymentIntegrityPayload);
                   return;
                 }
-                toast.error(
-                  result.errorMessage ||
-                    t("orderDashboard.markDeliveredFailed", {
-                      orderNumber: formatCompactOrderNumberForDisplay(
-                        getVisibleOrderNumber(order),
-                      ),
-                    }),
-                );
+                toast.error(result.errorMessage || t("orderDashboard.markDeliveredFailed", { orderNumber: item.number }));
                 return;
               }
-            }
-            toast.success(
-              t("orderDashboard.pickupDelivered", {
-                count: pickupOrders.length,
-              }),
-            );
-          }
-
-          if (deliveryOrdersNeedingDispatch.length > 0) {
-            toast.error(
-              t("orderDashboard.dispatchDeliveryBeforeComplete", {
-                defaultValue:
-                  "Assign a driver or convert delivery orders to pickup before completing them.",
-              }),
-            );
-            return;
-          }
-
-          if (deliveryOrdersInTransit.length > 0) {
-            for (const order of deliveryOrdersInTransit) {
-              const result = await updateOrderStatusDetailed(
-                order.id,
-                "delivered",
-              );
-              if (!result.success) {
-                // A payment-integrity blocker is fully owned by the handler (it opens
-                // the repair UI or shows one localized toast); never emit a second toast.
-                if (result.paymentIntegrityPayload) {
-                  handlePaymentIntegrityBlocker(
-                    order,
-                    "delivered",
-                    result.paymentIntegrityPayload,
-                  );
-                  return;
-                }
-                toast.error(
-                  result.errorMessage ||
-                    t("orderDashboard.markDeliveredFailed", {
-                      orderNumber: formatCompactOrderNumberForDisplay(
-                        getVisibleOrderNumber(order),
-                      ),
-                    }),
-                );
+              if (result.paymentIntegrityPayload) {
+                handlePaymentIntegrityBlocker(item.order, "delivered", result.paymentIntegrityPayload);
                 return;
               }
-            }
-            toast.success(
-              t("orderDashboard.deliveriesCompleted", {
-                count: deliveryOrdersInTransit.length,
-                defaultValue: "Completed {{count}} delivery order(s)",
-              }),
-            );
-          } else if (pickupOrders.length > 0) {
-            // If only pickup orders, clear selection
-            clearBulkSelection();
+              toast.error(result.errorMessage || t("orderDashboard.markDeliveredFailed", { orderNumber: item.number }));
+            });
+          if (outcome.blocked.length) announceOrderNoticeMoveRefusal(outcome.blocked, t, selectedOrderObjects.length > 1);
+          if (outcome.stopped) return;
+          if (outcome.moved.length && !outcome.blocked.length) {
+            toast.success(t("orderDashboard.orderStatusUpdated", { defaultValue: "Order status updated." }));
           }
+          if (deliveryOrdersNeedingDispatch.length) {
+            toast.error(t("orderDashboard.dispatchDeliveryBeforeComplete", { defaultValue: "Assign a driver or convert delivery orders to pickup before completing them." }));
+          }
+          clearBulkSelection();
         } else if (action === "reset") {
           const completedOrders = selectedOrderObjects.filter((order) => {
             const status = String(order.status || "").toLowerCase();
@@ -7512,7 +7470,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         if (result?.success !== true) {
           throw new Error(result?.error || "DRIVER_CHANGE_FAILED");
         }
-        toast.success(
+        if (isOrderOpenNoticeRefusal(result)) {
+          const order = [...orders, ...pendingExternalOrders].find(order => order.id === target.orderId);
+          announceOrderNoticeMoveRefusal([{ id: target.orderId, number: order ? formatCompactOrderNumberForDisplay(getVisibleOrderNumber(order)) || target.orderId : target.orderId, errorCode: orderNoticeRefusalCode(result) }], t);
+        } else toast.success(
           t("orderDashboard.driverChange.success", {
             name: result?.data?.driverName || driver.name,
           }),

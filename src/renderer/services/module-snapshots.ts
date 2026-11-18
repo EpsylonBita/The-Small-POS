@@ -66,7 +66,7 @@ export async function readModuleSnapshot(module: Module, force = false, preferCa
   const config = await bridge.terminalConfig.getFullConfig() as Record<string, unknown>;
   const scope = JSON.stringify([config?.organization_id, config?.branch_id, config?.terminal_id]);
   const access = await getOptionalWarmupModules(config, true);
-  if (!config?.organization_id || !config?.terminal_id || !access.has(module === 'inventory' ? 'inventory' : 'product_catalog')) {
+  if (!config?.organization_id || !config?.branch_id || !config?.terminal_id || !access.has(module === 'inventory' ? 'inventory' : 'product_catalog')) {
     engine(module).revoke();
     throw new SnapshotAccessError('Module unavailable for current terminal');
   }

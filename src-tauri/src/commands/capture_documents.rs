@@ -169,6 +169,60 @@ fn document_json(document: &store::CaptureDocument, pages: &[store::CapturePage]
     })
 }
 
+fn capture_details(
+    conn: &rusqlite::Connection,
+    app: &tauri::AppHandle,
+    document: &store::CaptureDocument,
+    pages: &[store::CapturePage],
+) -> Result<Value, String> {
+    let mut value = document_json(document, pages);
+    let source = store::latest_event_details(conn, &document.id, "capture_source")?;
+    value["deviceId"] = source
+        .as_ref()
+        .and_then(|v| v.get("deviceId"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    value["sourceId"] = source
+        .as_ref()
+        .and_then(|v| v.get("sourceId"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    value["scanDetail"] = store::latest_event_details(conn, &document.id, "acquisition_finished")?
+        .and_then(|v| v.get("detail").cloned())
+        .unwrap_or(Value::Null);
+    value["renderRetryAt"] = json!(document.next_retry_at);
+    value["needsRender"] = json!(
+        pages.is_empty()
+            && !document.status.is_terminal()
+            && files::original_path(&app_data_dir(app)?, &document.id)?.is_file()
+    );
+    value["acquiring"] =
+        json!(files::try_lock_lifecycle(&app_data_dir(app)?, &document.id)?.is_none());
+    Ok(value)
+}
+
+fn recover_receipts(
+    conn: &rusqlite::Connection,
+    app: &tauri::AppHandle,
+    id: &str,
+) -> Result<(), String> {
+    let dir = app_data_dir(app)?;
+    if let Some(guard) = files::try_lock_lifecycle(&dir, id)? {
+        if let Err(error) = store::reconcile_scan_receipts(conn, &guard, &dir, id) {
+            tracing::error!(capture_id = id, %error, "Capture receipt recovery needs attention");
+            conn.execute("UPDATE capture_documents SET error_message = 'scan_incomplete' WHERE id = ?1 AND status = 'capturing'", [id]).map_err(|e| e.to_string())?;
+            store::record_event(
+                conn,
+                Some(id),
+                "receipt_recovery_failed",
+                None,
+                Some(&json!({ "detail": error })),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
@@ -187,8 +241,10 @@ pub async fn capture_list_documents(app: tauri::AppHandle) -> Result<Value, Stri
 
         let mut out = Vec::with_capacity(documents.len());
         for document in &documents {
+            recover_receipts(&conn, &app, &document.id)?;
+            let current = store::get_document(&conn, &document.id)?.ok_or("capture missing")?;
             let pages = store::list_pages(&conn, &document.id)?;
-            out.push(document_json(document, &pages));
+            out.push(capture_details(&conn, &app, &current, &pages)?);
         }
 
         Ok(json!({ "success": true, "documents": out }))
@@ -207,6 +263,7 @@ pub async fn capture_get_document(
         let capture_id = required_string(&arg0, "captureId")?;
         let conn = lock(&db)?;
 
+        recover_receipts(&conn, &app, &capture_id)?;
         let Some(document) = store::get_document(&conn, &capture_id)? else {
             return Ok(json!({ "success": false, "code": "not_found" }));
         };
@@ -215,7 +272,7 @@ pub async fn capture_get_document(
 
         Ok(json!({
             "success": true,
-            "document": document_json(&document, &pages),
+            "document": capture_details(&conn, &app, &document, &pages)?,
             "events": events.iter().map(event_json).collect::<Vec<_>>(),
         }))
     })
@@ -406,6 +463,107 @@ fn thumbnail_data_url(path: &std::path::Path) -> Result<String, String> {
 // Writes
 // ---------------------------------------------------------------------------
 
+/// Picked files are documents, including Word files the current server cannot
+/// render. Keep those originals held locally; never turn them into manual rows.
+fn retain_picked_file(
+    conn: &rusqlite::Connection,
+    dir: &std::path::Path,
+    arg0: &Option<Value>,
+) -> Result<String, String> {
+    use base64::Engine;
+    use std::io::Write;
+    let encoded = required_string(arg0, "fileBase64")?;
+    if encoded.len() > 14 * 1024 * 1024 {
+        return Err("CAPTURE_TOO_LARGE".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| "Invalid document bytes")?;
+    if bytes.is_empty() || bytes.len() > 10 * 1024 * 1024 {
+        return Err("CAPTURE_TOO_LARGE".into());
+    }
+    let name = required_string(arg0, "fileName")?;
+    let extension = name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let pdf = extension == "pdf";
+    let word = matches!(extension.as_str(), "doc" | "docx");
+    if !pdf && !word && !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+        return Err("CAPTURE_DOCUMENT_UNSUPPORTED".into());
+    }
+    if pdf && !bytes.starts_with(b"%PDF-") {
+        return Err("CAPTURE_UNREADABLE".into());
+    }
+    let normalized = if pdf || word {
+        None
+    } else {
+        Some(crate::capture::wia::normalize_to_jpeg(&bytes).map_err(|_| "CAPTURE_UNREADABLE")?)
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let guard = files::lock_lifecycle(dir, &id)?;
+    if pdf {
+        files::write_original_blocking_guarded(&guard, dir, &id, &bytes)?;
+    } else {
+        let path = files::capture_dir(dir, &id)?.join(format!("original.{extension}"));
+        let mut original = std::fs::File::create(path).map_err(|e| e.to_string())?;
+        original.write_all(&bytes).map_err(|e| e.to_string())?;
+        original.sync_all().map_err(|e| e.to_string())?;
+    }
+    let page = normalized
+        .as_ref()
+        .map(|bytes| files::write_page_blocking_guarded(&guard, dir, &id, 0, "image/jpeg", bytes))
+        .transpose()?;
+    let validated = page
+        .as_ref()
+        .map(|page| store::validate_written_page(&guard, &id, page))
+        .transpose()?;
+    let tx = crate::db::immediate_transaction(conn).map_err(|e| e.to_string())?;
+    store::create_document(
+        &tx,
+        &store::NewCaptureDocument {
+            id: id.clone(),
+            source_kind: CaptureSourceKind::FilePick,
+            source_name: Some(name),
+            staff_id: optional_string(arg0, "staffId"),
+            captured_at: chrono::Utc::now().to_rfc3339(),
+            content_hash: Some(files::sha256_hex(&bytes)),
+        },
+    )?;
+    store::record_event(
+        &tx,
+        Some(&id),
+        "capture_source",
+        None,
+        Some(&json!({ "captureSubtype": "file" })),
+    )?;
+    if let Some(page) = validated.as_ref() {
+        store::record_validated_page(&tx, &id, page)?;
+    }
+    if pdf {
+        store::record_event(
+            &tx,
+            Some(&id),
+            "render_pending",
+            None,
+            Some(&json!({ "attempt": 0 })),
+        )?;
+    } else {
+        store::set_status(&tx, &id, CaptureStatus::Waiting, None)?;
+        if word {
+            store::set_status(
+                &tx,
+                &id,
+                CaptureStatus::NeedsAttention,
+                Some("CAPTURE_DOCUMENT_UNSUPPORTED"),
+            )?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
 /// Open a new captured document in `capturing`.
 ///
 /// The id is minted here rather than in the renderer so the same value is the
@@ -419,6 +577,15 @@ pub async fn capture_start_document(
 ) -> Result<Value, String> {
     run_blocking_command("capture_start_document", move || {
         let db = app.state::<db::DbState>();
+        if field(&arg0, "fileBase64").is_some() {
+            let conn = lock(&db)?;
+            let id = retain_picked_file(&conn, &app_data_dir(&app)?, &arg0)?;
+            if optional_string(&arg0, "fileName").is_some_and(|name| name.to_ascii_lowercase().ends_with(".pdf")) {
+                let _ = app.emit("capture:needs-render", json!({ "captureId": id }));
+            }
+            let _ = app.emit(EVENT_DOCUMENT_ARRIVED, json!({ "captureId": id }));
+            return Ok(json!({ "success": true, "captureId": id }));
+        }
         let source_kind_raw = required_string(&arg0, "sourceKind")?;
         let source_kind = CaptureSourceKind::parse(&source_kind_raw)
             .ok_or_else(|| format!("Unknown capture source kind: {source_kind_raw}"))?;
@@ -435,6 +602,10 @@ pub async fn capture_start_document(
 
         let conn = lock(&db)?;
         store::create_document(&conn, &document)?;
+        store::record_event(&conn, Some(&capture_id), "capture_source", None, Some(&json!({
+            "sourceId": optional_string(&arg0, "sourceId"), "deviceId": optional_string(&arg0, "deviceId"),
+            "feedMode": optional_string(&arg0, "feedMode").unwrap_or_else(|| "flatbed".into())
+        })))?;
 
         Ok(json!({
             "success": true,
@@ -480,16 +651,42 @@ pub async fn capture_advance(
         // rather than letting the worker discover an empty capture keeps the
         // failure where the user can still do something about it.
         if next == CaptureStatus::Waiting {
-            let pages = store::list_pages(&conn, &capture_id)?;
-            if pages.is_empty() {
-                return Ok(json!({
-                    "success": false,
-                    "code": "no_pages",
-                }));
+            if store::get_document(&conn, &capture_id)?.is_some_and(|d| {
+                d.status == CaptureStatus::Capturing
+                    && matches!(
+                        d.error_message.as_deref(),
+                        Some("scan_incomplete" | "CAPTURE_TOO_MANY_PAGES")
+                    )
+            }) {
+                return Ok(json!({ "success": false, "code": "scan_incomplete" }));
             }
+            store::reconcile_scan_receipts(&conn, &lifecycle, &app_data_dir(&app)?, &capture_id)?;
+            let pages = store::list_pages(&conn, &capture_id)?;
+            if pages.len() >= MAX_CAPTURE_PAGES
+                && store::get_document(&conn, &capture_id)?
+                    .is_some_and(|d| d.status == CaptureStatus::Capturing)
+            {
+                return Ok(json!({ "success": false, "code": "CAPTURE_TOO_MANY_PAGES" }));
+            }
+            if pages.is_empty() {
+                if files::original_path(&app_data_dir(&app)?, &capture_id)?.is_file() {
+                    let _ = app.emit("capture:needs-render", json!({ "captureId": capture_id }));
+                    return Ok(json!({ "success": false, "code": "render_pending" }));
+                }
+                return Ok(json!({ "success": false, "code": "no_pages" }));
+            }
+            store::page_manifest(&conn, &app_data_dir(&app)?, &capture_id)?;
         }
 
-        store::set_status(&conn, &capture_id, next, reason.as_deref())?;
+        let tx = crate::db::immediate_transaction(&conn).map_err(|e| e.to_string())?;
+        if let Some(response) = field(&arg0, "admissionResponse") {
+            if next != CaptureStatus::NeedsAttention {
+                return Err("Invalid admission retention state".into());
+            }
+            retain_admission_response(&tx, &capture_id, response)?;
+        }
+        store::set_status(&tx, &capture_id, next, reason.as_deref())?;
+        tx.commit().map_err(|e| e.to_string())?;
 
         if next == CaptureStatus::Discarded {
             store::record_event(
@@ -527,6 +724,36 @@ pub async fn capture_advance(
     }
 
     Ok(json!({ "success": true, "status": next.as_str() }))
+}
+
+fn retain_admission_response(
+    conn: &rusqlite::Connection,
+    capture_id: &str,
+    response: &Value,
+) -> Result<(), String> {
+    let admission = response.get("admission").ok_or("Missing admission")?;
+    let job = admission["jobId"]
+        .as_str()
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .ok_or("Invalid admission job")?;
+    if response["success"] != true
+        || !matches!(
+            admission["status"].as_str(),
+            Some("waiting" | "needs_review" | "failed" | "excluded")
+        )
+    {
+        return Err("Invalid retained admission".into());
+    }
+    store::set_recognition_json(conn, capture_id, &response.to_string())?;
+    store::record_event(
+        conn,
+        Some(capture_id),
+        "admission_job",
+        None,
+        Some(&json!({ "jobId": job })),
+    )?;
+    store::clear_retry(conn, capture_id)?;
+    Ok(())
 }
 
 /// Persist review edits so leaving the drawer (or restarting the POS) loses
@@ -613,8 +840,19 @@ pub async fn capture_remove_page(
             .find(|page| page.page_index == page_index)
             .map(|page| page.file_path);
 
-        store::delete_page(&conn, &capture_id, page_index)?;
-        store::compact_page_indexes(&conn, &capture_id)?;
+        if removed_path.is_none() {
+            return Ok(json!({ "success": false, "code": "not_found" }));
+        }
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        store::delete_page(&tx, &capture_id, page_index)?;
+        store::compact_page_indexes(&tx, &capture_id)?;
+        store::page_manifest(&tx, &app_data_dir(&app)?, &capture_id)?;
+        tx.execute(
+            "UPDATE capture_documents SET storage_keys_json = NULL WHERE id = ?1",
+            [&capture_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         (store::list_pages(&conn, &capture_id)?.len(), removed_path)
     };
 
@@ -644,6 +882,54 @@ pub async fn capture_reorder_pages(
     run_blocking_command("capture_reorder_pages", move || {
         let db = app.state::<db::DbState>();
         let capture_id = required_string(&arg0, "captureId")?;
+        if let Some(index) = field(&arg0, "rotatePageIndex")
+            .and_then(Value::as_i64)
+            .filter(|i| *i >= 0)
+        {
+            let dir = app_data_dir(&app)?;
+            let lifecycle = files::lock_lifecycle(&dir, &capture_id)?;
+            let conn = lock(&db)?;
+            let document = store::get_document(&conn, &capture_id)?.ok_or("capture not found")?;
+            if document.status != CaptureStatus::Capturing {
+                return Ok(json!({ "success": false, "code": "not_editable" }));
+            }
+            let page = store::list_pages(&conn, &capture_id)?
+                .into_iter()
+                .find(|p| p.page_index == index)
+                .ok_or("page not found")?;
+            let bytes = files::read_stored_page(
+                &dir,
+                &capture_id,
+                std::path::Path::new(&page.file_path),
+                &page.content_hash,
+            )?;
+            let rotated = crate::capture::wia::normalize_to_jpeg_rotated(&bytes, 1)
+                .map_err(|e| e.to_string())?;
+            let written = files::write_page_blocking_guarded(
+                &lifecycle,
+                &dir,
+                &capture_id,
+                index as usize,
+                "image/jpeg",
+                &rotated,
+            )?;
+            let dpi = store::latest_event_details(&conn, &capture_id, "page_manifest")?
+                .and_then(|v| {
+                    v.get(index as usize)
+                        .and_then(|p| p.get("dpi"))
+                        .and_then(Value::as_u64)
+                })
+                .map(|v| v as u32);
+            let receipt = files::ScanReceipt {
+                page: written,
+                replace_hash: Some(page.content_hash),
+                dpi,
+            };
+            let journal = files::journal_receipt(&receipt)?;
+            store::apply_scan_receipt(&conn, &lifecycle, &dir, &capture_id, &receipt)?;
+            std::fs::remove_file(journal).map_err(|e| e.to_string())?;
+            return Ok(json!({ "success": true }));
+        }
         let order: Vec<i64> = field(&arg0, "order")
             .and_then(Value::as_array)
             .map(|items| items.iter().filter_map(Value::as_i64).collect())
@@ -653,6 +939,7 @@ pub async fn capture_reorder_pages(
             return Err(format!("A capture holds at most {MAX_CAPTURE_PAGES} pages"));
         }
 
+        let _lifecycle = files::lock_lifecycle(&app_data_dir(&app)?, &capture_id)?;
         let conn = lock(&db)?;
         let document = store::get_document(&conn, &capture_id)?
             .ok_or_else(|| format!("Capture {capture_id} not found"))?;
@@ -661,6 +948,7 @@ pub async fn capture_reorder_pages(
         }
 
         store::reorder_pages(&conn, &capture_id, &order)?;
+        store::page_manifest(&conn, &app_data_dir(&app)?, &capture_id)?;
 
         Ok(json!({ "success": true }))
     })
@@ -670,6 +958,95 @@ pub async fn capture_reorder_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_picked_documents_keep_originals_and_never_become_manual_rows() {
+        use base64::Engine;
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let pdf = b"%PDF-1.7 retained original";
+        let id = retain_picked_file(
+            &conn,
+            db.dir(),
+            &Some(json!({ "fileName": "invoice.pdf",
+            "fileBase64": base64::engine::general_purpose::STANDARD.encode(pdf) })),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(files::original_path(db.dir(), &id).unwrap()).unwrap(),
+            pdf
+        );
+        let document = store::get_document(&conn, &id).unwrap().unwrap();
+        assert_eq!(document.source_kind, "file_pick");
+        assert_eq!(document.status, CaptureStatus::Capturing);
+        assert!(store::latest_event_details(&conn, &id, "render_pending")
+            .unwrap()
+            .is_some());
+        assert!(document.draft_json.is_none());
+
+        let word = b"original word bytes";
+        let id = retain_picked_file(
+            &conn,
+            db.dir(),
+            &Some(json!({ "fileName": "invoice.docx",
+            "fileBase64": base64::engine::general_purpose::STANDARD.encode(word) })),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(
+                files::capture_dir(db.dir(), &id)
+                    .unwrap()
+                    .join("original.docx")
+            )
+            .unwrap(),
+            word
+        );
+        let document = store::get_document(&conn, &id).unwrap().unwrap();
+        assert_eq!(document.status, CaptureStatus::NeedsAttention);
+        assert_eq!(
+            document.error_message.as_deref(),
+            Some("CAPTURE_DOCUMENT_UNSUPPORTED")
+        );
+        assert!(document.draft_json.is_none());
+        assert!(worker::next_actionable(&conn, chrono::Utc::now())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn capture_picked_image_keeps_original_bytes_and_queues_only_normalized_document_pages() {
+        use base64::Engine;
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let mut image = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(32, 32)
+            .write_to(&mut image, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = image.into_inner();
+        let id = retain_picked_file(
+            &conn,
+            db.dir(),
+            &Some(json!({ "fileName": "invoice.png",
+            "fileBase64": base64::engine::general_purpose::STANDARD.encode(&bytes) })),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(
+                files::capture_dir(db.dir(), &id)
+                    .unwrap()
+                    .join("original.png")
+            )
+            .unwrap(),
+            bytes
+        );
+        assert_eq!(
+            store::get_document(&conn, &id).unwrap().unwrap().status,
+            CaptureStatus::Waiting
+        );
+        assert_eq!(store::list_pages(&conn, &id).unwrap().len(), 1);
+    }
 
     #[test]
     fn required_string_accepts_the_object_and_bare_string_forms() {

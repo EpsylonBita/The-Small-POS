@@ -117,6 +117,20 @@ mod table_mutation_wire_tests {
         .unwrap()
     }
     #[test]
+    fn entitlement_routes_never_adopt_a_generic_legacy_cache() {
+        for path in [
+            "/api/pos/modules/enabled?terminal_id=till",
+            "/api/pos/modules/sync",
+            "/api/pos/settings/till",
+            "/api/pos/bootstrap",
+        ] {
+            assert!(is_module_entitlement_route(path));
+            assert!(!is_cacheable_admin_get("GET", path));
+        }
+        assert!(!is_module_entitlement_route("/api/pos/suppliers"));
+    }
+
+    #[test]
     fn table_mutation_wire_serialized_patch_and_transfer_are_retained_before_transport() {
         for (method, suffix, body) in [
             (
@@ -539,6 +553,16 @@ fn is_delta_cursor_admin_get(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+// Entitlements and module-bearing bootstrap/settings have dedicated scoped owners.
+// Never serve an organization/group-wide generic response saved by an earlier build.
+fn is_module_entitlement_route(path: &str) -> bool {
+    let route = canonical_admin_route(path);
+    route == "/api/pos/modules"
+        || route.starts_with("/api/pos/modules/")
+        || route == "/api/pos/bootstrap"
+        || route.starts_with("/api/pos/settings/")
+}
+
 fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
     let route = canonical_admin_route(path);
     let snapshot_page = matches!(
@@ -558,6 +582,7 @@ fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
         && route.starts_with("/api/pos/")
         && !route.contains("/api/pos/auth")
         && !route.contains("/api/pos/updates")
+        && !is_module_entitlement_route(path)
         // Platform availability must be live: a cached open/closed value can
         // mislead the operator after another device changes the shop status.
         && route != "/api/pos/platforms"
@@ -629,6 +654,41 @@ async fn admin_fetch_with_request_headers(
     body: Option<serde_json::Value>,
     options: &serde_json::Value,
 ) -> Result<serde_json::Value, api::AdminFetchError> {
+    if supplier_invoice_command(method, path) {
+        let identity = {
+            let conn = db
+                .conn
+                .lock()
+                .map_err(|_| "SUPPLIER_STAFF_SESSION_REQUIRED")?;
+            supplier_invoice_identity(&conn, options)
+        };
+        // Preview is read-only and is also our capability response. A legacy
+        // draft has no ticket; preserve its old online behavior. A new ticket,
+        // manual invoice or invoice PO command requires hosted identity locally
+        // before dispatch, and the server independently verifies it.
+        let required = supplier_invoice_requires_session(path, body.as_ref());
+        if identity.is_err() && !required {
+            return crate::admin_fetch_detailed(Some(db), path, method, body).await;
+        }
+        let (session, action_key) = identity?;
+        crate::validate_admin_api_path(path)?;
+        let (admin_url, api_key) = crate::resolve_admin_endpoint(Some(db)).await?;
+        // The generic bridge ignores arbitrary headers. Only these two values
+        // may cross this fixed supplier boundary; the session never enters JS.
+        return api::fetch_raw_from_admin_detailed(
+            &admin_url,
+            &api_key,
+            path,
+            method,
+            "application/json",
+            &[
+                ("x-staff-session-id", &session),
+                ("idempotency-key", &action_key),
+            ],
+            serde_json::to_vec(&body.unwrap_or(Value::Null)).map_err(|e| e.to_string())?,
+        )
+        .await;
+    }
     let session = waiter_service_staff_session(method, path, options).map_err(str::to_string)?;
     if let Some(session) = session {
         crate::validate_admin_api_path(path)?;
@@ -646,6 +706,62 @@ async fn admin_fetch_with_request_headers(
     } else {
         crate::admin_fetch_detailed(Some(db), path, method, body).await
     }
+}
+
+fn supplier_invoice_command(method: &str, path: &str) -> bool {
+    method == "POST"
+        && matches!(
+            canonical_admin_route(path),
+            "/api/pos/suppliers/import/preview"
+                | "/api/pos/suppliers/import/commit"
+                | "/api/pos/supplier-invoices"
+        )
+}
+
+fn supplier_invoice_requires_session(path: &str, body: Option<&Value>) -> bool {
+    canonical_admin_route(path) == "/api/pos/supplier-invoices"
+        || body.is_some_and(|body| {
+            body.pointer("/draft/humanImportTicket").is_some() || body.get("poLinkage").is_some()
+        })
+}
+
+fn supplier_invoice_identity(
+    conn: &rusqlite::Connection,
+    options: &Value,
+) -> Result<(String, String), String> {
+    let denied = || "SUPPLIER_STAFF_SESSION_REQUIRED".to_string();
+    let header = |name: &str| {
+        options
+            .get("headers")
+            .and_then(Value::as_object)
+            .and_then(|headers| {
+                headers
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            })
+            .and_then(|(_, value)| value.as_str())
+    };
+    let staff_id = header("x-supplier-staff-id").ok_or_else(denied)?;
+    uuid::Uuid::parse_str(staff_id).map_err(|_| denied())?;
+    let terminal = crate::terminal_helpers::resolve_canonical_terminal_identity_in_connection(conn)
+        .ok_or_else(denied)?;
+    let active: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM staff_shifts WHERE staff_id=?1 AND terminal_id=?2 AND status='active')",
+        rusqlite::params![staff_id, terminal], |row| row.get(0),
+    ).map_err(|_| denied())?;
+    let now = Utc::now();
+    let hosted = crate::hosted_staff_sessions::usable(staff_id, now)
+        .filter(|session| {
+            active
+                && session.staff_id == staff_id
+                && session.terminal_id == terminal
+                && session.checked_in_at <= now
+        })
+        .ok_or_else(denied)?;
+    let action_key = header("idempotency-key")
+        .filter(|key| !key.is_empty() && key.len() <= 300 && !key.chars().any(char::is_control))
+        .ok_or("INVOICE_HUMAN_IDEMPOTENCY_REQUIRED")?;
+    Ok((hosted.session_id, action_key.to_string()))
 }
 
 fn admin_api_cache_key(path: &str) -> String {
@@ -783,7 +899,10 @@ pub(crate) fn cache_admin_get_response(
     path: &str,
     response: &serde_json::Value,
 ) -> Result<(), String> {
-    if is_repair_admin_route(path) || is_customer_admin_route(path) {
+    if is_repair_admin_route(path)
+        || is_customer_admin_route(path)
+        || is_module_entitlement_route(path)
+    {
         return Ok(());
     }
     let envelope = serde_json::json!({
@@ -813,7 +932,10 @@ pub(crate) fn read_cached_admin_get_response(
 ) -> Option<(serde_json::Value, Option<String>)> {
     // A customer answer an earlier build saved is never served, even before
     // the startup purge has run.
-    if is_repair_admin_route(path) || is_customer_admin_route(path) {
+    if is_repair_admin_route(path)
+        || is_customer_admin_route(path)
+        || is_module_entitlement_route(path)
+    {
         return None;
     }
     let envelope = read_local_json(db, &admin_api_cache_key(path)).ok()?;
@@ -1013,19 +1135,24 @@ pub(crate) fn list_cached_admin_get_paths(
     let conn = db
         .lock_traced("admin_cache_list_paths")
         .map_err(|e| e.to_string())?;
+    let scoped_prefix = format!(
+        "shared_v2:{}:",
+        crate::group_scope::SharedScope::read(&conn).key()
+    );
     let mut stmt = conn
         .prepare(
             "SELECT setting_key
              FROM local_settings
              WHERE setting_category = 'local'
-               AND setting_key LIKE ?1
+               AND (setting_key LIKE ?1 OR substr(setting_key,1,length(?2))=?2)
              ORDER BY setting_key ASC",
         )
         .map_err(|e| format!("prepare cached admin path query: {e}"))?;
     let rows = stmt
-        .query_map([format!("{ADMIN_API_CACHE_PREFIX}%")], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_map(
+            rusqlite::params![format!("{ADMIN_API_CACHE_PREFIX}%"), scoped_prefix],
+            |row| row.get::<_, String>(0),
+        )
         .map_err(|e| format!("query cached admin paths: {e}"))?;
 
     let trimmed_prefixes = prefixes
@@ -1038,6 +1165,8 @@ pub(crate) fn list_cached_admin_get_paths(
         .filter_map(Result::ok)
         .filter_map(|setting_key| {
             setting_key
+                .strip_prefix(&scoped_prefix)
+                .unwrap_or(&setting_key)
                 .strip_prefix(ADMIN_API_CACHE_PREFIX)
                 .map(str::to_string)
         })
@@ -1157,6 +1286,7 @@ pub async fn api_fetch_from_admin(
     }
 
     let cacheable_get = is_cacheable_admin_get(&method, &final_path);
+    let shared_scope = crate::group_scope::SharedScope::capture(&db)?;
 
     let table_original = {
         let conn = db
@@ -1192,6 +1322,9 @@ pub async fn api_fetch_from_admin(
 
     match admin_fetch_with_request_headers(&db, &final_path, &method, body, &opts).await {
         Ok(mut v) => {
+            if crate::group_scope::is_shared_path(&final_path) {
+                shared_scope.ensure(&db)?;
+            }
             // Staff PIN hashes (staff directory/schedule) never reach the
             // renderer or the response cache; the native directory refresh
             // keeps them in the OS credential store (staff_pin_vault.rs).
@@ -1236,6 +1369,9 @@ pub async fn api_fetch_from_admin(
                     .lock()
                     .map_err(|error| format!("db lock: {error}"))?;
                 return table_mutation_failure_payload(&conn, original, &e);
+            }
+            if crate::group_scope::is_shared_path(&final_path) {
+                shared_scope.ensure(&db)?;
             }
             if let Some((mut cached_data, cached_at)) =
                 read_admin_get_fallback_after_error(&db, &final_path, cacheable_get, &e)
@@ -1382,6 +1518,129 @@ pub async fn sync_test_parent_connection() -> Result<serde_json::Value, String> 
 
 #[cfg(test)]
 mod dto_tests {
+    #[tokio::test(flavor = "current_thread")]
+    async fn supplier_invoice_native_identity_is_hosted_scoped_and_sent_with_stable_key() {
+        let server = crate::tests::fake_http::MockServer::new(r#"{"success":true}"#);
+        let _keyring = seed_command_identity(&server.url);
+        let db = crate::tests::harness::TestDb::open();
+        let staff = "55555555-5555-4555-8555-555555555555";
+        let session = "66666666-6666-4666-8666-666666666666";
+        let options = serde_json::json!({ "headers": { "x-supplier-staff-id": staff,
+            "idempotency-key": "same-invoice-action", "x-staff-session-id": "renderer-spoof" } });
+        let body = serde_json::json!({ "draft": { "humanImportTicket": "opaque-ticket" } });
+        {
+            let conn = db.state.conn.lock().unwrap();
+            for (key, value) in [
+                ("terminal_id", OLD_TERMINAL),
+                ("organization_id", OLD_ORG),
+                ("branch_id", OLD_BRANCH),
+                ("admin_dashboard_url", &server.url),
+            ] {
+                crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+            }
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,terminal_id,role_type,check_in_time,created_at,updated_at) VALUES('supplier-shift',?1,?2,'cashier','now','now','now')",
+                rusqlite::params![staff, OLD_TERMINAL]).unwrap();
+            assert!(
+                supplier_invoice_identity(&conn, &options).is_err(),
+                "offline check-in has no hosted proof"
+            );
+        }
+        assert!(admin_fetch_with_request_headers(
+            &db.state,
+            "/api/pos/suppliers/import/commit",
+            "POST",
+            Some(body.clone()),
+            &options
+        )
+        .await
+        .is_err());
+        assert_eq!(server.count(), 0);
+        let now = chrono::Utc::now();
+        let reply = crate::hosted_staff_sessions::check_in_reply(
+            staff,
+            session,
+            OLD_TERMINAL,
+            "cashier",
+            &[],
+            now + chrono::Duration::hours(1),
+        );
+        crate::hosted_staff_sessions::record_check_in(&reply, staff, now);
+        for _ in 0..2 {
+            admin_fetch_with_request_headers(
+                &db.state,
+                "/api/pos/suppliers/import/commit",
+                "POST",
+                Some(body.clone()),
+                &options,
+            )
+            .await
+            .unwrap();
+        }
+        let requests = server.recorded();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert_eq!(request.header("x-staff-session-id"), Some(session));
+            assert_eq!(
+                request.header("idempotency-key"),
+                Some("same-invoice-action")
+            );
+            assert_eq!(request.header("x-supplier-staff-id"), None);
+        }
+        // Expiry, wrong terminal and checkout all stop before transport.
+        let expired = crate::hosted_staff_sessions::check_in_reply(
+            staff,
+            session,
+            OLD_TERMINAL,
+            "cashier",
+            &[],
+            now - chrono::Duration::seconds(1),
+        );
+        crate::hosted_staff_sessions::record_check_in(&expired, staff, now);
+        assert!(supplier_invoice_identity(&db.state.conn.lock().unwrap(), &options).is_err());
+        let foreign = crate::hosted_staff_sessions::check_in_reply(
+            staff,
+            session,
+            "another-terminal",
+            "cashier",
+            &[],
+            now + chrono::Duration::hours(1),
+        );
+        crate::hosted_staff_sessions::record_check_in(&foreign, staff, now);
+        assert!(supplier_invoice_identity(&db.state.conn.lock().unwrap(), &options).is_err());
+        crate::hosted_staff_sessions::record_check_in(&reply, staff, now);
+        db.state
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE staff_shifts SET status='closed'", [])
+            .unwrap();
+        assert!(supplier_invoice_identity(&db.state.conn.lock().unwrap(), &options).is_err());
+        assert_eq!(server.count(), 2);
+    }
+
+    #[test]
+    fn supplier_invoice_legacy_response_needs_no_guessed_route_or_version() {
+        assert!(!supplier_invoice_requires_session(
+            "/api/pos/suppliers/import/preview",
+            Some(&serde_json::json!({}))
+        ));
+        assert!(!supplier_invoice_requires_session(
+            "/api/pos/suppliers/import/commit",
+            Some(&serde_json::json!({ "draft": { "rows": [] } }))
+        ));
+        assert!(supplier_invoice_requires_session(
+            "/api/pos/suppliers/import/commit",
+            Some(&serde_json::json!({ "draft": { "humanImportTicket": "signed" } }))
+        ));
+        assert!(supplier_invoice_requires_session(
+            "/api/pos/suppliers/import/commit",
+            Some(&serde_json::json!({ "poLinkage": { "mode": "confirm_existing" } }))
+        ));
+        assert!(!supplier_invoice_command(
+            "POST",
+            "/api/pos/suppliers/import/commit-other"
+        ));
+    }
     use super::*;
     use std::path::PathBuf;
     use std::sync::Mutex;

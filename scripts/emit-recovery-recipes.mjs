@@ -18,7 +18,7 @@ export function catalogue() {
     snapshot_level: snapshot === 'true' ? 'full' : 'none',
     attempt_cap: Number.MAX_SAFE_INTEGER, cooldown_ms: 0,
   }));
-  if (recipes.length !== 11) { throw new Error('Review new or changed renderer recipes'); }
+  if (recipes.length !== 13) { throw new Error('Review new or changed renderer recipes'); }
   const printerRecipe = recipes.find(recipe => recipe.id === 'printer.restore_last_known_brand');
   if (!printerRecipe) { throw new Error('Missing printer recipe'); }
   Object.assign(printerRecipe, { needs_staff_pin: false, attempt_cap: 3, cooldown_ms: 300_000 });

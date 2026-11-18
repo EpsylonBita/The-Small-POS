@@ -2180,6 +2180,19 @@ fn spawn_immediate_order_status_patches(
     bodies: Vec<Value>,
     accept_listener: Option<AcceptAnswerListener>,
 ) {
+    // Every caller queues its ordinary status before coming here. On
+    // 11/11/2026 an immediate PATCH overtook that order's queued edit and
+    // changed its canonical version, permanently refusing the edit.
+    let bodies = match db.conn.lock() {
+        Ok(conn) => immediate_order_status_bodies(&conn, bodies),
+        Err(error) => {
+            tracing::warn!(%error,"Status dependency lock failed; queued replay remains");
+            return;
+        }
+    };
+    if bodies.is_empty() {
+        return;
+    }
     let Some(context) = resolve_immediate_order_status_sync_context(db) else {
         tracing::debug!(
             "Skipping immediate order status sync because terminal credentials are unavailable"
@@ -2277,6 +2290,31 @@ fn spawn_immediate_order_status_patches(
             }
         }
     });
+}
+
+fn order_status_patch_can_go_immediately(
+    conn: &rusqlite::Connection,
+    body: &Value,
+) -> Result<bool, String> {
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("Status PATCH is missing its order id")?;
+    crate::sync_queue::order_status_waits_for_queued_edit(conn, id).map(|waiting| !waiting)
+}
+
+fn immediate_order_status_bodies(conn: &rusqlite::Connection, bodies: Vec<Value>) -> Vec<Value> {
+    let mut sendable = Vec::new();
+    for body in bodies {
+        match order_status_patch_can_go_immediately(conn, &body) {
+            Ok(true) => sendable.push(body),
+            Ok(false) => tracing::debug!("Status stays queued behind the order's edit"),
+            Err(error) => {
+                tracing::warn!(%error,"Status dependency check failed; queued replay remains")
+            }
+        }
+    }
+    sendable
 }
 
 fn merge_order_update_items_payload(
@@ -4385,12 +4423,6 @@ pub(crate) fn apply_order_status_locally(
     now: &str,
 ) -> Result<LocalStatusChange, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    // Offline week Ω9 (22/10/2026): the status, the cancel's drawer reversal
-    // and the estimated time were written before the row was queued, and a
-    // full queue then refused only the row: the till kept a status the server
-    // never heard of. A full queue now refuses before anything changes, under
-    // the same lock as the enqueue below.
-    crate::sync_queue::ensure_enqueue_capacity(&conn, 1)?;
     apply_order_status_in_connection(
         &conn,
         order_id_raw,
@@ -4410,7 +4442,26 @@ pub(crate) fn apply_order_status_in_connection(
     cancellation_reason: Option<&str>,
     now: &str,
 ) -> Result<LocalStatusChange, String> {
+    // Read the notice and write the status/outbox under one write transaction.
+    // Manual cancellation already supplies its own transaction.
+    if conn.is_autocommit() {
+        let tx = db::immediate_transaction(conn).map_err(|e| e.to_string())?;
+        let result = apply_order_status_in_connection(
+            &tx,
+            order_id_raw,
+            status,
+            estimated_time,
+            cancellation_reason,
+            now,
+        )?;
+        tx.commit().map_err(|e| e.to_string())?;
+        return Ok(result);
+    }
     let (actual_order_id, remote_order_id) = resolve_order_id_with_remote(conn, order_id_raw)?;
+    // Before settlement, drawer writes, queueing, events or immediate requests.
+    crate::order_notice_recovery::require_no_open_notice(conn, &actual_order_id, status)?;
+    // Capacity still refuses before any write, now in the same transaction.
+    crate::sync_queue::ensure_enqueue_capacity(conn, 1)?;
     payments::ensure_ecommerce_order_mutation_allowed(&conn, &actual_order_id, Some(status))?;
     ensure_box_order_mutation_allowed(&conn, &actual_order_id, status, BoxOrderMutation::Generic)?;
     let previous_status = ensure_order_status_transition_allowed(&conn, &actual_order_id, status)?;
@@ -4899,6 +4950,8 @@ pub(crate) fn update_customer_headers_in_connection(
     let mut queue = serde_json::json!({"orderId":actual,"organization_id":scope.organization,"status":status,"expected_version":wire_version,"client_event_id":event});
     if let Some(proof) = preflight {
         queue["header_edit_original"] = proof.clone();
+    } else if wire_version.is_none() {
+        queue["base_before_create"] = Value::Bool(true);
     }
     queue
         .as_object_mut()
@@ -4915,21 +4968,23 @@ fn header_edit_wire_version(
     conn: &rusqlite::Connection,
     order: &str,
     proof: Option<&Value>,
-) -> Result<i64, String> {
+) -> Result<Option<i64>, String> {
     if let Some(proof) = proof {
-        return crate::order_header_preflight::verify_local(conn, order, proof);
+        return crate::order_header_preflight::verify_local(conn, order, proof).map(Some);
     }
-    let (remote, local): (Option<String>, i64) = conn
+    let remote: Option<String> = conn
         .query_row(
-            "SELECT NULLIF(TRIM(supabase_id),''),COALESCE(version,1) FROM orders WHERE id=?1",
+            "SELECT NULLIF(TRIM(supabase_id),'') FROM orders WHERE id=?1",
             [order],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
     if remote.is_some() {
         return Err("EDIT_CANONICAL_PREFLIGHT_REQUIRED".into());
     }
-    Ok(local)
+    // Before the create answers, no canonical revision exists on this till.
+    // Its acknowledgement binds this edit; the local counter is never sent.
+    Ok(None)
 }
 
 /// The fresh canonical revision for a header correction. A difference the
@@ -5378,6 +5433,8 @@ fn try_metadata_only_item_edit(
     let mut queue = serde_json::json!({"orderId":actual,"organization_id":scope.organization,"client_event_id":event,"expected_version":wire_version,"status":status});
     if let Some(proof) = preflight {
         queue["header_edit_original"] = proof.clone();
+    } else if wire_version.is_none() {
+        queue["base_before_create"] = Value::Bool(true);
     }
     if let Some(updates) = payload.order_updates.as_ref() {
         apply_edit_settlement_order_updates(&tx, &actual, updates, &now)?;
@@ -11294,7 +11351,7 @@ pub async fn order_assign_driver(
         let notes = arg2;
         let now = Utc::now().to_rfc3339();
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let (order_id, driver_name, assigned_status) =
+        let (order_id, driver_name, assigned_status, completion_refusal) =
             assign_driver_locally(&conn, &order_id_raw, &driver_id, notes.as_deref(), &now)?;
         let earning_created = true;
         drop(conn);
@@ -11331,7 +11388,8 @@ pub async fn order_assign_driver(
             "driverName": driver_name,
             "status": assigned_status,
             "notes": notes,
-            "earningCreated": earning_created
+            "earningCreated": earning_created,
+            "completionRefusal": completion_refusal
         });
         let _ = app.emit(
             "order_status_updated",
@@ -11356,7 +11414,7 @@ pub(crate) fn assign_driver_locally(
     driver_id: &str,
     notes: Option<&str>,
     now: &str,
-) -> Result<(String, Option<String>, String), String> {
+) -> Result<(String, Option<String>, String, Option<String>), String> {
     // Reserve a bare connection before reading; nested callers retain their
     // transaction, while the savepoint still undoes only this assignment.
     crate::db::with_immediate_admission(conn, || {
@@ -11476,7 +11534,12 @@ pub(crate) fn assign_driver_locally(
                 "deliveryNotes": notes,
             });
             enqueue_order_sync_payload(conn, &order_id, &order_sync_payload)?;
-            Ok((order_id, driver_name, assigned_status))
+            Ok((
+                order_id,
+                driver_name,
+                assigned_status,
+                assignment.completion_refusal,
+            ))
         })()
         .and_then(|assigned| {
             conn.execute_batch("RELEASE assign_driver")
@@ -11579,6 +11642,7 @@ pub(crate) struct DriverChangeActor {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DriverChangeOutcome {
+    pub completion_refusal: Option<String>,
     pub order_id: String,
     pub status: String,
     pub previous_driver_id: Option<String>,
@@ -11899,7 +11963,7 @@ pub(crate) fn change_order_driver_locally(
     let outcome = if plan.is_correction() {
         move_order_to_driver(&tx, &plan, now)?
     } else {
-        let (order_id, driver_name, status) =
+        let (order_id, driver_name, status, completion_refusal) =
             assign_driver_locally(&tx, &plan.order_id, &plan.new_driver_id, None, now)?;
         let earning_id: Option<String> = tx
             .query_row(
@@ -11910,6 +11974,7 @@ pub(crate) fn change_order_driver_locally(
             .optional()
             .map_err(|e| format!("read the new driver earning: {e}"))?;
         DriverChangeOutcome {
+            completion_refusal,
             order_id,
             status,
             previous_driver_id: None,
@@ -11942,6 +12007,7 @@ fn move_order_to_driver(
         .map(|earning_id| driver_change_earning_money(tx, earning_id))
         .transpose()?;
 
+    let mut completion_refusal = None;
     let earning_id = match plan.earning_id.as_deref() {
         Some(earning_id) => {
             // Status unchanged; the receipts' custody follows the order.
@@ -11979,6 +12045,7 @@ fn move_order_to_driver(
                 &plan.new_shift_id,
                 now,
             )?;
+            completion_refusal = assignment.completion_refusal.clone();
             order_ownership::upsert_driver_earning(
                 tx,
                 &plan.order_id,
@@ -12033,6 +12100,7 @@ fn move_order_to_driver(
     )?;
 
     Ok(DriverChangeOutcome {
+        completion_refusal,
         order_id: plan.order_id.clone(),
         status,
         previous_driver_id: plan.previous_driver_id.clone(),
@@ -12447,6 +12515,7 @@ pub(crate) enum PlatformReadyLocal {
     Applied {
         remote_order_id: Option<String>,
         local_status: &'static str,
+        completion_refusal: Option<String>,
     },
 }
 
@@ -12463,7 +12532,8 @@ pub(crate) fn notify_platform_ready_locally(
     order_id_raw: &str,
     now: &str,
 ) -> Result<PlatformReadyLocal, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let locked = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = db::immediate_transaction(&locked).map_err(|e| e.to_string())?;
     let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, order_id_raw)?;
     ensure_box_order_mutation_allowed(&conn, &order_id, "ready", BoxOrderMutation::NotifyReady)?;
     let current_status = load_canonical_order_status(&conn, &order_id)?;
@@ -12534,6 +12604,15 @@ pub(crate) fn notify_platform_ready_locally(
             }
         }
     }
+    // Ready/settlement remain allowed; hold only the incidental final move.
+    let completion_refusal = if platform_fleet_done {
+        crate::order_notice_recovery::require_no_open_notice(&conn, &order_id, "delivered").err()
+    } else {
+        None
+    };
+    if completion_refusal.is_some() {
+        platform_fleet_done = false;
+    }
     if platform_fleet_done {
         conn.execute(
             "UPDATE orders SET status = 'delivered', sync_status = 'pending', updated_at = ?1
@@ -12547,7 +12626,9 @@ pub(crate) fn notify_platform_ready_locally(
             &serde_json::json!({ "orderId": order_id, "status": "delivered" }),
         )?;
     }
+    conn.commit().map_err(|e| e.to_string())?;
     Ok(PlatformReadyLocal::Applied {
+        completion_refusal,
         remote_order_id,
         local_status: if platform_fleet_done {
             "delivered"
@@ -12566,7 +12647,7 @@ pub async fn order_notify_platform_ready(
         let db = app.state::<db::DbState>();
         let order_id_raw = arg0.ok_or("Missing orderId")?;
         let now = Utc::now().to_rfc3339();
-        let (remote_order_id, local_status) = match notify_platform_ready_locally(
+        let (remote_order_id, local_status, completion_refusal) = match notify_platform_ready_locally(
             &db,
             &order_id_raw,
             &now,
@@ -12587,7 +12668,8 @@ pub async fn order_notify_platform_ready(
             PlatformReadyLocal::Applied {
                 remote_order_id,
                 local_status,
-            } => (remote_order_id, local_status),
+                completion_refusal,
+            } => (remote_order_id, local_status, completion_refusal),
         };
         let payload = serde_json::json!({ "orderId": order_id_raw, "status": local_status });
         let _ = app.emit("order_status_updated", payload.clone());
@@ -12606,7 +12688,7 @@ pub async fn order_notify_platform_ready(
                 build_order_status_patch_body(remote_order_id, "ready", None, None, None),
             );
         }
-        Ok(serde_json::json!({ "success": true, "status": local_status }))
+        Ok(serde_json::json!({ "success": true, "status": local_status, "completionRefusal": completion_refusal }))
     })
     .await
 }
@@ -15490,6 +15572,128 @@ mod transition_tests {
     use super::*;
     use crate::db;
     use rusqlite::{params, Connection};
+
+    #[test]
+    fn precreate_header_enqueue_keeps_canonical_base_unbound() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = precreate_status_db(None);
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE orders SET supabase_id=NULL,remote_version=NULL,version=9 WHERE id='status-after-edit'",[]).unwrap();
+        update_customer_headers_in_connection(
+            &conn,
+            serde_json::json!({
+                "orderId":"status-after-edit","customerName":"Corrected","customerPhone":"123",
+                "deliveryAddress":"Street","expectedVersion":9,
+            }),
+            None,
+        )
+        .unwrap();
+        let data: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE record_id='status-after-edit'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(queued["expected_version"], Value::Null);
+        assert_eq!(queued["base_before_create"], true);
+        assert!(queued.get("header_edit_original").is_none());
+    }
+
+    fn precreate_status_db(edit_status: Option<&str>) -> db::DbState {
+        let db = test_db();
+        insert_order(&db, "status-after-edit", "pending");
+        let conn = db.conn.lock().unwrap();
+        crate::sync_queue::create_tables(&conn).unwrap();
+        for (key, value) in [
+            ("organization_id", "status-org"),
+            ("terminal_id", "status-terminal"),
+            ("branch_id", "status-branch"),
+        ] {
+            db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        conn.execute("UPDATE orders SET supabase_id='remote-status-after-edit',organization_id='status-org',branch_id='status-branch',remote_version=1 WHERE id='status-after-edit'",[]).unwrap();
+        if let Some(status) = edit_status {
+            conn.execute("INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,created_at,module_type,conflict_strategy,version,status)
+                VALUES('original-edit','orders','status-after-edit','UPDATE',?1,'status-org',datetime('now'),'orders','manual',1,?2)",
+                params![serde_json::json!({"orderId":"status-after-edit","status":"pending","client_event_id":"original-event","expected_version":1,"customer_name":"Corrected"}).to_string(),status]).unwrap();
+        }
+        drop(conn);
+        db
+    }
+
+    fn assert_immediate_status(edit_status: Option<&str>, sends: bool) {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = precreate_status_db(edit_status);
+        apply_order_status_locally(
+            &db,
+            "status-after-edit",
+            "confirmed",
+            None,
+            None,
+            "2026-11-17T10:00:00Z",
+        )
+        .unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM parity_sync_queue WHERE record_id='status-after-edit' AND json_extract(data,'$.status')='confirmed'",[],|row|row.get::<_,i64>(0)).unwrap(),1,"the suppressed PATCH still has its replay");
+        let body = build_order_status_patch_body(
+            "remote-status-after-edit",
+            "confirmed",
+            None,
+            None,
+            None,
+        );
+        let dispatched = immediate_order_status_bodies(&conn, vec![body.clone()]);
+        if sends {
+            assert_eq!(dispatched, vec![body]);
+        } else {
+            assert!(
+                dispatched.is_empty(),
+                "no immediate PATCH is dispatched before the edit"
+            );
+        }
+    }
+
+    #[test]
+    fn precreate_status_pending_edit_suppresses_immediate_patch_and_keeps_replay() {
+        assert_immediate_status(Some("pending"), false);
+    }
+
+    #[test]
+    fn precreate_status_conflicted_edit_allows_immediate_patch() {
+        assert_immediate_status(Some("conflict"), true);
+    }
+
+    #[test]
+    fn precreate_status_without_edit_keeps_immediate_patch() {
+        assert_immediate_status(None, true);
+    }
+
+    #[test]
+    fn precreate_status_processing_blocks_but_parked_and_provider_edits_do_not() {
+        let db = precreate_status_db(Some("processing"));
+        let conn = db.conn.lock().unwrap();
+        let body = serde_json::json!({"id":"remote-status-after-edit","status":"confirmed"});
+        assert!(!order_status_patch_can_go_immediately(&conn, &body).unwrap());
+        conn.execute("INSERT INTO parity_sync_set_aside(queue_id,table_name,record_id,reason_code,set_aside_by_staff_id,set_aside_at,organization_id)
+            VALUES('original-edit','orders','status-after-edit','manager_reviewed','manager',datetime('now'),'status-org')",[]).unwrap();
+        assert!(order_status_patch_can_go_immediately(&conn, &body).unwrap());
+        drop(conn);
+        let db = precreate_status_db(Some("failed"));
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE parity_sync_queue SET status='failed',error_message='ORDER_EDIT_CONFLICT'",
+            [],
+        )
+        .unwrap();
+        assert!(order_status_patch_can_go_immediately(&conn, &body).unwrap());
+        conn.execute("UPDATE parity_sync_queue SET status='pending'", [])
+            .unwrap();
+        // Provider protocol timing stays with its existing owner.
+        conn.execute("UPDATE orders SET plugin='wolt'", []).unwrap();
+        assert!(order_status_patch_can_go_immediately(&conn, &body).unwrap());
+    }
 
     fn test_db() -> db::DbState {
         let conn = Connection::open_in_memory().expect("open in-memory db");
@@ -22774,7 +22978,7 @@ pub(crate) mod driver_restore_tests {
     /// delivered from the dashboard; the server takes both.
     pub(crate) fn assign_and_deliver(conn: &Connection) -> Server {
         let mut server = Server::mirror(conn);
-        let (_, _, status) =
+        let (_, _, status, _) =
             assign_driver_locally(conn, ORDER, "driver-1", None, "2026-10-07T18:10:00Z").unwrap();
         assert_eq!(status, "delivered");
         let earning: (String, String) = conn
@@ -23251,7 +23455,10 @@ pub(crate) mod driver_restore_tests {
             "2026-10-07T18:10:00Z",
         )
         .unwrap();
-        assert_eq!(assigned, (ORDER.to_string(), None, "delivered".to_string()));
+        assert_eq!(
+            assigned,
+            (ORDER.to_string(), None, "delivered".to_string(), None)
+        );
         let order: (String, Option<String>) = conn
             .query_row(
                 "SELECT sync_status,delivery_notes FROM orders WHERE id=?1",

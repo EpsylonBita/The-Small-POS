@@ -57,10 +57,12 @@ import {
   RefreshCw,
   Trash2,
 } from 'lucide-react';
+import { toast } from 'react-hot-toast';
 import { offEvent, onEvent } from '../../../lib';
 import { formatCurrency, formatDate } from '../../utils/format';
 import {
   advanceCapture,
+  captureSubtype,
   getCaptureHistory,
   listCaptureDocuments,
   type CaptureDocumentRow,
@@ -282,20 +284,26 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
     ) => {
       setBusyId(document.captureId);
       try {
-        await advanceCapture({
+        const result = await advanceCapture({
           captureId: document.captureId,
           status,
           reason: reason ?? null,
           staffId: staffId ?? null,
         });
+        if (!result.success && result.code !== 'render_pending') {
+          throw new Error(result.code ?? 'Capture action failed');
+        }
         await refresh();
         onChanged?.();
+      } catch (error) {
+        toast.error(t('suppliers.capture.reason.unknown'));
+        console.error('[capture] action failed:', error);
       } finally {
         setBusyId(null);
         setConfirmDiscardId(null);
       }
     },
-    [onChanged, refresh, staffId],
+    [onChanged, refresh, staffId, t],
   );
 
   const sorted = useMemo(
@@ -329,6 +337,11 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
     return rows;
   }, [events]);
 
+  const admitted = useMemo(() => events.filter((event) => event.eventType === COMMIT_CONFIRMED_EVENT
+    && event.details?.status === 'recorded' && typeof event.details?.invoiceId === 'string'
+    && typeof event.details?.undoId === 'string').filter((event, index, all) =>
+      all.findIndex((other) => other.captureId === event.captureId) === index), [events]);
+
   /** The mark, by outcome. A bill says so as well (R16.6). */
   const markLabel = useCallback(
     (automation: CaptureAutomation): string =>
@@ -348,6 +361,10 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
 
   return (
     <section className="space-y-3" data-testid="capture-queue">
+      {admitted.map((event) => <div key={event.id} data-testid={`capture-admitted-${event.captureId}`} className={`rounded-xl border p-3 ${cardClass}`}>
+        <p className="font-semibold text-(--pos-s-ok)">{t('suppliers.capture.pages.admissionRecorded', 'Invoice recorded')}</p>
+        <p className={`text-xs ${subtleClass}`}>{String(event.details?.invoiceId)}</p>
+      </div>)}
       {recorded.length > 0 && (
         <ul className="space-y-2" data-testid="capture-recorded">
           {recorded.map(({ captureId, automation }) => (
@@ -402,7 +419,14 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
         <ul className="space-y-2">
           {sorted.map((document) => {
             const automatic = AUTOMATIC_STATUSES.has(document.status);
+            const excluded = document.status === 'excluded' || document.reasonCode === 'CAPTURE_EXCLUDED'
+              || (document.recognition?.admission as { status?: string } | undefined)?.status === 'excluded';
+            const unsupported = document.reasonCode === 'CAPTURE_DOCUMENT_UNSUPPORTED';
             const busy = busyId === document.captureId;
+            const admission = document.recognition?.admission as { status?: string; reasons?: unknown } | undefined;
+            const reasons = Array.isArray(admission?.reasons) ? admission.reasons.filter(
+              (reason): reason is { reason: string } => typeof reason?.reason === 'string',
+            ) : [];
 
             return (
               <li
@@ -421,12 +445,16 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
 
                   <div className="min-w-0 flex-1">
                     <p className={`truncate font-semibold ${statusWordClass(document.status)}`}>
-                      {t(statusKey(document.status), document.status)}
+                      {excluded ? t('suppliers.capture.status.excluded') : Boolean(document.recognition?.admission) && typeof document.recognition?.admission === 'object'
+                        ? t(document.status === 'reading' ? 'suppliers.capture.pages.admissionWaiting' : `suppliers.capture.status.${document.status}`,
+                            String((document.recognition?.admission as { status?: string }).status ?? document.status))
+                        : t(statusKey(document.status), document.status)}
                     </p>
                     <p className={`truncate text-xs ${subtleClass}`}>
                       {displayTime(document.capturedAt)}
                       {' · '}
-                      {t(sourceKindKey(document.sourceKind), document.sourceKind)}
+                      {t(`suppliers.capture.subtype.${captureSubtype(document)}`)}
+                      {' · '}{t(sourceKindKey(document.sourceKind), document.sourceKind)}
                       {document.sourceName ? ` · ${document.sourceName}` : ''}
                       {' · '}
                       {t('suppliers.capture.pages.count', {
@@ -434,10 +462,11 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
                         defaultValue: '{{count}} page(s) so far',
                       })}
                     </p>
-                    {document.reasonCode && (
+                    {reasons.map((reason, index) => <p key={index} className="mt-1 text-xs">{reason.reason}</p>)}
+                    {document.reasonCode && !excluded && (
                       <p className="mt-1 text-xs font-semibold">
                         {t(
-                          reasonKey(document.reasonCode),
+                          unsupported ? 'suppliers.import.documentRetainedUnsupported' : document.reasonCode === 'CAPTURE_REVIEW_REQUIRED' ? 'suppliers.capture.pages.admissionReview' : reasonKey(document.reasonCode),
                           t(
                             'suppliers.capture.reason.unknown',
                             'Something went wrong with this scan. Nothing is lost.',
@@ -448,7 +477,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
                   </div>
 
                   <div className="flex shrink-0 flex-wrap gap-2">
-                    {document.status === 'ready_review' && (
+                    {document.status === 'ready_review' && !excluded && (
                       <button
                         type="button"
                         disabled={busy}
@@ -472,7 +501,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
                       </button>
                     )}
 
-                    {document.status === 'needs_attention' && (
+                    {document.status === 'needs_attention' && !excluded && !unsupported && (
                       <>
                         <button
                           type="button"

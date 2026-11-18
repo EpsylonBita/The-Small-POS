@@ -5,6 +5,7 @@ type TerminalCredentialState = {
   apiKey: string
   organizationId: string
   branchId: string
+  groupKey: string
 }
 
 const state: TerminalCredentialState = {
@@ -12,6 +13,7 @@ const state: TerminalCredentialState = {
   apiKey: '',
   organizationId: '',
   branchId: '',
+  groupKey: '',
 }
 
 type TerminalSettingsShape = {
@@ -19,13 +21,24 @@ type TerminalSettingsShape = {
     terminal_id?: string
     organization_id?: string
     branch_id?: string
+    group_id?: string | null
+    group_organization_id?: string
+    group_branch_id?: string
+    group_terminal_id?: string
   }
   [key: string]: unknown
 }
 
+function groupKeyFromSettings(settings: TerminalSettingsShape | null | undefined, identity: { terminalId: string; organizationId: string; branchId: string }): string {
+  const field = (key: string): string => String(settings?.[`terminal.${key}`] ?? (settings?.terminal as Record<string, unknown> | undefined)?.[key] ?? '')
+  const trusted = field('group_organization_id') === identity.organizationId &&
+    field('group_branch_id') === identity.branchId && field('group_terminal_id') === identity.terminalId
+  return (trusted ? field('group_id') : '') || identity.organizationId
+}
+
 function readFromSettings(settings: TerminalSettingsShape | null | undefined): TerminalCredentialState {
   if (!settings) {
-    return { terminalId: '', apiKey: '', organizationId: '', branchId: '' }
+    return { terminalId: '', apiKey: '', organizationId: '', branchId: '', groupKey: '' }
   }
 
   const terminalId =
@@ -41,12 +54,18 @@ function readFromSettings(settings: TerminalSettingsShape | null | undefined): T
     settings.terminal?.branch_id ||
     ''
 
-  return { terminalId, apiKey: '', organizationId, branchId }
+  return { terminalId, apiKey: '', organizationId, branchId, groupKey: groupKeyFromSettings(settings, { terminalId, organizationId, branchId }) }
 }
 
 export function updateTerminalCredentialCache(
   next: Partial<TerminalCredentialState>
 ): void {
+  if (next.groupKey === undefined && (
+    (next.terminalId !== undefined && next.terminalId !== state.terminalId) ||
+    (next.organizationId !== undefined && next.organizationId !== state.organizationId) ||
+    (next.branchId !== undefined && next.branchId !== state.branchId)
+  )) state.groupKey = next.organizationId ?? state.organizationId
+  if (typeof next.groupKey === 'string') state.groupKey = next.groupKey
   if (typeof next.terminalId === 'string') state.terminalId = next.terminalId
   if (typeof next.apiKey === 'string') state.apiKey = next.apiKey
   if (typeof next.organizationId === 'string') state.organizationId = next.organizationId
@@ -58,6 +77,7 @@ export function clearTerminalCredentialCache(): void {
   state.apiKey = ''
   state.organizationId = ''
   state.branchId = ''
+  state.groupKey = ''
 }
 
 export function getCachedTerminalCredentials(): TerminalCredentialState {
@@ -143,6 +163,7 @@ export async function refreshTerminalCredentialCache(): Promise<TerminalCredenti
   if (!resolved.organizationId) {
     resolved.organizationId = await invokeSettingByKey('organization_id')
   }
+  resolved.groupKey = groupKeyFromSettings(settings, resolved)
   if (resolved.terminalId || resolved.apiKey || resolved.organizationId || resolved.branchId) {
     updateTerminalCredentialCache(resolved)
   }

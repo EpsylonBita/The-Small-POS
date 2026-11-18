@@ -14,6 +14,71 @@ fn now() -> i64 {
 }
 
 #[test]
+fn interrupted_catalogue_read_recovers_without_off_schema_guidance_data() {
+    for view in ["capacity", "retry_disposition", "dependency_waits"] {
+        let (root, mut executor) = fixture();
+        let mut command = command();
+        command.kind = "till_run_catalogue_action".into();
+        command.tier = 2;
+        command.payload = json!({"action_id":"sync.explain_blockers.v1","version":1,"inputs":{"view":view,"limit":10}});
+        command.payload_sha256 = crate::support::contracts::payload_hash(&command.payload);
+        let mut admission = admission();
+        admission.tier_ceiling = 2;
+        admission.tiers_enabled.insert(2);
+        let clock = clock();
+        assert!(executor.accept(&command, &admission, &clock).unwrap());
+        executor.start(&command, &admission, &clock).unwrap();
+        drop(executor);
+        let mut recovered = Executor::new(SupportDb::open(&root).unwrap());
+        recovered.recover(now()).unwrap();
+        let results = recovered.pending_results(now()).unwrap();
+        assert_eq!(results[0]["error_code"], "OUTCOME_UNKNOWN");
+        assert_eq!(results[0]["outcome"], "outcome_unknown");
+        // Server permits absent data for failed catalogue envelopes; it refuses
+        // the generic verification_guidance object previously inserted here.
+        assert!(results[0].get("data").is_none(), "{view}: {}", results[0]);
+        drop(recovered);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn replay_of_a_permanently_refused_result_never_requeues_it() {
+    let (root, mut executor) = fixture();
+    let command = command();
+    let admission = admission();
+    let clock = clock();
+    assert!(executor.accept(&command, &admission, &clock).unwrap());
+    executor.start(&command, &admission, &clock).unwrap();
+    executor
+        .finish(&command, json!({"healthy":true}), now())
+        .unwrap();
+    let result = executor.pending_results(now()).unwrap().remove(0);
+    executor
+        .retire_result(&result, "INVALID_INPUT", now())
+        .unwrap();
+    drop(executor);
+    let mut recovered = Executor::new(SupportDb::open(&root).unwrap());
+    recovered.recover(now()).unwrap();
+    assert!(!recovered.accept(&command, &admission, &clock).unwrap());
+    assert!(recovered.pending_results(now()).unwrap().is_empty());
+    assert_eq!(
+        recovered
+            .db
+            .conn
+            .query_row(
+                "SELECT server_code FROM support_result_refusals WHERE command_id=?1",
+                [&command.command_id],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "INVALID_INPUT"
+    );
+    drop(recovered);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn evidence_failure_details_survive_envelopes_without_native_exception_text() {
     for detail in crate::support::evidence::DETAILS {
         let (root, mut executor) = fixture();

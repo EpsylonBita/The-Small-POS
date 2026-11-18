@@ -105,6 +105,52 @@ afterEach(() => {
 });
 
 describe('CaptureQueuePanel', () => {
+  it('shows exclusion as final and offers no retry or manual invoice action', async () => {
+    mocks.listCaptureDocuments.mockResolvedValue([doc({ status: 'needs_attention', reasonCode: 'CAPTURE_EXCLUDED',
+      sourceKind: 'file_pick', recognition: { admission: { status: 'excluded', reason: 'not_invoice', captureSubtype: 'file' } },
+    })]);
+    renderQueue();
+    expect(await screen.findByText('Not an invoice')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Fill in by hand' })).toBeNull();
+    expect(screen.getByTestId('capture-queue-row-cap-1')).toHaveTextContent('File');
+  });
+
+  it('keeps unsupported originals held without offering document-to-manual conversion', async () => {
+    mocks.listCaptureDocuments.mockResolvedValue([doc({ status: 'needs_attention', reasonCode: 'CAPTURE_DOCUMENT_UNSUPPORTED' })]);
+    renderQueue();
+    expect(await screen.findByText(/Original Word document retained/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Fill in by hand' })).toBeNull();
+  });
+  it('shows a durable waiting admission instead of leaving the capture uploading', async () => {
+    mocks.listCaptureDocuments.mockResolvedValue([doc({ status: 'reading', recognition: {
+      admission: { status: 'waiting', jobId: 'job-1', reason: 'queued' },
+    } })]);
+    renderQueue();
+    expect(await screen.findByText('Waiting for invoice reading')).toBeInTheDocument();
+  });
+
+  it('shows a recorded admission without asking for another confirmation', async () => {
+    mocks.listCaptureDocuments.mockResolvedValue([]);
+    mocks.getCaptureHistory.mockResolvedValue({ events: [{ id: 'event-1', captureId: 'cap-1',
+      eventType: 'committed', createdAt: '2026-11-16T12:00:00Z',
+      details: { status: 'recorded', invoiceId: 'invoice-1', undoId: 'undo-1', stock: 'none', balanceConfirmed: false },
+    }], ingest: [] });
+    renderQueue();
+    expect(await screen.findByTestId('capture-admitted-cap-1')).toHaveTextContent('Invoice recorded');
+    expect(screen.queryByRole('button', { name: /Check & Save/ })).toBeNull();
+  });
+
+  it('shows the admission review reason with the retained invoice', async () => {
+    mocks.listCaptureDocuments.mockResolvedValue([doc({ status: 'needs_attention', reasonCode: 'CAPTURE_REVIEW_REQUIRED',
+      recognition: { admission: { status: 'needs_review', jobId: 'job-1', reasons: [{ code: 'pages', passed: false, reason: 'Page 2 is missing' }] } },
+    })]);
+    renderQueue();
+    expect(await screen.findByText('Page 2 is missing')).toBeInTheDocument();
+    expect(screen.getByText('The readings need checking. Your invoice and all its pages are saved.')).toBeInTheDocument();
+  });
+
   it('says plainly when there is nothing waiting', async () => {
     mocks.listCaptureDocuments.mockResolvedValue([]);
     renderQueue();

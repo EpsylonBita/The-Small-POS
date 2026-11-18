@@ -164,7 +164,7 @@ describe('CaptureScanSettingsModal', () => {
     fireEvent.click(await screen.findByRole('button', { name: /HP OfficeJet/ }));
     const preview = await screen.findByAltText('Test page');
     expect(preview).toHaveAttribute('src', 'data:image/png;base64,TEST');
-    expect(mocks.testScanner).toHaveBeenCalledWith('device-1');
+    expect(mocks.testScanner).toHaveBeenCalledWith('device-1', 'flatbed');
 
     // 3. Name it
     fireEvent.click(screen.getByRole('button', { name: 'That looks right' }));
@@ -253,7 +253,9 @@ describe('CaptureScanSettingsModal', () => {
     )?.[1] as (payload: unknown) => void;
     expect(arrivedHandler).toBeTypeOf('function');
     fireEvent(window, new Event('noop'));
-    arrivedHandler({ captureId: 'cap-1' });
+    arrivedHandler({ captureId: 'other', sourceId: 'another-source' });
+    expect(screen.queryByText(/It worked/)).toBeNull();
+    arrivedHandler({ captureId: 'cap-1', sourceId: saved[0].id });
 
     expect(await screen.findByText('It worked — your scan came through.')).toBeInTheDocument();
   });

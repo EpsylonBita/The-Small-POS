@@ -85,12 +85,98 @@ struct MenuSyncCredentials {
     admin_url: String,
 }
 
+const MENU_IDENTITY_KEY: &str = "store_menu_identity";
+
+/// One active snapshot, labelled by org/store/terminal and the opaque menu epoch.
+fn current_menu_scope(db: &DbState) -> Value {
+    let branch = current_branch_id(db);
+    let organization = storage::get_credential("organization_id");
+    let terminal = storage::get_credential("terminal_id");
+    let conn = db.conn.lock().ok();
+    let local = |key: &str| {
+        conn.as_ref()
+            .and_then(|conn| crate::db::get_setting(conn, "terminal", key))
+    };
+    serde_json::json!({
+        "organization_id": organization.or_else(|| local("organization_id")).unwrap_or_default(),
+        "branch_id": branch.unwrap_or_default(),
+        "terminal_id": terminal.or_else(|| local("terminal_id")).unwrap_or_default(),
+    })
+}
+
+fn cached_menu_identity(conn: &Connection) -> Option<Value> {
+    conn.query_row(
+        "SELECT data FROM menu_cache WHERE cache_key = ?1",
+        [MENU_IDENTITY_KEY],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+fn scoped_menu_identity(conn: &Connection, scope: &Value) -> Option<Value> {
+    let key = format!("{MENU_IDENTITY_KEY}:{}", hash_canonical_json(scope));
+    conn.query_row(
+        "SELECT data FROM menu_cache WHERE cache_key=?1",
+        [key],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str(&raw).ok())
+    .or_else(|| cached_menu_identity(conn).filter(|old| old["scope"] == *scope))
+}
+
+fn current_menu_scope_without_lock(conn: &Connection, branch: Option<&str>) -> Value {
+    serde_json::json!({
+        "organization_id": storage::get_credential("organization_id").or_else(|| crate::db::get_setting(conn, "terminal", "organization_id")).unwrap_or_default(),
+        "branch_id": branch.unwrap_or_default(),
+        "terminal_id": storage::get_credential("terminal_id").or_else(|| crate::db::get_setting(conn, "terminal", "terminal_id")).unwrap_or_default(),
+    })
+}
+
+fn cache_matches_scope(conn: &Connection, scope: &Value) -> bool {
+    cached_menu_identity(conn).is_none_or(|identity| identity["scope"] == *scope)
+}
+
+fn validate_store_menu(
+    incoming: Option<&Value>,
+    cached: Option<&Value>,
+    branch: Option<&str>,
+) -> Result<(), String> {
+    let Some(incoming) = incoming else {
+        return Ok(());
+    }; // older server
+    if incoming["branch_id"].as_str() != branch || branch.is_none() {
+        return Err("Menu response belongs to another store".into());
+    }
+    if !matches!(
+        incoming["mode"].as_str(),
+        Some("organization" | "store_owned")
+    ) || incoming["revision"].as_u64().is_none()
+        || !incoming
+            .get("epoch")
+            .is_some_and(|epoch| epoch.is_null() || epoch.is_string())
+    {
+        return Err("Invalid store menu identity".into());
+    }
+    if let Some(previous) = cached {
+        if previous["epoch"] == incoming["epoch"]
+            && previous["mode"] == incoming["mode"]
+            && incoming["revision"].as_u64() < previous["revision"].as_u64()
+        {
+            return Err("Stale store menu revision".into());
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Cache readers
 // ---------------------------------------------------------------------------
 
 /// Read a cached menu array by key. Returns an empty array on miss or error.
 fn read_cache(db: &DbState, cache_key: &str) -> Vec<Value> {
+    let scope = current_menu_scope(db);
     let conn = match db.conn.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -98,6 +184,9 @@ fn read_cache(db: &DbState, cache_key: &str) -> Vec<Value> {
             return vec![];
         }
     };
+    if !cache_matches_scope(&conn, &scope) {
+        return vec![];
+    }
     read_cache_rows(&conn, cache_key)
 }
 
@@ -548,6 +637,12 @@ fn read_effective_rows(db: &DbState, section: &str, resource_column: &str) -> Ve
             return vec![];
         }
     };
+    if !cache_matches_scope(
+        &conn,
+        &current_menu_scope_without_lock(&conn, branch_id.as_deref()),
+    ) {
+        return vec![];
+    }
     let rows = read_cache_rows(&conn, section);
     let index = load_branch_override_index(&conn, branch_id.as_deref());
     merge_branch_overrides(rows, &index, resource_column)
@@ -624,6 +719,15 @@ pub(crate) fn apply_menu_payload(
 ) -> Result<bool, String> {
     validate_menu_sections(data)?;
     let overrides = complete_branch_overrides(data)?;
+    let identity = data.get("_store_menu_identity");
+    if let Some(identity) = identity {
+        let cached = scoped_menu_identity(conn, &identity["scope"]);
+        validate_store_menu(
+            identity.get("store_menu").filter(|v| !v.is_null()),
+            cached.as_ref().and_then(|v| v.get("store_menu")),
+            overrides_branch,
+        )?;
+    }
 
     let is_current = |conn: &Connection| -> Result<bool, String> {
         let current_rows: i64 = conn
@@ -679,6 +783,32 @@ pub(crate) fn apply_menu_payload(
             params![BRANCH_OVERRIDES_CACHE_KEY, stored.to_string(), version],
         )
         .map_err(|e| format!("upsert menu_cache[{BRANCH_OVERRIDES_CACHE_KEY}]: {e}"))?;
+    }
+    if let Some(identity) = identity {
+        let previous = cached_menu_identity(&tx);
+        let has_queue: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='parity_sync_queue')", [], |row| row.get(0)).unwrap_or(false);
+        if has_queue && previous.is_none_or(|old| old["scope"] == identity["scope"]) {
+            if let Some(branch) = identity["scope"]["branch_id"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+            {
+                tx.execute("UPDATE parity_sync_queue SET data=json_set(data, '$._menu_scope', json(?1), '$.branch_id', ?2)
+                    WHERE table_name IN ('menu_categories','menu_subcategories','menu_ingredients','menu_combos')
+                    AND json_valid(data) AND json_extract(data, '$._menu_scope') IS NULL
+                    AND (json_extract(data, '$.branch_id') IS NULL OR json_extract(data, '$.branch_id')=?2)",
+                    params![identity["scope"].to_string(), branch]).map_err(|e| e.to_string())?;
+            }
+        }
+        let scope_key = format!(
+            "{MENU_IDENTITY_KEY}:{}",
+            hash_canonical_json(&identity["scope"])
+        );
+        for key in [MENU_IDENTITY_KEY, scope_key.as_str()] {
+            tx.execute("INSERT INTO menu_cache (id,cache_key,data,version,updated_at)
+            VALUES (lower(hex(randomblob(16))),?1,?2,?3,datetime('now'))
+            ON CONFLICT(cache_key) DO UPDATE SET data=excluded.data,version=excluded.version,updated_at=excluded.updated_at",
+            params![key, identity.to_string(), version]).map_err(|e| e.to_string())?;
+        }
     }
     tx.commit()
         .map_err(|e| format!("commit menu_cache write: {e}"))?;
@@ -816,7 +946,8 @@ fn build_menu_version_token(
     let snapshot = serde_json::json!({
         "latest_updated_at": latest_updated_at,
         "last_updated": payload.get("last_updated").cloned().unwrap_or(Value::Null),
-        "counts": counts
+        "counts": counts,
+        "store_menu": payload.get("store_menu"),
     });
     hash_canonical_json(&snapshot)
 }
@@ -980,6 +1111,11 @@ pub async fn sync_menu(db: &DbState) -> Result<Value, String> {
 /// monitor's retry timing.
 pub(crate) async fn sync_menu_detailed(db: &DbState) -> Result<Value, MenuSyncFailure> {
     let credentials = resolve_menu_sync_credentials()?;
+    let scope = current_menu_scope(db);
+    let initial_identity = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        cached_menu_identity(&conn)
+    };
 
     let terminal_id_for_query = validate_terminal_id_for_query(&credentials.terminal_id)?;
     let path = format!(
@@ -1043,6 +1179,17 @@ pub(crate) async fn sync_menu_detailed(db: &DbState) -> Result<Value, MenuSyncFa
         })
         .ok_or("Menu sync response missing menu payload")?;
 
+    let mut data = data.clone();
+    let envelope = resp
+        .get("store_menu")
+        .or_else(|| resp.get("data").and_then(|d| d.get("store_menu")));
+    validate_store_menu(
+        envelope,
+        None,
+        scope["branch_id"].as_str().filter(|v| !v.is_empty()),
+    )?;
+    data["_store_menu_identity"] = serde_json::json!({ "scope": scope, "store_menu": envelope });
+    let data = &data;
     validate_menu_sections(data)?;
     complete_branch_overrides(data)?;
 
@@ -1057,7 +1204,11 @@ pub(crate) async fn sync_menu_detailed(db: &DbState) -> Result<Value, MenuSyncFa
         "combos": combo_count
     });
 
-    let version = compute_menu_payload_version(data);
+    let version = format!(
+        "{}:{}",
+        compute_menu_payload_version(data),
+        hash_canonical_json(&data["_store_menu_identity"])
+    );
     let timestamp = resp
         .get("timestamp")
         .and_then(Value::as_str)
@@ -1070,6 +1221,15 @@ pub(crate) async fn sync_menu_detailed(db: &DbState) -> Result<Value, MenuSyncFa
     let overrides_branch = current_branch_id(db);
     let updated = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if current_menu_scope_without_lock(&conn, overrides_branch.as_deref()) != scope {
+            return Err("Terminal menu scope changed during fetch".into());
+        }
+        let current = cached_menu_identity(&conn);
+        if current != initial_identity
+            && current.as_ref().map(|v| &v["store_menu"]["epoch"]) != envelope.map(|v| &v["epoch"])
+        {
+            return Err("Menu epoch changed during fetch".into());
+        }
         apply_menu_payload(&conn, data, &version, overrides_branch.as_deref())?
     };
     if !updated {
@@ -1214,6 +1374,89 @@ mod tests {
             &second_counts,
         );
         assert_eq!(first_token, second_token);
+    }
+
+    #[test]
+    fn store_menu_revision_fence_survives_switching_away_and_back() {
+        let conn = menu_cache_conn();
+        let payload = |branch: &str, revision: u64| {
+            serde_json::json!({
+                "categories":[], "subcategories":[], "ingredients":[], "combos":[],
+                "_store_menu_identity":{"scope":{"organization_id":"org","branch_id":branch,"terminal_id":"till"},
+                    "store_menu":{"branch_id":branch,"mode":"store_owned","epoch":"stable-epoch","revision":revision}}
+            })
+        };
+        apply_menu_payload(&conn, &payload("store-a", 12), "a", Some("store-a")).unwrap();
+        apply_menu_payload(&conn, &payload("store-b", 3), "b", Some("store-b")).unwrap();
+        let before = cached_rows(&conn);
+        assert!(
+            apply_menu_payload(&conn, &payload("store-a", 11), "stale-a", Some("store-a")).is_err()
+        );
+        assert_eq!(cached_rows(&conn), before);
+    }
+
+    #[test]
+    fn store_menu_epoch_changes_the_monitor_token_without_changing_rows() {
+        let before = serde_json::json!({"store_menu":{"branch_id":"store","mode":"organization","epoch":null,"revision":0}});
+        let after = serde_json::json!({"store_menu":{"branch_id":"store","mode":"store_owned","epoch":"opaque-new-epoch","revision":1}});
+        let counts = serde_json::json!({"subcategories":1});
+        assert_ne!(
+            build_menu_version_token(&before, Some("unchanged"), &counts),
+            build_menu_version_token(&after, Some("unchanged"), &counts)
+        );
+    }
+
+    #[test]
+    fn store_menu_identity_fences_store_revision_and_epoch_atomically() {
+        let conn = menu_cache_conn();
+        let scope = serde_json::json!({"organization_id":"org", "branch_id":"store-a", "terminal_id":"till"});
+        let payload = |branch: &str, epoch: &str, revision: u64, price: u64| {
+            serde_json::json!({
+                "categories":[], "subcategories":[{"id":"original-uuid","price":price}], "ingredients":[], "combos":[],
+                "_store_menu_identity":{"scope":scope,"store_menu":{"branch_id":branch,"mode":"store_owned","epoch":epoch,"revision":revision}}
+            })
+        };
+        let original = payload("store-a", "epoch-a", 12, 3);
+        apply_menu_payload(&conn, &original, "v1", Some("store-a")).unwrap();
+        let before = cached_rows(&conn);
+        assert!(apply_menu_payload(
+            &conn,
+            &payload("store-b", "epoch-a", 13, 8),
+            "wrong",
+            Some("store-a")
+        )
+        .is_err());
+        assert!(apply_menu_payload(
+            &conn,
+            &payload("store-a", "epoch-a", 11, 8),
+            "stale",
+            Some("store-a")
+        )
+        .is_err());
+        let mut incomplete = payload("store-a", "epoch-b", 1, 8);
+        incomplete.as_object_mut().unwrap().remove("combos");
+        assert!(apply_menu_payload(&conn, &incomplete, "partial", Some("store-a")).is_err());
+        assert_eq!(cached_rows(&conn), before);
+        assert!(!cache_matches_scope(
+            &conn,
+            &serde_json::json!({"organization_id":"org", "branch_id":"store-b", "terminal_id":"till"})
+        ));
+        // A complete epoch replacement may reset its revision; physical ids and prices survive.
+        apply_menu_payload(
+            &conn,
+            &payload("store-a", "epoch-b", 1, 3),
+            "v2",
+            Some("store-a"),
+        )
+        .unwrap();
+        assert_eq!(
+            read_cache_rows(&conn, "subcategories"),
+            original["subcategories"].as_array().unwrap().clone()
+        );
+        assert_eq!(
+            cached_menu_identity(&conn).unwrap()["store_menu"]["epoch"],
+            "epoch-b"
+        );
     }
 
     fn menu_cache_conn() -> Connection {

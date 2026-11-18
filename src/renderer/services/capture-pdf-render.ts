@@ -23,7 +23,7 @@ import { extractSupplierImportFile } from '../utils/supplier-import-parser';
 import { MAX_CAPTURE_PAGES, saveCaptureDraft } from './capture-client';
 
 /** Longest edge of a rasterized page, in pixels. */
-const RENDER_MAX_EDGE = 2000;
+const RENDER_MAX_EDGE = 4096;
 
 /**
  * JPEG rather than PNG, at a quality that stays comfortably inside the 10 MB
@@ -31,13 +31,14 @@ const RENDER_MAX_EDGE = 2000;
  * dense invoice routinely clears 8 MB; the same page as JPEG is well under one.
  */
 const RENDER_MIME = 'image/jpeg';
-const RENDER_QUALITY = 0.85;
+const RENDER_QUALITY = 0.95;
 
 export interface RenderedCapturePage {
   pageIndex: number;
   mime: string;
   /** Base64 image bytes, without the `data:` prefix. */
   data: string;
+  dpi: number;
 }
 
 function base64ToBytes(base64: string): Uint8Array {
@@ -90,7 +91,10 @@ export async function rasterizePdf(bytes: Uint8Array): Promise<RenderedCapturePa
   try {
     const pdf = await loadingTask.promise;
     const pages: RenderedCapturePage[] = [];
-    const pageCount = Math.min(pdf.numPages, MAX_CAPTURE_PAGES);
+    if (!Number.isInteger(pdf.numPages) || pdf.numPages < 1 || pdf.numPages > MAX_CAPTURE_PAGES) {
+      throw new Error('PDF page count outside capture limits');
+    }
+    const pageCount = pdf.numPages;
 
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
@@ -98,7 +102,10 @@ export async function rasterizePdf(bytes: Uint8Array): Promise<RenderedCapturePa
       try {
         const base = page.getViewport({ scale: 1 });
         const longestEdge = Math.max(base.width, base.height) || 1;
-        const scale = Math.min(RENDER_MAX_EDGE / longestEdge, 4);
+        if (![base.width, base.height].every((v) => Number.isFinite(v) && v > 0)) {
+          throw new Error('Invalid PDF page dimensions');
+        }
+        const scale = Math.min(RENDER_MAX_EDGE / longestEdge, 300 / 72);
         const viewport = page.getViewport({ scale });
 
         canvas.width = Math.max(1, Math.floor(viewport.width));
@@ -113,6 +120,7 @@ export async function rasterizePdf(bytes: Uint8Array): Promise<RenderedCapturePa
         pages.push({
           pageIndex: pageNumber - 1,
           mime: RENDER_MIME,
+          dpi: Math.round(scale * 72),
           data: dataUrlToBase64(canvas.toDataURL(RENDER_MIME, RENDER_QUALITY)),
         });
       } finally {
@@ -174,11 +182,12 @@ async function attachRenderedPages(
   pages: RenderedCapturePage[],
   failureReason?: string,
 ): Promise<void> {
-  await getBridge().invoke('capture_attach_rendered_pages', {
+  const result = await getBridge().invoke('capture_attach_rendered_pages', {
     captureId,
     pages,
     failureReason,
-  });
+  }) as { success?: boolean } | null;
+  if (!result?.success) throw new Error('Capture pages were not durably attached');
 }
 
 /**
@@ -215,7 +224,8 @@ export async function renderCaptureDocument(captureId: string): Promise<void> {
       await probeTask.destroy();
     }
 
-    pages = await rasterizePdf(bytes);
+    if (!pageOverflow) pages = await rasterizePdf(bytes);
+    else pages = [];
   } catch (error) {
     console.error('[capture] PDF rasterization failed:', error);
     await attachRenderedPages(captureId, [], 'CAPTURE_UNREADABLE');

@@ -6993,6 +6993,12 @@
       "reversal": "Payment undone"
     },
     "capture": {
+      "subtype": {
+        "scanner": "Scanner",
+        "file": "File",
+        "camera": "Camera",
+        "unknown": "Unknown source"
+      },
       "automation": {
         "recordedMark": "Saved on its own",
         "recordedStockMark": "Saved on its own · stock updated",
@@ -7046,7 +7052,16 @@
         "rescanned": "Page replaced.",
         "moveEarlier": "Move earlier",
         "moveLater": "Move later",
-        "capReached": "That is as many pages as one invoice can hold. Finish this one and start another for the rest.",
+        "paperSource": "Paper source",
+        "flatbed": "Flatbed / one sheet",
+        "feeder": "Feeder / one-sided stack",
+        "folderBoundary": "One invoice per capture. Save a multi-page invoice as one PDF; separate image files become separate captures.",
+        "oneInvoice": "One invoice per capture",
+        "capReached": "This invoice has reached the page limit. Its pages are saved here. Keep the complete invoice together; do not submit it in parts.",
+        "admissionReview": "The readings need checking. Your invoice and all its pages are saved.",
+        "rotate": "Rotate page clockwise",
+        "admissionRecorded": "Invoice recorded",
+        "admissionWaiting": "Waiting for invoice reading",
         "stoppedEarly": "The scanner stopped before the feeder was empty. If any pages are still in it, add them before you finish.",
         "finishAndStartAnother": "Finish this one and start another",
         "needAPage": "Add at least one page before finishing."
@@ -7109,6 +7124,7 @@
         "device_error": "The scanner did not answer. Check it is on and connected."
       },
       "status": {
+        "excluded": "Not an invoice",
         "capturing": "Still scanning",
         "waiting": "Waiting to be read",
         "uploading": "Sending the pages",
@@ -7313,6 +7329,14 @@
       "emptyDescription": "Supplier contact and invoice information will show here."
     },
     "import": {
+      "negativeStockWarning": "Stock is negative after this entry. Check the stock balance.",
+      "appliedStockQuantity": "Quantity applied: {{quantity}}",
+      "staffSessionRequired": "Connect to the office and check in again. Your input is kept.",
+      "tillSpreadsheetUnavailable": "Spreadsheet import is not available on this till yet. Your typed rows are kept.",
+      "documentRetained": "Document retained for reading. Open scanned invoices to follow its progress.",
+      "documentRetainedUnsupported": "Original Word document retained on this till. Word upload is not available yet. Export it as PDF and choose the PDF.",
+      "poLinkOnly": "Link this invoice to the purchase order (no delivery quantities will be recorded).",
+      "stockLineResult": "Row {{row}}: stock recorded for {{item}} · movement {{movement}}",
       "open": "Import items",
       "title": "Import supplier items",
       "subtitle": "Review imported rows before syncing them to inventory.",
@@ -9358,6 +9382,12 @@
     "portionNotSaved": "Card charged, payment not saved yet. Do not charge again."
   },
   "recovery": {
+    "confirmations": {
+      "cashDrawerControl": {
+        "title": "Confirm recovery action",
+        "subtitle": "Enter the cashier or manager PIN to run this recovery action."
+      }
+    },
     "common": {
       "reference": "Reference",
       "entityId": "Entity ID",
@@ -9604,6 +9634,17 @@
       }
     },
     "recipes": {
+      "orderCustomerCorrection": {
+        "title": "Customer details change",
+        "summary": "The change made to the customer's details was not saved. The sale and the payment are not affected.",
+        "guidance": "Save the change again or keep the details as they are now.",
+        "resend": "Save the customer details change again",
+        "resendExplanation": "Try saving the same customer details change again.",
+        "pending": "Saving… Please wait a moment.",
+        "keep": "Keep the details as they are now",
+        "keepExplanation": "Use the customer and delivery details already recorded. The unsaved change will remain in the history.",
+        "confirmed": "The order now uses the details already recorded."
+      },
       "restoreLastKnownPrinterBrand": {
         "title": "The printer language could not be identified",
         "label": "Restore saved printer language",
@@ -10674,5 +10715,39 @@
     "attention": "Work card: {{count}} movements need action. See admin → Staff schedule → ERGANI log.",
     "zHint": "Each person should check out with their own PIN so the work card exit can be sent.",
     "dismiss": "Dismiss for 1 hour"
+  }
+,
+  "orderSyncNotice": {
+    "checkUnavailableHealth": "The till cannot check for open order issues right now. Orders stay in the active orders.",
+    "checkUnavailableGuidance": "Try again in a moment. If it keeps happening, call support.",
+    "checkUnavailable": "The till cannot check right now whether order #{{number}} has an open issue, so it stays in the active orders. Try again in a moment. If it keeps happening, call support.",
+    "checkUnavailableMany": "The till cannot check right now whether orders {{numbers}} have an open issue, so they stay in the active orders. Try again in a moment. If it keeps happening, call support.",
+    "moveBlocked": "Order {{number}} has an issue that must be solved first. Open it to see what to do.",
+    "movesBlocked": "Not moved: {{numbers}}. They have an issue that must be solved first.",
+    "remainsActive": "Until it is solved, the order stays in the active orders.",
+    "needsAction": "Needs attention",
+    "customer_correction_refused": "The change made to the customer's details was not saved. The sale and the payment are not affected.",
+    "change_refused": "A change to this order was not saved. You can carry on serving.",
+    "payment_not_on_server": "A payment of this order has not been recorded yet. Do not charge the customer again.",
+    "next": "Press the button to save it again.",
+    "resend": "Save again",
+    "guided": "Check this order",
+    "pending": "Saving… Please wait a moment.",
+    "failedAgain": "The change was not saved this time either. Tell the manager.",
+    "failed": "The change was not saved. Try again shortly. If it keeps happening, tell the manager.",
+    "changed": "The order has changed in the meantime. Tell the manager.",
+    "offline": "There is no internet connection. Try again when it is back.",
+    "wait": "Finish the sale, the payment or the closing first, then try again.",
+    "busy": "Checking…",
+    "loading": "Checking this order…",
+    "stale": "The notice has not refreshed. The last known one is shown.",
+    "shift": "Orders to check before you leave",
+    "shiftHint": "They do not stop you closing your shift.",
+    "order": "Order {{number}}",
+    "toast": "Order {{number}} needs attention. Open it.",
+    "saving": "Saving…",
+    "tryAgain": "Try again",
+    "notSolved": "It was not solved. Tell the manager.",
+    "noRemedy": "This cannot be solved from here. Tell the manager."
   }
 }

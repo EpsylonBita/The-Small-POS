@@ -330,6 +330,10 @@ class MenuService {
   }
 
   private isCacheValid(key: string): boolean {
+    // Native cache readers fence the active terminal/store and menu epoch.
+    if (!isBrowser()) {
+      return false;
+    }
     const lastFetch = this.lastFetch.get(key);
     return lastFetch ? Date.now() - lastFetch < this.CACHE_TTL : false;
   }
@@ -519,7 +523,7 @@ class MenuService {
       console.error('Error fetching menu categories:', formatError(posError));
 
       // Check if cached data exists and return it with warning
-      if (this.cache.has(cacheKey)) {
+      if (isBrowser() && this.cache.has(cacheKey)) {
         console.warn('Returning cached menu categories due to error');
         return this.cache.get(cacheKey);
       }
@@ -724,7 +728,7 @@ class MenuService {
       console.error('Error fetching ingredients:', posError);
 
       // Check if cached data exists and return it with warning
-      if (this.cache.has(cacheKey)) {
+      if (isBrowser() && this.cache.has(cacheKey)) {
         console.warn('Returning cached ingredients due to error');
         return this.cache.get(cacheKey);
       }
@@ -953,7 +957,7 @@ class MenuService {
       console.error('Error fetching menu items:', formatError(posError));
 
       // Check if cached data exists and return it with warning
-      if (this.cache.has(cacheKey)) {
+      if (isBrowser() && this.cache.has(cacheKey)) {
         console.warn('Returning cached menu items due to error');
         return this.cache.get(cacheKey);
       }
@@ -1047,7 +1051,7 @@ class MenuService {
       console.error('Error fetching menu items by category:', formatError(posError));
 
       // Check if cached data exists and return it with warning
-      if (this.cache.has(cacheKey)) {
+      if (isBrowser() && this.cache.has(cacheKey)) {
         console.warn('Returning cached menu items by category due to error');
         return this.cache.get(cacheKey);
       }
@@ -1076,7 +1080,7 @@ class MenuService {
       console.error('Error fetching customizable items:', formatError(posError));
 
       // Check if cached data exists and return it with warning
-      if (this.cache.has(cacheKey)) {
+      if (isBrowser() && this.cache.has(cacheKey)) {
         console.warn('Returning cached customizable items due to error');
         return this.cache.get(cacheKey);
       }
@@ -1420,7 +1424,7 @@ class MenuService {
       console.error('Error fetching menu combos:', formatError(posError));
 
       // Return cached data if available
-      if (this.cache.has(cacheKey)) {
+      if (isBrowser() && this.cache.has(cacheKey)) {
         console.warn('Returning cached menu combos due to error');
         return this.cache.get(cacheKey);
       }

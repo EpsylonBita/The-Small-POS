@@ -1,5 +1,6 @@
 use chrono::{TimeZone, Utc};
 use reqwest::Url;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use crate::{db, storage, MODULE_CACHE_FILE};
@@ -251,23 +252,57 @@ pub(crate) fn can_transition_locally(from_status: &str, to_status: &str) -> bool
 }
 
 fn module_cache_path(db: &db::DbState) -> PathBuf {
+    module_cache_path_for_identity(db, &crate::commands::modules::current_module_identity(db))
+}
+
+fn module_cache_path_for_identity(
+    db: &db::DbState,
+    identity: &(String, String, String, String),
+) -> PathBuf {
+    let digest = Sha256::digest(serde_json::to_vec(identity).unwrap_or_default());
+    let filename = format!("store-v3-{}-{MODULE_CACHE_FILE}", lower_hex(&digest));
     db.db_path
         .parent()
-        .map(|p| p.join(MODULE_CACHE_FILE))
-        .unwrap_or_else(|| PathBuf::from(MODULE_CACHE_FILE))
+        .map(|p| p.join(&filename))
+        .unwrap_or_else(|| PathBuf::from(&filename))
 }
 
 pub(crate) fn read_module_cache(db: &db::DbState) -> Result<serde_json::Value, String> {
-    let path = module_cache_path(db);
+    let identity = crate::commands::modules::current_module_identity(db);
+    let path = module_cache_path_for_identity(db, &identity);
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read module cache: {e}"))?;
-    serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| format!("parse module cache: {e}"))
+    let cache = serde_json::from_str::<serde_json::Value>(&raw)
+        .map_err(|e| format!("parse module cache: {e}"))?;
+    if crate::commands::modules::current_module_identity(db) != identity {
+        return Err("MODULE_SCOPE_CHANGED".to_string());
+    }
+    let (org, branch, terminal, origin) = identity;
+    if !crate::commands::modules::cache_identity_matches(&cache, &org, &branch, &terminal, &origin)
+    {
+        return Err("MODULE_AUTHORITATIVE_SYNC_REQUIRED".to_string());
+    }
+    Ok(cache)
+}
+
+pub(crate) fn invalidate_module_cache(db: &db::DbState) -> Result<(), String> {
+    match std::fs::remove_file(module_cache_path(db)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("invalidate module cache: {error}")),
+    }
 }
 
 pub(crate) fn write_module_cache(
     db: &db::DbState,
     payload: &serde_json::Value,
 ) -> Result<(), String> {
-    let path = module_cache_path(db);
+    let identity = crate::commands::modules::current_module_identity(db);
+    let (org, branch, terminal, origin) = &identity;
+    if !crate::commands::modules::cache_identity_matches(payload, &org, &branch, &terminal, &origin)
+    {
+        return Err("MODULE_SCOPE_CHANGED".to_string());
+    }
+    let path = module_cache_path_for_identity(db, &identity);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create cache dir: {e}"))?;
     }
@@ -360,6 +395,26 @@ pub(crate) fn ensure_no_unsent_money(conn: &rusqlite::Connection) -> Result<(), 
 pub(crate) fn clear_generic_operational_data_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<(), String> {
+    clear_operational_tables(transaction, false)
+}
+
+pub(crate) fn clear_rebind_operational_data_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), String> {
+    clear_operational_tables(transaction, true)
+}
+
+fn clear_operational_tables(
+    transaction: &rusqlite::Transaction<'_>,
+    retain_shared: bool,
+) -> Result<(), String> {
+    if retain_shared {
+        transaction.execute_batch("DELETE FROM parity_sync_queue WHERE table_name NOT IN ('customers','customer_addresses','loyalty_transactions','coupons','suppliers'); DELETE FROM sync_queue WHERE entity_type NOT IN ('customer','customer_address','loyalty_transaction','coupon','supplier'); DELETE FROM local_settings WHERE setting_category='terminal' AND substr(setting_key,1,6)='group_';").map_err(|e|e.to_string())?;
+    } else {
+        transaction
+            .execute_batch("DELETE FROM parity_sync_queue; DELETE FROM sync_queue;")
+            .map_err(|e| e.to_string())?;
+    }
     transaction
         .execute_batch(
             "
@@ -372,8 +427,6 @@ pub(crate) fn clear_generic_operational_data_in_transaction(
         DELETE FROM z_reports;
         DELETE FROM recovery_action_log;
         DELETE FROM conflict_audit_log;
-        DELETE FROM parity_sync_queue;
-        DELETE FROM sync_queue;
         DELETE FROM orders;
         DELETE FROM local_settings WHERE setting_category = 'fiscal_admission_owed';
         ",
@@ -464,7 +517,7 @@ where
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| format!("clear operational data: {error}"))?;
     before_clear(&transaction)?;
-    clear_generic_operational_data_in_transaction(&transaction)?;
+    clear_rebind_operational_data_in_transaction(&transaction)?;
     transaction
         .commit()
         .map_err(|error| format!("clear operational data: {error}"))?;
@@ -740,6 +793,30 @@ pub(crate) fn stats_for_modules(modules: &[serde_json::Value]) -> serde_json::Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rebind_keeps_original_pending_shared_payload_and_retry_state() {
+        let database = crate::tests::harness::TestDb::open();
+        let conn = database.state.conn.lock().unwrap();
+        conn.execute("INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,status,attempts,claim_generation) VALUES('customer-original','customers','customer','INSERT','{\"phone\":\"210\"}','org','failed',4,8)",[]).unwrap();
+        crate::group_scope::record_queue_scope(&conn, "customer-original", "customers", "org")
+            .unwrap();
+        let tx = crate::db::immediate_transaction(&conn).unwrap();
+        ensure_no_unsent_money(&tx).unwrap();
+        clear_rebind_operational_data_in_transaction(&tx).unwrap();
+        tx.commit().unwrap();
+        let held:(String,String,i64,i64)=conn.query_row("SELECT data,status,attempts,claim_generation FROM parity_sync_queue WHERE id='customer-original'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!(held, (r#"{"phone":"210"}"#.into(), "failed".into(), 4, 8));
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM shared_queue_scope WHERE queue_id='customer-original'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
 
     #[test]
     fn completed_orders_can_be_reset_to_pending() {

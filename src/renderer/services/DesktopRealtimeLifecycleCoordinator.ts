@@ -7,6 +7,7 @@ export interface DesktopRealtimeIdentity {
   terminalId: string
   organizationId: string
   branchId: string
+  groupKey?: string
 }
 
 export interface DesktopRealtimeRuntime {
@@ -49,6 +50,7 @@ function normalizeIdentity(
     terminalId: identity.terminalId.trim(),
     organizationId: identity.organizationId.trim(),
     branchId: identity.branchId.trim(),
+    ...(identity.groupKey ? { groupKey: identity.groupKey.trim() } : {}),
   }
   return normalized.terminalId &&
     normalized.organizationId &&
@@ -64,7 +66,8 @@ function identitiesEqual(
   return (
     left?.terminalId === right?.terminalId &&
     left?.organizationId === right?.organizationId &&
-    left?.branchId === right?.branchId
+    left?.branchId === right?.branchId &&
+    (left?.groupKey ?? left?.organizationId) === (right?.groupKey ?? right?.organizationId)
   )
 }
 

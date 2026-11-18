@@ -22,6 +22,14 @@ function toastSpy() {
 }
 
 describe('Ready on platform orders', () => {
+  it('keeps ready successful and collects held completions while continuing the bulk action', async () => {
+    const notify = vi.fn().mockResolvedValueOnce({ success: true, status: 'ready', completionRefusal: 'ORDER_NOTICE_CHECK_UNAVAILABLE' }).mockResolvedValueOnce({ success: true, status: 'delivered' });
+    const outcome = await markPlatformOrdersReady([{ id: 'one', displayNumber: '125' }, { id: 'two', displayNumber: '126' }], notify);
+    expect(outcome.markedReady).toBe(2);
+    expect(outcome.failedOrderNumber).toBeNull();
+    expect(outcome.completionRefusals).toEqual([{ id: 'one', number: '125', errorCode: 'ORDER_NOTICE_CHECK_UNAVAILABLE' }]);
+    expect(notify).toHaveBeenCalledTimes(2);
+  });
   it('announces a cancelled order with the cancellation notice, never as ready', async () => {
     const outcome = await markPlatformOrdersReady(
       [{ id: 'ord-1', displayNumber: '#4711' }],

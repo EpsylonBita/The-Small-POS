@@ -24,7 +24,7 @@ import {
 
 function moduleCache(ids: string[]) {
   return { success: true, isValid: true, identityMatch: true, modules: {
-    success: true, organization_id: 'org-1', terminal_id: 'terminal-1',
+    success: true, organization_id: 'org-1', branch_id: 'branch-1', terminal_id: 'terminal-1',
     modules: ids.map(module_id => ({ module_id, is_purchased: true, pos_enabled: true })),
   } };
 }
@@ -79,6 +79,7 @@ function createMockBridge(overrides?: {
           ? overrides.getFullConfig()
           : {
               terminal_id: 'terminal-1',
+              branch_id: 'branch-1',
               admin_url: 'https://admin.example',
             };
       },
@@ -290,6 +291,7 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
     // actually cares about, rather than `deepEqual` on the whole object.
     assert.deepEqual(result.config, {
       terminal_id: 'terminal-1',
+      branch_id: 'branch-1',
       admin_url: 'https://admin.example',
     });
     assert.deepEqual(result.queueStatus, queueStatus);
@@ -485,6 +487,15 @@ test('optional access follows the filtered native module contract, not a page-ca
     ] },
   }) });
   setBridge(bridge);
-  try { assert.deepEqual([...await getOptionalWarmupModules({ terminal_id: 'terminal-1' })], ['rooms']); }
+  try { assert.deepEqual([...await getOptionalWarmupModules({ terminal_id: 'terminal-1', branch_id: 'branch-1' })], ['rooms']); }
   finally { resetBridge(); }
+});
+
+
+test('optional warmup cannot authorize A using a valid native snapshot for B', async () => {
+  const { bridge } = createMockBridge({ getCachedModules: async () => moduleCache(['rooms']) });
+  setBridge(bridge);
+  try {
+    assert.deepEqual([...await getOptionalWarmupModules({ terminal_id: 'terminal-1', branch_id: 'branch-B' })], []);
+  } finally { resetBridge(); }
 });

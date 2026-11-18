@@ -1,3 +1,5 @@
+import { isOrderOpenNoticeRefusal, orderNoticeRefusalCode } from '../../lib/order-open-notice';
+import { announceOrderNoticeMoveRefusal } from '../services/OrderNoticeStatusGuard';
 import { formatCurrency } from '../utils/format';
 /**
  * DeliveryPage - Delivery order management for Desktop POS
@@ -738,6 +740,7 @@ const DeliveryPage: React.FC = () => {
   const handleStatusUpdate = useCallback(async (deliveryId: string, newStatus: DeliveryStatus) => {
     try {
       const response: any = await bridge.orders.updateStatus(deliveryId, newStatus);
+      if (isOrderOpenNoticeRefusal(response)) throw response;
 
       if (response?.success !== false) {
         setDeliveries(prev =>
@@ -752,10 +755,14 @@ const DeliveryPage: React.FC = () => {
         toast.error(response?.error || t('delivery.statusUpdateFailed', 'Failed to update status'));
       }
     } catch (err) {
+      if (isOrderOpenNoticeRefusal(err)) {
+        announceOrderNoticeMoveRefusal([{ id: deliveryId, errorCode: orderNoticeRefusalCode(err), number: deliveries.find(order => order.id === deliveryId)?.orderNumber || deliveryId }], t);
+        return;
+      }
       console.error('[DeliveryPage] Error updating status:', err);
       toast.error(t('delivery.statusUpdateFailed', 'Failed to update status'));
     }
-  }, [bridge.orders, t]);
+  }, [bridge.orders, deliveries, t]);
 
   // Assign driver
   const handleAssignDriver = useCallback(async (deliveryId: string, driverId: string) => {
@@ -771,6 +778,10 @@ const DeliveryPage: React.FC = () => {
               : d
           )
         );
+        if (isOrderOpenNoticeRefusal(response)) {
+          announceOrderNoticeMoveRefusal([{ id: deliveryId, number: deliveries.find(order => order.id === deliveryId)?.orderNumber || deliveryId, errorCode: orderNoticeRefusalCode(response) }], t);
+          return true;
+        }
         toast.success(
           typeof navigator !== 'undefined' && !navigator.onLine
             ? t('delivery.savedLocallyQueued', 'Saved locally and queued for sync')
@@ -786,7 +797,7 @@ const DeliveryPage: React.FC = () => {
       toast.error(t('delivery.assignFailed', 'Failed to assign driver'));
       return false;
     }
-  }, [bridge.orders, drivers, t]);
+  }, [bridge.orders, deliveries, drivers, t]);
 
   // Open assignment modal
   const openAssignModal = useCallback((delivery: Delivery) => {

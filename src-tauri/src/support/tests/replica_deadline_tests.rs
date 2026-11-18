@@ -6,6 +6,7 @@ fn replica_build_uses_its_thirty_second_cap_and_queries_keep_five_seconds() {
         replica::build_budget().as_millis(),
         u128::from(contracts::cap("performance", "replicaBuildMs"))
     );
+    assert_eq!(replica::background_budget().as_millis(), 600_000);
     assert_eq!(contracts::cap("tools", "sqlMs"), 5_000);
 }
 
@@ -59,4 +60,48 @@ fn schema_does_not_build_or_refresh_a_replica_and_never_returns_schema_literals(
     assert!(replica::schema(&tmp.path().join("missing.db"), &permit)
         .unwrap_err()
         .contains("BUSINESS_DATABASE_MISSING"));
+}
+
+#[test]
+fn first_replica_request_is_background_and_reports_building_then_serves_queries() {
+    use crate::support::{critical_op::CriticalOpGate, replica::ReplicaManager, sql_query};
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+    let _keys = crate::tests::fake_keyring::install_empty();
+    let db = crate::tests::harness::TestDb::open();
+    let before = std::fs::read(db.db_path()).unwrap();
+    let gate = CriticalOpGate::new();
+    let permit = gate.try_begin_support(false, None).unwrap();
+    let mut manager = ReplicaManager::default();
+    let start = Instant::now();
+    assert!(
+        matches!(manager.get(db.db_path(), "session", false, &permit), Err(code) if code == "REPLICA_BUILDING")
+    );
+    assert!(start.elapsed() < Duration::from_millis(250));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let replica = loop {
+        match manager.get(db.db_path(), "session", false, &permit) {
+            Err(code) if code == "REPLICA_BUILDING" && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            result => break result.unwrap(),
+        }
+    };
+    let output = sql_query::query(
+        &replica,
+        &json!({"sql":"SELECT count(*) FROM orders"}),
+        &permit,
+    )
+    .unwrap();
+    assert_eq!(output["row_count"], 1);
+    assert_eq!(before, std::fs::read(db.db_path()).unwrap());
+    assert!(
+        matches!(manager.get(db.db_path(), "session", true, &permit), Err(code) if code == "RATE_LIMITED")
+    );
+    let path = replica.path.clone();
+    manager.clear();
+    // An active query owns its old sanitized file until its read finishes.
+    assert!(path.exists());
+    drop(replica);
+    assert!(!path.exists());
 }

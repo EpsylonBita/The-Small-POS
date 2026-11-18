@@ -14500,6 +14500,12 @@ mod tests {
     /// including the tables flag the printed Z reads for dine-in (#359).
     #[test]
     fn both_z_builders_freeze_the_tables_module_flag() {
+        let _fake = crate::tests::fake_keyring::install_seeded([
+            ("organization_id", "org-z"),
+            ("branch_id", "branch-1"),
+            ("terminal_id", "term-1"),
+            ("admin_dashboard_url", "https://admin.test"),
+        ]);
         let dir = std::env::temp_dir().join(format!("z-presentation-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create module cache dir");
         // The module cache lives beside the database file.
@@ -14510,6 +14516,7 @@ mod tests {
             let conn = db.conn.lock().unwrap();
             for (key, value) in [
                 ("organization_id", "org-z"),
+                ("admin_dashboard_url", "https://admin.test"),
                 ("branch_id", "branch-1"),
                 ("terminal_id", "term-1"),
                 ("pos_api_key", "not-a-connection-string"),
@@ -14521,6 +14528,8 @@ mod tests {
         crate::core_helpers::write_module_cache(
             &db,
             &serde_json::json!({
+                "storeScopeVersion": 3,
+                "adminDashboardUrl": "https://admin.test",
                 "organizationId": "org-z",
                 "branchId": "branch-1",
                 "terminalId": "term-1",

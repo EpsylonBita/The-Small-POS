@@ -123,6 +123,15 @@ describe('Recovery action truth', () => {
 });
 
 describe('Recovery observation lifecycle', () => {
+  it('keeps general recovery available when the optional order observer is unavailable', async () => {
+    bridge.diagnostics.getSystemHealth.mockResolvedValue({ ...health, orderNotices: null,
+      observerFailures: ['orderNotices', 'orderIssueEvidence'] });
+    queue.listItems.mockResolvedValue([row]);
+    render(<SyncRecoveryModal isOpen onClose={vi.fn()} />);
+    await screen.findAllByText('recovery.issues.customerAddressDefaultConflict.title');
+    expect(screen.queryByText('sync.recoveryCenter.loadFailed')).not.toBeInTheDocument();
+    expect(screen.queryByText('sync.recoveryCenter.staleData')).not.toBeInTheDocument();
+  });
   it('shows loading even with initial core context, then unavailable on queue failure', async () => {
     const load=deferred<any>(); queue.listItems.mockReturnValue(load.promise);
     render(<SyncRecoveryModal isOpen onClose={vi.fn()} initialContext={{systemHealth:health}} />);

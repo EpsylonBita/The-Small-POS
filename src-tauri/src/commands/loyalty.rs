@@ -157,7 +157,7 @@ fn find_loyalty_customer_row(
 ) -> Result<Option<Value>, String> {
     let resolved_customer_id = resolve_loyalty_customer_lookup_key(conn, org_id, customer_key)?;
     let sql = format!(
-        "{} WHERE organization_id = ?1
+        "{} WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
            AND (
              customer_id = ?2
              OR (?3 IS NOT NULL AND user_profile_id = ?3)
@@ -185,7 +185,7 @@ fn ensure_local_loyalty_customer_row(
         .query_row(
             "SELECT id
              FROM loyalty_customers
-             WHERE organization_id = ?1
+             WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
                AND customer_id = ?2
              LIMIT 1",
             params![org_id, customer_id],
@@ -225,7 +225,7 @@ fn resolve_loyalty_customer_lookup_key(
         .query_row(
             "SELECT customer_id
              FROM loyalty_customers
-             WHERE organization_id = ?1
+             WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
                AND customer_id = ?2
              LIMIT 1",
             params![org_id, customer_id],
@@ -243,7 +243,7 @@ fn resolve_loyalty_customer_lookup_key(
         .query_row(
             "SELECT customer_id
              FROM loyalty_customers
-             WHERE organization_id = ?1
+             WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
                AND user_profile_id = ?2
              LIMIT 1",
             params![org_id, customer_id],
@@ -293,7 +293,7 @@ pub async fn loyalty_get_settings(app: tauri::AppHandle) -> Result<Value, String
                     tier_gold_threshold, tier_platinum_threshold, welcome_bonus_points,
                     birthday_bonus_points, referral_bonus_points, last_synced_at
              FROM loyalty_settings
-             WHERE organization_id = ?1
+             WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
              LIMIT 1",
                 params![org_id],
                 settings_row_to_json,
@@ -312,7 +312,9 @@ pub async fn loyalty_sync_settings(db: tauri::State<'_, db::DbState>) -> Result<
     let org_id =
         get_organization_id(&db).ok_or_else(|| "Organization not configured".to_string())?;
 
+    let scope = crate::group_scope::SharedScope::capture(&db)?;
     let resp = crate::admin_fetch(Some(&db), "/api/pos/loyalty/settings", "GET", None).await?;
+    scope.ensure(&db)?;
 
     let settings = resp.get("settings").cloned().unwrap_or(Value::Null);
 
@@ -326,14 +328,14 @@ pub async fn loyalty_sync_settings(db: tauri::State<'_, db::DbState>) -> Result<
 
     // Upsert: delete existing for this org, then insert fresh
     conn.execute(
-        "DELETE FROM loyalty_settings WHERE organization_id = ?1",
+        "DELETE FROM loyalty_settings WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
         params![org_id],
     )
     .map_err(|e| format!("loyalty_sync_settings delete: {e}"))?;
 
     let s = &settings;
     conn.execute(
-        "INSERT INTO loyalty_settings (
+        "INSERT OR REPLACE INTO loyalty_settings (
             id, organization_id, is_active, points_per_euro, redemption_rate,
             min_redemption_points, tier_bronze_threshold, tier_silver_threshold,
             tier_gold_threshold, tier_platinum_threshold, welcome_bonus_points,
@@ -395,7 +397,7 @@ pub async fn loyalty_sync_settings(db: tauri::State<'_, db::DbState>) -> Result<
                     tier_gold_threshold, tier_platinum_threshold, welcome_bonus_points,
                     birthday_bonus_points, referral_bonus_points, last_synced_at
              FROM loyalty_settings
-             WHERE organization_id = ?1
+             WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
              LIMIT 1",
             params![org_id],
             settings_row_to_json,
@@ -415,6 +417,9 @@ fn loyalty_snapshot_scope(db: &db::DbState) -> Value {
     };
     serde_json::json!([
         identity("organization_id"),
+        crate::group_scope::SharedScope::capture(db)
+            .ok()
+            .map(|scope| scope.group),
         identity("branch_id"),
         identity("terminal_id")
     ])
@@ -442,7 +447,11 @@ async fn loyalty_snapshot_version(db: &db::DbState) -> Result<Option<String>, St
 }
 
 fn has_pending_loyalty(conn: &rusqlite::Connection, org: &str) -> Result<bool, String> {
-    conn.query_row("SELECT EXISTS(SELECT 1 FROM loyalty_transactions WHERE organization_id = ?1 AND sync_state NOT IN ('applied', 'synced'))", params![org], |row| row.get(0)).map_err(|e| e.to_string())
+    let local: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM loyalty_transactions WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope) AND sync_state NOT IN ('applied', 'synced'))", params![org], |row| row.get(0)).map_err(|e| e.to_string())?;
+    if local {
+        return Ok(true);
+    }
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue q JOIN shared_queue_scope s ON s.queue_id=q.id JOIN pos_shared_scope active ON s.organization_id=active.organization_id AND s.group_key=active.group_key AND s.terminal_id=active.terminal_id AND s.branch_id=active.branch_id WHERE q.table_name='loyalty_transactions' AND q.organization_id=?1 AND q.status IN ('pending','processing','failed','conflict'))",params![org],|r|r.get(0)).map_err(|e|e.to_string())
 }
 
 fn loyalty_snapshot_revision_confirmed(before: &Option<String>, after: &Option<String>) -> bool {
@@ -464,7 +473,7 @@ fn replace_loyalty_snapshot(
         return Err("Loyalty changes pending during snapshot".into());
     }
     conn.execute(
-        "DELETE FROM loyalty_customers WHERE organization_id = ?1",
+        "DELETE FROM loyalty_customers WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
         params![org_id],
     )
     .map_err(|e| e.to_string())?;
@@ -641,7 +650,7 @@ pub async fn loyalty_get_customers(
 
         let customers: Vec<Value> = if search.is_empty() {
             let sql = format!(
-                "{} WHERE organization_id = ?1
+                "{} WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
              ORDER BY points_balance DESC
 ",
                 loyalty_customer_select_clause()
@@ -659,7 +668,7 @@ pub async fn loyalty_get_customers(
         } else {
             let pattern = format!("%{search}%");
             let sql = format!(
-                "{} WHERE organization_id = ?1
+                "{} WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
                AND (customer_name LIKE ?2 OR customer_email LIKE ?2 OR customer_phone LIKE ?2)
              ORDER BY points_balance DESC
 ",
@@ -683,6 +692,7 @@ pub async fn loyalty_get_customers(
                 marker.pointer("/scope/0").and_then(Value::as_str) == Some(org_id.as_str())
                     && marker.get("complete") == Some(&Value::Bool(true))
             });
+        drop(conn);
         if customers.is_empty() && !complete {
             let legacy_customers =
                 legacy_loyalty_customers_from_local_cache(&db, &org_id, &search)?;
@@ -744,7 +754,7 @@ pub async fn loyalty_lookup_by_phone(
 
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let sql = format!(
-            "{} WHERE customer_phone = ?1 AND organization_id = ?2 LIMIT 1",
+            "{} WHERE customer_phone = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope) LIMIT 1",
             loyalty_customer_select_clause()
         );
         let row: Option<Value> = conn
@@ -779,7 +789,7 @@ pub async fn loyalty_lookup_by_card(
 
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let sql = format!(
-            "{} WHERE loyalty_card_uid = ?1 AND organization_id = ?2 LIMIT 1",
+            "{} WHERE loyalty_card_uid = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope) LIMIT 1",
             loyalty_customer_select_clause()
         );
         let row: Option<Value> = conn
@@ -819,7 +829,7 @@ pub async fn loyalty_earn_points(
         let points_per_euro: f64 = conn
             .query_row(
                 "SELECT points_per_euro FROM loyalty_settings
-             WHERE organization_id = ?1 LIMIT 1",
+             WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope) LIMIT 1",
                 params![org_id],
                 |row| row.get(0),
             )
@@ -868,7 +878,7 @@ pub async fn loyalty_earn_points(
             .query_row(
                 "SELECT tier_bronze_threshold, tier_silver_threshold,
                     tier_gold_threshold, tier_platinum_threshold
-             FROM loyalty_settings WHERE organization_id = ?1 LIMIT 1",
+             FROM loyalty_settings WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope) LIMIT 1",
                 params![org_id],
                 |row| {
                     Ok((
@@ -889,7 +899,7 @@ pub async fn loyalty_earn_points(
          SET points_balance = points_balance + ?1,
              total_earned = total_earned + ?1,
              updated_at = ?2
-         WHERE customer_id = ?3 AND organization_id = ?4",
+         WHERE customer_id = ?3 AND organization_id = ?4 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
             params![points_earned, now, canonical_customer_id, org_id],
         )
         .map_err(|e| format!("loyalty_earn_points update balance: {e}"))?;
@@ -898,7 +908,7 @@ pub async fn loyalty_earn_points(
         let (new_balance, new_total_earned): (i64, i64) = conn
             .query_row(
                 "SELECT points_balance, total_earned FROM loyalty_customers
-             WHERE customer_id = ?1 AND organization_id = ?2",
+             WHERE customer_id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
                 params![canonical_customer_id, org_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -906,7 +916,7 @@ pub async fn loyalty_earn_points(
 
         let new_tier = calculate_tier(new_total_earned, bronze, silver, gold, platinum);
         conn.execute(
-            "UPDATE loyalty_customers SET tier = ?1 WHERE customer_id = ?2 AND organization_id = ?3",
+            "UPDATE loyalty_customers SET tier = ?1 WHERE customer_id = ?2 AND organization_id = ?3 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
             params![new_tier, canonical_customer_id, org_id],
         )
         .map_err(|e| format!("loyalty_earn_points update tier: {e}"))?;
@@ -975,7 +985,7 @@ fn debit_local_loyalty_balance(
                  total_redeemed = total_redeemed + ?1,
                  updated_at = ?2
              WHERE customer_id = ?3
-               AND organization_id = ?4
+               AND organization_id = ?4 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
                AND points_balance >= ?1",
             params![points, now, customer_id, org_id],
         )
@@ -993,7 +1003,7 @@ pub(crate) fn reverse_local_loyalty_transaction(
     let original: Option<(String, i64, String)> = conn
         .query_row(
             "SELECT customer_id, points, transaction_type FROM loyalty_transactions
-         WHERE id = ?1 AND organization_id = ?2
+         WHERE id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
            AND COALESCE(sync_last_error, '') != 'LOYALTY_LOCAL_REVERSED'",
             params![tx_id, org_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -1008,7 +1018,7 @@ pub(crate) fn reverse_local_loyalty_transaction(
             "UPDATE loyalty_customers SET points_balance = points_balance - ?1,
          total_redeemed = MAX(0, total_redeemed - ?2),
          total_earned = MAX(0, total_earned - ?3), updated_at = ?4
-         WHERE customer_id = ?5 AND organization_id = ?6",
+         WHERE customer_id = ?5 AND organization_id = ?6 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
             params![
                 points,
                 if tx_type == "redeem" { -points } else { 0 },
@@ -1025,17 +1035,17 @@ pub(crate) fn reverse_local_loyalty_transaction(
     if tx_type == "earn" {
         conn.execute(
             "UPDATE loyalty_customers SET tier = CASE
-             WHEN total_earned >= COALESCE((SELECT tier_platinum_threshold FROM loyalty_settings WHERE organization_id = ?1), 5000) THEN 'platinum'
-             WHEN total_earned >= COALESCE((SELECT tier_gold_threshold FROM loyalty_settings WHERE organization_id = ?1), 2000) THEN 'gold'
-             WHEN total_earned >= COALESCE((SELECT tier_silver_threshold FROM loyalty_settings WHERE organization_id = ?1), 500) THEN 'silver'
-             WHEN total_earned >= COALESCE((SELECT tier_bronze_threshold FROM loyalty_settings WHERE organization_id = ?1), 0) THEN 'bronze'
-             ELSE 'none' END WHERE organization_id = ?1 AND customer_id = ?2",
+             WHEN total_earned >= COALESCE((SELECT tier_platinum_threshold FROM loyalty_settings WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)), 5000) THEN 'platinum'
+             WHEN total_earned >= COALESCE((SELECT tier_gold_threshold FROM loyalty_settings WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)), 2000) THEN 'gold'
+             WHEN total_earned >= COALESCE((SELECT tier_silver_threshold FROM loyalty_settings WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)), 500) THEN 'silver'
+             WHEN total_earned >= COALESCE((SELECT tier_bronze_threshold FROM loyalty_settings WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)), 0) THEN 'bronze'
+             ELSE 'none' END WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope) AND customer_id = ?2",
             params![org_id, customer_id],
         ).map_err(|e| format!("loyalty reversal tier: {e}"))?;
     }
     conn.execute(
         "UPDATE loyalty_transactions SET sync_state = 'applied', sync_last_error = 'LOYALTY_LOCAL_REVERSED'
-         WHERE id = ?1 AND organization_id = ?2", params![tx_id, org_id],
+         WHERE id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)", params![tx_id, org_id],
     ).map_err(|e| format!("loyalty reversal ledger: {e}"))?;
     Ok(true)
 }
@@ -1119,6 +1129,7 @@ fn parse_redeem_request(payload: &Value) -> Result<RedeemRequest, String> {
 /// A live redemption, written down (`syncing`) before it is sent.
 #[derive(Clone, Debug, PartialEq)]
 struct RedeemAttempt {
+    group_scope: crate::group_scope::SharedScope,
     tx_id: String,
     org_id: String,
     customer_id: String,
@@ -1211,7 +1222,7 @@ fn prepare_live_redemption(
     let (is_active, min_redemption, redemption_rate): (bool, i64, f64) = conn
         .query_row(
             "SELECT is_active, min_redemption_points, redemption_rate
-             FROM loyalty_settings WHERE organization_id = ?1 LIMIT 1",
+             FROM loyalty_settings WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope) LIMIT 1",
             params![org_id],
             |row| Ok((row.get::<_, i64>(0)? != 0, row.get(1)?, row.get(2)?)),
         )
@@ -1230,7 +1241,7 @@ fn prepare_live_redemption(
     let current_balance: i64 = conn
         .query_row(
             "SELECT points_balance FROM loyalty_customers
-             WHERE customer_id = ?1 AND organization_id = ?2",
+             WHERE customer_id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
             params![canonical_customer_id, org_id],
             |row| row.get(0),
         )
@@ -1246,7 +1257,7 @@ fn prepare_live_redemption(
             .query_row(
                 "SELECT EXISTS(
                      SELECT 1 FROM loyalty_transactions
-                     WHERE customer_id = ?1 AND organization_id = ?2 AND order_id = ?3
+                     WHERE customer_id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope) AND order_id = ?3
                        AND transaction_type = 'redeem'
                        AND COALESCE(sync_last_error, '') = 'LOYALTY_LOCAL_REVERSED')",
                 params![canonical_customer_id, org_id, order_id],
@@ -1262,7 +1273,7 @@ fn prepare_live_redemption(
                 "SELECT ABS(points), id, sync_state
                  FROM loyalty_transactions
                  WHERE customer_id = ?1
-                   AND organization_id = ?2
+                   AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
                    AND order_id = ?3
                    AND transaction_type = 'redeem'
                    AND COALESCE(sync_last_error, '') != 'LOYALTY_LOCAL_REVERSED'
@@ -1310,7 +1321,7 @@ fn prepare_live_redemption(
         Some(tx_id) => {
             conn.execute(
                 "UPDATE loyalty_transactions SET sync_retry_count = sync_retry_count + 1
-                 WHERE id = ?1 AND organization_id = ?2",
+                 WHERE id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
                 params![tx_id, org_id],
             )
             .map_err(|e| format!("loyalty_redeem_points retry tx: {e}"))?;
@@ -1341,6 +1352,7 @@ fn prepare_live_redemption(
     };
 
     Ok(RedeemPreparation::Send(RedeemAttempt {
+        group_scope: crate::group_scope::SharedScope::read(conn),
         tx_id,
         org_id: org_id.to_string(),
         customer_id: canonical_customer_id,
@@ -1413,7 +1425,7 @@ fn confirmed_redeem_answer(
     let new_balance: i64 = conn
         .query_row(
             "SELECT points_balance FROM loyalty_customers
-             WHERE customer_id = ?1 AND organization_id = ?2",
+             WHERE customer_id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
             params![attempt.customer_id, attempt.org_id],
             |row| row.get(0),
         )
@@ -1439,13 +1451,17 @@ fn record_live_redemption(
     outcome: &LiveRedeemOutcome,
     now: &str,
 ) -> Result<Value, String> {
+    if attempt.group_scope != crate::group_scope::SharedScope::read(conn) {
+        return Err("SHARED_GROUP_CHANGED: the original redemption attempt is retained".into());
+    }
+
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("loyalty_redeem_points begin: {e}"))?;
     let recorded = (|| -> Result<Value, String> {
         let row: Option<(String, Option<String>)> = conn
             .query_row(
                 "SELECT sync_state, sync_last_error FROM loyalty_transactions
-                 WHERE id = ?1 AND organization_id = ?2",
+                 WHERE id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
                 params![attempt.tx_id, attempt.org_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1489,7 +1505,7 @@ fn record_live_redemption(
                 }
                 conn.execute(
                     "UPDATE loyalty_transactions SET sync_state = 'applied', sync_last_error = NULL
-                     WHERE id = ?1 AND organization_id = ?2",
+                     WHERE id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
                     params![attempt.tx_id, attempt.org_id],
                 )
                 .map_err(|e| format!("loyalty_redeem_points applied: {e}"))?;
@@ -1507,7 +1523,7 @@ fn record_live_redemption(
                          SET points_balance = MAX(0, points_balance - ?1),
                              total_redeemed = total_redeemed + ?1,
                              updated_at = ?2
-                         WHERE customer_id = ?3 AND organization_id = ?4",
+                         WHERE customer_id = ?3 AND organization_id = ?4 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
                         params![attempt.points, now, attempt.customer_id, attempt.org_id],
                     )
                     .map_err(|e| format!("loyalty_redeem_points update balance: {e}"))?;
@@ -1539,7 +1555,7 @@ fn record_live_redemption(
                 if open {
                     conn.execute(
                         "UPDATE loyalty_transactions SET sync_last_error = ?3
-                         WHERE id = ?1 AND organization_id = ?2",
+                         WHERE id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
                         params![attempt.tx_id, attempt.org_id, LOYALTY_REDEEM_UNCONFIRMED],
                     )
                     .map_err(|e| format!("loyalty_redeem_points unconfirmed: {e}"))?;
@@ -1572,7 +1588,7 @@ fn delete_redeem_attempt(
 ) -> Result<(), String> {
     conn.execute(
         "DELETE FROM loyalty_transactions
-         WHERE id = ?1 AND organization_id = ?2 AND sync_state = 'syncing'",
+         WHERE id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope) AND sync_state = 'syncing'",
         params![attempt.tx_id, attempt.org_id],
     )
     .map(|_| ())
@@ -1677,7 +1693,7 @@ fn release_checkout_redemption(
         }
         let mut stmt = conn
             .prepare(
-                "SELECT id FROM loyalty_transactions WHERE organization_id = ?1 AND order_id = ?2
+                "SELECT id FROM loyalty_transactions WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope) AND order_id = ?2
              AND transaction_type = 'redeem' AND sync_state = 'pending'
              AND COALESCE(sync_last_error, '') != 'LOYALTY_LOCAL_REVERSED'",
             )
@@ -1705,7 +1721,7 @@ fn release_checkout_redemption(
         let mut live = conn
             .prepare(
                 "SELECT id, customer_id, sync_state, ABS(points) FROM loyalty_transactions
-                 WHERE organization_id = ?1 AND order_id = ?2 AND transaction_type = 'redeem'
+                 WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope) AND order_id = ?2 AND transaction_type = 'redeem'
                    AND sync_state IN ('applied', 'syncing')
                    AND COALESCE(sync_last_error, '') != 'LOYALTY_LOCAL_REVERSED'",
             )
@@ -1736,7 +1752,7 @@ fn release_checkout_redemption(
             conn.execute(
                 "UPDATE loyalty_transactions
                  SET sync_state = 'pending', sync_last_error = 'LOYALTY_LOCAL_REVERSED'
-                 WHERE id = ?1 AND organization_id = ?2",
+                 WHERE id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
                 params![tx_id, org_id],
             )
             .map_err(|e| format!("loyalty release ledger: {e}"))?;
@@ -1816,7 +1832,7 @@ fn settle_live_release(
         if !queued {
             conn.execute(
                 "UPDATE loyalty_transactions SET sync_state = 'applied'
-                 WHERE id = ?1 AND organization_id = ?2
+                 WHERE id = ?1 AND organization_id = ?2 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
                    AND sync_last_error = 'LOYALTY_LOCAL_REVERSED'",
                 params![release.tx_id, release.org_id],
             )
@@ -1961,7 +1977,7 @@ pub async fn loyalty_get_transactions(
                 "SELECT id, customer_id, organization_id, points, transaction_type,
                     order_id, description, sync_state, created_at
              FROM loyalty_transactions
-             WHERE organization_id = ?1
+             WHERE organization_id = ?1 AND COALESCE(NULLIF(group_id,''), organization_id) = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)
                AND (
                  customer_id = ?2
                  OR (?3 IS NOT NULL AND customer_id = ?3)
@@ -2118,12 +2134,18 @@ mod tests {
 
     fn setup_loyalty_customers_table(conn: &Connection) {
         conn.execute_batch(
-            "
+            "CREATE TABLE local_settings(setting_category TEXT,setting_key TEXT,setting_value TEXT);
+            CREATE VIEW pos_shared_scope AS SELECT NULL AS group_key, '' AS terminal_id, '' AS organization_id, '' AS branch_id;
+            CREATE TABLE parity_sync_queue(id TEXT,table_name TEXT,organization_id TEXT,status TEXT);
+            CREATE TABLE shared_queue_scope(queue_id TEXT,organization_id TEXT,group_key TEXT,terminal_id TEXT,branch_id TEXT);
+            
             CREATE TABLE loyalty_customers (
                 id TEXT PRIMARY KEY,
                 user_profile_id TEXT,
                 customer_id TEXT,
                 organization_id TEXT NOT NULL,
+                group_id TEXT,
+                cache_terminal_id TEXT DEFAULT '',
                 points_balance INTEGER NOT NULL DEFAULT 0,
                 total_earned INTEGER NOT NULL DEFAULT 0,
                 total_redeemed INTEGER NOT NULL DEFAULT 0,
@@ -2146,7 +2168,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         setup_loyalty_customers_table(&conn);
         conn.execute_batch(
-            "CREATE TABLE loyalty_transactions (organization_id TEXT, sync_state TEXT);",
+            "CREATE TABLE loyalty_transactions (organization_id TEXT, sync_state TEXT, group_id TEXT, cache_terminal_id TEXT DEFAULT '');",
         )
         .unwrap();
         let old = serde_json::json!({"id":"old", "points_balance":42});
@@ -2163,7 +2185,7 @@ mod tests {
             42
         );
         conn.execute(
-            "INSERT INTO loyalty_transactions VALUES ('org','pending')",
+            "INSERT INTO loyalty_transactions(organization_id,sync_state) VALUES ('org','pending')",
             [],
         )
         .unwrap();

@@ -35,6 +35,21 @@ describe('useOrderStore.updateOrderStatusDetailed: a cancel refused for money ta
     updateOrderStatus.mockReset();
   });
 
+  it('preserves an open-notice refusal and leaves the active order unchanged', async () => {
+    useOrderStore.setState({ orders: [{ id: 'order-notice', status: 'ready' } as any] });
+    updateOrderStatus.mockRejectedValue(new Error('ORDER_HAS_OPEN_NOTICE'));
+    const result = await useOrderStore.getState().updateOrderStatusDetailed('order-notice', 'completed');
+    expect(result).toEqual({ success: false, errorCode: 'ORDER_HAS_OPEN_NOTICE' });
+    expect(useOrderStore.getState().orders[0].status).toBe('ready');
+  });
+  it('preserves an unavailable-check refusal and leaves the active order unchanged', async () => {
+    useOrderStore.setState({ orders: [{ id: 'order-unreadable', status: 'ready' } as any] });
+    updateOrderStatus.mockRejectedValue(new Error('ORDER_NOTICE_CHECK_UNAVAILABLE'));
+    const result = await useOrderStore.getState().updateOrderStatusDetailed('order-unreadable', 'completed');
+    expect(result).toEqual({ success: false, errorCode: 'ORDER_NOTICE_CHECK_UNAVAILABLE' });
+    expect(useOrderStore.getState().orders[0].status).toBe('ready');
+  });
+
   it('reports the refusal typed', async () => {
     // OrderService rethrows the till's answer as the message.
     updateOrderStatus.mockRejectedValue(

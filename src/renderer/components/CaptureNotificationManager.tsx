@@ -29,6 +29,7 @@ import { FileText } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { offEvent, onEvent } from '../../lib';
 import { useModules } from '../contexts/module-context';
+import { listCaptureDocuments } from '../services/capture-client';
 import { renderCaptureDocument } from '../services/capture-pdf-render';
 import { reasonKey } from '../utils/capture-review';
 
@@ -126,9 +127,13 @@ export const CaptureNotificationManager: React.FC = () => {
         );
         return;
       }
+      if (status === 'committed') {
+        notify(t('suppliers.capture.pages.admissionRecorded', 'Invoice recorded'), undefined);
+        return;
+      }
       if (status === 'needs_attention') {
         notify(
-          t(reasonKey(payload?.reason), t('suppliers.capture.reason.unknown', 'Something went wrong with a scanned invoice. Nothing is lost.')),
+          t(payload?.reason === 'CAPTURE_REVIEW_REQUIRED' ? 'suppliers.capture.pages.admissionReview' : reasonKey(payload?.reason), t('suppliers.capture.reason.unknown', 'Something went wrong with a scanned invoice. Nothing is lost.')),
           payload?.captureId,
         );
         return;
@@ -155,15 +160,32 @@ export const CaptureNotificationManager: React.FC = () => {
         // on every failure path it can see; this catches the transport
         // failing outright, which must not take the manager down with it.
         console.error('[capture] rasterization handler failed:', error);
-        renderedRef.current.delete(captureId);
-      });
+      }).finally(() => { renderedRef.current.delete(captureId); });
     };
 
+    let cancelled = false;
+    const catchUp = async () => {
+      try {
+        const documents = await listCaptureDocuments();
+        if (cancelled) return;
+        for (const document of documents) {
+          if (document.needsRender && !document.acquiring
+            && document.reasonCode !== 'CAPTURE_TOO_MANY_PAGES'
+            && (!document.renderRetryAt || !Number.isFinite(Date.parse(document.renderRetryAt)) || Date.parse(document.renderRetryAt) <= Date.now())) {
+            handleNeedsRender({ captureId: document.captureId });
+          }
+        }
+      } catch (error) { console.error('[capture] pending PDF catch-up failed:', error); }
+    };
     onEvent('capture:document-arrived', handleArrived);
     onEvent('capture:status-changed', handleStatus);
     onEvent('capture:needs-render', handleNeedsRender);
+    void catchUp();
+    const timer = window.setInterval(() => { void catchUp(); }, 15000);
 
     return () => {
+      cancelled = true;
+      window.clearInterval(timer);
       offEvent('capture:document-arrived', handleArrived);
       offEvent('capture:status-changed', handleStatus);
       offEvent('capture:needs-render', handleNeedsRender);

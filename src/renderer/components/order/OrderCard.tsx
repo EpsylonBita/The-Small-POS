@@ -34,6 +34,7 @@ import { isBoxOrder } from './box-order-decision';
 import type { LocalPreparationPhase } from '../../services/KdsLocalPhaseStore';
 import { KitchenStageBadge } from './KitchenStageBadge';
 import './OrderCard.css';
+import { OrderSyncMark } from '../recovery/OrderSyncNotice';
 
 interface OrderCardProps {
   order: Order | any;
@@ -460,6 +461,7 @@ export const OrderCard = memo<OrderCardProps>(({
       onClick={() => onSelect(order.id)}
       onDoubleClick={() => onDoubleClick?.(order.id)}
     >
+        <OrderSyncMark orderId={order.id} onOpen={onDoubleClick ? () => onDoubleClick(order.id) : undefined} />
         <div className="flex items-center justify-between gap-2 sm:gap-4">
         {/* Left Section - Order Number & Time */}
         <div className="flex items-center gap-2 sm:gap-4 relative shrink-0">

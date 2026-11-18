@@ -4,9 +4,33 @@ use tauri::{Emitter, Manager};
 
 use crate::database_lock::run_blocking_command;
 use crate::{
-    db, fetch_supabase_rows, normalize_phone, payload_arg0_as_string, read_local_json_array,
-    read_local_setting, storage, sync_queue, value_i64, value_str, write_local_json,
+    db, normalize_phone, payload_arg0_as_string, read_local_json_array, read_local_setting,
+    storage, sync_queue, value_i64, value_str, write_local_json,
 };
+
+// Fence every remote directory/privacy answer before it can reach a newly bound group.
+async fn customer_admin_fetch(
+    db: Option<&db::DbState>,
+    path: &str,
+    method: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    customer_admin_fetch_detailed(db, path, method, body)
+        .await
+        .map_err(|e| e.to_string())
+}
+async fn customer_admin_fetch_detailed(
+    db: Option<&db::DbState>,
+    path: &str,
+    method: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, crate::api::AdminFetchError> {
+    let db = db.ok_or("Terminal database required")?;
+    let scope = crate::group_scope::SharedScope::capture(db)?;
+    let result = crate::admin_fetch_detailed(Some(db), path, method, body).await;
+    scope.ensure(db)?;
+    result
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -966,6 +990,13 @@ fn bounded_customer_rejection_code(code: &str) -> Option<String> {
 /// INVALID_PHONE, COUNTRY_CONTEXT_REQUIRED, INVALID_COORDINATES, DUPLICATE,
 /// VERSION_MISMATCH, NOT_FOUND, missing-field and schema validation errors.
 fn classify_customer_remote_failure(error: &crate::api::AdminFetchError) -> CustomerRemoteFailure {
+    if error.to_string().contains("SHARED_GROUP_CHANGED") {
+        return CustomerRemoteFailure::Rejected {
+            status: None,
+            code: "SHARED_GROUP_CHANGED".to_string(),
+        };
+    }
+
     if error.is_transport_failure() {
         return CustomerRemoteFailure::Deferrable;
     }
@@ -1090,7 +1121,7 @@ async fn sync_customer_create_remote(
     body: serde_json::Value,
 ) -> Result<serde_json::Value, crate::api::AdminFetchError> {
     let response =
-        crate::admin_fetch_detailed(Some(db), "/api/pos/customers", "POST", Some(body)).await?;
+        customer_admin_fetch_detailed(Some(db), "/api/pos/customers", "POST", Some(body)).await?;
     let remote_customer = response
         .get("data")
         .cloned()
@@ -1120,7 +1151,7 @@ async fn sync_customer_update_remote(
     }
 
     let path = format!("/api/pos/customers/{customer_id}");
-    let response = crate::admin_fetch_detailed(Some(db), &path, "PATCH", Some(body)).await?;
+    let response = customer_admin_fetch_detailed(Some(db), &path, "PATCH", Some(body)).await?;
     let remote_customer = response
         .get("customer")
         .cloned()
@@ -1277,7 +1308,7 @@ fn scrub_order_customer_snapshot(
 fn remove_loyalty_customer_copy(db: &db::DbState, customer_id: &str) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(
-        "DELETE FROM loyalty_customers WHERE customer_id = ?1 OR user_profile_id = ?1",
+        "DELETE FROM loyalty_customers WHERE (customer_id = ?1 OR user_profile_id = ?1) AND group_id = COALESCE(NULLIF((SELECT group_key FROM pos_shared_scope),''), organization_id) AND cache_terminal_id = (SELECT terminal_id FROM pos_shared_scope)",
         rusqlite::params![customer_id],
     )
     .map_err(|e| format!("remove erased customer's loyalty copy: {e}"))?;
@@ -1293,6 +1324,7 @@ fn apply_privacy_tombstones_to_cache(
     }
 
     let mut cache = read_local_json_array(db, "customer_cache_v1")?;
+    let mut aliases = read_local_json_array(db, "customer_replay_aliases_v1")?;
     let mut applied_ids: Vec<String> = Vec::new();
 
     for tombstone in tombstones {
@@ -1306,6 +1338,9 @@ fn apply_privacy_tombstones_to_cache(
 
         match target_type.as_str() {
             "customer" | "customers" => {
+                aliases.retain(|entry| {
+                    value_str(entry, &["id"]).as_deref() != Some(target_id.as_str())
+                });
                 cache.retain(|entry| {
                     value_str(entry, &["id", "customerId"])
                         .map(|id| id != target_id)
@@ -1342,6 +1377,11 @@ fn apply_privacy_tombstones_to_cache(
     }
 
     write_local_json(db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+    write_local_json(
+        db,
+        "customer_replay_aliases_v1",
+        &serde_json::Value::Array(aliases),
+    )?;
     Ok(applied_ids)
 }
 
@@ -1353,7 +1393,7 @@ async fn acknowledge_privacy_tombstones(db: &db::DbState, ids: Vec<String>) -> R
     let terminal_id = storage::get_credential("terminal_id")
         .or_else(|| read_local_setting(db, "terminal", "terminal_id"))
         .unwrap_or_else(|| "pos-tauri".to_string());
-    crate::admin_fetch(
+    customer_admin_fetch(
         Some(db),
         "/api/pos/privacy/tombstones/consume",
         "POST",
@@ -1367,7 +1407,8 @@ async fn acknowledge_privacy_tombstones(db: &db::DbState, ids: Vec<String>) -> R
 }
 
 async fn sync_customer_privacy_tombstones(db: &db::DbState) -> Result<usize, String> {
-    let response = crate::admin_fetch(Some(db), "/api/pos/privacy/tombstones", "GET", None).await?;
+    let response =
+        customer_admin_fetch(Some(db), "/api/pos/privacy/tombstones", "GET", None).await?;
     let tombstones = extract_privacy_tombstones(&response);
     let applied_ids = apply_privacy_tombstones_to_cache(db, &tombstones)?;
     let applied_count = applied_ids.len();
@@ -1375,131 +1416,9 @@ async fn sync_customer_privacy_tombstones(db: &db::DbState) -> Result<usize, Str
     Ok(applied_count)
 }
 
-fn resolved_customer_sync_org_id(db: &db::DbState) -> Option<String> {
-    storage::get_credential("organization_id")
-        .or_else(|| read_local_setting(db, "terminal", "organization_id"))
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-async fn fetch_supabase_table_pages(
-    table: &str,
-    params: &[(&str, String)],
-    page_size: usize,
-) -> Result<Vec<serde_json::Value>, String> {
-    let mut rows = Vec::new();
-    let mut offset = 0usize;
-
-    loop {
-        let mut page_params = params.to_vec();
-        page_params.push(("limit", page_size.to_string()));
-        page_params.push(("offset", offset.to_string()));
-
-        let response = fetch_supabase_rows(table, &page_params).await?;
-        let page = response.as_array().cloned().unwrap_or_default();
-        let page_len = page.len();
-        rows.extend(page);
-
-        if page_len < page_size {
-            break;
-        }
-
-        offset += page_size;
-        if offset > 1_000_000 {
-            return Err(format!("{table} pagination exceeded safety limit"));
-        }
-    }
-
-    Ok(rows)
-}
-
-async fn sync_customer_fetch_all_from_supabase(
-    db: &db::DbState,
-) -> Result<Vec<serde_json::Value>, String> {
-    crate::hydrate_terminal_credentials_from_local_settings(db);
-
-    let org_id = resolved_customer_sync_org_id(db)
-        .ok_or("Terminal not configured: missing organization_id")?;
-    let page_size = 1000usize;
-    let mut customers = fetch_supabase_table_pages(
-        "customers",
-        &[
-            ("select", "*".to_string()),
-            ("organization_id", format!("eq.{org_id}")),
-            ("order", "updated_at.desc.nullslast".to_string()),
-        ],
-        page_size,
-    )
-    .await?;
-
-    let addresses = fetch_supabase_table_pages(
-        "customer_addresses",
-        &[
-            ("select", "*".to_string()),
-            ("organization_id", format!("eq.{org_id}")),
-            ("order", "updated_at.desc.nullslast".to_string()),
-        ],
-        page_size,
-    )
-    .await
-    .unwrap_or_else(|error| {
-        tracing::warn!(error = %error, "Unable to fetch customer addresses from Supabase fallback");
-        Vec::new()
-    });
-
-    let mut addresses_by_customer: std::collections::HashMap<String, Vec<serde_json::Value>> =
-        std::collections::HashMap::new();
-    for address in addresses {
-        if let Some(customer_id) = value_str(&address, &["customer_id", "customerId"]) {
-            addresses_by_customer
-                .entry(customer_id)
-                .or_default()
-                .push(address);
-        }
-    }
-
-    for customer in &mut customers {
-        let Some(customer_id) = value_str(customer, &["id", "customer_id", "customerId"]) else {
-            continue;
-        };
-        let attached_addresses = addresses_by_customer
-            .remove(&customer_id)
-            .unwrap_or_default();
-        if let Some(object) = customer.as_object_mut() {
-            object.insert(
-                "addresses".to_string(),
-                serde_json::Value::Array(attached_addresses),
-            );
-        }
-    }
-
-    let customers = customers
-        .into_iter()
-        .map(normalize_customer_for_cache)
-        .collect::<Vec<_>>();
-
-    write_local_json(db, "customer_cache_v1", &serde_json::json!(customers))?;
-    Ok(customers)
-}
-
 /// Fetch all customers through the trusted POS admin API and replace the local cache.
 async fn sync_customer_fetch_all(db: &db::DbState) -> Result<Vec<serde_json::Value>, String> {
-    match sync_customer_fetch_all_from_supabase(db).await {
-        Ok(customers) => {
-            tracing::info!(
-                count = customers.len(),
-                "Synced customers directly from Supabase fallback"
-            );
-            return Ok(customers);
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "Supabase customer directory fallback unavailable; trying admin API"
-            );
-        }
-    }
-
+    let scope = crate::group_scope::SharedScope::capture(db)?;
     let _ = sync_customer_privacy_tombstones(db).await;
     let page_size = 500u64;
     let mut page = 1u64;
@@ -1508,7 +1427,7 @@ async fn sync_customer_fetch_all(db: &db::DbState) -> Result<Vec<serde_json::Val
 
     loop {
         let path = format!("/api/pos/customers?page={page}&limit={page_size}");
-        let response = crate::admin_fetch(Some(db), &path, "GET", None).await?;
+        let response = customer_admin_fetch(Some(db), &path, "GET", None).await?;
         customers.extend(
             extract_customers_from_pos_response(&response)
                 .into_iter()
@@ -1526,6 +1445,36 @@ async fn sync_customer_fetch_all(db: &db::DbState) -> Result<Vec<serde_json::Val
         }
     }
 
+    scope.ensure(db)?;
+    let pending_ids = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt=conn.prepare("SELECT CASE WHEN table_name='customers' THEN record_id ELSE COALESCE(json_extract(data,'$.customer_id'),json_extract(data,'$.customerId'),'') END FROM parity_sync_queue WHERE table_name IN ('customers','customer_addresses') AND status IN ('pending','processing','failed','conflict') AND organization_id=?1").map_err(|e|e.to_string())?;
+        let rows = stmt
+            .query_map([&scope.organization], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
+    let previous = read_local_json_array(db, "customer_cache_v1")?;
+    let mut aliases = read_local_json_array(db, "customer_replay_aliases_v1")?;
+    aliases.extend(previous.iter().cloned());
+    for customer in &mut customers {
+        if let Some(alias) = aliases
+            .iter()
+            .find(|entry| value_str(entry, &["id"]) == value_str(customer, &["id"]))
+            .and_then(|entry| value_str(entry, &[sync_queue::LOCAL_CUSTOMER_ALIAS_FIELD]))
+        {
+            customer[sync_queue::LOCAL_CUSTOMER_ALIAS_FIELD] = serde_json::json!(alias);
+        }
+    }
+    for held in previous {
+        if value_str(&held, &["id"]).is_some_and(|id| pending_ids.contains(&id))
+            || value_str(&held, &[sync_queue::LOCAL_CUSTOMER_ALIAS_FIELD])
+                .is_some_and(|id| pending_ids.contains(&id))
+        {
+            upsert_customer_cache_entry(&mut customers, held);
+        }
+    }
     write_local_json(db, "customer_cache_v1", &serde_json::json!(customers))?;
     let applied_ids = apply_privacy_tombstones_to_cache(db, &tombstones)?;
     let _ = acknowledge_privacy_tombstones(db, applied_ids).await;
@@ -1540,7 +1489,7 @@ async fn sync_customer_fetch_remote_by_id(
     customer_id: &str,
 ) -> Result<Option<serde_json::Value>, String> {
     let path = format!("/api/pos/customers/{customer_id}");
-    match crate::admin_fetch(Some(db), &path, "GET", None).await {
+    match customer_admin_fetch(Some(db), &path, "GET", None).await {
         Ok(response) => Ok(response
             .get("customer")
             .cloned()
@@ -1563,7 +1512,7 @@ async fn sync_customer_fetch_remote_by_phone(
         "/api/pos/customers?phone={}",
         percent_encode_component(&normalized_phone)
     );
-    match crate::admin_fetch(Some(db), &path, "GET", None).await {
+    match customer_admin_fetch(Some(db), &path, "GET", None).await {
         Ok(response) => {
             if response
                 .get("success")
@@ -1601,7 +1550,7 @@ async fn sync_customer_address_remote(
     }
 
     let path = format!("/api/pos/customers/{customer_id}/addresses");
-    let response = crate::admin_fetch_detailed(Some(db), &path, "POST", Some(body)).await?;
+    let response = customer_admin_fetch_detailed(Some(db), &path, "POST", Some(body)).await?;
     let remote_address = response
         .get("address")
         .cloned()
@@ -1621,7 +1570,7 @@ async fn sync_customer_address_update_remote(
     }
 
     let path = format!("/api/pos/customers/{customer_id}/addresses/{address_id}");
-    let response = crate::admin_fetch_detailed(Some(db), &path, "PATCH", Some(body)).await?;
+    let response = customer_admin_fetch_detailed(Some(db), &path, "PATCH", Some(body)).await?;
     let remote_address = response
         .get("address")
         .cloned()
@@ -1635,7 +1584,7 @@ async fn sync_customer_address_delete_remote(
     address_id: &str,
 ) -> Result<(), crate::api::AdminFetchError> {
     let path = format!("/api/pos/customers/{customer_id}/addresses/{address_id}");
-    match crate::admin_fetch_detailed(Some(db), &path, "DELETE", None).await {
+    match customer_admin_fetch_detailed(Some(db), &path, "DELETE", None).await {
         Ok(_) => Ok(()),
         // DELETE is idempotent: an address the office itself says it does not
         // have is already gone. A platform 404 page is not that answer.
@@ -1955,7 +1904,7 @@ pub async fn customer_search(
             "/api/pos/customers?search={}",
             percent_encode_component(&query)
         );
-        match crate::admin_fetch(Some(&db), &path, "GET", None).await {
+        match customer_admin_fetch(Some(&db), &path, "GET", None).await {
             Ok(response) => {
                 let remote_matches = extract_customers_from_pos_response(&response)
                     .into_iter()
@@ -3608,6 +3557,57 @@ pub(crate) async fn resolve_duplicate_customer_conflict(
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+
+    #[test]
+    fn privacy_tombstone_erases_the_group_replay_alias_copy() {
+        let database = crate::tests::harness::TestDb::open();
+        write_local_json(
+            &database.state,
+            "customer_replay_aliases_v1",
+            &serde_json::json!([{ "id":"canonical", "local_customer_id":"cust-local" }]),
+        )
+        .unwrap();
+        apply_privacy_tombstones_to_cache(&database.state,&[serde_json::json!({"id":"tombstone","target_type":"customer","target_id":"canonical","action":"erase"})]).unwrap();
+        assert!(
+            read_local_json_array(&database.state, "customer_replay_aliases_v1")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn caller_id_uses_only_the_trusted_group_directory() {
+        let database = crate::tests::harness::TestDb::open();
+        let db = &database.state;
+        for (group, id) in [("first", "first-customer"), ("second", "second-customer")] {
+            let conn = db.conn.lock().unwrap();
+            for (key, value) in [
+                ("organization_id", "org"),
+                ("branch_id", "store"),
+                ("terminal_id", "till"),
+                ("group_organization_id", "org"),
+                ("group_branch_id", "store"),
+                ("group_terminal_id", "till"),
+                ("group_id", group),
+            ] {
+                crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+            }
+            crate::db::set_setting(
+                &conn,
+                "local",
+                "customer_cache_v1",
+                &serde_json::json!([{ "id": id, "phone": "+306948128474" }]).to_string(),
+            )
+            .unwrap();
+            drop(conn);
+            let found = find_cached_customer_for_caller_id(
+                read_local_json_array(db, "customer_cache_v1").unwrap(),
+                "6948128474",
+            )
+            .unwrap();
+            assert_eq!(found["id"], id);
+        }
+    }
 
     #[test]
     fn caller_id_phone_key_matches_the_renderer_lookup_normalization() {

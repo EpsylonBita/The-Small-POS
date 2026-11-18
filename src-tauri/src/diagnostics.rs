@@ -28,19 +28,41 @@ pub(crate) fn is_runtime_error_code(code: &str) -> bool {
 
 /// Observation-only storage, separate from all business/device locks. Neither
 /// publishing nor reading ever waits; contention means unavailable evidence.
+#[derive(Clone)]
+struct RetainedObservation(std::sync::Arc<Value>);
+impl std::ops::Deref for RetainedObservation {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for RetainedObservation {
+    fn deref_mut(&mut self) -> &mut Value {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
 #[derive(Default)]
-pub(crate) struct RetainedObservations(std::sync::Mutex<std::collections::HashMap<String, Value>>);
+pub(crate) struct RetainedObservations(
+    std::sync::Mutex<std::collections::HashMap<String, RetainedObservation>>,
+);
 
 impl RetainedObservations {
     pub(crate) fn publish(&self, key: String, content: Value) {
+        let observation = RetainedObservation(std::sync::Arc::new(
+            json!({"at":chrono::Utc::now().to_rfc3339(),"content":content}),
+        ));
         if let Ok(mut cache) = self.0.try_lock() {
             if cache.len() >= 256 && !cache.contains_key(&key) {
-                cache.clear();
+                // One new path must not erase every other retained source.
+                let oldest = cache
+                    .iter()
+                    .min_by(|(_, a), (_, b)| a["at"].as_str().cmp(&b["at"].as_str()))
+                    .map(|(key, _)| key.clone());
+                if let Some(oldest) = oldest {
+                    cache.remove(&oldest);
+                }
             }
-            cache.insert(
-                key,
-                json!({"at":chrono::Utc::now().to_rfc3339(),"content":content}),
-            );
+            cache.insert(key, observation);
         }
     }
 
@@ -57,6 +79,9 @@ impl RetainedObservations {
             .try_lock()
             .ok()
             .and_then(|cache| cache.get(key).cloned())
+            // Copy the potentially large observation after releasing the leaf
+            // lock. Unrelated Health/support readers never wait on this copy.
+            .map(|observation| observation.0.as_ref().clone())
             .unwrap_or_else(|| json!({"status":"unavailable","at":null,"content":null}))
     }
 }
@@ -457,6 +482,11 @@ pub(crate) fn build_system_health(db: &DbState, business: &DbState) -> Result<Va
         read_failures.push("syncBlockerDetails");
         Default::default()
     });
+    let parity_blockers = get_parity_blocker_details(db, 10).unwrap_or_else(|_| {
+        read_failures.push("sharedScopeHolds");
+        Vec::new()
+    });
+    let sync_blocker_details = get_sync_blocker_details_json(sync_blocker_details, parity_blockers);
     let terminal_context = get_terminal_context(db);
     let sync_status_summary = get_sync_status_summary(db, business).unwrap_or_else(|_| {
         read_failures.push("syncStatusSummary");
@@ -471,7 +501,28 @@ pub(crate) fn build_system_health(db: &DbState, business: &DbState) -> Result<Va
         Value::Null
     });
     let last_parity_sync = get_last_parity_sync(db);
+    // Optional observer failures belong to their own source. They must not
+    // invalidate the owner's existing Health or support observations.
+    let mut observer_failures: Vec<&str> = Vec::new();
+    let order_notices = crate::order_notice_recovery::observe(
+        "health_notices",
+        crate::order_notice_recovery::observer_connection(&db.db_path, false)
+            .and_then(|conn| crate::order_notice_recovery::notices(&conn, None)),
+    )
+    .unwrap_or_else(|_| {
+        observer_failures.push("orderNotices");
+        Value::Null
+    });
     let credential_state = get_credential_state(db);
+    let order_issue_evidence = crate::order_notice_recovery::observe(
+        "health_order_evidence",
+        crate::order_notice_recovery::observer_connection(&db.db_path, false)
+            .and_then(|conn| crate::order_notice_evidence::collect(&conn)),
+    )
+    .unwrap_or_else(|_| {
+        observer_failures.push("orderIssueEvidence");
+        Value::Null
+    });
     let checkout_payment_blockers = get_checkout_payment_blockers(db).unwrap_or_else(|error| {
         warn!(
             error = %error,
@@ -511,6 +562,10 @@ pub(crate) fn build_system_health(db: &DbState, business: &DbState) -> Result<Va
         "dbSizeBytes": db_size,
         "panicCount": crate::panic_hook::crash_count(),
         "parityQueueStatus": parity_queue_status,
+        "orderNotices": order_notices,
+        "orderIssueEvidence": order_issue_evidence,
+        "orderNoticeGate": crate::order_notice_gate::health(&db.db_path),
+        "observerFailures": observer_failures,
         "financialQueueStatus": financial_queue_status,
         "lastParitySync": last_parity_sync,
         "credentialState": credential_state,
@@ -719,30 +774,39 @@ fn get_sync_blocker_details_json(
 /// Parity-queue rows an operator has to act on: conflicts, and anything holding
 /// a recorded error. Each one names the queue it belongs to so the two shapes in
 /// `sync_blocker_details.json` stay tellable apart.
-fn get_parity_blocker_details(db: &DbState, limit: i64) -> Vec<Value> {
-    let Ok(conn) = db.conn.lock() else {
-        return Vec::new();
-    };
+fn get_parity_blocker_details(db: &DbState, limit: i64) -> Result<Vec<Value>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let scope = crate::group_scope::SharedScope::read(&conn);
+    let held: Vec<_> = crate::sync_queue::list_set_aside_entries(&conn)?
+        .into_iter()
+        .filter(|entry| {
+            entry.organization_id == scope.organization
+                && matches!(
+                    entry.reason_code.as_str(),
+                    "SHARED_SCOPE_UNKNOWN" | "SHARED_SCOPE_CHANGED"
+                )
+        })
+        .take(limit.max(0) as usize)
+        .collect();
     // Same ownership boundary as the error list: the accessor decides what a
     // renderer (and therefore a support bundle) may see.
-    let Ok(items) = crate::sync_queue::renderer_list_actionable_items(
+    let items = crate::sync_queue::renderer_list_actionable_items(
         &conn,
         &crate::sync_queue::QueueListQuery {
             limit: Some(limit),
             module_type: None,
         },
-    ) else {
-        return Vec::new();
-    };
-    items
+    )?;
+    let mut details: Vec<Value> = items
         .into_iter()
         .filter(|item| {
-            item.status == "conflict"
-                || (item.status == "failed"
-                    && item
-                        .error_message
-                        .as_deref()
-                        .is_some_and(|reason| !reason.trim().is_empty()))
+            !held.iter().any(|entry| entry.queue_id == item.id)
+                && (item.status == "conflict"
+                    || (item.status == "failed"
+                        && item
+                            .error_message
+                            .as_deref()
+                            .is_some_and(|reason| !reason.trim().is_empty())))
         })
         .map(|item| {
             json!({
@@ -761,7 +825,14 @@ fn get_parity_blocker_details(db: &DbState, limit: i64) -> Vec<Value> {
                 "lastAttempt": item.last_attempt,
             })
         })
-        .collect()
+        .collect();
+    details.extend(held.into_iter().map(|entry| json!({
+        "queue": "parity_sync_queue", "queueItemId": entry.queue_id,
+        "entityType": entry.table_name, "entityId": entry.record_id,
+        "queueStatus": "set_aside", "blockerReason": format!("{}: {}", entry.reason_code, entry.server_message.unwrap_or_default()),
+        "reasonCode": entry.reason_code,
+    })));
+    Ok(details)
 }
 
 fn parse_local_setting_value(raw: &str) -> Value {
@@ -1442,7 +1513,7 @@ fn export_diagnostics_bundle_with_log_dir(
     let sync_blocker_details = run_collector(&mut records, "sync_blocker_details.json", || {
         Ok(get_sync_blocker_details_json(
             crate::sync::get_sync_blocker_details(db, 25)?,
-            get_parity_blocker_details(db, 25),
+            get_parity_blocker_details(db, 25)?,
         ))
     });
     documents.push(("sync_blocker_details.json", sync_blocker_details));
@@ -2908,6 +2979,35 @@ pub fn prune_old_logs() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_scope_holds_reach_health_and_bundle_blocker_details_without_payloads() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let database = crate::tests::harness::TestDb::open();
+        {
+            let conn = database.state.conn.lock().unwrap();
+            for (key, value) in [
+                ("group_organization_id", "org"),
+                ("group_terminal_id", "till"),
+                ("group_branch_id", "store"),
+            ] {
+                crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+            }
+            conn.execute("INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id) VALUES('unknown','customers','customer','INSERT','{\"phone\":\"private-phone-canary\"}','org')", []).unwrap();
+            crate::group_scope::set_aside_unclaimable(&conn).unwrap();
+        }
+        let details = get_parity_blocker_details(&database.state, 10).unwrap();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0]["queueStatus"], "set_aside");
+        assert_eq!(details[0]["reasonCode"], "SHARED_SCOPE_UNKNOWN");
+        assert!(!json!(details).to_string().contains("private-phone-canary"));
+        let health = build_system_health(&database.state, &database.state).unwrap();
+        assert!(health["syncBlockerDetails"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["reasonCode"] == "SHARED_SCOPE_UNKNOWN"));
+    }
 
     fn read_zip_json(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Value {
         let mut file = archive.by_name(name).expect("zip entry should exist");
@@ -5203,5 +5303,17 @@ mod support_observation_tests {
         let at = Instant::now();
         assert_eq!(cache.read("test")["status"], "unavailable");
         assert!(at.elapsed() < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn notice_containment_cache_capacity_retains_other_recent_observations() {
+        let cache = RetainedObservations::default();
+        for index in 0..256 {
+            cache.publish(format!("source-{index}"), json!({"index":index}));
+        }
+        cache.publish("another-source".into(), json!({"index":256}));
+        assert_eq!(cache.read("source-255")["content"]["index"], 255);
+        assert_eq!(cache.read("another-source")["content"]["index"], 256);
+        assert_eq!(cache.0.lock().unwrap().len(), 256);
     }
 }

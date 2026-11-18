@@ -2,6 +2,38 @@
   "version": 1,
   "recipes": [
     {
+      "id": "order-customer-correction.resend",
+      "version": 1,
+      "source": "recipe",
+      "action_id": "resendOrderCustomerCorrection",
+      "title_key": "recovery.recipes.orderCustomerCorrection.resend",
+      "explanation_key": "recovery.recipes.orderCustomerCorrection.resendExplanation",
+      "verification_key": "recovery.recipes.orderCustomerCorrection.pending",
+      "mutates_data": true,
+      "needs_onsite": true,
+      "needs_staff_pin": true,
+      "requires_snapshot": true,
+      "snapshot_level": "full",
+      "attempt_cap": 9007199254740991,
+      "cooldown_ms": 0
+    },
+    {
+      "id": "order-customer-correction.keep-server",
+      "version": 1,
+      "source": "recipe",
+      "action_id": "keepServerOrderCustomerDetails",
+      "title_key": "recovery.recipes.orderCustomerCorrection.keep",
+      "explanation_key": "recovery.recipes.orderCustomerCorrection.keepExplanation",
+      "verification_key": "recovery.recipes.orderCustomerCorrection.confirmed",
+      "mutates_data": true,
+      "needs_onsite": true,
+      "needs_staff_pin": true,
+      "requires_snapshot": true,
+      "snapshot_level": "full",
+      "attempt_cap": 9007199254740991,
+      "cooldown_ms": 0
+    },
+    {
       "id": "printer.restore_last_known_brand",
       "version": 1,
       "source": "recipe",

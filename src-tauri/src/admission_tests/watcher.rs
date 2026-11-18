@@ -2,8 +2,18 @@ use super::*;
 use crate::tests::harness::TestDb;
 use std::{rc::Rc, sync::mpsc, time::Duration};
 
+fn scanned_image() -> Vec<u8> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([10, 20, 30])))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    bytes.into_inner()
+}
+
 #[test]
 fn admission_image_ingest_validates_before_writer_and_commits_page_event_and_ledger() {
+    let _keyring = crate::tests::fake_keyring::install_empty();
+    let page = scanned_image();
     let db = TestDb::open();
     let conn = Rc::new(Connection::open(db.db_path()).unwrap());
     conn.busy_timeout(Duration::from_millis(5000)).unwrap();
@@ -19,6 +29,7 @@ fn admission_image_ingest_validates_before_writer_and_commits_page_event_and_led
     });
     let path = db.db_path().to_owned();
     let checkout = std::thread::spawn(move || {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         pause.recv_timeout(Duration::from_secs(2)).unwrap();
         let at = std::time::Instant::now();
         let checkout = crate::admission_tests::writer(&path);
@@ -38,8 +49,8 @@ fn admission_image_ingest_validates_before_writer_and_commits_page_event_and_led
         &source,
         &db.dir().join("your-image.png"),
         "image/png",
-        b"your-page",
-        "your-hash",
+        &page,
+        &files::sha256_hex(&page),
     )
     .unwrap();
     store::PAGE_VALIDATOR_HOOK.with(|hook| *hook.borrow_mut() = None);
@@ -59,6 +70,8 @@ fn admission_image_ingest_validates_before_writer_and_commits_page_event_and_led
 
 #[test]
 fn admission_missing_ingest_file_creates_no_document() {
+    let _keyring = crate::tests::fake_keyring::install_empty();
+    let page = scanned_image();
     let db = TestDb::open();
     let conn = Rc::new(Connection::open(db.db_path()).unwrap());
     conn.busy_timeout(Duration::from_millis(5000)).unwrap();
@@ -85,8 +98,8 @@ fn admission_missing_ingest_file_creates_no_document() {
         &source,
         &db.dir().join("your-image.png"),
         "image/png",
-        b"your-page",
-        "your-hash"
+        &page,
+        &files::sha256_hex(&page)
     )
     .is_err());
     store::PAGE_VALIDATOR_HOOK.with(|hook| *hook.borrow_mut() = None);

@@ -6993,6 +6993,12 @@
       "reversal": "Paiement annulé"
     },
     "capture": {
+      "subtype": {
+        "scanner": "Scanner",
+        "file": "Fichier",
+        "camera": "Appareil photo",
+        "unknown": "Source inconnue"
+      },
       "automation": {
         "recordedMark": "Enregistrée toute seule",
         "recordedStockMark": "Enregistrée toute seule · stock mis à jour",
@@ -7046,7 +7052,16 @@
         "rescanned": "Page remplacée.",
         "moveEarlier": "Avancer",
         "moveLater": "Reculer",
-        "capReached": "C'est le maximum de pages pour une facture. Terminez celle-ci et commencez-en une autre pour le reste.",
+        "paperSource": "Source papier",
+        "flatbed": "Vitre / une feuille",
+        "feeder": "Chargeur / pile recto",
+        "folderBoundary": "Une facture par capture. Enregistrez une facture de plusieurs pages dans un seul PDF ; les fichiers image séparés deviennent des captures séparées.",
+        "oneInvoice": "Une facture par capture",
+        "capReached": "Cette facture a atteint la limite de pages. Ses pages sont enregistrées ici. Conservez la facture complète ensemble ; ne la soumettez pas en plusieurs parties.",
+        "admissionReview": "Les lectures doivent être vérifiées. Votre facture et toutes ses pages sont enregistrées.",
+        "rotate": "Tourner la page vers la droite",
+        "admissionRecorded": "Facture enregistrée",
+        "admissionWaiting": "En attente de lecture de la facture",
         "stoppedEarly": "Le scanner s'est arrêté avant que le chargeur soit vide. S'il reste des pages dedans, ajoutez-les avant de terminer.",
         "finishAndStartAnother": "Terminer celle-ci et en commencer une autre",
         "needAPage": "Ajoutez au moins une page avant de terminer."
@@ -7109,6 +7124,7 @@
         "device_error": "Le scanner n'a pas répondu. Vérifiez qu'il est allumé et branché."
       },
       "status": {
+        "excluded": "Ce document n’est pas une facture",
         "capturing": "Scan en cours",
         "waiting": "En attente de lecture",
         "uploading": "Envoi des pages",
@@ -7313,6 +7329,14 @@
       "emptyDescription": "Les contacts et factures du fournisseur s’afficheront ici."
     },
     "import": {
+      "negativeStockWarning": "Le stock est négatif après cette saisie. Vérifiez le solde du stock.",
+      "appliedStockQuantity": "Quantité appliquée : {{quantity}}",
+      "staffSessionRequired": "Connectez-vous au bureau et reprenez votre service. Vos données sont conservées.",
+      "tillSpreadsheetUnavailable": "L’import de feuilles de calcul n’est pas encore disponible sur cette caisse. Vos lignes sont conservées.",
+      "documentRetained": "Document conservé pour lecture. Suivez son traitement dans les factures numérisées.",
+      "documentRetainedUnsupported": "L’original Word est conservé sur cette caisse. Le transfert Word n’est pas encore disponible. Exportez-le en PDF et sélectionnez le PDF.",
+      "poLinkOnly": "Lier cette facture à la commande (sans enregistrer de quantités livrées).",
+      "stockLineResult": "Ligne {{row}} : stock enregistré pour {{item}} · mouvement {{movement}}",
       "open": "Importer des articles",
       "title": "Importer des articles fournisseur",
       "subtitle": "Vérifiez les lignes avant de les synchroniser avec le stock.",
@@ -9358,6 +9382,12 @@
     "portionNotSaved": "Carte débitée, paiement pas encore enregistré. Ne débitez pas à nouveau."
   },
   "recovery": {
+    "confirmations": {
+      "cashDrawerControl": {
+        "title": "Confirmer l'action de récupération",
+        "subtitle": "Saisissez le code PIN d'un caissier ou d'un responsable pour exécuter cette action de récupération."
+      }
+    },
     "common": {
       "reference": "Référence",
       "entityId": "ID de l'entité",
@@ -9604,6 +9634,17 @@
       }
     },
     "recipes": {
+      "orderCustomerCorrection": {
+        "title": "Modification des coordonnées du client",
+        "summary": "La modification des coordonnées du client n’a pas été enregistrée. La vente et le paiement ne sont pas affectés.",
+        "guidance": "Enregistrez à nouveau la modification ou gardez les coordonnées telles qu’elles sont maintenant.",
+        "resend": "Enregistrer à nouveau la modification des coordonnées du client",
+        "resendExplanation": "Essayez d’enregistrer à nouveau la même modification des coordonnées du client.",
+        "pending": "Enregistrement… Veuillez patienter un instant.",
+        "keep": "Garder les coordonnées telles qu’elles sont maintenant",
+        "keepExplanation": "Utilisez les coordonnées du client et de livraison déjà enregistrées. La modification non enregistrée restera dans l’historique.",
+        "confirmed": "La commande utilise maintenant les coordonnées déjà enregistrées."
+      },
       "restoreLastKnownPrinterBrand": {
         "title": "Le langage de l’imprimante n’a pas été reconnu",
         "label": "Rétablir le langage enregistré de l’imprimante",
@@ -10674,5 +10715,39 @@
     "attention": "Carte de travail : {{count}} mouvements nécessitent une action. Voir admin → Planning du personnel → Journal ERGANI.",
     "zHint": "Chaque personne doit terminer son service avec son propre PIN pour que la sortie de la carte de travail soit envoyée.",
     "dismiss": "Masquer pendant 1 heure"
+  }
+,
+  "orderSyncNotice": {
+    "checkUnavailableHealth": "La caisse ne peut pas vérifier pour le moment si des commandes ont un problème à régler. Elles restent dans les commandes en cours.",
+    "checkUnavailableGuidance": "Réessayez dans un instant. Si cela persiste, appelez l’assistance.",
+    "checkUnavailable": "La caisse ne peut pas vérifier pour le moment si la commande #{{number}} a un problème à régler. Elle reste donc dans les commandes en cours. Réessayez dans un instant. Si cela persiste, appelez l’assistance.",
+    "checkUnavailableMany": "La caisse ne peut pas vérifier pour le moment si les commandes {{numbers}} ont un problème à régler. Elles restent donc dans les commandes en cours. Réessayez dans un instant. Si cela persiste, appelez l’assistance.",
+    "moveBlocked": "La commande {{number}} présente un problème à résoudre d’abord. Ouvrez-la pour voir quoi faire.",
+    "movesBlocked": "Commandes non déplacées : {{numbers}}. Elles présentent un problème à résoudre d’abord.",
+    "remainsActive": "Tant que le problème n’est pas résolu, la commande reste dans les commandes actives.",
+    "needsAction": "À vérifier",
+    "customer_correction_refused": "La modification des coordonnées du client n’a pas été enregistrée. La vente et le paiement ne sont pas affectés.",
+    "change_refused": "Une modification de cette commande n’a pas été enregistrée. Vous pouvez continuer le service.",
+    "payment_not_on_server": "Un paiement de cette commande n’a pas encore été enregistré. Ne faites pas payer le client une deuxième fois.",
+    "next": "Appuyez sur le bouton pour enregistrer à nouveau.",
+    "resend": "Enregistrer à nouveau",
+    "guided": "Vérifiez cette commande",
+    "pending": "Enregistrement… Veuillez patienter un instant.",
+    "failedAgain": "La modification n’a pas été enregistrée cette fois non plus. Prévenez le responsable.",
+    "failed": "La modification n’a pas été enregistrée. Réessayez dans un instant. Si cela continue, prévenez le responsable.",
+    "changed": "La commande a changé entre-temps. Prévenez le responsable.",
+    "offline": "Il n’y a pas de connexion internet. Réessayez quand elle sera rétablie.",
+    "wait": "Terminez d’abord la vente, le paiement ou la clôture, puis réessayez.",
+    "busy": "Vérification…",
+    "loading": "Vérification de la commande…",
+    "stale": "L’avis n’a pas été actualisé. Le dernier avis connu est affiché.",
+    "shift": "Commandes à vérifier avant de partir",
+    "shiftHint": "Elles ne vous empêchent pas de clôturer votre service.",
+    "order": "Commande {{number}}",
+    "toast": "La commande {{number}} demande votre attention. Ouvrez-la.",
+    "saving": "Enregistrement…",
+    "tryAgain": "Réessayer",
+    "notSolved": "Le problème n’a pas été résolu. Prévenez le responsable.",
+    "noRemedy": "Ce problème ne peut pas être résolu ici. Prévenez le responsable."
   }
 }

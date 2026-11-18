@@ -73,10 +73,8 @@ class CustomerService {
   /**
    * Lookup customer by phone number
    *
-   * Calls main process CustomerService which uses three-tier fallback:
-   * 1. Admin Dashboard API
-   * 2. Direct Supabase query
-   * 3. SQLite local cache
+   * Calls the native terminal-group directory through the Admin API,
+   * with its group-scoped SQLite cache for offline lookup.
    *
    * @param phone - Phone number to search
    * @returns Customer object or null if not found

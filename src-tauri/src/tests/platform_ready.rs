@@ -22,6 +22,17 @@ const NOW: &str = "2026-10-01T09:00:00Z";
 const PREPAID_FLEET: &str = r#"{"food_delivery":{"prepaid":true,"payment_method":"online","delivery_provider":"platform_delivery"}}"#;
 
 fn seed_platform_order(conn: &rusqlite::Connection, id: &str, status: &str) {
+    // A healthy completion check requires the same explicit scope as the till.
+    let org = "11111111-1111-4111-8111-111111111111";
+    let branch = "22222222-2222-4222-8222-222222222222";
+    let terminal = "33333333-3333-4333-8333-333333333333";
+    for (key, value) in [
+        ("organization_id", org),
+        ("branch_id", branch),
+        ("terminal_id", terminal),
+    ] {
+        crate::db::set_setting(conn, "terminal", key, value).unwrap();
+    }
     conn.execute(
         "INSERT INTO orders (currency, id, order_number, supabase_id, items, total_amount, total_amount_cents,
             status, order_type, payment_status, sync_status, plugin, external_plugin_order_id,
@@ -36,6 +47,11 @@ fn seed_platform_order(conn: &rusqlite::Connection, id: &str, status: &str) {
         ],
     )
     .expect("seed a platform order");
+    conn.execute(
+        "UPDATE orders SET organization_id=?1,branch_id=?2,terminal_id=?3 WHERE id=?4",
+        params![org, branch, terminal, id],
+    )
+    .unwrap();
 }
 
 fn counts(td: &TestDb, id: &str) -> (String, i64, i64) {
@@ -126,7 +142,9 @@ fn ready_on_an_open_platform_fleet_order_still_completes_it() {
         PlatformReadyLocal::Applied {
             remote_order_id,
             local_status,
+            completion_refusal,
         } => {
+            assert_eq!(completion_refusal, None);
             assert_eq!(remote_order_id.as_deref(), Some("remote-ord-open-fleet"));
             assert_eq!(local_status, "delivered");
         }

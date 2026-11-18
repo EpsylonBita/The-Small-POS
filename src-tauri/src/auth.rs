@@ -151,6 +151,8 @@ struct StaffAuthDirectoryCache {
 #[derive(Debug, Clone, Deserialize)]
 struct StaffAuthCacheEntry {
     id: String,
+    #[serde(default, alias = "branchIds")]
+    branch_ids: Option<Vec<String>>,
     #[serde(default, alias = "canLoginPos", alias = "canLoginPOS")]
     can_login_pos: Option<bool>,
     #[serde(default, alias = "hasPin")]
@@ -456,6 +458,22 @@ fn extract_scope(arg: &Value) -> Option<PrivilegedActionScope> {
     None
 }
 
+fn staff_vault_scope_key(conn: &rusqlite::Connection, branch_id: &str) -> String {
+    let scope = crate::group_scope::SharedScope::read(conn);
+    if scope.organization.is_empty() {
+        branch_id.trim().into()
+    } else {
+        scope.key()
+    }
+}
+
+fn staff_assigned_to_branch(entry: &StaffAuthCacheEntry, branch_id: &str) -> bool {
+    entry
+        .branch_ids
+        .as_ref()
+        .is_none_or(|ids| ids.iter().any(|id| id == branch_id))
+}
+
 fn staff_auth_cache_key(branch_id: &str) -> String {
     format!("branch_{}", branch_id.trim())
 }
@@ -564,7 +582,14 @@ fn adopt_legacy_pin_hashes(conn: &rusqlite::Connection, setting_key: &str, raw: 
     };
     let row_branch = staff_auth_cache_row_branch(&payload, setting_key);
     let current_branch = current_terminal_branch(conn);
-    if !row_branch.is_empty()
+    let active_prefix = format!(
+        "shared_v2:{}:",
+        crate::group_scope::SharedScope::read(conn).key()
+    );
+    let active_group =
+        !setting_key.starts_with("shared_v2:") || setting_key.starts_with(&active_prefix);
+    if active_group
+        && !row_branch.is_empty()
         && current_branch
             .as_deref()
             .is_none_or(|current| current == row_branch)
@@ -573,7 +598,11 @@ fn adopt_legacy_pin_hashes(conn: &rusqlite::Connection, setting_key: &str, raw: 
             .get("staff")
             .map(directory_pin_entries)
             .unwrap_or_default();
-        if let Err(error) = staff_pin_vault::save_directory(&row_branch, &entries, Utc::now()) {
+        if let Err(error) = staff_pin_vault::save_directory(
+            &staff_vault_scope_key(conn, &row_branch),
+            &entries,
+            Utc::now(),
+        ) {
             warn!(%error, "Legacy staff PIN hashes could not be moved to the credential store");
         }
     }
@@ -727,6 +756,10 @@ fn parse_staff_auth_entry(value: &Value) -> Option<StaffAuthCacheEntry> {
 
     Some(StaffAuthCacheEntry {
         id,
+        branch_ids: value
+            .get("branch_ids")
+            .or_else(|| value.get("branchIds"))
+            .map(|v| serde_json::from_value(v.clone()).unwrap_or_default()),
         can_login_pos: value_bool_alias(value, &["can_login_pos", "canLoginPos", "canLoginPOS"]),
         has_pin: value_bool_alias(value, &["has_pin", "hasPin"]),
         is_active: value_bool_alias(value, &["is_active", "isActive"]),
@@ -798,27 +831,60 @@ fn redact_staff_auth_hashes(staff_entries: &Value) -> Value {
 
 /// Persist a staff auth directory payload (as returned by
 /// `/api/pos/staff-directory`) into `local_settings.staff_auth_cache`,
-/// keyed by branch, and its PIN hashes into the OS credential store
+/// keyed by organization/group/terminal and eligible store, and its PIN hashes into the OS credential store
 /// (`staff_pin_vault.rs`). The SQLite row never holds a hash. The structure
 /// is wrapped so the reader's schema-drift tolerance (version + synced_at
 /// envelope) is preserved.
+#[cfg(test)]
 fn persist_staff_auth_cache(
     db: &db::DbState,
     branch_id: &str,
     staff_entries: &Value,
 ) -> Result<(), String> {
+    let scope = crate::group_scope::SharedScope::capture(db)?;
+    persist_staff_auth_cache_with_scope(db, branch_id, staff_entries, &scope)
+}
+
+fn persist_staff_auth_cache_with_scope(
+    db: &db::DbState,
+    branch_id: &str,
+    staff_entries: &Value,
+    scope: &crate::group_scope::SharedScope,
+) -> Result<(), String> {
+    scope.ensure(db)?;
+
     // A person listed without a hash keeps the one the vault holds, unless
     // the directory says the PIN is gone.
+    let vault_scope = if scope.organization.is_empty() {
+        branch_id.trim().to_string()
+    } else {
+        scope.key()
+    };
+    let eligible_entries: Value = Value::Array(
+        staff_entries
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| {
+                parse_staff_auth_entry(entry)
+                    .is_some_and(|entry| staff_assigned_to_branch(&entry, branch_id))
+            })
+            .collect(),
+    );
     if let Err(error) = staff_pin_vault::save_directory(
-        branch_id,
-        &directory_pin_entries(staff_entries),
+        &vault_scope,
+        &directory_pin_entries(&eligible_entries),
         Utc::now(),
     ) {
         warn!(%error, "Staff PIN hashes could not be saved; offline check-in is unavailable");
     }
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut merged_staff = staff_entries.as_array().cloned().unwrap_or_default();
+    if *scope != crate::group_scope::SharedScope::read(&conn) {
+        return Err("SHARED_GROUP_CHANGED".into());
+    }
+    let mut merged_staff = eligible_entries.as_array().cloned().unwrap_or_default();
     for entry in &mut merged_staff {
         let Some(entry_obj) = entry.as_object_mut() else {
             continue;
@@ -835,7 +901,11 @@ fn persist_staff_auth_cache(
     db::set_setting(
         &conn,
         STAFF_AUTH_CACHE_CATEGORY,
-        &staff_auth_cache_key(branch_id),
+        &crate::group_scope::setting_key(
+            &conn,
+            STAFF_AUTH_CACHE_CATEGORY,
+            &staff_auth_cache_key(branch_id),
+        ),
         &payload.to_string(),
     )
     .map_err(|e| format!("persist staff auth cache: {e}"))
@@ -882,9 +952,14 @@ pub async fn refresh_staff_auth_directory(
     // duplicate validator.
     let branch_id = crate::core_helpers::validate_terminal_id_path_safe(&branch_id)
         .map_err(|e| format!("branch_id: {e}"))?;
+    let shared_scope = crate::group_scope::SharedScope::capture(db)?;
+    if !shared_scope.branch.is_empty() && shared_scope.branch != branch_id {
+        return Err("STAFF_DIRECTORY_STORE_MISMATCH".into());
+    }
     let path = format!("/api/pos/staff-directory?branchId={branch_id}");
     let response = api::fetch_from_admin(&admin_url, &api_key, &path, "GET", None).await?;
 
+    shared_scope.ensure(db)?;
     if response.get("success").and_then(Value::as_bool) != Some(true) {
         let reason = response
             .get("error")
@@ -899,7 +974,7 @@ pub async fn refresh_staff_auth_directory(
         .unwrap_or(Value::Array(Vec::new()));
     let staff_count = staff_entries.as_array().map(|arr| arr.len()).unwrap_or(0);
 
-    persist_staff_auth_cache(db, branch_id, &staff_entries)?;
+    persist_staff_auth_cache_with_scope(db, branch_id, &staff_entries, &shared_scope)?;
     let public_staff_entries = redact_staff_auth_hashes(&staff_entries);
 
     // Surface the set of staff IDs that are busy on some OTHER terminal.
@@ -1070,12 +1145,14 @@ fn approval_candidates(
     cache: StaffAuthDirectoryCache,
     branch_id: &str,
     approval: MoneyApproval,
+    vault_scope: &str,
 ) -> Vec<(String, String)> {
     let required = approval.catalogue_permissions();
     cache
         .staff
         .into_iter()
         .filter(|entry| entry.is_active == Some(true) && entry.can_login_pos == Some(true))
+        .filter(|entry| staff_assigned_to_branch(entry, branch_id))
         .filter(|entry| entry.has_pin == Some(true))
         .filter(|entry| {
             entry
@@ -1085,7 +1162,7 @@ fn approval_candidates(
         })
         .filter_map(|entry| {
             let staff_id = entry.id.trim().to_string();
-            let hash = staff_pin_vault::hash_for(branch_id, &staff_id)?;
+            let hash = staff_pin_vault::hash_for(vault_scope, &staff_id)?;
             Some((staff_id, hash))
         })
         .collect()
@@ -1128,7 +1205,12 @@ fn branch_approval_candidates(
     if !cache.branch_id.trim().is_empty() && cache.branch_id.trim() != branch_id.trim() {
         return None;
     }
-    Some(approval_candidates(cache, branch_id.trim(), approval))
+    Some(approval_candidates(
+        cache,
+        branch_id.trim(),
+        approval,
+        &staff_vault_scope_key(conn, branch_id),
+    ))
 }
 
 pub fn manager_approval_availability(
@@ -2049,7 +2131,22 @@ fn verify_check_in_pin_on_till(
         }
     }
 
-    match staff_pin_vault::verify_offline(branch_id, staff_id, pin, now) {
+    if !staff_assigned_to_branch(staff, branch_id) {
+        return offline(
+            "staff_not_assigned",
+            "This person is not assigned to this store.",
+        );
+    }
+    let vault_scope = match db.conn.lock() {
+        Ok(conn) => staff_vault_scope_key(&conn, branch_id),
+        Err(_) => {
+            return offline(
+                "staff_auth_unavailable",
+                "Staff auth data unavailable offline.",
+            )
+        }
+    };
+    match staff_pin_vault::verify_offline(&vault_scope, staff_id, pin, now) {
         // Every role checks in (founder, 15/10/2026): anyone whose PIN this
         // till holds. The shift open applies the local rules.
         OfflinePinCheck::Accepted => {
@@ -2722,6 +2819,54 @@ pub(crate) mod tests {
                 "permissions": permissions
             }]),
         );
+    }
+
+    #[test]
+    fn an_archived_group_directory_never_installs_its_pin_in_the_active_vault() {
+        let database = crate::tests::harness::TestDb::open();
+        let conn = database.state.conn.lock().unwrap();
+        for (key, value) in [
+            ("organization_id", "org"),
+            ("branch_id", "store"),
+            ("terminal_id", "till"),
+            ("group_organization_id", "org"),
+            ("group_branch_id", "store"),
+            ("group_terminal_id", "till"),
+            ("group_id", "active"),
+            ("__ignore_keyring", "1"),
+        ] {
+            crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        let hash = bcrypt::hash("1234", 4).unwrap();
+        let payload=serde_json::json!({"branch_id":"store","staff":[{"id":"archived-person","pinHash":hash,"hasPin":true,"isActive":true,"canLoginPos":true}]}).to_string();
+        let redacted = adopt_legacy_pin_hashes(
+            &conn,
+            "shared_v2:[\"org\",\"archived\",\"till\"]:branch_store",
+            payload,
+        );
+        assert!(!redacted.contains(&hash));
+        assert!(staff_pin_vault::hash_for(
+            &crate::group_scope::SharedScope::read(&conn).key(),
+            "archived-person"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn staff_store_assignments_are_explicit_and_legacy_directory_still_works() {
+        for (branches, allowed) in [
+            (serde_json::json!(["store", "other"]), true),
+            (serde_json::json!(["other"]), false),
+            (serde_json::json!([]), false),
+            (serde_json::json!("malformed"), false),
+        ] {
+            let entry =
+                parse_staff_auth_entry(&serde_json::json!({"id":"person","branch_ids":branches}))
+                    .unwrap();
+            assert_eq!(staff_assigned_to_branch(&entry, "store"), allowed);
+        }
+        let legacy = parse_staff_auth_entry(&serde_json::json!({"id":"person"})).unwrap();
+        assert!(staff_assigned_to_branch(&legacy, "store"));
     }
 
     #[test]

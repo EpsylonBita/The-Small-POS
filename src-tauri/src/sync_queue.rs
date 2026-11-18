@@ -1894,11 +1894,12 @@ pub(crate) fn has_actionable_internal_work(conn: &Connection) -> Result<bool, St
     let generic = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
     let reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
     let actionable_owner = format!("({generic} OR {reserved})");
+    let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
     let sql = format!(
         "SELECT EXISTS(
              SELECT 1
              FROM parity_sync_queue
-             WHERE {actionable_owner}
+             WHERE {actionable_owner} AND {not_set_aside}
                AND (
                     status = 'pending'
                     AND (
@@ -1996,6 +1997,10 @@ fn is_fiscal_receipt_input(input: &EnqueueInput) -> bool {
 /// reached `MAX_CONFLICT_ROWS`. A fiscal receipt of an order already saved
 /// is refused only past `MAX_QUEUE_SIZE + FISCAL_RECEIPT_RESERVE`.
 pub fn enqueue(conn: &Connection, input: &EnqueueInput) -> Result<String, String> {
+    in_own_transaction(conn, |conn| enqueue_with_scope(conn, input))
+}
+
+fn enqueue_with_scope(conn: &Connection, input: &EnqueueInput) -> Result<String, String> {
     if classify_repair_queue_ownership(input.module_type.as_deref(), &input.table_name)
         != RepairQueueOwnership::Generic
     {
@@ -2071,6 +2076,7 @@ pub fn enqueue(conn: &Connection, input: &EnqueueInput) -> Result<String, String
         ],
     )
     .map_err(|e| format!("sync_queue enqueue: {e}"))?;
+    crate::group_scope::record_queue_scope(conn, &id, &input.table_name, &input.organization_id)?;
 
     info!(
         id = %id,
@@ -5592,6 +5598,21 @@ fn retry_failed_invalid_fiscal_issued_at_items_limited(
     )
 }
 
+fn is_store_menu_table(table: &str) -> bool {
+    matches!(
+        table,
+        "menu_categories" | "menu_subcategories" | "menu_ingredients" | "menu_combos"
+    )
+}
+
+fn store_menu_queue_scope(conn: &Connection) -> Value {
+    serde_json::json!({
+        "organization_id": runtime_credential(conn, "organization_id"),
+        "branch_id": runtime_credential(conn, "branch_id"),
+        "terminal_id": runtime_credential(conn, "terminal_id"),
+    })
+}
+
 pub fn enqueue_payload_item(
     conn: &Connection,
     table_name: &str,
@@ -5603,7 +5624,22 @@ pub fn enqueue_payload_item(
     conflict_strategy: Option<&str>,
     version: Option<i64>,
 ) -> Result<String, String> {
-    let organization_id = infer_organization_id(conn, payload);
+    let mut payload = payload.clone();
+    if is_store_menu_table(table_name) {
+        let scope = store_menu_queue_scope(conn);
+        if scope["branch_id"].is_string() {
+            if payload.get("_menu_scope").is_some_and(|old| *old != scope)
+                || payload
+                    .get("branch_id")
+                    .is_some_and(|branch| *branch != scope["branch_id"])
+            {
+                return Err("MENU_STORE_SCOPE_MISMATCH".into());
+            }
+            payload["branch_id"] = scope["branch_id"].clone();
+            payload["_menu_scope"] = scope;
+        }
+    }
+    let organization_id = infer_organization_id(conn, &payload);
 
     enqueue(
         conn,
@@ -5710,6 +5746,7 @@ fn dequeue_due_by_with_repair_gate(
 ) -> Result<(Option<SyncQueueItem>, i64), String> {
     retry_transaction(conn, |conn| {
         let table_quarantined = quarantine_existing_refused_table_batches(conn)? as i64;
+        crate::group_scope::set_aside_unclaimable(conn)?;
         let quarantined = quarantine_reserved_repair_lookalikes(conn)? + table_quarantined;
         claim_next_internal_item(conn, due_by, include_repair).map(|item| (item, quarantined))
     })
@@ -5744,7 +5781,11 @@ fn claim_next_internal_item(
     let claim_canonical = canonical_repair_owner_predicate("parity_sync_queue");
     let unsafe_reserved = semantic_reserved_repair_owner_predicate("unsafe_repair");
     let unsafe_canonical = canonical_repair_owner_predicate("unsafe_repair");
-    let table_order = table_mutation_dispatch_predicate("candidate");
+    let table_order = format!(
+        "({}) AND ({})",
+        table_mutation_dispatch_predicate("candidate"),
+        crate::group_scope::queue_predicate("candidate")
+    );
     // A row a manager set aside is never sent on its own (Ω4), whatever its
     // status became.
     let not_set_aside = set_aside_exclusion_sql("candidate");
@@ -5908,12 +5949,17 @@ fn renderer_dequeue_due_by(
     conn: &Connection,
     due_by: Option<&str>,
 ) -> Result<Option<SyncQueueItem>, String> {
+    crate::group_scope::set_aside_unclaimable(conn)?;
     let now = Utc::now().to_rfc3339();
     let candidate_generic = renderer_visible_owner_predicate("candidate");
     let claim_generic = renderer_visible_owner_predicate("parity_sync_queue");
     let candidate_exclusion = renderer_non_repair_owned_predicate("candidate");
     let claim_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
-    let table_order = table_mutation_dispatch_predicate("candidate");
+    let table_order = format!(
+        "({}) AND ({})",
+        table_mutation_dispatch_predicate("candidate"),
+        crate::group_scope::queue_predicate("candidate")
+    );
     let not_set_aside = set_aside_exclusion_sql("candidate");
     let sql = format!(
         "UPDATE parity_sync_queue
@@ -6006,6 +6052,11 @@ fn renderer_retry_and_dequeue_exact(
             _ => {}
         }
 
+        if !crate::group_scope::queue_item_allowed(conn, item_id)? {
+            return Err(
+                "SHARED_GROUP_CHANGED: original queued operation is kept for its group".into(),
+            );
+        }
         if !table_mutation_dispatch_ready(conn, item_id)? {
             return Err("TABLE_MUTATION_BLOCKED: Resolve the earlier original batch item before retrying this suffix.".into());
         }
@@ -6215,7 +6266,9 @@ fn cleanup_superseded_synced_order_status_updates_in_transaction(
         let Ok(mut payload) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
-        if is_identified_order_edit_payload(&payload) {
+        if is_identified_order_edit_payload(&payload)
+            || payload.get("base_before_create") == Some(&Value::Bool(true))
+        {
             // A failed atomic event cannot be repaired by changing its body
             // under the same event identity. Leave the conflict reviewable.
             continue;
@@ -6326,11 +6379,17 @@ fn cleanup_superseded_synced_order_status_updates_in_transaction(
 
 /// Peek at the next item without removing or marking it.
 pub fn peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
+    crate::group_scope::set_aside_unclaimable(conn)?;
     quarantine_reserved_repair_lookalikes(conn)?;
     let candidate_generic = semantic_generic_nonfinancial_owner_predicate("candidate");
     let unsafe_reserved = semantic_reserved_repair_owner_predicate("unsafe_repair");
     let unsafe_canonical = canonical_repair_owner_predicate("unsafe_repair");
-    let table_order = table_mutation_dispatch_predicate("candidate");
+    let not_set_aside = set_aside_exclusion_sql("candidate");
+    let table_order = format!(
+        "({}) AND ({})",
+        table_mutation_dispatch_predicate("candidate"),
+        crate::group_scope::queue_predicate("candidate")
+    );
     let sql = format!(
         "SELECT candidate.id, candidate.table_name, candidate.record_id,
                 candidate.operation, candidate.data, candidate.organization_id,
@@ -6340,7 +6399,7 @@ pub fn peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
                 COALESCE(candidate.module_type, 'orders'), candidate.conflict_strategy,
                 candidate.version, candidate.claim_generation, candidate.status
            FROM parity_sync_queue AS candidate
-          WHERE candidate.status = 'pending'
+          WHERE candidate.status = 'pending' AND {not_set_aside}
                    AND {table_order}
             AND (
                 candidate.next_retry_at IS NULL
@@ -7107,12 +7166,21 @@ fn with_live_generic_claim<T>(
     item: &SyncQueueItem,
     operation: impl FnOnce(&Connection) -> Result<T, String>,
 ) -> Result<Option<T>, String> {
-    retry_transaction(conn, |conn| {
+    let result = retry_transaction(conn, |conn| {
         if !is_live_generic_claim(conn, item)? {
             return Ok(None);
         }
         operation(conn).map(Some)
-    })
+    })?;
+    if result.is_some()
+        && matches!(
+            item.table_name.as_str(),
+            "orders" | "payments" | "payment_adjustments"
+        )
+    {
+        crate::order_notice_recovery::notify_queue_changed();
+    }
+    Ok(result)
 }
 
 pub fn retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
@@ -7712,6 +7780,8 @@ pub fn mark_success(
     } else {
         // Ω2: the row left the queue, and its scheduling history with it.
         delete_retry_schedule_audit(conn, item_id)?;
+        let _ = crate::order_notice_recovery::observe("queue_employee_ack",
+            conn.execute("UPDATE recovery_action_log SET success=1,payload_json=json_set(payload_json,'$.outcome','resolved') WHERE issue_id=?1 AND json_extract(payload_json,'$.employeeOrderAttempt')=1",[item_id]).map_err(|e|e.to_string()));
     }
 
     Ok(())
@@ -8167,16 +8237,19 @@ fn synced_office_customer_id(conn: &Connection, customer_id: &str) -> Option<Str
     if !customer_id.starts_with("cust-") {
         return None;
     }
-    read_local_json_array_setting(conn, "customer_cache_v1")
-        .iter()
-        .find_map(|entry| {
-            let alias = string_field(entry, &[LOCAL_CUSTOMER_ALIAS_FIELD])?;
-            if alias.trim() != customer_id {
-                return None;
-            }
-            string_field(entry, &["id", "customerId"])
-                .filter(|office_id| !office_id.trim().is_empty() && office_id != customer_id)
-        })
+    let mut aliases = read_local_json_array_setting(conn, "customer_cache_v1");
+    aliases.extend(read_local_json_array_setting(
+        conn,
+        "customer_replay_aliases_v1",
+    ));
+    aliases.iter().find_map(|entry| {
+        let alias = string_field(entry, &[LOCAL_CUSTOMER_ALIAS_FIELD])?;
+        if alias.trim() != customer_id {
+            return None;
+        }
+        string_field(entry, &["id", "customerId"])
+            .filter(|office_id| !office_id.trim().is_empty() && office_id != customer_id)
+    })
 }
 
 /// The office's record for a customer INSERT that just succeeded.
@@ -9404,6 +9477,18 @@ fn wake_z_reports_after_success(conn: &Connection, item: &SyncQueueItem) -> Resu
 fn wake_rows_after_success(conn: &Connection, item: &SyncQueueItem) -> Result<(), String> {
     wake_rows_waiting_for_shift_rows(conn, item)?;
     wake_orders_waiting_for_loyalty_release(conn, item)?;
+    if item.table_name == "orders" {
+        conn.execute(
+            &format!(
+                "UPDATE parity_sync_queue SET next_retry_at=NULL
+            WHERE table_name='orders' AND record_id=?1 AND status='pending'
+            AND error_message=?2 AND {}",
+                set_aside_exclusion_sql("parity_sync_queue")
+            ),
+            params![item.record_id, ORDER_STATUS_WAITING_FOR_EDIT],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     wake_z_reports_after_success(conn, item)
 }
 
@@ -10867,6 +10952,22 @@ fn remap_synced_appointment(
 fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPreparation, String> {
     let payload =
         serde_json::from_str::<Value>(&item.data).unwrap_or_else(|_| Value::Object(Map::new()));
+    if is_store_menu_table(&item.table_name) {
+        let scope = store_menu_queue_scope(conn);
+        let owned: bool = conn.query_row("SELECT json_extract(data, '$.store_menu.mode')='store_owned' FROM menu_cache WHERE cache_key='store_menu_identity'", [], |row| row.get(0)).unwrap_or(false);
+        let mismatch = (owned && payload.get("_menu_scope").is_none())
+            || payload
+                .get("_menu_scope")
+                .is_some_and(|original| *original != scope)
+            || payload
+                .get("branch_id")
+                .is_some_and(|branch| *branch != scope["branch_id"]);
+        if mismatch {
+            return Ok(RequestPreparation::Deferred {
+                reason: "MENU_STORE_SCOPE_MISMATCH".into(),
+            });
+        }
+    }
     let terminal_id = match resolve_request_terminal_id(conn, &payload) {
         Some(value) => value,
         None => {
@@ -10938,7 +11039,17 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             body: if resolve_http_method(item) == Method::DELETE {
                 None
             } else {
-                Some(item.data.clone())
+                if is_store_menu_table(&item.table_name) {
+                    let mut body = payload.clone();
+                    if let Some(object) = body.as_object_mut() {
+                        if object.remove("_menu_scope").is_some() {
+                            object.remove("branch_id");
+                        }
+                    }
+                    Some(body.to_string())
+                } else {
+                    Some(item.data.clone())
+                }
             },
             terminal_id,
         })),
@@ -12059,7 +12170,7 @@ fn prepare_customer_address_request(
     }))
 }
 
-fn is_identified_order_edit_payload(payload: &Value) -> bool {
+pub(crate) fn is_identified_order_edit_payload(payload: &Value) -> bool {
     string_field(payload, &["client_event_id"])
         .filter(|value| !value.trim().is_empty())
         .is_some()
@@ -12067,6 +12178,121 @@ fn is_identified_order_edit_payload(payload: &Value) -> bool {
             .get("expected_version")
             .and_then(Value::as_i64)
             .is_some_and(|version| version > 0)
+}
+
+pub(crate) fn is_marked_precreate_order_edit(payload: &Value) -> bool {
+    payload.get("base_before_create") == Some(&Value::Bool(true))
+        && string_field(payload, &["client_event_id"]).is_some_and(|event| !event.trim().is_empty())
+}
+
+pub(crate) fn has_only_order_header_keys(payload: &Value) -> bool {
+    payload.as_object().is_some_and(|object| {
+        object.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "id" | "orderId"
+                    | "order_id"
+                    | "remoteOrderId"
+                    | "remote_order_id"
+                    | "canonicalOrderId"
+                    | "canonical_order_id"
+                    | "supabase_id"
+                    | "organization_id"
+                    | "status"
+                    | "expected_version"
+                    | "client_event_id"
+                    | "header_edit_original"
+                    | "base_before_create"
+                    | "customerId"
+                    | "customer_id"
+                    | "customerName"
+                    | "customer_name"
+                    | "customerPhone"
+                    | "customer_phone"
+                    | "customerEmail"
+                    | "customer_email"
+                    | "deliveryAddress"
+                    | "delivery_address"
+                    | "deliveryAddressId"
+                    | "delivery_address_id"
+                    | "deliveryCity"
+                    | "delivery_city"
+                    | "deliveryPostalCode"
+                    | "delivery_postal_code"
+                    | "deliveryFloor"
+                    | "delivery_floor"
+                    | "deliveryNotes"
+                    | "delivery_notes"
+                    | "nameOnRinger"
+                    | "name_on_ringer"
+                    | "deliveryLatitude"
+                    | "delivery_latitude"
+                    | "deliveryLongitude"
+                    | "delivery_longitude"
+                    | "deliveryAddressFingerprint"
+                    | "delivery_address_fingerprint"
+                    | "deliveryZoneId"
+                    | "delivery_zone_id"
+            )
+        })
+    })
+}
+
+/// Money still waits for every order write except a parked, identified
+/// customer/delivery correction. Tomikro's refused correction held cash and
+/// the Z for hours on 17/11/2026 even though it could no longer be sent.
+pub(crate) fn order_write_holds_payment(conn: &Connection, order_id: &str) -> Result<bool, String> {
+    let protected: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM orders WHERE id=?1
+             AND lower(trim(COALESCE(order_context,'')))='repair_settlement')
+         OR EXISTS(SELECT 1 FROM sync_queue WHERE entity_type='order' AND entity_id=?1
+             AND status IN ('pending','in_progress','queued_remote','deferred','failed'))",
+            [order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if protected {
+        return Ok(true);
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT q.operation,q.data,q.status,COALESCE(q.error_message,''),q.module_type,
+                EXISTS(SELECT 1 FROM parity_sync_set_aside s WHERE s.queue_id=q.id)
+         FROM parity_sync_queue q WHERE q.table_name='orders' AND q.record_id=?1
+           AND COALESCE(q.module_type,'')<>'repairs'
+           AND q.status IN ('pending','processing','failed','conflict')",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([order_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, bool>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (operation, data, status, error, module, set_aside) = row.map_err(|e| e.to_string())?;
+        let payload: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+        let parked = set_aside
+            || status == "conflict"
+            || (status == "failed"
+                && is_refused_for_good(&error, module.as_deref().unwrap_or_default()));
+        if !(operation == "UPDATE"
+            && parked
+            && (is_identified_order_edit_payload(&payload)
+                || is_marked_precreate_order_edit(&payload))
+            && has_only_order_header_keys(&payload))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn is_status_only_order_update_payload(payload: &Value) -> bool {
@@ -12096,9 +12322,48 @@ fn is_status_only_order_update_payload(payload: &Value) -> bool {
                 | "canonicalOrderId"
                 | "canonical_order_id"
                 | "supabase_id"
+                | "organization_id"
                 | "syncRecoveryReason"
         )
     })
+}
+
+pub(crate) const ORDER_STATUS_WAITING_FOR_EDIT: &str =
+    "Waiting for queued order edit before status sync";
+const ORDER_EDIT_BASE_UNAVAILABLE: &str = "ORDER_EDIT_BASE_UNAVAILABLE";
+
+/// Ordinary till status writes follow its sendable edits. Provider decisions
+/// keep their existing immediate accept/decline/ready behavior.
+pub(crate) fn order_status_waits_for_queued_edit(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<bool, String> {
+    let order: Option<(String,String)> = conn.query_row(
+        "SELECT id,lower(trim(COALESCE(plugin,''))) FROM orders WHERE id=?1 OR supabase_id=?1 LIMIT 1",
+        [order_id],|row|Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((local, plugin)) = order else {
+        return Ok(false);
+    };
+    if !matches!(plugin.as_str(), "" | "pos") {
+        return Ok(false);
+    }
+    let mut statement = conn.prepare(
+        "SELECT data FROM parity_sync_queue q WHERE table_name='orders' AND operation='UPDATE'
+         AND record_id=?1 AND status IN ('pending','processing') AND COALESCE(module_type,'')<>'repairs'
+         AND NOT EXISTS(SELECT 1 FROM parity_sync_set_aside s WHERE s.queue_id=q.id)",
+    ).map_err(|e|e.to_string())?;
+    let rows = statement
+        .query_map([local], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let data = row.map_err(|e| e.to_string())?;
+        let payload: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+        if is_identified_order_edit_payload(&payload) || is_marked_precreate_order_edit(&payload) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn superseded_synced_order_status_update_reason(
@@ -12294,6 +12559,25 @@ fn prepare_order_request(
         }
         return Ok(RequestPreparation::Deferred { reason });
     };
+
+    let awaiting_create_base = payload.get("base_before_create") == Some(&Value::Bool(true))
+        && !is_identified_order_edit_payload(payload);
+    if awaiting_create_base {
+        // The server id is already known, so no future create acknowledgement
+        // is promised. Keep the correction for review instead of holding its
+        // payment and statuses forever (Tomikro, 17/11/2026).
+        return Ok(RequestPreparation::Failed {
+            reason: ORDER_EDIT_BASE_UNAVAILABLE.into(),
+        });
+    }
+
+    if is_status_only_order_update_payload(payload)
+        && order_status_waits_for_queued_edit(conn, &item.record_id)?
+    {
+        return Ok(RequestPreparation::WaitingForParent {
+            reason: ORDER_STATUS_WAITING_FOR_EDIT.into(),
+        });
+    }
 
     if let Some(reason) = superseded_synced_order_status_update_reason(
         conn,
@@ -13055,7 +13339,7 @@ fn prepare_payment_request(
         return Ok(RequestPreparation::Deferred { reason });
     };
 
-    if sync::has_outstanding_local_order_queue(conn, local_order_id.as_str()) {
+    if order_write_holds_payment(conn, local_order_id.as_str())? {
         let _ = conn.execute(
             "UPDATE order_payments
              SET sync_state = 'waiting_parent',
@@ -13230,6 +13514,7 @@ fn prepare_payment_request(
     let _ = conn.execute(
         "UPDATE order_payments
          SET sync_state = 'syncing',
+             sync_last_error = NULL,
              updated_at = datetime('now')
          WHERE id = ?1",
         params![item.record_id.as_str()],
@@ -13277,9 +13562,10 @@ fn prepare_adjustment_request(
     };
 
     if string_field(payload, &["parentEditEventId", "parent_edit_event_id"]).is_some()
-        && order_id
-            .as_deref()
-            .is_some_and(|id| sync::has_outstanding_local_order_queue(conn, id))
+        && match order_id.as_deref() {
+            Some(id) => order_write_holds_payment(conn, id)?,
+            None => false,
+        }
     {
         // The order's own edit is still queued here: waiting for it spends
         // no attempt.
@@ -13461,6 +13747,7 @@ fn build_adjustment_request(
     let _ = conn.execute(
         "UPDATE payment_adjustments
          SET sync_state = 'syncing',
+             sync_last_error = NULL,
              updated_at = datetime('now')
          WHERE id = ?1",
         params![item.record_id.as_str()],
@@ -14455,7 +14742,21 @@ fn apply_header_edit_ack(
     }
     let live:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE id=?1 AND claim_generation=?2 AND data=?3 AND status='processing')",params![item.id,item.claim_generation,item.data],|r|r.get(0)).map_err(|e|e.to_string())?;
     let newer:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND id<>?2)",params![item.record_id,item.id],|r|r.get(0)).map_err(|e|e.to_string())?;
-    if !live || newer {
+    if !live {
+        return Ok(true);
+    }
+    let _ = crate::order_notice_recovery::observe(
+        "queue_header_response",
+        crate::order_notice_recovery::acknowledge_response(
+            conn,
+            &item.id,
+            &item.record_id,
+            &payload,
+            response,
+            now,
+        ),
+    );
+    if newer {
         return Ok(true);
     }
     let answer = response
@@ -14537,6 +14838,10 @@ fn apply_header_edit_ack(
             .into_iter()
             .partition(|(column, _)| matches!(*column, "notes" | "special_instructions"));
         adopt_edit_ack_headers(conn, &item.record_id, &scope.organization, &others)?;
+        let _ = crate::order_notice_recovery::observe(
+            "queue_header_ack",
+            crate::order_notice_recovery::acknowledged(conn, &item.id, now),
+        );
         for (column, value) in notes {
             conn.execute(
                 &format!("UPDATE orders SET {column}=?1 WHERE id=?2 AND organization_id=?3"),
@@ -14931,7 +15236,7 @@ fn edit_ack_receipts_match(context: &Value, receipts: &Value) -> bool {
 
 /// Adopt the canonical value of each header this edit named (a linked
 /// customer, a normalized phone, a resolved address identity).
-fn adopt_edit_ack_headers(
+pub(crate) fn adopt_edit_ack_headers(
     conn: &Connection,
     order: &str,
     organization: &str,
@@ -15187,6 +15492,160 @@ fn apply_table_mutation_answer(
     Ok(())
 }
 
+// Replace only the root revision token. Re-serializing the document could
+// change other bytes in a frozen request (including customer text or numbers).
+fn bind_expected_version_bytes(data: &str, version: i64) -> Result<String, String> {
+    let bytes = data.as_bytes();
+    let mut depth = 0;
+    let mut cursor = 0;
+    let mut revision = None;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            b'"' => {
+                let start = cursor;
+                cursor += 1;
+                while cursor < bytes.len() {
+                    if bytes[cursor] == b'\\' {
+                        cursor += 2;
+                    } else if bytes[cursor] == b'"' {
+                        break;
+                    } else {
+                        cursor += 1;
+                    }
+                }
+                if depth == 1
+                    && serde_json::from_str::<String>(&data[start..=cursor])
+                        .is_ok_and(|key| key == "expected_version")
+                {
+                    let mut value_start = cursor + 1;
+                    while bytes.get(value_start).is_some_and(u8::is_ascii_whitespace) {
+                        value_start += 1;
+                    }
+                    if bytes.get(value_start) == Some(&b':') {
+                        value_start += 1;
+                        while bytes.get(value_start).is_some_and(u8::is_ascii_whitespace) {
+                            value_start += 1;
+                        }
+                        let mut end = value_start;
+                        while bytes
+                            .get(end)
+                            .is_some_and(|b| !b.is_ascii_whitespace() && !matches!(b, b',' | b'}'))
+                        {
+                            end += 1;
+                        }
+                        if revision.replace(value_start..end).is_some() {
+                            return Err("Duplicate queued expected_version".into());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    let span = revision.ok_or("Queued expected_version is missing")?;
+    let mut bound = data.to_owned();
+    bound.replace_range(span, &version.to_string());
+    Ok(bound)
+}
+
+/// The create answer is the first canonical base for edits made before it.
+/// Called inside the create acknowledgement transaction, before its identity
+/// is installed. Never advance a proven original or touch a parked request.
+pub(crate) fn acknowledge_created_order_version(
+    conn: &Connection,
+    order_id: &str,
+    response: Option<&Value>,
+) -> Result<(), String> {
+    let Some(version) = response
+        .and_then(|answer| {
+            answer
+                .pointer("/data/version")
+                .or_else(|| answer.get("version"))
+        })
+        .and_then(Value::as_i64)
+        .filter(|version| *version > 0)
+    else {
+        return Ok(());
+    };
+    let context: Option<(Option<i64>, Option<String>)> = conn
+        .query_row(
+            "SELECT remote_version,organization_id FROM orders WHERE id=?1",
+            [order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((previous, organization)) = context else {
+        return Ok(());
+    };
+    // A replayed create must not rebind an already sent edit or roll back a
+    // canonical version subsequently learned from an edit acknowledgement.
+    if previous.is_some() {
+        return Ok(());
+    }
+    let organization =
+        organization.or_else(|| db::get_setting(conn, "terminal", "organization_id"));
+    let mut statement = conn.prepare(
+        "SELECT id,data FROM parity_sync_queue q WHERE table_name='orders' AND operation='UPDATE'
+           AND record_id=?1 AND status='pending' AND COALESCE(module_type,'')<>'repairs'
+           AND organization_id=?2
+           AND NOT EXISTS(SELECT 1 FROM parity_sync_set_aside s WHERE s.queue_id=q.id)
+           AND NOT EXISTS(SELECT 1 FROM recovery_action_log a WHERE a.id='order-create-base:'||q.id)",
+    ).map_err(|e|e.to_string())?;
+    let rows = statement
+        .query_map(params![order_id, organization], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    for (queue_id, data) in rows {
+        let Ok(payload) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        if payload.get("header_edit_original").is_some() {
+            continue;
+        }
+        let marked = payload.get("base_before_create") == Some(&Value::Bool(true));
+        let event = string_field(&payload, &["client_event_id"])
+            .is_some_and(|event| !event.trim().is_empty());
+        let eligible = if marked {
+            event
+                && (payload["expected_version"].is_null()
+                    || is_identified_order_edit_payload(&payload))
+                && payload.get("items").is_none()
+                && payload.get("settlement_context").is_none()
+        } else {
+            payload.get("base_before_create").is_none()
+                && is_identified_order_edit_payload(&payload)
+                && has_only_order_header_keys(&payload)
+        };
+        if !eligible {
+            continue;
+        }
+        let bound = bind_expected_version_bytes(&data, version)?;
+        conn.execute(
+            "UPDATE parity_sync_queue SET data=?1 WHERE id=?2 AND status='pending' AND data=?3",
+            params![bound, queue_id, data],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO recovery_action_log(id,action_id,issue_code,entity_type,entity_id,order_id,success,payload_json,created_at)
+            VALUES(?1,'bind_order_create_base','ORDER_CREATE_BASE_BOUND','sync_queue',?2,?3,1,?4,?5)",
+            params![format!("order-create-base:{queue_id}"),queue_id,order_id,
+                serde_json::json!({"queueId":queue_id,"oldVersion":payload["expected_version"],"newVersion":version}).to_string(),Utc::now().to_rfc3339()])
+            .map_err(|e|e.to_string())?;
+    }
+    conn.execute(
+        "UPDATE orders SET remote_version=?1 WHERE id=?2 AND remote_version IS NULL",
+        params![version, order_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn apply_success(
     conn: &Connection,
     item: &SyncQueueItem,
@@ -15321,6 +15780,7 @@ fn apply_success(
             );
 
             if item.operation == "INSERT" {
+                acknowledge_created_order_version(conn, &item.record_id, response)?;
                 let remote_id = extract_response_string(
                     response,
                     &["data.id", "data.order_id", "order_id", "id"],
@@ -16955,7 +17415,7 @@ where
     // claimed (see `dequeue_due_by_with_quarantine_count`).
     let pass_due_by = Utc::now().to_rfc3339();
 
-    loop {
+    for _ in 0..queue_depth_before.max(1) {
         if selection != QueueProcessSelection::All && exact_claim_consumed {
             break;
         }
@@ -19224,7 +19684,7 @@ fn load_queue_row(conn: &Connection, queue_id: &str) -> Result<Option<SyncQueueI
 /// check-in, an unknown 409, a local preparation that cannot succeed. Not a
 /// transport failure, a rate limit, a server error or a missing terminal
 /// identity, which heal on their own or by a retry.
-fn is_refused_for_good(error_message: &str, module_type: &str) -> bool {
+pub(crate) fn is_refused_for_good(error_message: &str, module_type: &str) -> bool {
     let error = error_message.trim();
     if error.is_empty() || error == REPAIR_RESERVED_OWNER_QUARANTINED {
         return false;
@@ -19733,6 +20193,56 @@ pub(crate) mod tests {
     const TEST_BRANCH_ID: &str = "11111111-1111-1111-1111-111111111111";
     const TEST_MENU_ITEM_ID: &str = "22222222-2222-2222-2222-222222222222";
 
+    #[test]
+    fn store_menu_mutation_waits_for_its_original_store() {
+        let conn = test_connection();
+        for (key, value) in [
+            ("organization_id", "org-1"),
+            ("branch_id", "store-a"),
+            ("terminal_id", "till"),
+        ] {
+            crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        let id = enqueue_payload_item(
+            &conn,
+            "menu_subcategories",
+            "original-id",
+            "UPDATE",
+            &json!({"id":"original-id","is_available":false}),
+            Some(0),
+            Some("catalog"),
+            Some("manual"),
+            Some(1),
+        )
+        .unwrap();
+        let raw: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(payload["branch_id"], "store-a");
+        let item = queue_item("menu_subcategories", "UPDATE", "original-id", payload);
+        assert!(matches!(
+            prepare_request(&conn, &item).unwrap(),
+            RequestPreparation::Ready(_)
+        ));
+        crate::db::set_setting(&conn, "terminal", "branch_id", "store-b").unwrap();
+        assert!(
+            matches!(prepare_request(&conn, &item).unwrap(), RequestPreparation::Deferred { reason } if reason == "MENU_STORE_SCOPE_MISMATCH")
+        );
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
     fn review_batch(conn: &Connection, count: usize) -> (Vec<EnqueueInput>, Vec<String>) {
         seed_foreground_table_scope(conn);
         let source = "11111111-1111-4111-8111-111111111111";
@@ -19746,6 +20256,32 @@ pub(crate) mod tests {
     fn review_answer() -> Value {
         json!({"success":true,"source_session":review_snapshot("11111111-1111-4111-8111-111111111111","55555555-5555-4555-8555-555555555555",2),"target_session":review_snapshot("22222222-2222-4222-8222-222222222222","44444444-4444-4444-8444-444444444444",2)})
     }
+    #[test]
+    fn replay_customer_alias_survives_bootstrap_without_a_phone_directory() {
+        let conn = test_connection();
+        for (key, value) in [
+            ("group_organization_id", "org-1"),
+            ("group_branch_id", "store"),
+            ("group_terminal_id", "till"),
+            ("group_id", "first"),
+        ] {
+            crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        crate::db::set_setting(
+            &conn,
+            "local",
+            "customer_replay_aliases_v1",
+            r#"[{"id":"canonical","local_customer_id":"cust-local"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            synced_office_customer_id(&conn, "cust-local").as_deref(),
+            Some("canonical")
+        );
+        crate::db::set_setting(&conn, "terminal", "group_id", "second").unwrap();
+        assert!(synced_office_customer_id(&conn, "cust-local").is_none());
+    }
+
     #[test]
     fn table_mutation_review_batch_claims_head_then_waits_for_canonical_ack() {
         let conn = test_connection();
@@ -20549,6 +21085,600 @@ pub(crate) mod tests {
         }
     }
 
+    mod precreate_order_regressions {
+        use super::*;
+
+        fn seed_order(conn: &Connection, remote: Option<&str>) {
+            seed_terminal_context(conn);
+            db::set_setting(conn, "terminal", "organization_id", "org-1").unwrap();
+            conn.execute("INSERT INTO orders(id,supabase_id,organization_id,branch_id,terminal_id,items,total_amount,total_amount_cents,status,sync_status,created_at,updated_at)
+                VALUES('incident-order',?1,'org-1',?2,?3,'[]',14.5,1450,'pending','pending',datetime('now'),datetime('now'))", params![remote,TEST_BRANCH_ID,TEST_TERMINAL_ID]).unwrap();
+        }
+
+        fn header() -> Value {
+            json!({"orderId":"incident-order","client_event_id":"incident-event","expected_version":1,
+                "status":"pending","customer_name":"Corrected","delivery_address":"Corrected street"})
+        }
+
+        fn queue_edit(conn: &Connection, payload: Value, status: &str, set_aside: bool) -> String {
+            let id = enqueue_test_item(conn, "orders", "UPDATE", "incident-order", payload);
+            conn.execute("UPDATE parity_sync_queue SET status=?1,error_message='HTTP_409_CLIENT_ERROR:ORDER_EDIT_CONFLICT' WHERE id=?2", params![status,id]).unwrap();
+            if set_aside {
+                conn.execute("INSERT INTO parity_sync_set_aside(queue_id,table_name,record_id,reason_code,set_aside_by_staff_id,set_aside_at,organization_id)
+                    VALUES(?1,'orders','incident-order','manager_reviewed','manager',datetime('now'),'org-1')", [&id]).unwrap();
+            }
+            id
+        }
+
+        fn assert_payment(payload: Value, status: &str, set_aside: bool, ready: bool) {
+            let conn = test_connection();
+            seed_order(&conn, Some("server-order"));
+            queue_edit(&conn, payload, status, set_aside);
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,sync_status,sync_state,sync_last_error,created_at,updated_at)
+                VALUES('incident-payment','incident-order','cash',14.5,1450,'completed','pending','waiting_parent','Order update not yet synced',datetime('now'),datetime('now'))",[]).unwrap();
+            let payload = json!({"orderId":"incident-order","amount":14.5,"method":"cash"});
+            let item = queue_item("payments", "INSERT", "incident-payment", payload.clone());
+            let result = prepare_payment_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap();
+            if ready {
+                assert!(matches!(result, RequestPreparation::Ready(_)), "{result:?}");
+                let state: (String,Option<String>) = conn.query_row("SELECT sync_state,sync_last_error FROM order_payments WHERE id='incident-payment'",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+                assert_eq!(state, ("syncing".into(), None));
+                assert!(
+                    sync::has_outstanding_local_order_queue(&conn, "incident-order"),
+                    "snapshot protection still sees the retained correction"
+                );
+            } else {
+                assert!(
+                    matches!(result, RequestPreparation::WaitingForParent { .. }),
+                    "{result:?}"
+                );
+            }
+        }
+
+        fn create_ack(conn: &Connection, answer: &Value) {
+            let create = queue_item("orders", "INSERT", "incident-order", json!({}));
+            retry_transaction(conn, |conn| apply_success(conn, &create, Some(answer))).unwrap();
+        }
+
+        fn assert_create_base(version: i64, marked: bool) {
+            let conn = test_connection();
+            seed_order(&conn, None);
+            conn.execute("UPDATE orders SET version=9 WHERE id='incident-order'", [])
+                .unwrap();
+            let mut payload = header();
+            if marked {
+                payload["base_before_create"] = json!(true);
+                payload["expected_version"] = Value::Null;
+            }
+            let id = queue_edit(&conn, payload, "pending", false);
+            // Spaces, escaped content and UTF-8 must all survive the binding.
+            let raw = if marked {
+                "{ \"customer_name\":\"Κώστας \\\"expected_version\\\"\", \"orderId\":\"incident-order\", \"client_event_id\":\"incident-event\", \"status\":\"pending\", \"base_before_create\":true, \"expected_version\" : null }"
+            } else {
+                "{ \"customer_name\":\"Κώστας \\\"expected_version\\\"\", \"orderId\":\"incident-order\", \"client_event_id\":\"incident-event\", \"status\":\"pending\", \"expected_version\" : 1 }"
+            };
+            conn.execute(
+                "UPDATE parity_sync_queue SET data=?1 WHERE id=?2",
+                params![raw, id],
+            )
+            .unwrap();
+            create_ack(
+                &conn,
+                &json!({"success":true,"data":{"id":"server-order","version":version},"create_event_version":99}),
+            );
+            let item = load_queue_row(&conn, &id).unwrap().unwrap();
+            let expected = if marked {
+                raw.replace(" : null", &format!(" : {version}"))
+            } else {
+                raw.replace(" : 1", &format!(" : {version}"))
+            };
+            assert_eq!(item.data, expected);
+            let payload: Value = serde_json::from_str(&item.data).unwrap();
+            let RequestPreparation::Ready(spec) =
+                prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap()
+            else {
+                panic!("bound edit must leave");
+            };
+            let wire: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+            assert_eq!(wire["expected_version"], version);
+            assert_eq!(wire["client_event_id"], "incident-event");
+            assert!(wire.get("base_before_create").is_none());
+            assert_eq!(
+                conn.query_row(
+                    "SELECT remote_version FROM orders WHERE id='incident-order'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                version
+            );
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM recovery_action_log WHERE action_id='bind_order_create_base'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+            // Even a replay returning a later canonical version cannot bind twice.
+            create_ack(
+                &conn,
+                &json!({"success":true,"data":{"id":"server-order","version":version+5}}),
+            );
+            assert_eq!(load_queue_row(&conn, &id).unwrap().unwrap().data, expected);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM recovery_action_log WHERE action_id='bind_order_create_base'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        }
+
+        #[test]
+        fn create_version_two_binds_legacy_header_and_replay_does_not_bind_twice() {
+            assert_create_base(2, false);
+        }
+
+        #[test]
+        fn create_version_one_binds_marked_header_and_replay_does_not_bind_twice() {
+            assert_create_base(1, true);
+        }
+
+        #[test]
+        fn create_version_six_binds_marked_header_without_using_local_counter() {
+            assert_create_base(6, true);
+        }
+
+        #[test]
+        fn create_does_not_bind_proven_parked_set_aside_or_other_orders() {
+            let conn = test_connection();
+            seed_order(&conn, None);
+            let mut originals = Vec::new();
+            for status in ["pending", "processing", "conflict", "failed"] {
+                let mut payload = header();
+                if status == "pending" {
+                    payload["header_edit_original"] = json!({"canonicalVersion":1});
+                }
+                let id = queue_edit(&conn, payload, status, false);
+                originals.push((
+                    id.clone(),
+                    load_queue_row(&conn, &id).unwrap().unwrap().data,
+                ));
+            }
+            let id = queue_edit(&conn, header(), "pending", true);
+            originals.push((
+                id.clone(),
+                load_queue_row(&conn, &id).unwrap().unwrap().data,
+            ));
+            let id = enqueue_test_item(&conn, "orders", "UPDATE", "other-order", header());
+            originals.push((
+                id.clone(),
+                load_queue_row(&conn, &id).unwrap().unwrap().data,
+            ));
+            let mut items = header();
+            items["items"] = json!([]);
+            let id = queue_edit(&conn, items, "pending", false);
+            originals.push((
+                id.clone(),
+                load_queue_row(&conn, &id).unwrap().unwrap().data,
+            ));
+            create_ack(&conn, &json!({"data":{"id":"server-order","version":2}}));
+            for (id, data) in originals {
+                assert_eq!(load_queue_row(&conn, &id).unwrap().unwrap().data, data);
+            }
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM recovery_action_log WHERE action_id='bind_order_create_base'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        }
+
+        #[test]
+        fn create_without_usable_version_preserves_original_then_refuses_marked_or_sends_legacy() {
+            for version in [Value::Null, json!(0), json!(-1), json!(2.5), json!("2")] {
+                for marked in [true, false] {
+                    let conn = test_connection();
+                    seed_order(&conn, None);
+                    let mut payload = header();
+                    if marked {
+                        payload["base_before_create"] = json!(true);
+                        payload["expected_version"] = Value::Null;
+                    }
+                    let id = queue_edit(&conn, payload, "pending", false);
+                    let original = load_queue_row(&conn, &id).unwrap().unwrap();
+                    create_ack(
+                        &conn,
+                        &json!({"data":{"id":"server-order","version":version}}),
+                    );
+                    let item = load_queue_row(&conn, &id).unwrap().unwrap();
+                    assert_eq!(item.data, original.data);
+                    assert_eq!(item.status, "pending");
+                    let payload: Value = serde_json::from_str(&item.data).unwrap();
+                    let prepared =
+                        prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap();
+                    if marked {
+                        assert!(
+                            matches!(prepared, RequestPreparation::Failed { reason } if reason == ORDER_EDIT_BASE_UNAVAILABLE)
+                        );
+                    } else {
+                        let RequestPreparation::Ready(spec) = prepared else {
+                            panic!("legacy edit keeps its frozen revision");
+                        };
+                        let wire: Value =
+                            serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+                        assert_eq!(wire["expected_version"], 1);
+                    }
+                    assert_eq!(
+                        conn.query_row(
+                            "SELECT remote_version FROM orders WHERE id='incident-order'",
+                            [],
+                            |r| r.get::<_, Option<i64>>(0)
+                        )
+                        .unwrap(),
+                        None
+                    );
+                }
+            }
+        }
+
+        fn unbound_header() -> Value {
+            let mut payload = header();
+            payload["base_before_create"] = json!(true);
+            payload["expected_version"] = Value::Null;
+            payload
+        }
+
+        #[test]
+        fn marked_unbound_header_without_server_id_still_waits_for_create() {
+            let conn = test_connection();
+            seed_order(&conn, None);
+            enqueue_test_item(&conn, "orders", "INSERT", "incident-order", json!({}));
+            let id = queue_edit(&conn, unbound_header(), "pending", false);
+            let item = load_queue_row(&conn, &id).unwrap().unwrap();
+            assert!(matches!(
+                prepare_order_request(&conn, &item, &unbound_header(), TEST_TERMINAL_ID).unwrap(),
+                RequestPreparation::WaitingForOrderCreate { .. }
+            ));
+            assert!(order_write_holds_payment(&conn, "incident-order").unwrap());
+            assert!(order_status_waits_for_queued_edit(&conn, "incident-order").unwrap());
+        }
+
+        #[test]
+        fn legacy_header_with_server_id_and_unknown_remote_version_sends_frozen_revision() {
+            let conn = test_connection();
+            seed_order(&conn, Some("server-order"));
+            let mut payload = header();
+            payload["expected_version"] = json!(4);
+            let id = queue_edit(&conn, payload.clone(), "pending", false);
+            let item = load_queue_row(&conn, &id).unwrap().unwrap();
+            let RequestPreparation::Ready(spec) =
+                prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap()
+            else {
+                panic!("legacy edit must send");
+            };
+            let wire: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+            assert_eq!(wire["expected_version"], 4);
+            assert_eq!(load_queue_row(&conn, &id).unwrap().unwrap().data, item.data);
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn marked_unbound_header_parks_visibly_and_releases_payment_and_status() {
+            let _keyring = crate::tests::fake_keyring::install_seeded([
+                ("terminal_id", TEST_TERMINAL_ID),
+                ("organization_id", "org-1"),
+                ("branch_id", TEST_BRANCH_ID),
+            ]);
+            // Reconciliation can leave either no remote revision or a later
+            // one. Neither is the create acknowledgement's captured base.
+            for remote_version in [None, Some(7)] {
+                let conn = test_connection();
+                seed_order(&conn, Some("server-order"));
+                conn.execute(
+                    "UPDATE orders SET remote_version=?1 WHERE id='incident-order'",
+                    [remote_version],
+                )
+                .unwrap();
+                let id = queue_edit(&conn, unbound_header(), "pending", false);
+                conn.execute("UPDATE parity_sync_queue SET module_type='orders',error_message=NULL WHERE id=?1",[&id]).unwrap();
+                let original = load_queue_row(&conn, &id).unwrap().unwrap().data;
+                conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,sync_status,sync_state,sync_last_error,created_at,updated_at)
+                    VALUES('unbound-payment','incident-order','cash',14.5,1450,'completed','pending','waiting_parent','Order update not yet synced',datetime('now'),datetime('now'))",[]).unwrap();
+                let payment = json!({"orderId":"incident-order","amount":14.5,"method":"cash"});
+                let payment_item =
+                    queue_item("payments", "INSERT", "unbound-payment", payment.clone());
+                assert!(matches!(
+                    prepare_payment_request(&conn, &payment_item, &payment, TEST_TERMINAL_ID)
+                        .unwrap(),
+                    RequestPreparation::WaitingForParent { .. }
+                ));
+                let db = std::sync::Mutex::new(conn);
+                let result = process_queue(&db, "http://127.0.0.1:9", "api-key")
+                    .await
+                    .unwrap();
+                assert_eq!(result.failed, 1);
+                let conn = db.into_inner().unwrap();
+                let parked = load_queue_row(&conn, &id).unwrap().unwrap();
+                assert_eq!(parked.status, "failed");
+                assert_eq!(
+                    parked.error_message.as_deref(),
+                    Some(ORDER_EDIT_BASE_UNAVAILABLE)
+                );
+                assert_eq!(parked.data, original);
+                assert!(is_refused_for_good(
+                    parked.error_message.as_deref().unwrap(),
+                    &parked.module_type
+                ));
+                let listed = renderer_list_actionable_items(
+                    &conn,
+                    &QueueListQuery {
+                        limit: Some(200),
+                        module_type: None,
+                    },
+                )
+                .unwrap();
+                assert!(listed
+                    .iter()
+                    .any(|row| row.id == id && row.status == "failed"));
+                assert!(matches!(
+                    prepare_payment_request(&conn, &payment_item, &payment, TEST_TERMINAL_ID)
+                        .unwrap(),
+                    RequestPreparation::Ready(_)
+                ));
+                assert_eq!(conn.query_row("SELECT sync_state,sync_last_error FROM order_payments WHERE id='unbound-payment'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))).unwrap(),("syncing".into(),None));
+                let status = json!({"orderId":"incident-order","organization_id":"org-1","status":"confirmed"});
+                let status_id =
+                    enqueue_test_item(&conn, "orders", "UPDATE", "incident-order", status.clone());
+                let status_item = load_queue_row(&conn, &status_id).unwrap().unwrap();
+                assert!(matches!(
+                    prepare_order_request(&conn, &status_item, &status, TEST_TERMINAL_ID).unwrap(),
+                    RequestPreparation::Ready(_)
+                ));
+                assert!(!order_status_waits_for_queued_edit(&conn, "incident-order").unwrap());
+                set_aside_queue_row(&conn, &id, "manager-1", "manager_reviewed").unwrap();
+                assert!(queue_row_is_set_aside(&conn, &id).unwrap());
+                assert_eq!(load_queue_row(&conn, &id).unwrap().unwrap().data, original);
+            }
+        }
+
+        #[test]
+        fn marked_unbound_header_barriers_follow_parked_state_and_strict_allowlist() {
+            for (status, set_aside, ready) in [
+                ("pending", false, false),
+                ("processing", false, false),
+                ("conflict", false, true),
+                ("failed", false, true),
+                ("pending", true, true),
+            ] {
+                assert_payment(unbound_header(), status, set_aside, ready);
+                let conn = test_connection();
+                seed_order(&conn, Some("server-order"));
+                queue_edit(&conn, unbound_header(), status, set_aside);
+                assert_eq!(
+                    order_status_waits_for_queued_edit(&conn, "incident-order").unwrap(),
+                    !ready
+                );
+            }
+            let mut money = unbound_header();
+            money["total_amount"] = json!(14.5);
+            assert_payment(money, "failed", false, false);
+        }
+
+        #[test]
+        fn create_binding_audit_failure_rolls_back_identity_and_payload() {
+            let conn = test_connection();
+            seed_order(&conn, None);
+            let id = queue_edit(&conn, header(), "pending", false);
+            let original = load_queue_row(&conn, &id).unwrap().unwrap().data;
+            conn.execute_batch("CREATE TRIGGER reject_binding BEFORE INSERT ON recovery_action_log BEGIN SELECT RAISE(ABORT,'audit unavailable'); END").unwrap();
+            let create = queue_item("orders", "INSERT", "incident-order", json!({}));
+            assert!(retry_transaction(&conn, |conn| apply_success(
+                conn,
+                &create,
+                Some(&json!({"data":{"id":"server-order","version":2}}))
+            ))
+            .is_err());
+            assert_eq!(load_queue_row(&conn, &id).unwrap().unwrap().data, original);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT supabase_id,remote_version FROM orders WHERE id='incident-order'",
+                    [],
+                    |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?))
+                )
+                .unwrap(),
+                (None, None)
+            );
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn status_follows_edit_even_when_status_has_higher_priority() {
+            let _keyring = crate::tests::fake_keyring::install_seeded([
+                ("terminal_id", TEST_TERMINAL_ID),
+                ("organization_id", "org-1"),
+                ("branch_id", TEST_BRANCH_ID),
+            ]);
+            let conn = test_connection();
+            seed_order(&conn, Some("server-order"));
+            conn.execute(
+                "UPDATE orders SET remote_version=1,status='ready' WHERE id='incident-order'",
+                [],
+            )
+            .unwrap();
+            let edit = queue_edit(&conn, header(), "pending", false);
+            let status = enqueue_test_item(
+                &conn,
+                "orders",
+                "UPDATE",
+                "incident-order",
+                json!({"orderId":"incident-order","organization_id":"org-1","status":"ready"}),
+            );
+            conn.execute(
+                "UPDATE parity_sync_queue SET priority=10 WHERE id=?1",
+                [&status],
+            )
+            .unwrap();
+            let (url, mut requests, server) = spawn_mock_http_server(vec![
+                MockResponse::json(
+                    200,
+                    json!({"success":true,"data":{"id":"server-order","version":2}}).to_string(),
+                ),
+                MockResponse::json(
+                    200,
+                    json!({"success":true,"data":{"id":"server-order","version":3}}).to_string(),
+                ),
+            ])
+            .await;
+            let db = std::sync::Mutex::new(conn);
+            // A pass visits at most as many rows as the queue held when it
+            // started (store switch release, 17/11/2026). The status row is
+            // visited first and waits behind its edit, so it is sent on the
+            // next pass. The order of the two requests is what must hold.
+            let mut processed = 0;
+            for _ in 0..2 {
+                processed += process_queue(&db, &url, "api-key").await.unwrap().processed;
+            }
+            let first = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let second = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let first: Value = serde_json::from_str(&first.body).unwrap();
+            let second: Value = serde_json::from_str(&second.body).unwrap();
+            assert_eq!(first["client_event_id"], "incident-event");
+            assert_eq!(first["expected_version"], 1);
+            assert_eq!(second["status"], "ready");
+            assert!(second.get("client_event_id").is_none());
+            assert_eq!(processed, 2);
+            let conn = db.into_inner().unwrap();
+            assert!(load_queue_row(&conn, &edit).unwrap().is_none());
+            assert!(load_queue_row(&conn, &status).unwrap().is_none());
+            server.abort();
+        }
+
+        #[test]
+        fn conflicted_header_releases_waiting_cash_payment() {
+            assert_payment(header(), "conflict", false, true);
+        }
+
+        #[test]
+        fn set_aside_refused_header_releases_waiting_cash_payment() {
+            assert_payment(header(), "failed", true, true);
+        }
+
+        #[test]
+        fn refused_failed_header_releases_waiting_cash_payment() {
+            assert_payment(header(), "failed", false, true);
+        }
+
+        #[test]
+        fn pending_header_still_holds_cash_payment() {
+            assert_payment(header(), "pending", false, false);
+        }
+
+        #[test]
+        fn processing_header_still_holds_cash_payment() {
+            assert_payment(header(), "processing", false, false);
+        }
+
+        #[test]
+        fn adjustment_behind_parked_header_proceeds_but_settlement_still_waits() {
+            for money_edit in [false, true] {
+                let conn = test_connection();
+                seed_order(&conn, Some("server-order"));
+                let mut parent = header();
+                if money_edit {
+                    parent["settlement_context"] = json!({"kind":"pos_edit_settlement"});
+                }
+                queue_edit(&conn, parent, "conflict", false);
+                conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,sync_status,sync_state,remote_payment_id,created_at,updated_at)
+                    VALUES('original-payment','incident-order','cash',14.5,1450,'completed','synced','applied','remote-payment',datetime('now'),datetime('now'))",[]).unwrap();
+                conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,sync_state,sync_last_error,created_at,updated_at)
+                    VALUES('incident-return','original-payment','incident-order','refund',1,100,'Recorded return','waiting_parent','Order update not yet synced',datetime('now'),datetime('now'))",[]).unwrap();
+                let payload = json!({"paymentId":"original-payment","orderId":"incident-order","parentEditEventId":"settled-event",
+                    "idempotency_key":"edit:settled-event:refund:0","adjustmentType":"refund","amount":1});
+                let item = queue_item(
+                    "payment_adjustments",
+                    "INSERT",
+                    "incident-return",
+                    payload.clone(),
+                );
+                let result =
+                    prepare_adjustment_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap();
+                if money_edit {
+                    assert!(matches!(
+                        result,
+                        RequestPreparation::WaitingForParent { .. }
+                    ));
+                } else {
+                    assert!(matches!(result, RequestPreparation::Ready(_)), "{result:?}");
+                    assert_eq!(conn.query_row("SELECT sync_state,sync_last_error FROM payment_adjustments WHERE id='incident-return'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))).unwrap(),("syncing".into(),None));
+                }
+            }
+        }
+
+        #[test]
+        fn failed_transient_and_unidentified_headers_keep_payment_barrier() {
+            let conn = test_connection();
+            seed_order(&conn, Some("server-order"));
+            let id = queue_edit(&conn, header(), "failed", false);
+            conn.execute(
+                "UPDATE parity_sync_queue SET error_message='HTTP_503_SERVER_ERROR' WHERE id=?1",
+                [&id],
+            )
+            .unwrap();
+            assert!(order_write_holds_payment(&conn, "incident-order").unwrap());
+            let mut payload = header();
+            payload.as_object_mut().unwrap().remove("client_event_id");
+            conn.execute(
+                "UPDATE parity_sync_queue SET status='conflict',data=?1 WHERE id=?2",
+                params![payload.to_string(), id],
+            )
+            .unwrap();
+            assert!(order_write_holds_payment(&conn, "incident-order").unwrap());
+        }
+
+        #[test]
+        fn conflicted_items_still_hold_cash_payment() {
+            let mut payload = header();
+            payload["items"] = json!([]);
+            assert_payment(payload, "conflict", false, false);
+        }
+
+        #[test]
+        fn inline_and_periodic_payment_promotion_ignore_parked_header() {
+            let conn = test_connection();
+            seed_order(&conn, Some("server-order"));
+            queue_edit(&conn, header(), "conflict", false);
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,sync_status,sync_state,sync_last_error,created_at,updated_at)
+                VALUES('promotion-payment','incident-order','cash',14.5,1450,'completed','pending','waiting_parent','Order update not yet synced',datetime('now'),datetime('now'))",[]).unwrap();
+            sync::promote_payments_for_order(&conn, "incident-order");
+            let read = |conn: &Connection| {
+                conn.query_row("SELECT sync_state,sync_last_error FROM order_payments WHERE id='promotion-payment'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))).unwrap()
+            };
+            assert_eq!(read(&conn), ("pending".into(), None));
+            conn.execute("UPDATE order_payments SET sync_state='waiting_parent',sync_last_error='Order update not yet synced'",[]).unwrap();
+            let db = crate::db::DbState {
+                conn: std::sync::Mutex::new(conn),
+                db_path: std::path::PathBuf::from(":memory:"),
+            };
+            assert_eq!(sync::reconcile_deferred_payments(&db).unwrap(), 1);
+            assert_eq!(read(&db.conn.lock().unwrap()), ("pending".into(), None));
+        }
+
+        #[test]
+        fn conflicted_settlement_still_holds_cash_payment() {
+            let mut payload = header();
+            payload["settlement_context"] = json!({"kind":"pos_edit_settlement"});
+            assert_payment(payload, "conflict", false, false);
+        }
+
+        #[test]
+        fn header_with_a_money_key_still_holds_cash_payment() {
+            for key in [
+                "totalAmount",
+                "delivery_fee",
+                "tip_amount",
+                "payment_status",
+                "order_type",
+                "table_id",
+                "driver_id",
+                "notes",
+            ] {
+                let mut payload = header();
+                payload[key] = json!(0);
+                assert_payment(payload, "conflict", false, false);
+            }
+        }
+    }
+
     #[test]
     fn salon_replay_keeps_identity_waits_and_remaps_followups() {
         let conn = test_connection();
@@ -20689,7 +21819,103 @@ pub(crate) mod tests {
         create_tables(&conn).expect("create sync queue tables");
         crate::db::set_setting(&conn, "terminal", "__ignore_keyring", "1")
             .expect("disable keyring reads for sync_queue tests");
+        seed_shared_scope(&conn);
         conn
+    }
+
+    fn seed_shared_scope(conn: &Connection) {
+        for (key, value) in [
+            ("group_organization_id", "org-1"),
+            ("group_terminal_id", TEST_TERMINAL_ID),
+            ("group_branch_id", TEST_BRANCH_ID),
+        ] {
+            if crate::db::get_setting(conn, "terminal", key).is_none() {
+                crate::db::set_setting(conn, "terminal", key, value).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_scope_unknown_drain_finishes_and_preserves_original_retry_state() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let id = enqueue_test_item(
+            &conn,
+            "customers",
+            "INSERT",
+            "unscoped",
+            json!({
+                "organization_id": "org-1", "terminal_id": TEST_TERMINAL_ID,
+                "group_id": "org-1", "name": "Original"
+            }),
+        );
+        conn.execute("UPDATE parity_sync_queue SET attempts=3,claim_generation=7,next_retry_at='2000-01-01T00:00:00Z',retry_delay_ms=64000,error_message='original failure' WHERE id=?1", [&id]).unwrap();
+        // Simulate a phase-2 original without the separate ownership record.
+        conn.execute("DELETE FROM shared_queue_scope WHERE queue_id=?1", [&id])
+            .unwrap();
+        let before = full_queue_row_fingerprint(&conn, &id);
+        let conn = std::sync::Mutex::new(conn);
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            process_queue(&conn, "http://127.0.0.1:9", "test-key"),
+        )
+        .await
+        .expect("unclaimable work must not spin")
+        .unwrap();
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.telemetry.replay_attempts, 0);
+        let conn = conn.lock().unwrap();
+        assert_eq!(full_queue_row_fingerprint(&conn, &id), before);
+        let listing = list_set_aside_entries(&conn).unwrap();
+        assert_eq!(listing.len(), 1);
+        assert_eq!(listing[0].reason_code, "SHARED_SCOPE_UNKNOWN");
+        assert_eq!(listing[0].queue_id, id);
+        assert!(!has_actionable_internal_work(&conn).unwrap());
+        assert!(renderer_dequeue(&conn).unwrap().is_none());
+        assert!(peek(&conn).unwrap().is_none());
+        assert_eq!(crate::group_scope::set_aside_unclaimable(&conn).unwrap(), 0);
+        // Matching organization/terminal/payload is not durable group history.
+        assert!(!crate::group_scope::queue_item_allowed(&conn, &id).unwrap());
+    }
+
+    #[test]
+    fn shared_scope_changed_is_visible_and_never_automatically_revived() {
+        let conn = test_connection();
+        let id = enqueue_test_item(
+            &conn,
+            "suppliers",
+            "UPDATE",
+            "supplier",
+            json!({"name":"kept"}),
+        );
+        let before = full_queue_row_fingerprint(&conn, &id);
+        crate::db::set_setting(&conn, "terminal", "group_id", "other-group").unwrap();
+        assert!(dequeue(&conn).unwrap().is_none());
+        assert_eq!(full_queue_row_fingerprint(&conn, &id), before);
+        assert_eq!(
+            list_set_aside_entries(&conn).unwrap()[0].reason_code,
+            "SHARED_SCOPE_CHANGED"
+        );
+        crate::db::set_setting(&conn, "terminal", "group_id", "org-1").unwrap();
+        assert!(dequeue(&conn).unwrap().is_none());
+        assert!(peek(&conn).unwrap().is_none());
+        assert_eq!(full_queue_row_fingerprint(&conn, &id), before);
+    }
+
+    #[test]
+    fn shared_scope_enqueue_and_ownership_are_atomic() {
+        let conn = test_connection();
+        conn.execute_batch("CREATE TRIGGER refuse_shared_scope BEFORE INSERT ON shared_queue_scope BEGIN SELECT RAISE(ABORT,'scope disk failure'); END;").unwrap();
+        let input = EnqueueInput {
+            table_name: "customers".into(),
+            ..capacity_enqueue_input("atomic-shared")
+        };
+        assert!(enqueue(&conn, &input)
+            .unwrap_err()
+            .contains("scope disk failure"));
+        assert_eq!(get_length(&conn).unwrap(), 0);
+        assert!(conn.is_autocommit());
     }
 
     static RENDERER_RACE_WAITING_ON_WRITE: std::sync::atomic::AtomicBool =
@@ -21029,6 +22255,7 @@ pub(crate) mod tests {
         record_id: &str,
         data: Value,
     ) -> String {
+        seed_shared_scope(conn);
         enqueue(
             conn,
             &EnqueueInput {
@@ -21195,6 +22422,13 @@ pub(crate) mod tests {
     #[test]
     fn repair_rows_are_claimed_only_with_the_repair_gate_open() {
         let conn = test_connection();
+        crate::db::set_setting(
+            &conn,
+            "terminal",
+            "group_organization_id",
+            "11111111-1111-4111-8111-111111111111",
+        )
+        .unwrap();
         let repair_id = "44444444-4444-4444-8444-444444444444";
         let operation_id = "66666666-6666-4666-8666-666666666666";
         enqueue_repair_with_fixed_id(
@@ -21348,7 +22582,11 @@ pub(crate) mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = tokio::spawn(async move {
             for response in responses {
-                let (mut stream, _) = listener.accept().await.expect("accept request");
+                let (mut stream, _) =
+                    tokio::time::timeout(Duration::from_secs(15), listener.accept())
+                        .await
+                        .expect("queue did not send the expected mock request within 15s")
+                        .expect("accept request");
                 let captured = read_http_request(&mut stream).await;
                 tx.send(captured).expect("send captured request");
                 write_http_response(&mut stream, &response)
@@ -21377,7 +22615,11 @@ pub(crate) mod tests {
         let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(async move {
-            let (mut first_stream, _) = listener.accept().await.expect("accept first request");
+            let (mut first_stream, _) =
+                tokio::time::timeout(Duration::from_secs(15), listener.accept())
+                    .await
+                    .expect("queue did not send the expected first request within 15s")
+                    .expect("accept first request");
             let first = read_http_request(&mut first_stream).await;
             observed_tx
                 .send(())
@@ -22196,6 +23438,7 @@ pub(crate) mod tests {
 
     #[test]
     fn customer_manual_resolution_parking_survives_reopen_and_is_not_requeued() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let path = std::env::temp_dir().join(format!(
             "the-small-customer-country-{}.sqlite",
             Uuid::new_v4()
@@ -32089,6 +33332,14 @@ pub(crate) mod tests {
     }
 
     fn seed_gap_generic_control(conn: &Connection, item_id: &str) {
+        seed_shared_scope(conn);
+        crate::db::set_setting(
+            conn,
+            "terminal",
+            "group_organization_id",
+            "semantic-gap-org",
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO parity_sync_queue (
                  id, table_name, record_id, operation, data, organization_id,
@@ -32100,6 +33351,8 @@ pub(crate) mod tests {
             params![item_id, format!("{item_id}-record")],
         )
         .expect("seed semantic-gap generic control");
+        crate::group_scope::record_queue_scope(conn, item_id, "customers", "semantic-gap-org")
+            .unwrap();
     }
 
     fn insert_gap_semantic_poison(conn: &Connection, prefix: &str) {
@@ -32417,7 +33670,10 @@ pub(crate) mod tests {
         let address = listener.local_addr().expect("strict mock server address");
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(15), listener.accept())
+                .await
+                .expect("queue did not send the expected strict request within 15s")
+                .expect("accept request");
             let captured = read_http_request(&mut stream).await;
             tx.send(CapturedRequest {
                 request_line: captured.request_line.clone(),
@@ -32772,6 +34028,13 @@ pub(crate) mod tests {
     async fn process_queue_sends_terminal_id_header_on_parity_requests() {
         clear_terminal_identity();
         let conn = test_connection();
+        for (key, value) in [
+            ("group_organization_id", "org-1"),
+            ("group_branch_id", ""),
+            ("group_terminal_id", "terminal-test"),
+        ] {
+            crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
         crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
             .expect("store terminal id");
         let queue_id = enqueue_test_item(
@@ -32964,6 +34227,13 @@ pub(crate) mod tests {
     async fn process_queue_marks_items_failed_when_terminal_context_is_missing() {
         clear_terminal_identity();
         let conn = test_connection();
+        for (key, value) in [
+            ("group_organization_id", "org-1"),
+            ("group_branch_id", ""),
+            ("group_terminal_id", "terminal-test"),
+        ] {
+            crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
         let queue_id = enqueue_test_item(
             &conn,
             "customers",
@@ -33019,6 +34289,13 @@ pub(crate) mod tests {
     async fn process_queue_retries_failed_missing_terminal_context_items_after_fix() {
         clear_terminal_identity();
         let conn = test_connection();
+        for (key, value) in [
+            ("group_organization_id", "org-1"),
+            ("group_branch_id", ""),
+            ("group_terminal_id", "terminal-test"),
+        ] {
+            crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
         crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
             .expect("store terminal id");
         let queue_id = enqueue_test_item(
@@ -36789,6 +38066,7 @@ pub(crate) mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn claim_time_quarantine_is_counted_and_cannot_report_batch_success() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let (fixture, setup) = FileBackedTestDb::new("claim-time-quarantine-count");
         let process_db = std::sync::Mutex::new(setup);
         let database_path = fixture.path.clone();
@@ -37347,6 +38625,8 @@ pub(crate) mod tests {
 
     fn seed_timestamp_format_backoff_rows(conn: &Connection, prefix: &str) -> String {
         seed_terminal_context(conn);
+        seed_shared_scope(conn);
+        crate::db::set_setting(conn, "terminal", "group_organization_id", "backoff-org").unwrap();
         conn.execute(
             "INSERT INTO parity_sync_queue (
                  id, table_name, record_id, operation, data, organization_id,
@@ -37370,6 +38650,9 @@ pub(crate) mod tests {
             ],
         )
         .expect("seed timestamp-format backoff rows");
+        for id in [format!("{prefix}-due"), format!("{prefix}-future")] {
+            crate::group_scope::record_queue_scope(conn, &id, "customers", "backoff-org").unwrap();
+        }
         assert!(
             conn.query_row(
                 "SELECT julianday(next_retry_at) > julianday('now')
@@ -40789,6 +42072,13 @@ pub(crate) mod tests {
     async fn process_queue_sends_waiting_rows_as_replays_and_fresh_rows_live() {
         clear_terminal_identity();
         let conn = test_connection();
+        for (key, value) in [
+            ("group_organization_id", "org-1"),
+            ("group_branch_id", ""),
+            ("group_terminal_id", "terminal-test"),
+        ] {
+            crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
         crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
             .expect("store terminal id");
         let waited = enqueue_test_item(
@@ -40844,6 +42134,13 @@ pub(crate) mod tests {
     async fn process_queue_holds_every_row_for_retry_after_after_a_429() {
         clear_terminal_identity();
         let conn = test_connection();
+        for (key, value) in [
+            ("group_organization_id", "org-1"),
+            ("group_branch_id", ""),
+            ("group_terminal_id", "terminal-test"),
+        ] {
+            crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
         crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
             .expect("store terminal id");
         for index in 0..2 {
@@ -41056,6 +42353,13 @@ pub(crate) mod tests {
                     ],
                 )
                 .expect("seed backlog row");
+                crate::group_scope::record_queue_scope(
+                    &conn,
+                    &format!("sim-{order}-{index}"),
+                    "customers",
+                    "org-1",
+                )
+                .unwrap();
                 rows += 1;
             }
         }
@@ -41176,7 +42480,9 @@ pub(crate) mod tests {
             if remaining == 0 {
                 break;
             }
-            assert!(passes < 200_000, "catch-up harness did not converge");
+            assert!(passes < rows + 100, "catch-up harness did not converge");
+            assert!(refusals_after > refusals_before || !parked.is_empty(),
+                "catch-up pass made no progress with {remaining} retained rows; check queue scope and claim eligibility");
             // The background loop sleeps 15 s between passes.
             server.lock().expect("sim lock").now_ms += 15_000;
         }
@@ -42565,6 +43871,13 @@ pub(crate) mod tests {
                         json!({ "code": format!("WEEK{index:03}") }).to_string(),
                         format!("2026-10-20T08:{:02}:{:02}Z", index / 60, index % 60),
                     ],
+                )
+                .unwrap();
+                crate::group_scope::record_queue_scope(
+                    &conn,
+                    &format!("offline-row-{index:03}"),
+                    "coupons",
+                    "org-1",
                 )
                 .unwrap();
             }

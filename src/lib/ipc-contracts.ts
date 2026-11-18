@@ -1496,6 +1496,8 @@ export interface DiagnosticsCheckoutPaymentBlockers {
 }
 
 export interface DiagnosticsSystemHealth {
+  orderNotices?: import('./order-sync-notices').OrderSyncNotice[] | null;
+  orderNoticeGate?: { status: 'unknown' | 'unavailable' | 'clear'; code?: string; refusal_count?: number; pending_report?: boolean };
   schemaVersion: number;
   syncBacklog: Record<string, Record<string, number>>;
   /**

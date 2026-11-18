@@ -106,6 +106,7 @@ const entityLabelKey: Record<string, string> = {
 
 const actionButtonTone = (action: RecoveryActionDescriptor) => {
   if (action.recommended) {
+    if (action.id === 'resendOrderCustomerCorrection') { return 'bg-yellow-400 text-zinc-950 border-yellow-400 active:bg-yellow-300'; }
     return 'border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-800 active:bg-emerald-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-emerald-100 dark:active:bg-zinc-800';
   }
   if (action.safetyLevel === 'destructive_server') {
@@ -373,13 +374,18 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
   const staleDiagnostics = useRef(diagnosticsStale);
   staleDiagnostics.current = diagnosticsStale;
   const pendingIssueIdRef = useRef<string | null>(null);
+  const pendingCorrectionRef = useRef<{ orderId: string; startedAt: number } | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   useEffect(() => {
-    if (pendingIssueIdRef.current && !issues.some(issue => issue.id === pendingIssueIdRef.current)) {
+    const correction = pendingCorrectionRef.current;
+    const correctionVerified = !correction || recentActions.some(entry => entry.actionId === 'resendOrderCustomerCorrection' &&
+      entry.targetRefs?.orderId === correction.orderId && entry.outcome === 'resolved' && entry.success && Date.parse(entry.timestamp) >= correction.startedAt);
+    if (!diagnosticsStale && correctionVerified && pendingIssueIdRef.current && !issues.some(issue => issue.id === pendingIssueIdRef.current)) {
       pendingIssueIdRef.current = null;
+      pendingCorrectionRef.current = null;
       setActionFeedback(t('recovery.center.outcomes.resolved'));
     }
-  }, [issues, t]);
+  }, [issues, recentActions, t, diagnosticsStale]);
   const [confirmingAction, setConfirmingAction] = useState<{
     issue: RecoveryIssue;
     action: RecoveryActionDescriptor;
@@ -446,6 +452,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     actionInFlight.current = true;
     setActionFeedback(null);
     const actionKey = `${issue.id}:${action.id}`;
+    const startedAt = Date.now();
     const request = buildRecoveryActionRequest(issue, action);
     let snapshotPointId: string | null = null;
     let exportPath: string | null = null;
@@ -461,6 +468,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
       issueId: issue.id,
       entityType: issue.entityType,
       queueId: issue.queueId ?? null,
+      noticeQueueId: issue.params?.sampleItemId ?? issue.params?.queueId ?? (issue.queueId == null ? null : `financial:${issue.queueId}`),
       success,
       outcome,
       timestamp: new Date().toISOString(),
@@ -543,6 +551,8 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
       } else if (pendingVerification) {
         outcome = 'pending';
         pendingIssueIdRef.current = issue.id;
+        pendingCorrectionRef.current = issue.code === 'customer_correction_refused' && issue.orderId
+          ? { orderId: issue.orderId, startedAt } : null;
         const pendingMessage = t('recovery.messages.actionPendingVerification', {
           action: t(action.labelKey, { defaultValue: action.id }),
           defaultValue:

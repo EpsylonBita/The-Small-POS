@@ -399,6 +399,11 @@ fn terminal_identity_rollback_binding(
 }
 
 fn validate_generic_setting_update(category: &str, key: &str) -> Result<(), String> {
+    if category.trim().eq_ignore_ascii_case("terminal")
+        && key.trim().to_ascii_lowercase().starts_with("group_")
+    {
+        return Err("TRUSTED_GROUP_NATIVE_ONLY".into());
+    }
     if crate::is_sensitive_setting_path(category, key) {
         Err("PROTECTED_TERMINAL_SETTING".to_string())
     } else if category
@@ -1535,7 +1540,7 @@ fn clear_terminal_rebind_operational_data(
     let transaction = crate::db::immediate_transaction(&conn)
         .map_err(|error| format!("clear operational data: {error}"))?;
     crate::core_helpers::ensure_no_unsent_money(&transaction)?;
-    crate::core_helpers::clear_generic_operational_data_in_transaction(&transaction)?;
+    crate::core_helpers::clear_rebind_operational_data_in_transaction(&transaction)?;
     transaction
         .commit()
         .map_err(|error| format!("clear operational data: {error}"))
@@ -2828,8 +2833,6 @@ where
         .and_then(Value::as_str);
     apply_refresh_secondary_settings_under_lock(db, &secondary_updates, supabase_anon_key)?;
 
-    crate::cache_terminal_settings_snapshot(db, &resp)
-        .map_err(|_| "SETTINGS_DURABLE_WRITE_FAILED".to_string())?;
     // A settings sync may have changed the branch or its plugins: ask for the
     // fiscal-active verdict on the next sync pass (29/09/2026).
     crate::fiscal::status::mark_due();
@@ -2837,6 +2840,8 @@ where
         prepare_terminal_connection_rebind(db)?;
         finish_terminal_connection_rebind(db)?;
     }
+    crate::cache_terminal_settings_snapshot(db, &resp)
+        .map_err(|_| "SETTINGS_DURABLE_WRITE_FAILED".to_string())?;
     completion()?;
 
     Ok(())

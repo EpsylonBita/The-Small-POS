@@ -73,7 +73,8 @@ export async function executeHealthRecoveryAction(options: {
   return authorize({ scope: 'cash_drawer_control',
     action: async () => { check(); await options.beforeExecute?.(); check();
       return getBridge().recovery.executeAction({ ...request, ...(snapshotPointId ? { snapshotPointId } : {}) }); },
-    title: t('recovery.confirmations.cashDrawerControl.title'), subtitle: t('recovery.confirmations.cashDrawerControl.subtitle') });
+    title: t('recovery.confirmations.cashDrawerControl.title', { defaultValue: 'Confirm recovery action' }),
+    subtitle: t('recovery.confirmations.cashDrawerControl.subtitle', { defaultValue: 'Enter the cashier or manager PIN to run this recovery action.' }) });
 }
 
 function refusalCode(error: unknown): string | null {

@@ -6993,6 +6993,12 @@
       "reversal": "Zahlung rückgängig gemacht"
     },
     "capture": {
+      "subtype": {
+        "scanner": "Scanner",
+        "file": "Datei",
+        "camera": "Kamera",
+        "unknown": "Unbekannte Quelle"
+      },
       "automation": {
         "recordedMark": "Von allein gespeichert",
         "recordedStockMark": "Von allein gespeichert · Lager aktualisiert",
@@ -7046,7 +7052,16 @@
         "rescanned": "Seite ersetzt.",
         "moveEarlier": "Nach vorne schieben",
         "moveLater": "Nach hinten schieben",
-        "capReached": "Mehr Seiten passen nicht in eine Rechnung. Schließen Sie diese ab und beginnen Sie für den Rest eine neue.",
+        "paperSource": "Papierquelle",
+        "flatbed": "Flachbett / ein Blatt",
+        "feeder": "Einzug / einseitiger Stapel",
+        "folderBoundary": "Eine Rechnung pro Erfassung. Speichern Sie eine mehrseitige Rechnung als eine PDF; separate Bilddateien werden zu separaten Erfassungen.",
+        "oneInvoice": "Eine Rechnung pro Erfassung",
+        "capReached": "Diese Rechnung hat die Seitengrenze erreicht. Ihre Seiten sind hier gespeichert. Halten Sie die vollständige Rechnung zusammen; reichen Sie sie nicht in Teilen ein.",
+        "admissionReview": "Die Lesungen müssen geprüft werden. Ihre Rechnung und alle Seiten sind gespeichert.",
+        "rotate": "Seite im Uhrzeigersinn drehen",
+        "admissionRecorded": "Rechnung erfasst",
+        "admissionWaiting": "Warten auf das Lesen der Rechnung",
         "stoppedEarly": "Der Scanner hat angehalten, bevor der Einzug leer war. Wenn noch Seiten darin liegen, fügen Sie sie hinzu, bevor Sie abschließen.",
         "finishAndStartAnother": "Diese abschließen und eine neue beginnen",
         "needAPage": "Fügen Sie mindestens eine Seite hinzu, bevor Sie abschließen."
@@ -7109,6 +7124,7 @@
         "device_error": "Der Scanner hat nicht geantwortet. Prüfen Sie, ob er an und angeschlossen ist."
       },
       "status": {
+        "excluded": "Keine Rechnung",
         "capturing": "Wird noch gescannt",
         "waiting": "Wartet aufs Lesen",
         "uploading": "Seiten werden gesendet",
@@ -7313,6 +7329,14 @@
       "emptyDescription": "Kontakt- und Rechnungsdaten werden hier angezeigt."
     },
     "import": {
+      "negativeStockWarning": "Der Bestand ist nach diesem Eintrag negativ. Prüfen Sie den Lagerbestand.",
+      "appliedStockQuantity": "Gebuchte Menge: {{quantity}}",
+      "staffSessionRequired": "Verbinden Sie sich mit dem Büro und melden Sie sich erneut zur Schicht an. Ihre Eingaben bleiben erhalten.",
+      "tillSpreadsheetUnavailable": "Tabellenimport ist an dieser Kasse noch nicht verfügbar. Ihre Zeilen bleiben erhalten.",
+      "documentRetained": "Dokument zur Verarbeitung gespeichert. Den Fortschritt finden Sie unter gescannten Rechnungen.",
+      "documentRetainedUnsupported": "Das Word-Original bleibt auf dieser Kasse gespeichert. Word-Upload ist noch nicht verfügbar. Exportieren und wählen Sie eine PDF.",
+      "poLinkOnly": "Rechnung mit der Bestellung verknüpfen (ohne Liefermengen zu buchen).",
+      "stockLineResult": "Zeile {{row}}: Bestand für {{item}} gebucht · Bewegung {{movement}}",
       "open": "Artikel importieren",
       "title": "Lieferantenartikel importieren",
       "subtitle": "Prüfen Sie die Zeilen, bevor sie mit dem Bestand synchronisiert werden.",
@@ -9358,6 +9382,12 @@
     "portionNotSaved": "Karte belastet, Zahlung noch nicht gespeichert. Nicht erneut belasten."
   },
   "recovery": {
+    "confirmations": {
+      "cashDrawerControl": {
+        "title": "Wiederherstellungsaktion bestätigen",
+        "subtitle": "Geben Sie die PIN eines Kassierers oder Managers ein, um diese Wiederherstellungsaktion auszuführen."
+      }
+    },
     "common": {
       "reference": "Referenz",
       "entityId": "Entitäts-ID",
@@ -9604,6 +9634,17 @@
       }
     },
     "recipes": {
+      "orderCustomerCorrection": {
+        "title": "Änderung der Kundendaten",
+        "summary": "Die Änderung an den Kundendaten wurde nicht gespeichert. Der Verkauf und die Zahlung sind davon nicht betroffen.",
+        "guidance": "Speichern Sie die Änderung erneut oder behalten Sie die Daten so bei, wie sie jetzt sind.",
+        "resend": "Änderung der Kundendaten erneut speichern",
+        "resendExplanation": "Versuchen Sie, dieselbe Änderung der Kundendaten erneut zu speichern.",
+        "pending": "Wird gespeichert… Bitte warten Sie einen Moment.",
+        "keep": "Daten so beibehalten, wie sie jetzt sind",
+        "keepExplanation": "Verwenden Sie die bereits erfassten Kunden- und Lieferdaten. Die nicht gespeicherte Änderung bleibt im Verlauf erhalten.",
+        "confirmed": "Die Bestellung verwendet jetzt die bereits erfassten Daten."
+      },
       "restoreLastKnownPrinterBrand": {
         "title": "Die Druckersprache wurde nicht erkannt",
         "label": "Gespeicherte Druckersprache wiederherstellen",
@@ -10674,5 +10715,39 @@
     "attention": "Arbeitskarte: {{count}} Buchungen erfordern eine Aktion. Siehe Admin → Personalplanung → ERGANI-Protokoll.",
     "zHint": "Jede Person soll sich mit ihrer eigenen PIN abmelden, damit das Ende der Arbeitskarte gesendet werden kann.",
     "dismiss": "Für 1 Stunde ausblenden"
+  }
+,
+  "orderSyncNotice": {
+    "checkUnavailableHealth": "Die Kasse kann gerade nicht prüfen, ob bei Bestellungen noch etwas zu klären ist. Sie bleiben bei den aktiven Bestellungen.",
+    "checkUnavailableGuidance": "Versuchen Sie es gleich noch einmal. Falls das weiterhin passiert, rufen Sie den Support an.",
+    "checkUnavailable": "Die Kasse kann gerade nicht prüfen, ob bei Bestellung #{{number}} noch etwas zu klären ist. Deshalb bleibt sie bei den aktiven Bestellungen. Versuchen Sie es gleich noch einmal. Falls das weiterhin passiert, rufen Sie den Support an.",
+    "checkUnavailableMany": "Die Kasse kann gerade nicht prüfen, ob bei den Bestellungen {{numbers}} noch etwas zu klären ist. Deshalb bleiben sie bei den aktiven Bestellungen. Versuchen Sie es gleich noch einmal. Falls das weiterhin passiert, rufen Sie den Support an.",
+    "moveBlocked": "Bestellung {{number}} hat ein Problem, das zuerst gelöst werden muss. Öffnen Sie sie, um zu sehen, was zu tun ist.",
+    "movesBlocked": "Nicht verschoben: {{numbers}}. Bei diesen Bestellungen muss zuerst ein Problem gelöst werden.",
+    "remainsActive": "Bis das Problem gelöst ist, bleibt die Bestellung bei den aktiven Bestellungen.",
+    "needsAction": "Bitte prüfen",
+    "customer_correction_refused": "Die Änderung an den Kundendaten wurde nicht gespeichert. Der Verkauf und die Zahlung sind davon nicht betroffen.",
+    "change_refused": "Eine Änderung an dieser Bestellung wurde nicht gespeichert. Sie können weiter bedienen.",
+    "payment_not_on_server": "Eine Zahlung für diese Bestellung wurde noch nicht erfasst. Kassieren Sie nicht noch einmal.",
+    "next": "Drücken Sie die Schaltfläche, um erneut zu speichern.",
+    "resend": "Erneut speichern",
+    "guided": "Bestellung prüfen",
+    "pending": "Wird gespeichert… Bitte warten Sie einen Moment.",
+    "failedAgain": "Die Änderung wurde auch diesmal nicht gespeichert. Informieren Sie die verantwortliche Person.",
+    "failed": "Die Änderung wurde nicht gespeichert. Versuchen Sie es gleich noch einmal. Falls es weiterhin nicht klappt, informieren Sie die verantwortliche Person.",
+    "changed": "Die Bestellung hat sich inzwischen geändert. Informieren Sie die verantwortliche Person.",
+    "offline": "Es besteht keine Internetverbindung. Versuchen Sie es erneut, sobald die Verbindung wieder da ist.",
+    "wait": "Beenden Sie zuerst den Verkauf, die Zahlung oder den Abschluss und versuchen Sie es dann erneut.",
+    "busy": "Wird geprüft…",
+    "loading": "Die Bestellung wird geprüft…",
+    "stale": "Der Hinweis wurde nicht aktualisiert. Der zuletzt bekannte Hinweis wird angezeigt.",
+    "shift": "Bestellungen vor dem Gehen prüfen",
+    "shiftHint": "Sie verhindern nicht, dass Sie Ihre Schicht abschließen.",
+    "order": "Bestellung {{number}}",
+    "toast": "Bitte prüfen Sie Bestellung {{number}}. Öffnen Sie sie.",
+    "saving": "Wird gespeichert…",
+    "tryAgain": "Erneut versuchen",
+    "notSolved": "Das Problem wurde nicht gelöst. Informieren Sie die verantwortliche Person.",
+    "noRemedy": "Dieses Problem lässt sich hier nicht lösen. Informieren Sie die verantwortliche Person."
   }
 }

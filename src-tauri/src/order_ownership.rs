@@ -6,6 +6,7 @@ use crate::business_day;
 use crate::money::Cents;
 
 pub struct DriverOwnershipAssignment {
+    pub completion_refusal: Option<String>,
     pub driver_shift_id: String,
     pub branch_id: String,
     pub delivery_fee: f64,
@@ -280,8 +281,28 @@ pub fn assign_order_to_driver_shift(
     driver_shift_id: &str,
     now: &str,
 ) -> Result<DriverOwnershipAssignment, String> {
+    if conn.is_autocommit() {
+        let tx = crate::db::immediate_transaction(conn).map_err(|e| e.to_string())?;
+        let result = assign_order_to_driver_shift(
+            &tx,
+            order_id,
+            driver_id,
+            driver_name,
+            driver_shift_id,
+            now,
+        )?;
+        tx.commit().map_err(|e| e.to_string())?;
+        return Ok(result);
+    }
     let current = load_order_attribution_snapshot(conn, order_id)?;
-    let target_status = if is_final_order_status(&current.status) {
+    // Assignment and receipt custody must still succeed. An open notice only
+    // suppresses the incidental move out of the active orders.
+    let completion_refusal = if is_final_order_status(&current.status) {
+        None
+    } else {
+        crate::order_notice_recovery::require_no_open_notice(conn, order_id, "delivered").err()
+    };
+    let target_status = if is_final_order_status(&current.status) || completion_refusal.is_some() {
         None
     } else {
         Some("delivered")
@@ -318,6 +339,7 @@ pub fn assign_order_to_driver_shift(
         };
 
     Ok(DriverOwnershipAssignment {
+        completion_refusal,
         driver_shift_id: driver_shift_id.to_string(),
         branch_id: applied.branch_id,
         delivery_fee: applied.delivery_fee,

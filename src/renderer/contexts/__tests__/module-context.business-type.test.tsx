@@ -10,7 +10,7 @@ const bridge = vi.hoisted(() => ({
   modules: { fetchFromAdmin: vi.fn(async () => ({ success: false })) },
 }));
 vi.mock('../../../lib', () => ({ getBridge: () => bridge, onEvent: vi.fn(), offEvent: vi.fn() }));
-vi.mock('../../services/terminal-credentials', () => ({ getCachedTerminalCredentials: () => ({ terminalId: 'terminal' }) }));
+vi.mock('../../services/terminal-credentials', () => ({ getCachedTerminalCredentials: () => ({ terminalId: 'terminal', organizationId: 'org', branchId: 'branch' }) }));
 import { ModuleProvider, useModules } from '../module-context';
 
 function State() {
@@ -19,6 +19,7 @@ function State() {
 }
 afterEach(() => { cleanup(); localStorage.clear(); });
 it('resolves a convenience_store terminal without rejecting its business type', async () => {
+  localStorage.setItem('admin_dashboard_url', 'https://admin.test');
   render(<ModuleProvider><State /></ModuleProvider>);
   await waitFor(() => expect(screen.getByRole('status').textContent).toContain('"businessType":"convenience"'));
   expect(screen.getByRole('status').textContent).not.toContain('Invalid business type');

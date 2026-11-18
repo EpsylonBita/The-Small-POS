@@ -33,6 +33,7 @@ pub const KINDS: &[&str] = &[
 pub struct Tools {
     live: PathBuf,
     replicas: Mutex<ReplicaManager>,
+    personal_replicas: Mutex<ReplicaManager>,
     network: Mutex<network::DiscoveryState>,
     personal_mask: Mutex<Option<(String, super::evidence::Policy)>>,
 }
@@ -50,6 +51,7 @@ pub fn initialize(dir: &Path) -> Result<(), String> {
     let tools = Arc::new(Tools {
         live: dir.join("pos.db"),
         replicas: Mutex::default(),
+        personal_replicas: Mutex::default(),
         network: Mutex::default(),
         personal_mask: Mutex::default(),
     });
@@ -70,6 +72,9 @@ pub fn end_session() {
         // A collector never owns the Core mutex. Ending takes away authority
         // first; cancelled workers cannot publish a new replica afterwards.
         if let Ok(mut replica) = tools.replicas.lock() {
+            replica.clear();
+        }
+        if let Ok(mut replica) = tools.personal_replicas.lock() {
             replica.clear();
         }
         if let Ok(mut mask) = tools.personal_mask.lock() {
@@ -184,20 +189,34 @@ impl Tools {
                     }
                 }
                 if c.kind == "till_sql_query" && personal {
-                    let replica = replica::build_evidence(&self.live, permit, true)?;
-                    let value = sql_query::query(&replica, input, permit)?;
-                    return evidence_meta(value, evidence_policy);
+                    let mut manager = self
+                        .personal_replicas
+                        .lock()
+                        .map_err(|_| "INTERNAL_ERROR")?;
+                    let replica =
+                        manager.get_evidence(&self.live, &c.session_id, false, permit, true)?;
+                    let value = sql_query::query(&replica, input, permit);
+                    manager.clear();
+                    return value.and_then(|v| evidence_meta(v, evidence_policy));
                 }
                 let mut manager = self.replicas.lock().map_err(|_| "INTERNAL_ERROR")?;
                 let at = Instant::now();
-                let r = manager.get(
+                let r = match manager.get(
                     &self.live,
                     &c.session_id,
                     c.kind == "till_sql_refresh_replica",
                     permit,
-                )?;
+                ) {
+                    // A readiness retry observes the completed copy without
+                    // scheduling another build inside the refresh cooldown.
+                    Err(code) if c.kind == "till_sql_refresh_replica" && code == "RATE_LIMITED" => {
+                        manager.get(&self.live, &c.session_id, false, permit)
+                    }
+                    result => result,
+                }?;
+                drop(manager);
                 if c.kind == "till_sql_query" {
-                    sql_query::query(r, input, permit)?
+                    sql_query::query(&r, input, permit)?
                 } else if c.kind == "till_sql_schema" {
                     json!({"database":"main","replica_taken_at":r.taken_at,"sqlite_version":rusqlite::version(),"tables":r.schema})
                 } else {
@@ -572,9 +591,25 @@ mod tests {
         command.kind = "till_sql_query".into();
         command.payload =
             json!({"database":"main","sql":"SELECT COUNT(*) AS n FROM orders","max_rows":200});
-        let rows = tools.run(&command, &permit).unwrap();
+        assert_eq!(
+            tools.run(&command, &permit).unwrap_err(),
+            "REPLICA_BUILDING"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let rows = loop {
+            match tools.run(&command, &permit) {
+                Err(code) if code == "REPLICA_BUILDING" && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                result => break result.unwrap(),
+            }
+        };
         assert_eq!(rows["columns"], json!(["n"]));
         assert_eq!(rows["row_count"], 1);
+        command.kind = "till_sql_refresh_replica".into();
+        command.payload = json!({});
+        assert!(tools.run(&command, &permit).unwrap()["replica_taken_at"].is_string());
+        command.kind = "till_sql_query".into();
         command.payload =
             json!({"data":{"database":"main","sql":"SELECT COUNT(*) AS n FROM orders"}});
         assert_eq!(tools.run(&command, &permit).unwrap_err(), "INVALID_INPUT");
@@ -587,7 +622,7 @@ mod tests {
         command.payload = json!({});
         assert_eq!(tools.run(&command, &permit).unwrap_err(), "INVALID_INPUT");
         end_session();
-        assert!(tools.replicas.lock().unwrap().replica.is_none());
+        assert!(tools.replicas.lock().unwrap().is_empty());
         command.kind = "till_network_scan".into();
         tools
             .audit_network(&command, &json!({"port_groups":["printers"]}))
@@ -599,7 +634,7 @@ mod tests {
         assert!(!include_str!("network/info.rs").contains("storage::"));
         // v106 is the commit marker; v107 adds Health indexes; v108 retains
         // adopted status rows and the server's cancellation timestamp.
-        assert_eq!(crate::db::CURRENT_SCHEMA_VERSION, 108);
+        assert_eq!(crate::db::CURRENT_SCHEMA_VERSION, 109);
     }
 }
 

@@ -1,4 +1,7 @@
 import type { PlatformReadyResult } from '../../lib/ipc-adapter';
+import type { TFunction } from 'i18next';
+import { orderNoticeRefusalCode } from '../../lib/order-open-notice';
+import { announceOrderNoticeMoveRefusal, type NoticeMoveOrder } from '../services/OrderNoticeStatusGuard';
 
 /**
  * Ready on the selected platform orders (item D8, efood late Ready,
@@ -8,6 +11,7 @@ import type { PlatformReadyResult } from '../../lib/ipc-adapter';
  * announced as ready: the cashier is told it was cancelled by the platform.
  */
 export interface PlatformReadyOutcome {
+  completionRefusals?: NoticeMoveOrder[];
   markedReady: number;
   alreadyClosed: number;
   /** Display numbers of the orders the platform had cancelled. */
@@ -46,6 +50,8 @@ export async function markPlatformOrdersReady(
       outcome.alreadyClosed += 1;
     } else {
       outcome.markedReady += 1;
+      const errorCode = orderNoticeRefusalCode(result);
+      if (errorCode) (outcome.completionRefusals ??= []).push({ id: order.id, number: order.displayNumber, errorCode });
     }
   }
   return outcome;
@@ -64,6 +70,9 @@ export function announcePlatformReadyOutcome(
   t: Translate,
   toast: ToastApi,
 ): void {
+  if (outcome.completionRefusals?.length) {
+    announceOrderNoticeMoveRefusal(outcome.completionRefusals, t as TFunction, outcome.completionRefusals.length > 1);
+  }
   if (outcome.failedOrderNumber !== null) {
     toast.error(
       String(
@@ -84,7 +93,7 @@ export function announcePlatformReadyOutcome(
       duration: 8000,
     });
   }
-  if (outcome.markedReady > 0) {
+  if (outcome.markedReady > 0 && !outcome.completionRefusals?.length) {
     toast.success(
       String(
         t('orderDashboard.platformReadySent', {

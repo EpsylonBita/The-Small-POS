@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   isModuleEnabled: vi.fn(() => true),
+  listCaptureDocuments: vi.fn(async () => [] as Array<Record<string, unknown>>),
   onEvent: vi.fn(),
   offEvent: vi.fn(),
   toastCustom: vi.fn(),
@@ -50,6 +51,8 @@ vi.mock('../../../lib', () => ({
   onEvent: mocks.onEvent,
   offEvent: mocks.offEvent,
 }));
+
+vi.mock('../../services/capture-client', () => ({ listCaptureDocuments: mocks.listCaptureDocuments }));
 
 vi.mock('../../services/capture-pdf-render', () => ({
   renderCaptureDocument: mocks.renderCaptureDocument,
@@ -92,6 +95,33 @@ describe('CaptureNotificationManager', () => {
     expect(handlerFor('capture:document-arrived')).toBeTypeOf('function');
     expect(handlerFor('capture:status-changed')).toBeTypeOf('function');
     expect(handlerFor('capture:needs-render')).toBeTypeOf('function');
+  });
+
+  it('catches up a PDF whose render event was missed before renderer readiness', async () => {
+    mocks.listCaptureDocuments.mockResolvedValueOnce([{ captureId: 'pending-pdf', needsRender: true, status: 'capturing' }]);
+    render(<CaptureNotificationManager />);
+    await waitFor(() => expect(mocks.renderCaptureDocument).toHaveBeenCalledWith('pending-pdf'));
+  });
+
+  it('catches up retained PDFs when Suppliers becomes enabled', async () => {
+    mocks.isModuleEnabled.mockReturnValue(false);
+    mocks.listCaptureDocuments.mockResolvedValueOnce([{ captureId: 'module-pdf', needsRender: true, status: 'capturing' }]);
+    const { rerender } = render(<CaptureNotificationManager />);
+    expect(mocks.listCaptureDocuments).not.toHaveBeenCalled();
+    mocks.isModuleEnabled.mockReturnValue(true);
+    rerender(<CaptureNotificationManager />);
+    await waitFor(() => expect(mocks.renderCaptureDocument).toHaveBeenCalledWith('module-pdf'));
+  });
+
+  it('retries after a failed render transport rather than remembering a false completion', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.renderCaptureDocument.mockRejectedValueOnce(new Error('IPC unavailable'));
+    render(<CaptureNotificationManager />);
+    handlerFor('capture:needs-render')?.({ captureId: 'retry-pdf' });
+    await waitFor(() => expect(error).toHaveBeenCalled());
+    await Promise.resolve();
+    handlerFor('capture:needs-render')?.({ captureId: 'retry-pdf' });
+    await waitFor(() => expect(mocks.renderCaptureDocument.mock.calls.filter(([id]) => id === 'retry-pdf')).toHaveLength(2));
   });
 
   it('unsubscribes on unmount', () => {
@@ -156,11 +186,18 @@ describe('CaptureNotificationManager', () => {
   it('stays quiet for the statuses the worker owns', () => {
     render(<CaptureNotificationManager />);
 
-    for (const status of ['waiting', 'uploading', 'reading', 'committing', 'committed']) {
+    for (const status of ['waiting', 'uploading', 'reading', 'committing']) {
       handlerFor('capture:status-changed')?.({ captureId: 'cap-1', status });
     }
 
     expect(mocks.toastCustom).not.toHaveBeenCalled();
+  });
+
+  it('announces a recorded invoice without asking for confirmation', () => {
+    render(<CaptureNotificationManager />);
+    handlerFor('capture:status-changed')?.({ captureId: 'cap-1', status: 'committed' });
+    expect(lastToastMessage()).toContain('Invoice recorded');
+    expect(lastToastMessage()).not.toContain('Check invoice');
   });
 
   it('navigates to review when the toast action is pressed', () => {

@@ -22,6 +22,7 @@ import LoginPage, {
 import { resolveExternalDisplayKind } from "./utils/externalDisplayKind";
 import { ErrorBoundary } from "./components/error/ErrorBoundary";
 import { SyncNotificationManager } from "./components/SyncNotificationManager";
+import { OrderNoticeHost } from './components/recovery/OrderNoticeHost';
 import { CaptureNotificationManager } from "./components/CaptureNotificationManager";
 import { CancellationNoticeManager } from "./components/notices/CancellationNoticeManager";
 import { WaiterServiceRequestManager } from "./components/notices/WaiterServiceRequestManager";
@@ -1231,6 +1232,7 @@ function AppContent() {
     }
     setTerminalRealtimeSession(realtimeSession);
     const authService = new RealtimeAuthService(realtimeSession.authClient);
+    let activeSharedIdentity: string | null = null;
     const coordinator = new DesktopRealtimeLifecycleCoordinator({
       authService,
       resolveIdentity: async () => {
@@ -1247,13 +1249,31 @@ function AppContent() {
           return null;
         }
 
-        return { terminalId, organizationId, branchId };
+        const groupKey = credentials.groupKey || organizationId;
+        const identityKey = JSON.stringify([organizationId, groupKey, terminalId]);
+        if (activeSharedIdentity !== null && activeSharedIdentity !== identityKey) {
+          emitCompatEvent('shared-data-invalidated', { reason: 'group-change', groupKey });
+          void bridge.staffAuth.refreshDirectory().catch(() => {});
+          void runParitySyncCycle({ trigger: 'realtime' }).catch(() => {});
+        }
+        activeSharedIdentity = identityKey;
+        return { terminalId, organizationId, branchId, groupKey };
       },
-      createManager: ({ organizationId }) => {
+      createManager: ({ organizationId, branchId, groupKey, terminalId }) => {
         const manager = new DesktopRealtimeManager({
           supabaseUrl,
           supabaseKey: supabasePublicKey,
           organizationId,
+          branchId,
+          terminalId,
+          groupKey,
+          onSharedDataChange: (payload) => {
+            emitCompatEvent('shared-data-invalidated', { table: payload.table, groupKey });
+            if (payload.table === 'staff' || payload.table === 'staff_branch_assignments') {
+              void bridge.staffAuth.refreshDirectory().catch(() => {});
+            }
+            void runParitySyncCycle({ trigger: 'realtime' }).catch(() => {});
+          },
           onOrderChange: () => {
             void silentRefreshOrders().catch(() => {});
           },
@@ -1321,7 +1341,7 @@ function AppContent() {
       void coordinator.credentialsChanged();
     };
     const handleTerminalConfigChanged = () => {
-      void coordinator.refreshIdentity();
+      void refreshTerminalCredentialCache().then(() => coordinator.refreshIdentity());
     };
     const handleTerminalAuthPaused = () => {
       stopRealtime();
@@ -1784,6 +1804,7 @@ function AppContent() {
             </CashierRecovery>
 
             {/* Sync Notification Manager */}
+            <OrderNoticeHost />
             <SyncNotificationManager
               onSettingsUpdate={(settings) => {
                 console.log('Settings updated:', settings);

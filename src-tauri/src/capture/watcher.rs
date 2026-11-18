@@ -247,6 +247,19 @@ struct Tracked {
     decided: Option<CaptureIngestOutcome>,
 }
 
+fn fingerprint(path: &Path) -> Result<Fingerprint, String> {
+    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+    Ok(Fingerprint {
+        size: metadata.len(),
+        mtime_ms: metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default(),
+    })
+}
+
 /// Per-source sweep state. Lives in the worker across ticks; a test owns one
 /// directly and drives it with an explicit clock.
 ///
@@ -256,6 +269,7 @@ struct Tracked {
 #[derive(Debug, Default)]
 pub struct FolderWatchState {
     tracked: HashMap<PathBuf, Tracked>,
+    atomic_finals: HashMap<PathBuf, Fingerprint>,
     /// `None` until the first probe — so the first status is always a real
     /// change and the UI never has to render an unknown source.
     available: Option<bool>,
@@ -434,6 +448,16 @@ pub fn sweep_folder(
             Some(_) => {}
         }
 
+        // A pause in writes is not completion. Producers either publish by
+        // atomic rename while watched, or leave a <file>.complete SHA-256 marker
+        // (also permits safe startup catch-up after a missed rename).
+        let marker = path.with_file_name(format!("{file_name}.complete"));
+        if supported_mime(file_name).is_some()
+            && !marker.is_file()
+            && state.atomic_finals.get(&path) != Some(&fingerprint)
+        {
+            continue;
+        }
         match decide_file(conn, app_data_dir, source, &path, file_name, fingerprint) {
             Ok(decision) => {
                 state.tracked.insert(
@@ -451,6 +475,20 @@ pub fn sweep_folder(
                     // Opt-in only, and never allowed to fail the ingest: the
                     // document is already durable and ledger-recorded, so a
                     // failed move is untidy, not lossy.
+                    let source_hash = decision.capture_id.as_deref().and_then(|id| {
+                        store::get_document(conn, id)
+                            .ok()
+                            .flatten()
+                            .and_then(|d| d.content_hash)
+                    });
+                    let still_final = self::fingerprint(&path).ok() == Some(fingerprint)
+                        && source_hash.is_some_and(|hash| {
+                            read_candidate(&path, fingerprint.size).is_ok_and(|c| c.hash == hash)
+                        });
+                    if !still_final {
+                        report.decisions.push(decision);
+                        continue;
+                    }
                     if let Err(error) = move_to_done(&source.folder, &path) {
                         warn!(source = %source.name, %error, "Capture housekeeping move failed");
                     } else {
@@ -481,13 +519,15 @@ pub fn sweep_folder(
     // Forget files that are gone, so the tracker cannot grow without bound in a
     // folder the user empties regularly.
     state.tracked.retain(|path, _| seen.contains(path));
+    state.atomic_finals.retain(|path, _| seen.contains(path));
 
     Ok(report)
 }
 
 fn is_transient_artifact(file_name: &str) -> bool {
     let lower = file_name.to_ascii_lowercase();
-    lower.starts_with('.')
+    lower.ends_with(".complete")
+        || lower.starts_with('.')
         || lower.starts_with('~')
         || TRANSIENT_SUFFIXES
             .iter()
@@ -561,7 +601,27 @@ fn decide_file(
     file_name: &str,
     fingerprint: Fingerprint,
 ) -> Result<IngestDecision, String> {
+    if self::fingerprint(path)? != fingerprint {
+        return Err("candidate changed before read".into());
+    }
     let candidate = read_candidate(path, fingerprint.size)?;
+    if self::fingerprint(path)? != fingerprint {
+        return Err("candidate changed during read".into());
+    }
+    let marker = path.with_file_name(format!("{file_name}.complete"));
+    if marker.is_file() && !candidate.oversize {
+        let expected = fs::read_to_string(marker).map_err(|e| e.to_string())?;
+        if expected.trim() != candidate.hash {
+            return Err("completion marker hash does not match final bytes".into());
+        }
+    }
+    // A second bounded read detects same-size rewrites even on filesystems
+    // whose modification timestamp is too coarse to distinguish them.
+    if read_candidate(path, fingerprint.size)?.hash != candidate.hash
+        || self::fingerprint(path)? != fingerprint
+    {
+        return Err("candidate bytes changed during validation".into());
+    }
     let mime = supported_mime(file_name);
     let known = store::ledger_entry(conn, &candidate.hash)?;
 
@@ -585,6 +645,14 @@ fn decide_file(
         .bytes
         .ok_or_else(|| "Captured document is empty".to_string())?;
     let mime = mime.unwrap_or("application/pdf");
+    if mime == "application/pdf" {
+        if !bytes.starts_with(b"%PDF-") || !bytes.windows(5).rev().take(2048).any(|w| w == b"%%EOF")
+        {
+            return Err("PDF is not a complete final document".into());
+        }
+    } else {
+        super::wia::normalize_to_jpeg(&bytes).map_err(|e| e.to_string())?;
+    }
     ingest_document(
         conn,
         app_data_dir,
@@ -712,6 +780,11 @@ fn ingest_document(
     } else {
         None
     };
+    let normalized = if is_pdf {
+        None
+    } else {
+        Some(super::wia::normalize_to_jpeg(bytes).map_err(|e| e.to_string())?)
+    };
     let page = if is_pdf {
         None
     } else {
@@ -720,11 +793,17 @@ fn ingest_document(
             app_data_dir,
             &capture_id,
             0,
-            mime,
-            bytes,
+            "image/jpeg",
+            normalized.as_deref().ok_or("missing normalized page")?,
         )?)
     };
 
+    if let Some(page) = &page {
+        let mut original = fs::File::create(page.file_path.with_extension("original"))
+            .map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut original, bytes).map_err(|e| e.to_string())?;
+        original.sync_all().map_err(|e| e.to_string())?;
+    }
     let validated = page
         .as_ref()
         .map(|page| store::validate_written_page(&lifecycle, &capture_id, page))
@@ -746,6 +825,22 @@ fn ingest_document(
         },
     )?;
 
+    store::record_event(
+        &tx,
+        Some(&capture_id),
+        "capture_source",
+        None,
+        Some(&serde_json::json!({ "sourceId": source.id })),
+    )?;
+    if is_pdf {
+        store::record_event(
+            &tx,
+            Some(&capture_id),
+            "render_pending",
+            None,
+            Some(&serde_json::json!({ "attempt": 0 })),
+        )?;
+    }
     if let Some(page) = validated.as_ref() {
         store::record_validated_page(&tx, &capture_id, page)?;
         // An image arrives complete: the document is finished the moment it is
@@ -840,6 +935,7 @@ pub struct RenderedPageInput {
     pub mime: String,
     /// Base64 image bytes, as produced by `pdfjs-dist` in the renderer.
     pub data: String,
+    pub dpi: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -880,10 +976,18 @@ pub async fn capture_attach_rendered_pages(
         .app_data_dir()
         .map_err(|e| format!("app data dir: {e}"))?;
 
+    let lifecycle = files::lock_lifecycle_async(app_data_dir.clone(), capture_id.clone()).await?;
     {
         let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-        store::get_document(&conn, &capture_id)?
-            .ok_or_else(|| format!("Capture {capture_id} not found"))?;
+        let document = store::get_document(&conn, &capture_id)?.ok_or("capture not found")?;
+        if !store::list_pages(&conn, &capture_id)?.is_empty() || document.status.is_terminal() {
+            return Ok(AttachRenderedPagesResult {
+                success: true,
+                capture_id,
+                page_count: document.page_count as usize,
+                status: document.status.as_str().to_string(),
+            });
+        }
     }
 
     // Rasterization failed, or produced nothing usable: keep the document and
@@ -923,15 +1027,18 @@ pub async fn capture_attach_rendered_pages(
         });
     }
 
-    let lifecycle = files::lock_lifecycle_async(app_data_dir.clone(), capture_id.clone()).await?;
     let mut ordered = pages;
     ordered.sort_by_key(|page| page.page_index);
+    if ordered.iter().enumerate().any(|(i, p)| p.page_index != i) {
+        return Err("Rendered page order is incomplete".into());
+    }
 
     let mut written = Vec::with_capacity(ordered.len());
     for (index, page) in ordered.iter().enumerate() {
         let bytes = BASE64_STANDARD
             .decode(page.data.as_bytes())
             .map_err(|e| format!("decode rendered page {index}: {e}"))?;
+        super::wia::normalize_to_jpeg(&bytes).map_err(|e| e.to_string())?;
         // Pages are re-indexed densely: the renderer's page numbering is a
         // detail, document order is what the store and the server contract on.
         written.push(
@@ -955,6 +1062,16 @@ pub async fn capture_attach_rendered_pages(
     {
         let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
         record_rendered_pages(&conn, &capture_id, &validated)?;
+        for (page, input) in written.iter().zip(&ordered) {
+            store::record_event(
+                &conn,
+                Some(&capture_id),
+                "page_geometry",
+                None,
+                Some(&serde_json::json!({ "sha256": page.content_hash, "dpi": input.dpi })),
+            )?;
+        }
+        store::page_manifest(&conn, &app_data_dir, &capture_id)?;
     }
 
     Ok(AttachRenderedPagesResult {
@@ -979,6 +1096,7 @@ pub(crate) fn record_rendered_pages(
         store::record_validated_page(&tx, capture_id, page)?;
     }
     store::set_status(&tx, capture_id, CaptureStatus::Waiting, None)?;
+    store::clear_retry(&tx, capture_id)?;
     store::record_event(
         &tx,
         Some(capture_id),
@@ -1001,6 +1119,16 @@ fn finish_needs_attention(conn: &Connection, capture_id: &str, reason: &str) -> 
         capture_id,
         CaptureStatus::NeedsAttention,
         Some(reason),
+    )?;
+    let attempts = store::get_document(conn, capture_id)?
+        .ok_or("capture missing")?
+        .attempts;
+    store::schedule_retry(
+        conn,
+        capture_id,
+        &(Utc::now() + chrono::Duration::seconds(super::worker::backoff_delay_secs(attempts)))
+            .to_rfc3339(),
+        true,
     )
 }
 
@@ -1034,7 +1162,7 @@ pub fn start_watched_folder_worker(
 
     tauri::async_runtime::spawn(async move {
         let started = Instant::now();
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<PathBuf>>();
         let mut watchers: HashMap<String, RecommendedWatcher> = HashMap::new();
         let mut states: HashMap<String, FolderWatchState> = HashMap::new();
 
@@ -1131,11 +1259,23 @@ pub fn start_watched_folder_worker(
 
             tokio::select! {
                 _ = tokio::time::sleep(cadence) => {}
-                _ = event_rx.recv() => {
+                paths = event_rx.recv() => {
                     // A change notification only shortens the wait; the sweep
                     // above is what decides anything. Drain the burst an MFP
                     // produces while writing one file so it costs one sweep.
-                    while event_rx.try_recv().is_ok() {}
+                    let mut paths = paths.unwrap_or_default();
+                    while let Ok(more) = event_rx.try_recv() { paths.extend(more); }
+                    for path in paths {
+                        if let Ok(stamp) = fingerprint(&path) {
+                            for source in &sources {
+                                if path.parent().and_then(|p| fs::canonicalize(p).ok()) == fs::canonicalize(&source.folder).ok() {
+                                    if let Some(name) = path.file_name() {
+                                        states.entry(source.id.clone()).or_default().atomic_finals.insert(source.folder.join(name), stamp);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 _ = cancel.cancelled() => {
                     info!("Invoice capture watched-folder worker cancelled");
@@ -1148,13 +1288,23 @@ pub fn start_watched_folder_worker(
 
 fn spawn_notify_watcher(
     folder: &Path,
-    tx: UnboundedSender<()>,
+    tx: UnboundedSender<Vec<PathBuf>>,
 ) -> Result<RecommendedWatcher, String> {
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-        if result.is_ok() {
+        if let Ok(event) = result {
             // Payload deliberately discarded: the event is a hint to sweep
             // sooner, never a description of what to ingest.
-            let _ = tx.send(());
+            let final_paths = if matches!(
+                event.kind,
+                notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::Both | notify::event::RenameMode::To
+                ))
+            ) {
+                event.paths.last().cloned().into_iter().collect()
+            } else {
+                Vec::new()
+            };
+            let _ = tx.send(final_paths);
         }
     })
     .map_err(|e| format!("create folder watcher: {e}"))?;
@@ -1241,6 +1391,28 @@ mod tests {
         clock_ms: u64,
     }
 
+    fn fixture_bytes(name: &str, bytes: &[u8]) -> Vec<u8> {
+        if supported_mime(name) == Some("application/pdf")
+            && bytes.len() <= MAX_CAPTURE_PAGE_BYTES as usize
+        {
+            return [bytes, b"\n%%EOF"].concat();
+        }
+        if supported_mime(name).is_some_and(|m| m.starts_with("image/")) {
+            let hash = files::sha256_hex(bytes);
+            let pixel = image::Rgb([hash.as_bytes()[0], hash.as_bytes()[1], hash.as_bytes()[2]]);
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, pixel))
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .unwrap();
+            // Include the entire content label to distinguish same-prefix fixtures.
+            let mut encoded = encoded.into_inner();
+            encoded.extend_from_slice(bytes);
+            encoded
+        } else {
+            bytes.to_vec()
+        }
+    }
+
     impl Folder {
         fn new() -> Self {
             Self::with_housekeeping(Housekeeping::None)
@@ -1266,7 +1438,15 @@ mod tests {
         }
 
         fn drop_file(&self, name: &str, bytes: &[u8]) {
-            fs::write(self.dir.join(name), bytes).expect("write folder file");
+            let bytes = fixture_bytes(name, bytes);
+            fs::write(self.dir.join(name), &bytes).expect("write folder file");
+            if supported_mime(name).is_some() {
+                fs::write(
+                    self.dir.join(format!("{name}.complete")),
+                    files::sha256_hex(&bytes),
+                )
+                .unwrap();
+            }
         }
 
         /// Advance the clock past the stability window and sweep.
@@ -1324,7 +1504,55 @@ mod tests {
     }
 
     #[test]
+    fn paused_partial_file_never_ingests_and_atomic_rename_requires_decodable_bytes() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let mut folder = Folder::new();
+        let path = folder.dir.join("paused.png");
+        fs::write(&path, b"partial image header").unwrap();
+        folder.settle_and_sweep();
+        folder.sweep_after(STABILITY_WINDOW_MS * 10);
+        assert!(folder.documents().is_empty());
+        let temporary = folder.dir.join("scan.part");
+        fs::write(&temporary, fixture_bytes("final.png", b"complete")).unwrap();
+        let final_path = folder.dir.join("final.png");
+        fs::rename(temporary, &final_path).unwrap();
+        folder
+            .state
+            .atomic_finals
+            .insert(final_path.clone(), fingerprint(&final_path).unwrap());
+        folder.settle_and_sweep();
+        assert_eq!(folder.documents().len(), 1);
+        folder
+            .state
+            .atomic_finals
+            .insert(path.clone(), fingerprint(&path).unwrap());
+        folder.settle_and_sweep();
+        assert_eq!(
+            folder.documents().len(),
+            1,
+            "rename cannot turn corrupt bytes into a page"
+        );
+    }
+
+    #[test]
+    fn same_size_rewrite_with_stale_completion_marker_is_held() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let mut folder = Folder::new();
+        folder.drop_file("final.jpg", b"complete");
+        folder.sweep_after(0);
+        let path = folder.dir.join("final.jpg");
+        let mut bytes = fs::read(&path).unwrap();
+        let end = bytes.len() - 1;
+        bytes[end] ^= 1;
+        fs::write(path, bytes).unwrap();
+        folder.settle_and_sweep();
+        assert!(folder.documents().is_empty());
+        assert_eq!(folder.ledger_rows(), 0);
+    }
+
+    #[test]
     fn a_growing_file_is_held_until_it_stops_changing_then_ingested_exactly_once() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let mut folder = Folder::new();
         folder.drop_file("invoice.png", b"first-half");
 
@@ -1371,7 +1599,7 @@ mod tests {
         // The source file is untouched — the read-only guarantee (R17.5).
         assert_eq!(
             fs::read(folder.dir.join("invoice.png")).expect("source file survives"),
-            b"first-half-and-the-rest"
+            fixture_bytes("invoice.png", b"first-half-and-the-rest")
         );
 
         // Sweeping again forever changes nothing.
@@ -1387,6 +1615,7 @@ mod tests {
 
     #[test]
     fn identical_content_is_deduped_across_a_restart_by_the_ledger() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let mut folder = Folder::new();
         folder.drop_file("invoice.png", b"the-same-invoice-bytes");
         let report = folder.settle_and_sweep();
@@ -1442,6 +1671,7 @@ mod tests {
 
     #[test]
     fn unsupported_and_oversize_files_are_recorded_once_per_hash() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let mut folder = Folder::new();
         folder.drop_file("notes.txt", b"not an invoice");
         folder.drop_file("scan.docx", b"also not an invoice");
@@ -1500,6 +1730,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_folder_reports_unavailable_and_catches_up_on_recovery() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let mut folder = Folder::new();
         folder.drop_file("first.png", b"before-the-outage");
         folder.settle_and_sweep();
@@ -1563,6 +1794,7 @@ mod tests {
 
     #[test]
     fn a_startup_sweep_ingests_files_that_appeared_while_the_pos_was_closed() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         // The POS was never running when these landed: no watcher existed, no
         // event was ever delivered. Only the sweep can find them (R3.8).
         let mut folder = Folder::new();
@@ -1577,6 +1809,7 @@ mod tests {
 
     #[test]
     fn a_pdf_is_kept_whole_and_waits_for_the_renderer_to_rasterize_it() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let mut folder = Folder::new();
         folder.drop_file("delivery-note.pdf", b"%PDF-1.7 two pages worth of invoice");
 
@@ -1589,7 +1822,7 @@ mod tests {
         let original = decision.original_path.clone().expect("original retained");
         assert_eq!(
             fs::read(&original).expect("read retained original"),
-            b"%PDF-1.7 two pages worth of invoice",
+            fixture_bytes("delivery-note.pdf", b"%PDF-1.7 two pages worth of invoice"),
             "the PDF is retained verbatim as evidence",
         );
         assert!(original.ends_with("original.pdf"));
@@ -1606,6 +1839,7 @@ mod tests {
 
     #[test]
     fn opt_in_housekeeping_moves_an_ingested_file_and_never_re_ingests_it() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let mut folder = Folder::with_housekeeping(Housekeeping::MoveDone);
         folder.drop_file("invoice.png", b"tidy-me-away");
 
@@ -1618,7 +1852,7 @@ mod tests {
         );
         assert_eq!(
             fs::read(folder.dir.join(DONE_SUBFOLDER).join("invoice.png")).expect("moved copy"),
-            b"tidy-me-away",
+            fixture_bytes("invoice.png", b"tidy-me-away"),
             "housekeeping moves, never deletes",
         );
 
@@ -1632,6 +1866,7 @@ mod tests {
 
     #[test]
     fn housekeeping_is_off_unless_the_user_switched_it_on() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let mut folder = Folder::new();
         folder.drop_file("invoice.png", b"leave-me-alone");
         folder.settle_and_sweep();
@@ -1645,6 +1880,7 @@ mod tests {
 
     #[test]
     fn in_progress_scanner_artifacts_are_ignored_without_history_noise() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let mut folder = Folder::new();
         folder.drop_file("scan.png.tmp", b"still being written");
         folder.drop_file(".hidden", b"system artifact");
@@ -1657,6 +1893,7 @@ mod tests {
 
     #[test]
     fn only_watched_folder_entries_with_a_real_path_are_loaded() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         let conn = db.state.conn.lock().expect("lock");
 
@@ -1703,7 +1940,9 @@ mod tests {
 
     #[test]
     fn no_configured_source_means_nothing_is_ever_watched() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         // R17.7: capture only ever happens from an explicitly configured source.
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         let conn = db.state.conn.lock().expect("lock");
         assert!(load_watched_folder_sources(&conn).is_empty());

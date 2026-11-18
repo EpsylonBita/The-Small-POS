@@ -193,7 +193,13 @@ fn is_syncable_system_setting(setting_key: &str) -> bool {
 fn is_local_only_terminal_setting(setting_key: &str) -> bool {
     matches!(
         setting_key.trim().to_ascii_lowercase().as_str(),
-        "admin_dashboard_url"
+        "group_id"
+            | "group_name"
+            | "group_business_type"
+            | "group_organization_id"
+            | "group_branch_id"
+            | "group_terminal_id"
+            | "admin_dashboard_url"
             | "admin_url"
             | "display_brightness"
             | "screen_timeout"
@@ -584,6 +590,8 @@ pub(crate) fn cache_terminal_settings_snapshot(
     // Re-plan DB-dependent deletions against the admitted snapshot.
     let (changes, fresh_updated) = terminal_settings_snapshot_plan(&transaction, resp, &scope)?;
     updated = fresh_updated;
+    let old_shared_scope = crate::group_scope::SharedScope::read(&transaction);
+    crate::group_scope::migrate_legacy_settings(&transaction)?;
     for (category, key, value) in changes {
         match value {
             Some(value) => db::set_setting(&transaction, &category, &key, &value)?,
@@ -592,6 +600,9 @@ pub(crate) fn cache_terminal_settings_snapshot(
             }
         }
     }
+    crate::group_scope::adopt_legacy_queue_scope(&transaction, &old_shared_scope)?;
+    crate::group_scope::cleanup_old_settings(&transaction)?;
+    crate::group_scope::cleanup_old_loyalty_caches(&transaction)?;
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(updated)
 }
@@ -638,8 +649,56 @@ fn terminal_settings_snapshot_plan(
     resp: &serde_json::Value,
     scope: &TerminalScopeSnapshot,
 ) -> Result<(SnapshotChanges, Vec<String>), String> {
+    crate::group_scope::validate_group_payload(resp)?;
     let mut changes = Vec::new();
     let mut updated = Vec::new();
+    // Only branch_info from the terminal-authenticated settings response owns the group.
+    // Missing fields on an older server explicitly restore org-as-group compatibility.
+    for (key, value) in [
+        (
+            "group_id",
+            resp.pointer("/branch_info/group_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        ),
+        (
+            "group_name",
+            resp.pointer("/branch_info/group_name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        ),
+        (
+            "group_business_type",
+            resp.pointer("/branch_info/group_business_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        ),
+        (
+            "group_organization_id",
+            scope.value("organization_id").unwrap_or_default(),
+        ),
+        (
+            "group_branch_id",
+            scope.value("branch_id").unwrap_or_default(),
+        ),
+        (
+            "group_terminal_id",
+            scope.value("terminal_id").unwrap_or_default(),
+        ),
+    ] {
+        // A snapshot without branch_info (e.g. an empty maintenance payload) does
+        // not speak for the group; an unchanged value needs no writer reservation.
+        if resp.get("branch_info").is_none()
+            || db::get_setting(conn, "terminal", key).as_deref() == Some(value.as_str())
+        {
+            continue;
+        }
+        plan_setting(&mut changes, "terminal", key, &value)?;
+        updated.push(format!("terminal.{key}"));
+    }
 
     if let Some(settings_obj) = resp.get("settings").and_then(|value| value.as_object()) {
         for (category, category_values) in settings_obj {

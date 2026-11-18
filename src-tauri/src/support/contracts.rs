@@ -81,7 +81,7 @@ mod tests {
     fn embedded_contracts_drift() {
         let c = shared();
         assert_eq!(c.kinds.len(), 32);
-        assert_eq!(c.error_codes.len(), 39);
+        assert_eq!(c.error_codes.len(), 40);
         assert_eq!(c.payload_schemas.len(), c.kinds.len());
         assert_eq!(c.probes["catalogue"].as_object().unwrap().len(), 5);
         assert_eq!(c.network["port_groups"].as_object().unwrap().len(), 3);

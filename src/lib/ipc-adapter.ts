@@ -182,6 +182,7 @@ export interface ZGateHealth {
  * sent to the platform.
  */
 export interface PlatformReadyResult {
+  completionRefusal?: string;
   success: boolean;
   status?: string;
   alreadyClosed?: boolean;
@@ -2059,7 +2060,7 @@ export interface PlatformBridge {
     clearAllOrders(): Promise<IpcResult>;
     cleanupDeletedOrders(): Promise<IpcResult>;
     getFinancialStats(): Promise<any>;
-    getFailedFinancialItems(limit?: number): Promise<SyncFinancialQueueItem[]>;
+    getFailedFinancialItems(limit?: number, orderId?: string): Promise<SyncFinancialQueueItem[]>;
     retryFinancialItem(syncId: number | string): Promise<IpcResult>;
     retryAllFailedFinancial(options?: { incomingOnly?: boolean }): Promise<IpcResult>;
     getUnsyncedFinancialSummary(): Promise<any>;
@@ -3873,9 +3874,9 @@ export class TauriBridge implements PlatformBridge {
     clearAllOrders: () => this.inv("sync:clear-all-orders"),
     cleanupDeletedOrders: () => this.inv("sync:cleanup-deleted-orders"),
     getFinancialStats: () => this.inv("sync:get-financial-stats"),
-    getFailedFinancialItems: async (limit?: number) =>
+    getFailedFinancialItems: async (limit?: number, orderId?: string) =>
       normalizeFinancialQueueItems(
-        await this.inv("sync:get-failed-financial-items", limit),
+        await this.inv("sync:get-failed-financial-items", orderId ? { limit, orderId } : limit),
       ),
     retryFinancialItem: (id: number | string) =>
       this.inv("sync:retry-financial-item", id),

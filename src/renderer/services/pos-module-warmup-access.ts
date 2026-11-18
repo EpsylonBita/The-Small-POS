@@ -20,6 +20,8 @@ export async function getOptionalWarmupModules(config: Record<string, unknown> |
       typeof envelope.terminal_id !== 'string' || !envelope.terminal_id) return new Set();
     const terminal = config?.terminal_id ?? config?.terminalId;
     const organization = config?.organization_id ?? config?.organizationId;
+    const branch = config?.branch_id ?? config?.branchId;
+    if (!branch || branch !== envelope.branch_id) return new Set();
     if ((terminal && terminal !== envelope.terminal_id) || (organization && organization !== envelope.organization_id)) return new Set();
     return new Set(envelope.modules.flatMap(value => {
       const module = record(value);

@@ -37,7 +37,13 @@ test('SuppliersPage supports POS-only scan and review-first import actions', () 
 
   assert.match(source, /useOnBarcodeScan/);
   assert.match(source, /BarcodeDetector/);
-  assert.match(source, /extractSupplierImportFile/);
+  // Phase E cutover (13f434769): the till no longer reads a document into rows
+  // itself. Every document is staged for invoice admission and spreadsheets are
+  // refused on the till, so local extraction must not come back.
+  assert.doesNotMatch(source, /extractSupplierImportFile/);
+  assert.match(source, /supplierImportFileKind\(file\) === 'spreadsheet'/);
+  assert.match(source, /suppliers\.import\.tillSpreadsheetUnavailable/);
+  assert.match(source, /await importCaptureFile\(file, captureStaffId\)/);
   assert.match(source, /pos\/suppliers\/import\/preview/);
   assert.match(source, /pos\/suppliers\/import\/commit/);
   assert.match(source, /pos\/supplier-invoices\/\$\{invoiceId\}\/mark-\$\{status\}/);

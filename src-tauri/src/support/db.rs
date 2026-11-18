@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-pub const VERSION: i64 = 5;
+pub const VERSION: i64 = 6;
 #[cfg(test)]
 pub const TABLES: &[&str] = &[
     "support_session_state",
@@ -156,6 +156,8 @@ impl SupportDb {
         tx.execute_batch("UPDATE support_device_applies SET state='unknown' WHERE state='saving'; UPDATE support_device_applies SET state='undo_unknown' WHERE state='undoing';").map_err(|e|e.to_string())?;
         tx.execute_batch(include_str!("confirmed_schema.sql"))
             .map_err(|e| e.to_string())?;
+        tx.execute_batch(include_str!("result_delivery_schema.sql"))
+            .map_err(|e| e.to_string())?;
         tx.pragma_update(None, "user_version", VERSION)
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
@@ -200,6 +202,29 @@ fn migrate_notices(conn: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delivery_upgrade_preserves_v5_pending_results_and_initializes_only_scheduling() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("schema.sql")).unwrap();
+        conn.pragma_update(None, "user_version", 5).unwrap();
+        conn.execute("INSERT INTO support_result_outbox VALUES('old','ended-session','{\"your_retained\":true}',1,0)", []).unwrap();
+        SupportDb::migrate(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT result_json FROM support_result_outbox", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "{\"your_retained\":true}"
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM support_result_delivery", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        SupportDb::migrate(&conn).unwrap();
+    }
 
     fn legacy(conn: &Connection, version: i64) {
         let mut sql = include_str!("schema.sql").replace(

@@ -149,6 +149,21 @@ async fn request_with_staff_session(
     body: Option<Value>,
     staff_session: Option<&str>,
 ) -> Result<Value, String> {
+    request_detailed(app, path, method, body, staff_session)
+        .await
+        .map_err(|error| match error.status {
+            Some(status) => refusal_code(Some(status), error.code.as_deref()).to_string(),
+            None => error.code.unwrap_or_else(|| "TILL_OFFLINE".into()),
+        })
+}
+
+async fn request_detailed(
+    app: &tauri::AppHandle,
+    path: &str,
+    method: &str,
+    body: Option<Value>,
+    staff_session: Option<&str>,
+) -> Result<Value, ResultDeliveryError> {
     use tauri::Manager;
     // Include credential resolution and reply decoding inside the deadline.
     tokio::time::timeout(REQUEST_TIMEOUT, async {
@@ -157,7 +172,7 @@ async fn request_with_staff_session(
         let (base, key) = crate::resolve_admin_endpoint(Some(&db))
             .await
             .map_err(|_| "TILL_OFFLINE")?;
-        require_https(&base)?;
+        require_https(&base).map_err(|_| ResultDeliveryError::transient())?;
         let first = crate::api::fetch_from_admin_detailed_with_staff_session(
             &base,
             &key,
@@ -186,10 +201,13 @@ async fn request_with_staff_session(
         } else {
             first
         };
-        reply.map_err(|e| refusal_code(e.status(), e.code()).to_string())
+        reply.map_err(|e| ResultDeliveryError {
+            status: e.status(),
+            code: e.code().map(str::to_owned),
+        })
     })
     .await
-    .map_err(|_| "TILL_OFFLINE".to_string())?
+    .map_err(|_| ResultDeliveryError::transient())?
 }
 
 /// The till's name for an admin refusal. A support session already starting
@@ -389,6 +407,52 @@ pub fn ack(id: &str, baseline: Value, capabilities: Vec<String>) -> Value {
 
 pub type ApiFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>;
+/// Result delivery must preserve the HTTP status; session UI error names lose it.
+#[derive(Debug)]
+pub struct ResultDeliveryError {
+    pub status: Option<u16>,
+    pub code: Option<String>,
+}
+impl From<&str> for ResultDeliveryError {
+    fn from(code: &str) -> Self {
+        Self {
+            status: None,
+            code: Some(code.into()),
+        }
+    }
+}
+impl ResultDeliveryError {
+    fn transient() -> Self {
+        Self {
+            status: None,
+            code: None,
+        }
+    }
+    fn permanent(&self) -> bool {
+        self.status.is_some_and(|status| {
+            (400..500).contains(&status) && !matches!(status, 401 | 408 | 425 | 429)
+        })
+    }
+    fn audit_code(&self) -> String {
+        self.code
+            .as_deref()
+            .filter(|code| {
+                super::contracts::shared()
+                    .error_codes
+                    .iter()
+                    .any(|known| known.as_str() == *code)
+                    || matches!(*code, "COMMAND_VOID" | "RESULT_ALREADY_STORED")
+            })
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                self.status
+                    .map_or_else(|| "INVALID_INPUT".into(), |status| format!("HTTP_{status}"))
+            })
+    }
+}
+pub type ResultDeliveryFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Value, ResultDeliveryError>> + Send + 'a>,
+>;
 /// Preserve HTTP evidence only for the decline's explicit retirement rules.
 #[derive(Debug)]
 pub struct DeclineError {
@@ -446,6 +510,13 @@ pub(super) fn consent_decline_request(notice: &Value) -> Result<(Value, String),
 pub trait SupportApi: Send + Sync {
     fn request<'a>(&'a self, path: &'a str, method: &'a str, body: Option<Value>) -> ApiFuture<'a>;
     fn visible(&self) -> bool;
+    fn post_result(&self, body: Value) -> ResultDeliveryFuture<'_> {
+        Box::pin(async move {
+            self.request("/api/pos/support/results", "POST", Some(body))
+                .await
+                .map_err(|_| ResultDeliveryError::transient())
+        })
+    }
     fn command_authority(&self) -> bool {
         false
     }
@@ -466,6 +537,15 @@ struct NativeApi {
     app: tauri::AppHandle,
 }
 impl SupportApi for NativeApi {
+    fn post_result(&self, body: Value) -> ResultDeliveryFuture<'_> {
+        Box::pin(request_detailed(
+            &self.app,
+            "/api/pos/support/results",
+            "POST",
+            Some(body),
+            None,
+        ))
+    }
     fn command_authority(&self) -> bool {
         super::confirmed::availability(&self.app)
     }
@@ -938,13 +1018,40 @@ async fn flush(api: &dyn SupportApi, rt: &super::session::Runtime) -> Result<(),
         core.executor.pending_results_limit(core.now(), 3)?
     };
     for result in results.into_iter().take(3) {
-        let response = api
-            .request("/api/pos/support/results", "POST", Some(result.clone()))
-            .await?;
-        if response["stored"] != true {
-            return Err("INVALID_INPUT".into());
+        let id = result["command_id"].as_str().ok_or("INVALID_INPUT")?;
+        {
+            let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
+            if !core.executor.reserve_result_send(id, core.now())? {
+                continue;
+            }
         }
+        let response = tokio::time::timeout(REQUEST_TIMEOUT, api.post_result(result.clone()))
+            .await
+            .unwrap_or_else(|_| Err(ResultDeliveryError::transient()));
+        let error = match response {
+            Ok(response) if response["stored"] == true => None,
+            // Also understand an explicit final refusal from an older 2xx proxy.
+            Ok(response) if response["stored"] == false && response["final"] == true => {
+                Some(ResultDeliveryError {
+                    status: Some(400),
+                    code: response["code"].as_str().map(str::to_owned),
+                })
+            }
+            Ok(_) => Some(ResultDeliveryError::transient()),
+            Err(error) => Some(error),
+        };
         let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
+        if let Some(error) = error {
+            if error.permanent() {
+                core.executor
+                    .retire_result(&result, &error.audit_code(), core.now())?;
+                continue;
+            }
+            if core.executor.result_send_failed(id, core.now())? {
+                continue;
+            }
+            return Err("TILL_OFFLINE".into());
+        }
         core.executor.delivered(
             result["command_id"].as_str().ok_or("INVALID_INPUT")?,
             result["result_sha256"].as_str().ok_or("INVALID_INPUT")?,
@@ -1024,6 +1131,10 @@ pub(super) mod harness {
 #[cfg(test)]
 #[path = "tests/transport_loop_tests.rs"]
 mod loop_tests;
+
+#[cfg(test)]
+#[path = "tests/result_delivery_tests.rs"]
+mod result_delivery_tests;
 
 #[cfg(test)]
 mod tests {

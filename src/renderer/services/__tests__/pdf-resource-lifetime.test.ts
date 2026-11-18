@@ -22,7 +22,7 @@ function loadingTask(pdf: unknown) {
 
 function pdfPage() {
   return {
-    getViewport: vi.fn(() => ({ width: 1000, height: 2000 })),
+    getViewport: vi.fn((_options: { scale: number }) => ({ width: 1000, height: 2000 })),
     render: vi.fn(() => ({ promise: Promise.resolve() })),
     getTextContent: vi.fn().mockResolvedValue({ items: [] }),
     cleanup: vi.fn(),
@@ -54,13 +54,53 @@ describe('PDF resource lifetime', () => {
     vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/jpeg;base64,aW1hZ2U=');
 
     await expect(rasterizePdf(new Uint8Array([1]))).resolves.toEqual([
-      { pageIndex: 0, mime: 'image/jpeg', data: 'aW1hZ2U=' },
-      { pageIndex: 1, mime: 'image/jpeg', data: 'aW1hZ2U=' },
+      { pageIndex: 0, mime: 'image/jpeg', data: 'aW1hZ2U=', dpi: 147 },
+      { pageIndex: 1, mime: 'image/jpeg', data: 'aW1hZ2U=', dpi: 147 },
     ]);
 
     expect(canvases).toHaveLength(2);
     for (const canvas of canvases) expect([canvas.width, canvas.height]).toEqual([0, 0]);
     expect(task.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('renders A4 at 300 DPI with intrinsic rotation and JPEG 95, keeping the long edge bounded', async () => {
+    const page = pdfPage();
+    page.getViewport.mockImplementation(({ scale }: { scale: number }) => ({ width: 595.28 * scale, height: 841.89 * scale }));
+    loadingTask({ numPages: 1, getPage: vi.fn().mockResolvedValue(page) });
+    let dimensions: number[] = [];
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function () {
+      dimensions = [(this as HTMLCanvasElement).width, (this as HTMLCanvasElement).height];
+      return {} as CanvasRenderingContext2D;
+    } as typeof HTMLCanvasElement.prototype.getContext);
+    const encode = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/jpeg;base64,aW1hZ2U=');
+    await rasterizePdf(new Uint8Array([1]));
+    expect(page.getViewport).toHaveBeenCalledWith({ scale: 300 / 72 });
+    expect(dimensions).toEqual([2480,3507]);
+    expect(encode).toHaveBeenCalledWith('image/jpeg', 0.95);
+  });
+
+  it('bounds long PDF pages to 4096 pixels without changing JPEG quality', async () => {
+    const page = pdfPage();
+    page.getViewport.mockImplementation(({ scale }: { scale: number }) => ({ width: 3000 * scale, height: 10000 * scale }));
+    loadingTask({ numPages: 1, getPage: vi.fn().mockResolvedValue(page) });
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({} as CanvasRenderingContext2D);
+    const encode = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/jpeg;base64,aW1hZ2U=');
+    await rasterizePdf(new Uint8Array([1]));
+    expect(page.getViewport).toHaveBeenCalledWith({ scale: 4096 / 10000 });
+    expect(encode).toHaveBeenCalledWith('image/jpeg', 0.95);
+  });
+
+  it('refuses an overflowing PDF as a whole and releases the worker', async () => {
+    const getPage = vi.fn();
+    const task = loadingTask({ numPages: 11, getPage });
+    await expect(rasterizePdf(new Uint8Array([1]))).rejects.toThrow('page count');
+    expect(getPage).not.toHaveBeenCalled();
+    expect(task.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a false attachment envelope so the durable render job can retry', async () => {
+    invoke.mockResolvedValueOnce({ success: false }).mockResolvedValueOnce({ success: false });
+    await expect(renderCaptureDocument('capture-1')).rejects.toThrow('not durably attached');
   });
 
   it.each(['render', 'canvas'] as const)('releases the worker and canvas after %s failure', async (failure) => {
@@ -85,7 +125,7 @@ describe('PDF resource lifetime', () => {
     const task = { promise: Promise.reject(error), destroy: vi.fn().mockResolvedValue(undefined) };
     getDocument.mockReturnValueOnce(task);
     if (operation === 'probe') {
-      invoke.mockResolvedValueOnce({ success: true, data: 'AQ==' });
+      invoke.mockResolvedValueOnce({ success: true, data: 'AQ==' }).mockResolvedValueOnce({ success: true });
       vi.spyOn(console, 'error').mockImplementation(() => {});
       await renderCaptureDocument('capture-1');
       expect(invoke).toHaveBeenLastCalledWith('capture_attach_rendered_pages', {

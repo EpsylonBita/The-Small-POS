@@ -33,7 +33,7 @@
  */
 
 import React from 'react';
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -241,7 +241,7 @@ function page(index: number) {
   return {
     pageIndex: index,
     filePath: `C:/captures/${CAPTURE_ID}/page-00${index}.png`,
-    contentHash: `hash-${index}`,
+    contentHash: String(index).repeat(64),
     byteSize: 4096,
     mime: 'image/png',
   };
@@ -368,7 +368,7 @@ async function landOnSuppliers(): Promise<Walkthrough> {
 }
 
 /** Preview then Save inside the import drawer — the review screen's own steps. */
-async function checkAndSave(walk: Walkthrough): Promise<void> {
+async function checkAndSave(walk: Walkthrough, outcomeText = 'Invoice saved.'): Promise<void> {
   const drawer = screenRoot('review');
   expect(drawer).not.toBeNull();
 
@@ -387,7 +387,7 @@ async function checkAndSave(walk: Walkthrough): Promise<void> {
       .closest('button'),
     'save',
   );
-  await screen.findByText('Invoice saved.');
+  await screen.findByText(outcomeText);
   walk.observe();
 }
 
@@ -410,7 +410,7 @@ beforeEach(() => {
     status: 200,
     data: {
       success: true,
-      result: { createdInventoryCount: 0, updatedInventoryCount: 1 },
+      result: { supplierInvoiceId: '22222222-2222-4222-8222-222222222222', createdInventoryCount: 0, updatedInventoryCount: 1 },
     },
   });
 
@@ -448,6 +448,78 @@ afterEach(() => {
   // and a "one notice, one tap" assertion would be measuring the wrong toast.
   toast.remove();
   cleanup();
+});
+
+describe('server admission during capture Save', () => {
+  const jobId = '11111111-1111-4111-8111-111111111111';
+  it('links an admitted capture without fabricating delivery quantities', async () => {
+    mocks.loadPurchaseOrderSnapshot.mockReturnValue({ purchaseOrders: [openPurchaseOrder()], serverCursor: null });
+    const walk = await landOnSuppliers();
+    documentState = captureDocument({ status: 'ready_review', recognition: RECOGNITION });
+    await act(async () => { emitBackend('capture:status-changed', { captureId: CAPTURE_ID, status: 'ready_review' }); });
+    walk.press(await screen.findByRole('button', { name: 'Check invoice' }), 'check-invoice');
+    await waitFor(() => expect(activeScreen()).toBe('review'));
+    const linkage = screen.getByTestId('capture-po-linkage');
+    fireEvent.click(within(linkage).getAllByRole('radio')[0]);
+    await checkAndSave(walk);
+    const request = mocks.posApiFetch.mock.calls[mocks.posApiFetch.mock.calls.length - 1][1];
+    const body = JSON.parse(request.body);
+    expect(body.poLinkage).toMatchObject({ mode: 'confirm_existing' });
+    expect(body.receiptLines).toBeUndefined();
+    expect(body.capture.captureSubtype).toBe('scanner');
+    expect(request.headers).toMatchObject({ 'idempotency-key': CAPTURE_ID, 'x-supplier-staff-id': 'staff-1' });
+  });
+  it.each([
+    { status: 'waiting', jobId, reason: 'queued' },
+    { status: 'needs_review', jobId, reasons: [] },
+    { status: 'failed', jobId, reasons: [] },
+    { status: 'excluded', jobId, reason: 'not_invoice' },
+  ])('keeps $status in the durable queue without claiming an invoice was saved', async (admission) => {
+    const walk = await landOnSuppliers();
+    documentState = captureDocument({ status: 'ready_review', recognition: RECOGNITION });
+    await act(async () => {
+      emitBackend('capture:status-changed', { captureId: CAPTURE_ID, status: 'ready_review' });
+    });
+    walk.press(await screen.findByRole('button', { name: 'Check invoice' }), 'check-invoice');
+    await waitFor(() => expect(activeScreen()).toBe('review'));
+    mocks.posApiFetch.mockResolvedValue({ success: true, status: 200, data: { success: true, admission } });
+
+    await checkAndSave(walk, admission.status === 'excluded' ? 'Not an invoice' : admission.status === 'waiting'
+      ? 'Waiting for invoice reading' : 'The readings need checking. Your invoice and all its pages are saved.');
+
+    expect(mocks.confirmCaptureCommit).not.toHaveBeenCalled();
+    expect(screen.queryByText('Invoice saved.')).not.toBeInTheDocument();
+    const reason = admission.status === 'excluded' ? 'CAPTURE_EXCLUDED'
+      : admission.status === 'failed' ? 'CAPTURE_UNREADABLE' : 'CAPTURE_REVIEW_REQUIRED';
+    expect(mocks.advanceCapture).toHaveBeenCalledWith({ captureId: CAPTURE_ID, status: 'needs_attention', reason,
+      admissionResponse: { success: true, admission } });
+    if (admission.status === 'waiting') {
+      expect(mocks.advanceCapture).toHaveBeenLastCalledWith({ captureId: CAPTURE_ID, status: 'waiting' });
+    } else {
+      expect(mocks.advanceCapture).not.toHaveBeenCalledWith({ captureId: CAPTURE_ID, status: 'waiting' });
+    }
+    const request = mocks.posApiFetch.mock.calls[mocks.posApiFetch.mock.calls.length - 1][1];
+    expect(JSON.parse(request.body).capture.page_manifest)
+      .toEqual([{ index: 0, sha256: '0'.repeat(64) }]);
+  });
+
+  it('finishes a validated recorded admission without requiring a legacy result block', async () => {
+    const walk = await landOnSuppliers();
+    documentState = captureDocument({ status: 'ready_review', recognition: RECOGNITION });
+    await act(async () => {
+      emitBackend('capture:status-changed', { captureId: CAPTURE_ID, status: 'ready_review' });
+    });
+    walk.press(await screen.findByRole('button', { name: 'Check invoice' }), 'check-invoice');
+    await waitFor(() => expect(activeScreen()).toBe('review'));
+    const admission = { status: 'recorded', jobId,
+      invoiceId: '22222222-2222-4222-8222-222222222222',
+      undoId: '33333333-3333-4333-8333-333333333333', stock: 'none', balanceConfirmed: true };
+    mocks.posApiFetch.mockResolvedValue({ success: true, status: 200, data: { success: true, admission } });
+
+    await checkAndSave(walk);
+
+    expect(mocks.confirmCaptureCommit).toHaveBeenCalledWith({ captureId: CAPTURE_ID, result: admission, staffId: 'staff-1' });
+  });
 });
 
 // ---------------------------------------------------------------------------

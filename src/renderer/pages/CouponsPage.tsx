@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import { onEvent, offEvent } from '../../lib';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import {
@@ -166,12 +167,15 @@ const CouponsPage: React.FC = () => {
     };
   }, []);
 
+  const directoryGeneration = useRef(0);
   const fetchCoupons = useCallback(async () => {
+    const generation = ++directoryGeneration.current;
     setLoading(true);
     try {
       const invoke = getIpcInvoke();
       if (invoke) {
         const result = await invoke('api:fetch-from-admin', '/api/pos/coupons');
+        if (generation !== directoryGeneration.current) return;
         if (result?.success && !result?.data?.error) {
           const rows = Array.isArray(result?.data?.coupons) ? result.data.coupons : [];
           setCoupons(rows.map(normalizeCoupon));
@@ -181,6 +185,7 @@ const CouponsPage: React.FC = () => {
       }
 
       const result = await posApiGet<{ coupons?: unknown[]; error?: string }>('pos/coupons');
+      if (generation !== directoryGeneration.current) return;
       if (!result.success || result.data?.error) {
         throw new Error(result.error || result.data?.error || 'Failed to load coupons');
       }
@@ -197,6 +202,14 @@ const CouponsPage: React.FC = () => {
 
   useEffect(() => {
     fetchCoupons();
+    const invalidate = (event: any) => {
+      if (event?.reason !== 'group-change' && event?.table !== 'coupons') return;
+      ++directoryGeneration.current;
+      if (event?.reason === 'group-change') { setCoupons([]); setEditingCoupon(null); setShowModal(false); }
+      void fetchCoupons();
+    };
+    onEvent('shared-data-invalidated', invalidate);
+    return () => { ++directoryGeneration.current; offEvent('shared-data-invalidated', invalidate); };
   }, [fetchCoupons]);
 
   const copyCode = async (code: string, id: string) => {

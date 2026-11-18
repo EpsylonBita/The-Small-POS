@@ -127,6 +127,19 @@ pub fn native_outcome(
     target: Option<&str>,
     since: Option<i64>,
 ) -> Result<Option<String>, String> {
+    if r.id.starts_with("order-customer-correction.") {
+        let scope = crate::table_session_cache::current_scope(conn)?;
+        let target =
+            target.map(|value| value.strip_prefix("customer-correction:").unwrap_or(value));
+        let evidence:Option<(String,String)>=conn.query_row("SELECT CASE WHEN q.status IN ('conflict','failed') THEN 'failed' ELSE json_extract(a.payload_json,'$.outcome') END,COALESCE(json_extract(a.payload_json,'$.verifiedAt'),a.created_at) FROM recovery_action_log a JOIN orders o ON o.id=a.order_id LEFT JOIN parity_sync_queue q ON q.id=json_extract(a.payload_json,'$.replacementQueueId') WHERE a.recipe_id=?1 AND a.recipe_version=?2 AND json_extract(a.payload_json,'$.nativeOrderCorrection')=1 AND o.organization_id=?3 AND o.branch_id=?4 AND (?5 IS NULL OR json_extract(a.payload_json,'$.retiredQueueId')=?5) ORDER BY a.rowid DESC LIMIT 1",rusqlite::params![r.id,r.version,scope.organization,scope.branch,target],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(|_|"REMEDY_NOT_APPLICABLE")?;
+        return Ok(evidence
+            .filter(|(_, at)| {
+                since
+                    .zip(super::clock::parse(at).ok())
+                    .is_some_and(|(start, at)| at >= start)
+            })
+            .map(|(outcome, _)| outcome));
+    }
     if r.id != "customer-address-default.retry" {
         return Ok(None);
     }
@@ -208,6 +221,6 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(super::shipped().len(), 15);
+        assert_eq!(super::shipped().len(), 17);
     }
 }

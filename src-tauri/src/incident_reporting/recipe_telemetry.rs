@@ -29,6 +29,14 @@ const STATE_CATEGORY: &str = "diagnostics";
 // match, never an actor or target, and follow Android's fingerprintOf encoding.
 const RECIPE_ISSUES: &[(&str, &str)] = &[
     (
+        "order-customer-correction.resend",
+        "customer_correction_refused",
+    ),
+    (
+        "order-customer-correction.keep-server",
+        "customer_correction_refused",
+    ),
+    (
         "printer.restore_last_known_brand",
         "printer.brand_probe_unanswered",
     ),
@@ -216,7 +224,9 @@ fn collect(conn: &Connection, key: &str) -> Result<Outbox, String> {
     for rowid in rowids {
         let previously_scoped = state.entries.iter().any(|entry| entry.audit_rowid == rowid);
         let row: Option<(String, u32, String, String, String)> = conn.query_row(
-            "SELECT recipe_id,recipe_version,action_id,json_extract(payload_json,'$.outcome'),COALESCE(json_extract(payload_json,'$.verifiedAt'),created_at) FROM recovery_action_log a WHERE rowid=?1 AND recipe_id IS NOT NULL AND recipe_version IS NOT NULL AND json_valid(payload_json) AND json_extract(payload_json,'$.outcome') IN ('resolved','failed','pending','unknown') AND (json_extract(payload_json,'$.organizationId')=?2 OR EXISTS(SELECT 1 FROM parity_sync_queue q WHERE q.organization_id=?2 AND q.id=a.entity_id) OR ?5) AND (json_extract(payload_json,'$.branchId') IS NULL OR json_extract(payload_json,'$.branchId')=?3) AND (json_extract(payload_json,'$.terminalId') IS NULL OR json_extract(payload_json,'$.terminalId')=?4)",
+            // The till's own one-time attempt of a remedy is recorded under the
+            // remedy's action with `automatic: true`; it is reported as `auto`.
+            "SELECT recipe_id,recipe_version,CASE WHEN json_extract(payload_json,'$.automatic')=1 THEN 'auto_retry' ELSE action_id END,json_extract(payload_json,'$.outcome'),COALESCE(json_extract(payload_json,'$.verifiedAt'),created_at) FROM recovery_action_log a WHERE rowid=?1 AND recipe_id IS NOT NULL AND recipe_version IS NOT NULL AND json_valid(payload_json) AND json_extract(payload_json,'$.outcome') IN ('resolved','failed','pending','unknown') AND (json_extract(payload_json,'$.organizationId')=?2 OR EXISTS(SELECT 1 FROM parity_sync_queue q WHERE q.organization_id=?2 AND q.id=a.entity_id) OR ?5) AND (json_extract(payload_json,'$.branchId') IS NULL OR json_extract(payload_json,'$.branchId')=?3) AND (json_extract(payload_json,'$.terminalId') IS NULL OR json_extract(payload_json,'$.terminalId')=?4)",
             rusqlite::params![rowid,scope.organization_id,scope.branch_id,scope.terminal_id,previously_scoped],
             |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional().map_err(|_| "RECIPE_OUTBOX_UNAVAILABLE")?;
         let Some((id, version, action, outcome, raw_at)) = row else {
@@ -504,6 +514,81 @@ mod tests {
             .unwrap();
         }
         assert_eq!(sent.load(Ordering::Relaxed), 1);
+    }
+    /// 17/11/2026: the till's own one-time re-save of a refused customer
+    /// correction is reported as `auto`. The same remedy pressed by a person,
+    /// and the keep-server remedy, stay `one_tap`.
+    #[tokio::test]
+    async fn recipe_telemetry_reports_the_automatic_customer_correction_attempt_as_auto() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let (_files, db) = fixture();
+        let closed_hour = |back: i64| {
+            DateTime::from_timestamp_millis(
+                (Utc::now().timestamp_millis().div_euclid(HOUR_MS) - back) * HOUR_MS + 60_000,
+            )
+            .unwrap()
+        };
+        {
+            let conn = db.conn.lock().unwrap();
+            let org = crate::db::get_setting(&conn, "terminal", "organization_id").unwrap();
+            for (id, action, recipe, automatic, at) in [
+                (
+                    "your-automatic",
+                    "resendOrderCustomerCorrection",
+                    "order-customer-correction.resend",
+                    true,
+                    closed_hour(3),
+                ),
+                (
+                    "your-pressed",
+                    "resendOrderCustomerCorrection",
+                    "order-customer-correction.resend",
+                    false,
+                    closed_hour(2),
+                ),
+                (
+                    "your-kept",
+                    "keepServerOrderCustomerDetails",
+                    "order-customer-correction.keep-server",
+                    false,
+                    closed_hour(2),
+                ),
+            ] {
+                let mut payload =
+                    json!({"organizationId":org,"outcome":"resolved","nativeOrderCorrection":true});
+                if automatic {
+                    payload["automatic"] = json!(true);
+                }
+                conn.execute("INSERT INTO recovery_action_log(id,action_id,issue_code,recipe_id,recipe_version,success,payload_json,created_at) VALUES(?1,?2,'customer_correction_refused',?3,1,1,?4,?5)", rusqlite::params![id,action,recipe,payload.to_string(),at.to_rfc3339()]).unwrap();
+            }
+        }
+        let seen = std::sync::Mutex::new(Vec::new());
+        flush_with(db.clone(), true, |event| {
+            validate_event(&event).unwrap();
+            assert_eq!(
+                event["match_fingerprint"],
+                contracts::sha256(b"windows|[\"customer_correction_refused\"]|[]|[]|[]")
+            );
+            seen.lock().unwrap().push((
+                event["recipe_id"].as_str().unwrap().to_string(),
+                event["mode"].as_str().unwrap().to_string(),
+            ));
+            async { Ok(true) }
+        })
+        .await
+        .unwrap();
+        let mut seen = seen.into_inner().unwrap();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                ("order-customer-correction.keep-server", "one_tap"),
+                ("order-customer-correction.resend", "auto"),
+                ("order-customer-correction.resend", "one_tap"),
+            ]
+            .map(|(recipe, mode)| (recipe.to_string(), mode.to_string()))
+        );
     }
     #[test]
     fn recipe_telemetry_backoff_doubles_and_corruption_preserves_claims() {

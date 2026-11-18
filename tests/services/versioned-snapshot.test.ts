@@ -70,7 +70,7 @@ test('actual catalog consumer shares complete pages/categories and checks only r
   const config = { organization_id: 'integration-org', branch_id: 'branch', terminal_id: 'terminal' };
   setBridge({
     terminalConfig: { getFullConfig: async () => config },
-    modules: { getCached: async () => ({ success: true, identityMatch: true, isValid: true, modules: { success: true, organization_id: config.organization_id, terminal_id: config.terminal_id, modules: [{ module_id: 'product_catalog', is_purchased: true, pos_enabled: true }] } }) },
+    modules: { getCached: async () => ({ success: true, identityMatch: true, isValid: true, modules: { success: true, organization_id: config.organization_id, branch_id: config.branch_id, terminal_id: config.terminal_id, modules: [{ module_id: 'product_catalog', is_purchased: true, pos_enabled: true }] } }) },
     invoke: async () => pending,
     adminApi: { fetchFromAdmin: async (path: string) => {
       calls.push(path);

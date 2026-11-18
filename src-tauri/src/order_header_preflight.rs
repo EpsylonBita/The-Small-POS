@@ -4,6 +4,17 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 pub(crate) fn capture(conn: &Connection, order: &str, request: &Value) -> Result<Value, String> {
+    capture_except(conn, order, request, None)
+}
+
+/// Recovery may exclude only the exact refused row it is replacing. Every
+/// other outstanding edit retains the ordinary preflight barrier.
+pub(crate) fn capture_except(
+    conn: &Connection,
+    order: &str,
+    request: &Value,
+    excluded: Option<&str>,
+) -> Result<Value, String> {
     let scope = crate::table_session_cache::current_scope(conn)?;
     let mut original: Value = conn.query_row(
         "SELECT supabase_id,organization_id,branch_id,COALESCE(version,1),remote_version,status,total_amount,items,notes,special_instructions,sync_status FROM orders WHERE id=?1",
@@ -37,7 +48,7 @@ pub(crate) fn capture(conn: &Connection, order: &str, request: &Value) -> Result
     original["localPayments"] = json!(payments);
     let adjustments:String=conn.query_row("SELECT COALESCE(json_group_array(json_object('id',id,'payment',payment_id,'type',adjustment_type,'amount',amount,'cents',amount_cents,'method',refund_method,'handler',cash_handler,'shift',staff_shift_id)), '[]') FROM (SELECT * FROM payment_adjustments WHERE order_id=?1 ORDER BY id)",[order],|r|r.get(0)).map_err(|e|e.to_string())?;
     original["localAdjustments"] = json!(adjustments);
-    let pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND operation='UPDATE')",[order],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND ((?2 IS NULL AND operation='UPDATE') OR (?2 IS NOT NULL AND id<>?2)))",rusqlite::params![order,excluded],|r|r.get(0)).map_err(|e|e.to_string())?;
     if pending {
         return Err("ORDER_HEADER_SYNC_REQUIRED".into());
     }

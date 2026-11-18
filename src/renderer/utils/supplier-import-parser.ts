@@ -296,6 +296,13 @@ export async function extractSupplierImportFile(file: File): Promise<SupplierImp
   };
 }
 
+/** The drawer must never discard document provenance by parsing it as human rows. */
+export function supplierImportFileKind(file: Pick<File, 'name' | 'type'>): 'spreadsheet' | 'document' {
+  const extension = file.name.split('.').pop()?.toLowerCase();
+  if (/pdf|word|image\//i.test(file.type) || ['pdf', 'doc', 'docx', 'png', 'jpg', 'jpeg', 'webp'].includes(extension ?? '')) return 'document';
+  return ['csv', 'tsv', 'txt', 'xls', 'xlsx'].includes(extension ?? '') ? 'spreadsheet' : 'document';
+}
+
 export async function extractSupplierImportRowsFromFile(file: File): Promise<SupplierImportParsedRow[]> {
   const parsedFile = await extractSupplierImportFile(file);
   return parsedFile.rows;

@@ -6993,6 +6993,12 @@
       "reversal": "Pagamento annullato"
     },
     "capture": {
+      "subtype": {
+        "scanner": "Scanner",
+        "file": "File",
+        "camera": "Fotocamera",
+        "unknown": "Origine sconosciuta"
+      },
       "automation": {
         "recordedMark": "Registrata da sola",
         "recordedStockMark": "Registrata da sola · magazzino aggiornato",
@@ -7046,7 +7052,16 @@
         "rescanned": "Pagina sostituita.",
         "moveEarlier": "Sposta prima",
         "moveLater": "Sposta dopo",
-        "capReached": "Sono tutte le pagine che una fattura può contenere. Chiudi questa e comincia un'altra per il resto.",
+        "paperSource": "Origine carta",
+        "flatbed": "Piano / un foglio",
+        "feeder": "Alimentatore / pila solo fronte",
+        "folderBoundary": "Una fattura per acquisizione. Salva una fattura di più pagine in un solo PDF; i file immagine separati diventano acquisizioni separate.",
+        "oneInvoice": "Una fattura per acquisizione",
+        "capReached": "Questa fattura ha raggiunto il limite di pagine. Le pagine sono salvate qui. Mantieni insieme la fattura completa; non inviarla in parti separate.",
+        "admissionReview": "Le letture richiedono un controllo. La fattura e tutte le sue pagine sono salvate.",
+        "rotate": "Ruota pagina in senso orario",
+        "admissionRecorded": "Fattura registrata",
+        "admissionWaiting": "In attesa della lettura della fattura",
         "stoppedEarly": "Lo scanner si è fermato prima che l'alimentatore fosse vuoto. Se sono rimaste delle pagine dentro, aggiungile prima di chiudere.",
         "finishAndStartAnother": "Chiudi questa e comincia un'altra",
         "needAPage": "Aggiungi almeno una pagina prima di chiudere."
@@ -7109,6 +7124,7 @@
         "device_error": "Lo scanner non ha risposto. Controlla che sia acceso e collegato."
       },
       "status": {
+        "excluded": "Non è una fattura",
         "capturing": "Ancora in scansione",
         "waiting": "In attesa di essere letta",
         "uploading": "Invio delle pagine",
@@ -7313,6 +7329,14 @@
       "emptyDescription": "Contatti e fatture del fornitore appariranno qui."
     },
     "import": {
+      "negativeStockWarning": "La scorta è negativa dopo questa registrazione. Controlla il saldo di magazzino.",
+      "appliedStockQuantity": "Quantità applicata: {{quantity}}",
+      "staffSessionRequired": "Collegati all’ufficio ed effettua nuovamente l’ingresso in turno. I dati sono conservati.",
+      "tillSpreadsheetUnavailable": "L’importazione dei fogli di calcolo non è ancora disponibile su questa cassa. Le righe sono conservate.",
+      "documentRetained": "Documento conservato per la lettura. Segui lo stato nelle fatture scansionate.",
+      "documentRetainedUnsupported": "Il documento Word originale è conservato su questa cassa. Il caricamento Word non è ancora disponibile. Esportalo in PDF e seleziona il PDF.",
+      "poLinkOnly": "Collega la fattura all’ordine di acquisto (senza registrare quantità consegnate).",
+      "stockLineResult": "Riga {{row}}: scorta registrata per {{item}} · movimento {{movement}}",
       "open": "Importa articoli",
       "title": "Importa articoli fornitore",
       "subtitle": "Controlla le righe prima di sincronizzarle con l’inventario.",
@@ -9358,6 +9382,12 @@
     "portionNotSaved": "Carta addebitata, pagamento non ancora salvato. Non addebitare di nuovo."
   },
   "recovery": {
+    "confirmations": {
+      "cashDrawerControl": {
+        "title": "Conferma l'azione di ripristino",
+        "subtitle": "Inserisci il PIN di un cassiere o di un responsabile per eseguire questa azione di ripristino."
+      }
+    },
     "common": {
       "reference": "Riferimento",
       "entityId": "ID entità",
@@ -9604,6 +9634,17 @@
       }
     },
     "recipes": {
+      "orderCustomerCorrection": {
+        "title": "Modifica ai dati del cliente",
+        "summary": "La modifica ai dati del cliente non è stata salvata. La vendita e il pagamento non sono interessati.",
+        "guidance": "Salvi di nuovo la modifica oppure mantenga i dati come sono adesso.",
+        "resend": "Salvare di nuovo la modifica ai dati del cliente",
+        "resendExplanation": "Provi a salvare di nuovo la stessa modifica ai dati del cliente.",
+        "pending": "Salvataggio… Attenda un momento.",
+        "keep": "Mantenere i dati come sono adesso",
+        "keepExplanation": "Utilizzi i dati del cliente e della consegna già registrati. La modifica non salvata resterà nella cronologia.",
+        "confirmed": "L’ordine ora utilizza i dati già registrati."
+      },
       "restoreLastKnownPrinterBrand": {
         "title": "Il linguaggio della stampante non è stato riconosciuto",
         "label": "Ripristina il linguaggio salvato della stampante",
@@ -10674,5 +10715,39 @@
     "attention": "Carta di lavoro: {{count}} movimenti richiedono un intervento. Vedere admin → Pianificazione del personale → Registro ERGANI.",
     "zHint": "Ogni persona deve terminare il turno con il proprio PIN affinché venga inviata l’uscita della carta di lavoro.",
     "dismiss": "Nascondi per 1 ora"
+  }
+,
+  "orderSyncNotice": {
+    "checkUnavailableHealth": "La cassa non può verificare al momento se gli ordini hanno un problema da risolvere. Rimangono tra gli ordini attivi.",
+    "checkUnavailableGuidance": "Riprovi tra poco. Se continua a succedere, chiami l’assistenza.",
+    "checkUnavailable": "La cassa non può verificare al momento se l’ordine #{{number}} ha un problema da risolvere, quindi rimane tra gli ordini attivi. Riprovi tra poco. Se continua a succedere, chiami l’assistenza.",
+    "checkUnavailableMany": "La cassa non può verificare al momento se gli ordini {{numbers}} hanno un problema da risolvere, quindi rimangono tra gli ordini attivi. Riprovi tra poco. Se continua a succedere, chiami l’assistenza.",
+    "moveBlocked": "L’ordine {{number}} ha un problema da risolvere prima. Lo apra per vedere cosa fare.",
+    "movesBlocked": "Ordini non spostati: {{numbers}}. Hanno un problema da risolvere prima.",
+    "remainsActive": "Finché il problema non è risolto, l’ordine rimane tra gli ordini attivi.",
+    "needsAction": "Da controllare",
+    "customer_correction_refused": "La modifica ai dati del cliente non è stata salvata. La vendita e il pagamento non sono interessati.",
+    "change_refused": "Una modifica a questo ordine non è stata salvata. Può continuare a servire il cliente.",
+    "payment_not_on_server": "Un pagamento di questo ordine non è ancora stato registrato. Non faccia pagare di nuovo il cliente.",
+    "next": "Prema il pulsante per salvare di nuovo.",
+    "resend": "Salvare di nuovo",
+    "guided": "Controlli questo ordine",
+    "pending": "Salvataggio… Attenda un momento.",
+    "failedAgain": "La modifica non è stata salvata neanche questa volta. Avvisi il responsabile.",
+    "failed": "La modifica non è stata salvata. Riprovi tra poco. Se succede ancora, avvisi il responsabile.",
+    "changed": "Nel frattempo l’ordine è cambiato. Avvisi il responsabile.",
+    "offline": "Non c’è connessione a internet. Riprovi quando sarà disponibile.",
+    "wait": "Completi prima la vendita, il pagamento o la chiusura, poi riprovi.",
+    "busy": "Controllo in corso…",
+    "loading": "Controllo dell’ordine in corso…",
+    "stale": "L’avviso non è stato aggiornato. Viene mostrato l’ultimo avviso disponibile.",
+    "shift": "Ordini da controllare prima di andare via",
+    "shiftHint": "Non impediscono la chiusura del turno.",
+    "order": "Ordine {{number}}",
+    "toast": "L’ordine {{number}} richiede attenzione. Lo apra.",
+    "saving": "Salvataggio…",
+    "tryAgain": "Riprovare",
+    "notSolved": "Il problema non è stato risolto. Avvisi il responsabile.",
+    "noRemedy": "Questo problema non può essere risolto da qui. Avvisi il responsabile."
   }
 }

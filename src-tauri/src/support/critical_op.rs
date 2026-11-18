@@ -59,6 +59,37 @@ pub struct SupportPermit {
     id: u64,
     pub cancelled: Arc<AtomicBool>,
 }
+
+/// A cancelled progress handler must not interrupt ROLLBACK itself. Optional
+/// helpers always release their reservation before returning to the owner.
+pub(crate) struct NonWaitingWrite<'a> {
+    conn: &'a rusqlite::Connection,
+    transaction: Option<rusqlite::Transaction<'a>>,
+}
+impl std::ops::Deref for NonWaitingWrite<'_> {
+    type Target = rusqlite::Connection;
+    fn deref(&self) -> &Self::Target {
+        self.conn
+    }
+}
+impl NonWaitingWrite<'_> {
+    pub(crate) fn commit(mut self) -> rusqlite::Result<()> {
+        self.transaction
+            .take()
+            .expect("active optional write")
+            .commit()
+    }
+}
+impl Drop for NonWaitingWrite<'_> {
+    fn drop(&mut self) {
+        self.conn.progress_handler(0, None::<fn() -> bool>);
+        drop(self.transaction.take());
+        // COMMIT may have consumed the transaction before an interruption.
+        if !self.conn.is_autocommit() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+    }
+}
 /// Keep alive until the command ends. A cancelled registration never becomes
 /// launchable again, even after the pre-empting critical operation has ended.
 // Used by the task 21.4 runner before resuming its suspended process.
@@ -298,6 +329,9 @@ impl Drop for SupportPermit {
     }
 }
 impl SupportPermit {
+    pub(super) fn gate(&self) -> Arc<CriticalOpGate> {
+        self.gate.clone()
+    }
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
@@ -309,6 +343,31 @@ impl SupportPermit {
         &self,
         conn: &'a rusqlite::Connection,
     ) -> Result<rusqlite::Transaction<'a>, String> {
+        self.begin_write_with_timeout(conn, std::time::Duration::from_millis(100))
+    }
+
+    /// Optional order helpers never queue behind the business writer.
+    pub(crate) fn begin_write_nowait<'a>(
+        &self,
+        conn: &'a rusqlite::Connection,
+    ) -> Result<NonWaitingWrite<'a>, String> {
+        match self.begin_write_with_timeout(conn, std::time::Duration::ZERO) {
+            Ok(transaction) => Ok(NonWaitingWrite {
+                conn,
+                transaction: Some(transaction),
+            }),
+            Err(error) => {
+                conn.progress_handler(0, None::<fn() -> bool>);
+                Err(error)
+            }
+        }
+    }
+
+    fn begin_write_with_timeout<'a>(
+        &self,
+        conn: &'a rusqlite::Connection,
+        timeout: std::time::Duration,
+    ) -> Result<rusqlite::Transaction<'a>, String> {
         if !self
             .gate
             .lock()
@@ -318,8 +377,7 @@ impl SupportPermit {
         {
             return Err("TIER_NOT_ALLOWED".into());
         }
-        conn.busy_timeout(std::time::Duration::from_millis(100))
-            .map_err(|_| "INTERNAL_ERROR")?;
+        conn.busy_timeout(timeout).map_err(|_| "INTERNAL_ERROR")?;
         self.guard_connection(conn, Instant::now() + std::time::Duration::from_millis(250));
         if self.is_cancelled() {
             return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());

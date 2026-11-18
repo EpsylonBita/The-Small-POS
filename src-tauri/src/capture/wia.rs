@@ -113,7 +113,7 @@ const PAGE_JPEG_QUALITY: u8 = 95;
 /// returns 1700x3400 whatever this says — the same driver that advertises a
 /// document feeder the machine does not physically have. Page size is therefore
 /// held by the encoding (see `PAGE_MIME`), never by this number.
-const SCAN_DPI: i32 = 200;
+const SCAN_DPI: i32 = 300;
 
 /// How long a caller waits on the host thread before giving up on it.
 ///
@@ -312,6 +312,7 @@ pub enum PageTransfer {
 /// Not `Send`: implementations own apartment-bound COM objects. The host thread
 /// builds one through a factory and keeps it for that thread's lifetime.
 pub trait ScannerBackend {
+    fn configure_feed_mode(&mut self, _mode: FeedMode) {}
     /// Devices this terminal can scan from, already filtered to scanners.
     fn list_devices(&mut self) -> Result<Vec<ScannerDeviceInfo>, ScanError>;
 
@@ -327,6 +328,50 @@ pub trait ScannerJob {
 
     /// Transfer the next page, or report the feeder empty.
     fn transfer_page(&mut self) -> Result<PageTransfer, ScanError>;
+
+    /// Accepted resolution read back from the device, never the requested hint.
+    fn accepted_dpi(&self) -> Option<u32> {
+        None
+    }
+    fn expected_dimensions(&self) -> Option<(u32, u32)> {
+        None
+    }
+}
+
+fn full_page_dimensions(
+    x: Option<i32>,
+    y: Option<i32>,
+    width: Option<i32>,
+    height: Option<i32>,
+) -> Result<(u32, u32), ScanError> {
+    match (x,y,width,height) {
+        (Some(0),Some(0),Some(w),Some(h)) if w > 0 && h > 0 && w <= 12000 && h <= 12000
+            && i64::from(w) * i64::from(h) <= 60_000_000 => Ok((w as u32,h as u32)),
+        _ => Err(ScanError::device_error(format!("scanner could not confirm a complete page area: x={x:?}, y={y:?}, width={width:?}, height={height:?}"))),
+    }
+}
+
+fn source_category_index(categories: &[String], use_feeder: bool) -> Option<usize> {
+    let wanted = if use_feeder {
+        "FE131934-F84C-42AD-8DA4-6129CDDD7288"
+    } else {
+        "FB607B1F-43F3-488B-855B-FB703EC342A6"
+    };
+    categories
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case(wanted))
+        .or_else(|| {
+            if categories.len() == 1
+                && (categories[0].is_empty()
+                    || (!use_feeder
+                        && categories[0]
+                            .eq_ignore_ascii_case("FE131934-F84C-42AD-8DA4-6129CDDD7288")))
+            {
+                Some(0)
+            } else {
+                None
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +406,7 @@ pub struct AcquireOutcome {
     /// one". A conditional sentence on a finished flatbed scan is the cheap
     /// error. Silence over sheets still in a real ADF is the expensive one.
     pub stopped_early: bool,
+    pub failure: Option<ScanError>,
 }
 
 /// Where the test scan's page landed, for visual confirmation (R2.2).
@@ -381,14 +427,59 @@ pub struct TestScanOutcome {
 /// It re-encodes and never scales: the page keeps the exact pixel dimensions the
 /// scanner produced.
 pub fn normalize_to_jpeg(bytes: &[u8]) -> Result<Vec<u8>, ScanError> {
+    normalize_to_jpeg_rotated(bytes, 0)
+}
+
+pub(crate) fn normalize_to_jpeg_rotated(
+    bytes: &[u8],
+    quarter_turns: u32,
+) -> Result<Vec<u8>, ScanError> {
     if bytes.is_empty() {
         return Err(ScanError::device_error(
             "the scanner returned no image data",
         ));
     }
 
-    let decoded = image::load_from_memory(bytes)
+    use image::ImageDecoder;
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| ScanError::device_error(e.to_string()))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(12000);
+    limits.max_image_height = Some(12000);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    let mut decoder = reader
+        .into_decoder()
         .map_err(|e| ScanError::device_error(format!("decode scanned page: {e}")))?;
+    let (width, height) = decoder.dimensions();
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 60_000_000 {
+        return Err(ScanError::device_error("unsafe decoded page dimensions"));
+    }
+    let orientation = decoder
+        .orientation()
+        .map_err(|e| ScanError::device_error(e.to_string()))?;
+    let mut decoded = image::DynamicImage::from_decoder(decoder)
+        .map_err(|e| ScanError::device_error(format!("decode scanned page: {e}")))?;
+    decoded.apply_orientation(orientation);
+    let decoded = match quarter_turns % 4 {
+        1 => decoded.rotate90(),
+        2 => decoded.rotate180(),
+        3 => decoded.rotate270(),
+        _ => decoded,
+    };
+    let decoded = if decoded.color().has_alpha() {
+        let rgba = decoded.into_rgba8();
+        image::RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
+            let p = rgba.get_pixel(x, y).0;
+            let a = u16::from(p[3]);
+            image::Rgb(
+                [0, 1, 2].map(|i| ((u16::from(p[i]) * a + 255 * (255 - a) + 127) / 255) as u8),
+            )
+        })
+    } else {
+        decoded.into_rgb8()
+    };
     let mut encoded = Vec::new();
     // `JpegEncoder` rather than `write_to(ImageFormat::Jpeg)`: that path takes no
     // quality and silently applies the crate default of 75, which measured an
@@ -432,6 +523,34 @@ pub fn acquire_pages(
     start_page_index: usize,
     max_pages: usize,
 ) -> Result<AcquireOutcome, ScanError> {
+    let guard = files::lock_lifecycle(app_data_dir, capture_id).map_err(ScanError::device_error)?;
+    acquire_pages_guarded(
+        backend,
+        device_id,
+        app_data_dir,
+        capture_id,
+        start_page_index,
+        max_pages,
+        &guard,
+        None,
+        None,
+    )
+}
+
+/// The guard and callback live on the host thread through late completion.
+/// The callback commits the receipt before the next physical transfer.
+#[allow(clippy::too_many_arguments)]
+fn acquire_pages_guarded(
+    backend: &mut dyn ScannerBackend,
+    device_id: &str,
+    app_data_dir: &Path,
+    capture_id: &str,
+    start_page_index: usize,
+    max_pages: usize,
+    guard: &files::CaptureLifecycleGuard,
+    replace_hash: Option<&str>,
+    observer: Option<&PageObserver>,
+) -> Result<AcquireOutcome, ScanError> {
     if max_pages == 0 {
         return Err(ScanError::device_error("no pages were requested"));
     }
@@ -454,67 +573,101 @@ pub fn acquire_pages(
     let mut reached_page_cap = false;
     let mut stopped_early = false;
 
+    let mut failure = None;
     while page_index < limit {
-        let transfer = match job.transfer_page() {
-            Ok(transfer) => transfer,
-            // A stack that has ALREADY produced pages and then reports busy is
-            // finished, not failed. Discovered on an HP DeskJet 3700 series,
-            // 2026-08-16: its driver advertises a document feeder the machine
-            // does not physically have and no flatbed, so `feed_mode` is
-            // `Feeder` and this loop asks for a second sheet. The device — a
-            // flatbed that has just scanned the one sheet on the glass — answers
-            // 409 Conflict, which `?` turned into a hard error.
-            //
-            // The user watched the scanner pull the page, scan it, finish, and
-            // then saw "0 pages" and a failure. The page was written durably
-            // before the second transfer was ever attempted; the error simply
-            // threw the whole run away on the way out.
-            //
-            // Narrow on purpose: only DeviceBusy, and only once at least one
-            // page exists. A busy device on the FIRST page is a real failure and
-            // still surfaces.
-            //
-            // Keeping the pages is only half the fix. On a GENUINE ADF the same
-            // break ends a stack that is not finished — a WIA lock, or the
-            // 429/503 a driverless eSCL scanner answers under load — and
-            // reporting that as an ordinary success is the identical defect
-            // wearing the other face: the user sees the pages that arrived, no
-            // error, no notice, and presses Done while sheets are still in the
-            // feeder. So the run is kept AND flagged; `stopped_early` is what
-            // the UI turns into a sentence.
-            Err(error) if !pages.is_empty() && error.code == ScanErrorCode::DeviceBusy => {
-                tracing::warn!(
-                    "scanner reported busy after {} page(s); the stack may be unfinished: {error}",
-                    pages.len(),
-                );
+        let result = (|| {
+            match job.transfer_page()? {
+                PageTransfer::FeederEmpty => Ok(None),
+                PageTransfer::Page(bytes) => {
+                    // Retain the physical handoff even if decoding fails. A
+                    // consumed sheet must not disappear just because its
+                    // derivative could not be produced.
+                    let dir = files::capture_dir(app_data_dir, capture_id)
+                        .map_err(ScanError::device_error)?;
+                    let raw_path = dir.join(format!("page-{}.original", uuid::Uuid::new_v4()));
+                    let raw_temp = raw_path.with_extension("part");
+                    let mut raw = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&raw_temp)
+                        .map_err(|e| ScanError::device_error(e.to_string()))?;
+                    std::io::Write::write_all(&mut raw, &bytes)
+                        .map_err(|e| ScanError::device_error(e.to_string()))?;
+                    raw.sync_all()
+                        .map_err(|e| ScanError::device_error(e.to_string()))?;
+                    drop(raw);
+                    std::fs::rename(&raw_temp, &raw_path)
+                        .map_err(|e| ScanError::device_error(e.to_string()))?;
+                    if let Some(expected) = job.expected_dimensions() {
+                        let actual = image::ImageReader::new(Cursor::new(&bytes))
+                            .with_guessed_format()
+                            .map_err(|e| ScanError::device_error(e.to_string()))?
+                            .into_dimensions()
+                            .map_err(|e| ScanError::device_error(e.to_string()))?;
+                        if actual != expected {
+                            return Err(ScanError::device_error(format!(
+                            "scanner transferred {actual:?} pixels instead of the accepted full page {expected:?}; original retained at {}", raw_path.display())));
+                        }
+                    }
+                    let normalized = normalize_to_jpeg(&bytes).map_err(|error| {
+                        ScanError::device_error(format!(
+                            "{error}; original retained at {}",
+                            raw_path.display()
+                        ))
+                    })?;
+                    let written = WrittenPage {
+                        page_index,
+                        file_path: raw_path.with_extension("jpg"),
+                        content_hash: files::sha256_hex(&normalized),
+                        byte_size: normalized.len() as u64,
+                        mime: PAGE_MIME.into(),
+                    };
+                    let receipt = files::ScanReceipt {
+                        page: written.clone(),
+                        replace_hash: replace_hash.map(str::to_owned),
+                        dpi: job.accepted_dpi(),
+                    };
+                    let journal = if observer.is_some() {
+                        Some(files::journal_receipt(&receipt).map_err(ScanError::device_error)?)
+                    } else {
+                        None
+                    };
+                    // Journal precedes derivative creation. After a crash the
+                    // retained original can rebuild this exact path and hash.
+                    files::commit_prepared_page(
+                        guard,
+                        app_data_dir,
+                        capture_id,
+                        &written,
+                        &normalized,
+                    )
+                    .map_err(ScanError::device_error)?;
+                    if let Some(observer) = observer {
+                        observer(guard, &receipt).map_err(ScanError::device_error)?;
+                        if let Some(journal) = journal {
+                            std::fs::remove_file(journal)
+                                .map_err(|e| ScanError::device_error(e.to_string()))?;
+                        }
+                    }
+                    Ok(Some(written))
+                }
+            }
+        })();
+        match result {
+            Ok(Some(page)) => {
+                pages.push(page);
+                page_index += 1;
+            }
+            Ok(None) => break,
+            Err(error) => {
+                failure = Some(error);
                 stopped_early = true;
                 break;
             }
-            Err(error) => return Err(error),
-        };
-        match transfer {
-            PageTransfer::FeederEmpty => break,
-            PageTransfer::Page(bytes) => {
-                let page = normalize_to_jpeg(&bytes)?;
-                let written = files::write_page_blocking(
-                    app_data_dir,
-                    capture_id,
-                    page_index,
-                    PAGE_MIME,
-                    &page,
-                )
-                .map_err(ScanError::device_error)?;
-                pages.push(written);
-                page_index += 1;
-            }
         }
-
-        // One sheet on the glass is one page; asking for another would rescan
-        // the same sheet.
         if feed_mode == FeedMode::Flatbed {
             break;
         }
-
         if page_index >= MAX_CAPTURE_PAGES {
             reached_page_cap = true;
             break;
@@ -526,6 +679,7 @@ pub fn acquire_pages(
         feeder_used: feed_mode == FeedMode::Feeder,
         reached_page_cap,
         stopped_early,
+        failure,
     })
 }
 
@@ -538,7 +692,24 @@ pub fn test_scan(
     device_id: &str,
     app_data_dir: &Path,
 ) -> Result<TestScanOutcome, ScanError> {
-    let outcome = acquire_pages(backend, device_id, app_data_dir, TEST_SCAN_CAPTURE_ID, 0, 1)?;
+    let guard = files::lock_lifecycle(app_data_dir, TEST_SCAN_CAPTURE_ID)
+        .map_err(ScanError::device_error)?;
+    files::remove_capture_files_guarded(&guard, app_data_dir, TEST_SCAN_CAPTURE_ID)
+        .map_err(ScanError::device_error)?;
+    let outcome = acquire_pages_guarded(
+        backend,
+        device_id,
+        app_data_dir,
+        TEST_SCAN_CAPTURE_ID,
+        0,
+        1,
+        &guard,
+        None,
+        None,
+    )?;
+    if let Some(error) = outcome.failure {
+        return Err(error);
+    }
 
     let page = outcome
         .pages
@@ -556,19 +727,34 @@ pub fn test_scan(
 // The host thread
 // ---------------------------------------------------------------------------
 
+pub(crate) type PageObserver =
+    dyn Fn(&files::CaptureLifecycleGuard, &files::ScanReceipt) -> Result<(), String> + Send + Sync;
+pub(crate) type FinishObserver =
+    dyn Fn(&Result<AcquireOutcome, ScanError>) -> Result<(), String> + Send + Sync;
+pub(crate) struct AcquisitionContext {
+    pub guard: Arc<files::CaptureLifecycleGuard>,
+    pub replace_hash: Option<String>,
+    pub observer: Arc<PageObserver>,
+    pub finish: Option<Arc<FinishObserver>>,
+    pub feed_mode: FeedMode,
+}
+
 /// What a caller asks the host thread to do.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum HostRequest {
     List,
     Test {
         device_id: String,
         app_data_dir: PathBuf,
+        feed_mode: FeedMode,
     },
     Acquire {
         device_id: String,
         app_data_dir: PathBuf,
         capture_id: String,
         start_page_index: usize,
+        max_pages: usize,
+        context: Option<Arc<AcquisitionContext>>,
     },
 }
 
@@ -593,6 +779,7 @@ enum HostReply {
 struct Job {
     request: HostRequest,
     reply: Sender<Result<HostReply, ScanError>>,
+    pending: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Builds the backend, on the host thread, in its own apartment.
@@ -614,6 +801,7 @@ pub struct WiaHost {
     /// How many apartments this host has started — the observable evidence
     /// that a restart happened.
     starts: AtomicUsize,
+    pending: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Outcome of one attempt to reach the host thread.
@@ -637,6 +825,7 @@ impl WiaHost {
             factory,
             channel: Mutex::new(None),
             starts: AtomicUsize::new(0),
+            pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -665,9 +854,19 @@ impl WiaHost {
         device_id: &str,
         app_data_dir: &Path,
     ) -> Result<TestScanOutcome, ScanError> {
+        self.test_scan_profile(device_id, app_data_dir, FeedMode::Flatbed)
+    }
+
+    pub(crate) fn test_scan_profile(
+        &self,
+        device_id: &str,
+        app_data_dir: &Path,
+        feed_mode: FeedMode,
+    ) -> Result<TestScanOutcome, ScanError> {
         let request = HostRequest::Test {
             device_id: device_id.to_string(),
             app_data_dir: app_data_dir.to_path_buf(),
+            feed_mode,
         };
         match self.execute(request)? {
             HostReply::TestPage(outcome) => Ok(outcome),
@@ -688,8 +887,32 @@ impl WiaHost {
             app_data_dir: app_data_dir.to_path_buf(),
             capture_id: capture_id.to_string(),
             start_page_index,
+            max_pages: MAX_CAPTURE_PAGES,
+            context: None,
         };
         match self.execute(request)? {
+            HostReply::Pages(outcome) => Ok(outcome),
+            other => Err(unexpected_reply(&other)),
+        }
+    }
+
+    pub(crate) fn acquire_durable(
+        &self,
+        device_id: &str,
+        app_data_dir: &Path,
+        capture_id: &str,
+        start_page_index: usize,
+        max_pages: usize,
+        context: Arc<AcquisitionContext>,
+    ) -> Result<AcquireOutcome, ScanError> {
+        match self.execute(HostRequest::Acquire {
+            device_id: device_id.into(),
+            app_data_dir: app_data_dir.into(),
+            capture_id: capture_id.into(),
+            start_page_index,
+            max_pages,
+            context: Some(context),
+        })? {
             HostReply::Pages(outcome) => Ok(outcome),
             other => Err(unexpected_reply(&other)),
         }
@@ -727,14 +950,21 @@ impl WiaHost {
             Err(error) => return Dispatched::Replied(Err(error)),
         };
 
+        if self.pending.swap(true, Ordering::SeqCst) {
+            return Dispatched::Replied(Err(ScanError::busy(
+                "previous scanner operation is still running; waiting for reconciliation",
+            )));
+        }
         let (reply_tx, reply_rx) = mpsc::channel();
         if sender
             .send(Job {
                 request,
                 reply: reply_tx,
+                pending: Arc::clone(&self.pending),
             })
             .is_err()
         {
+            self.pending.store(false, Ordering::SeqCst);
             self.forget_channel();
             return Dispatched::HostGone;
         }
@@ -743,16 +973,20 @@ impl WiaHost {
             Ok(result) => Dispatched::Replied(result),
             // The thread went away mid-command without answering.
             Err(RecvTimeoutError::Disconnected) => {
+                self.pending.store(false, Ordering::SeqCst);
                 self.forget_channel();
-                Dispatched::HostGone
+                // The request was delivered. It may already have consumed paper;
+                // never replay a physical acquisition on an ambiguous outcome.
+                Dispatched::Replied(Err(ScanError::device_error(
+                    "scanner operation ended without acknowledgement; reconcile saved receipts",
+                )))
             }
             // A wedged driver. Retire the apartment so the next attempt gets a
             // clean one, and tell the user the scanner is tied up rather than
             // leaving them staring at a spinner.
-            Err(RecvTimeoutError::Timeout) => {
-                self.forget_channel();
-                Dispatched::Replied(Err(ScanError::busy("the scanner did not answer in time")))
-            }
+            Err(RecvTimeoutError::Timeout) => Dispatched::Replied(Err(ScanError::busy(
+                "the scanner did not answer in time; previous operation is still running",
+            ))),
         }
     }
 
@@ -807,7 +1041,11 @@ fn host_thread_main(factory: BackendFactory, rx: mpsc::Receiver<Job>) {
     let mut backend: Option<Box<dyn ScannerBackend>> = None;
 
     while let Ok(job) = rx.recv() {
-        let Job { request, reply } = job;
+        let Job {
+            request,
+            reply,
+            pending,
+        } = job;
 
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             if backend.is_none() {
@@ -832,15 +1070,19 @@ fn host_thread_main(factory: BackendFactory, rx: mpsc::Receiver<Job>) {
             }
         };
 
-        // A caller that has already given up is not an error worth handling.
-        let _ = reply.send(result);
-
         if retire {
-            // Drop the backend inside this apartment (COM objects may not be
-            // released from another thread) and let the channel close, so the
-            // next command starts somewhere clean.
-            break;
+            // Retire both COM and the receiver BEFORE acknowledging the panic.
+            // Otherwise the caller can enqueue its next command in the tiny
+            // window between the error reply and channel closure.
+            drop(backend);
+            drop(rx);
+            pending.store(false, Ordering::SeqCst);
+            let _ = reply.send(result);
+            return;
         }
+        // A caller that has already given up is not an error worth handling.
+        pending.store(false, Ordering::SeqCst);
+        let _ = reply.send(result);
     }
 
     drop(backend);
@@ -855,21 +1097,48 @@ fn run_request(
         HostRequest::Test {
             device_id,
             app_data_dir,
-        } => test_scan(backend, &device_id, &app_data_dir).map(HostReply::TestPage),
+            feed_mode,
+        } => {
+            backend.configure_feed_mode(feed_mode);
+            test_scan(backend, &device_id, &app_data_dir).map(HostReply::TestPage)
+        }
         HostRequest::Acquire {
             device_id,
             app_data_dir,
             capture_id,
             start_page_index,
-        } => acquire_pages(
-            backend,
-            &device_id,
-            &app_data_dir,
-            &capture_id,
-            start_page_index,
-            MAX_CAPTURE_PAGES,
-        )
-        .map(HostReply::Pages),
+            max_pages,
+            context,
+        } => {
+            let outcome = if let Some(context) = context {
+                backend.configure_feed_mode(context.feed_mode);
+                let outcome = acquire_pages_guarded(
+                    backend,
+                    &device_id,
+                    &app_data_dir,
+                    &capture_id,
+                    start_page_index,
+                    max_pages,
+                    &context.guard,
+                    context.replace_hash.as_deref(),
+                    Some(context.observer.as_ref()),
+                );
+                if let Some(finish) = &context.finish {
+                    finish(&outcome).map_err(ScanError::device_error)?;
+                }
+                outcome
+            } else {
+                acquire_pages(
+                    backend,
+                    &device_id,
+                    &app_data_dir,
+                    &capture_id,
+                    start_page_index,
+                    max_pages,
+                )
+            };
+            outcome.map(HostReply::Pages)
+        }
     }
 }
 
@@ -1283,6 +1552,81 @@ mod com {
             self.find(property_id)?.get_i32("Value").ok()
         }
 
+        /// Negotiate only values the driver advertises, then read back reality.
+        fn negotiate(&self, id: i32, requested: i32) -> Result<Option<i32>, ScanError> {
+            let Some(property) = self.find(id) else {
+                return Ok(None);
+            };
+            let value = match property.get_i32("SubType").unwrap_or(0) {
+                1 => {
+                    let min = property.get_i32("SubTypeMin")?;
+                    let max = property.get_i32("SubTypeMax")?;
+                    let step = property.get_i32("SubTypeStep").unwrap_or(1).max(1);
+                    let delta = requested.clamp(min, max) - min;
+                    let steps = if matches!(id, 6147 | 6148) {
+                        delta.saturating_add(step - 1) / step
+                    } else {
+                        delta / step
+                    };
+                    min.saturating_add(steps.saturating_mul(step)).min(max)
+                }
+                2 => {
+                    let values = property.get_object("SubTypeValues")?;
+                    let count = values.get_i32("Count")?;
+                    let mut candidates = Vec::new();
+                    for index in 1..=count {
+                        if let Ok(value) = values.get_indexed("Item", VARIANT::from(index)) {
+                            if let Ok(value) = i32::try_from(&value) {
+                                candidates.push(value);
+                            }
+                        }
+                    }
+                    if matches!(id, 6147 | 6148) && candidates.iter().any(|v| *v >= requested) {
+                        candidates.retain(|v| *v >= requested);
+                    }
+                    candidates
+                        .into_iter()
+                        .min_by_key(|v| (i64::from(*v) - i64::from(requested)).abs())
+                        .ok_or_else(|| {
+                            ScanError::device_error(format!(
+                                "property {id} has no advertised values"
+                            ))
+                        })?
+                }
+                3 => {
+                    let values = property.get_object("SubTypeValues")?;
+                    let mut flags = 0;
+                    for index in 1..=values.get_i32("Count")? {
+                        let value = values.get_indexed("Item", VARIANT::from(index))?;
+                        flags |= i32::try_from(&value)
+                            .map_err(|e| ScanError::device_error(e.to_string()))?;
+                    }
+                    let value = requested & flags;
+                    if value == 0 || (id == 6146 && value & 1 == 0) {
+                        return Err(ScanError::device_error(format!(
+                            "property {id} does not support the scan profile"
+                        )));
+                    }
+                    value
+                }
+                _ => requested,
+            };
+            // Fixed/read-only properties are valid when they already meet
+            // the profile; writing the same value can still be refused.
+            if property.get_i32("Value").ok() != Some(value) {
+                property.put("Value", VARIANT::from(value))?;
+            }
+            let accepted = property.get_i32("Value")?;
+            if matches!(id, 6149 | 6150 | 6151 | 6152) && accepted != value {
+                return Err(ScanError::device_error(format!("scanner changed full-page geometry property {id}: requested {value}, accepted {accepted}")));
+            }
+            Ok(Some(accepted))
+        }
+
+        fn read_string(&self, id: i32) -> Option<String> {
+            self.find(id)?.get_string("Value").ok()
+        }
+
         /// Best-effort write. A device that refuses a setting still scans — at
         /// its own default — which is always better than failing the capture
         /// over a resolution hint.
@@ -1302,6 +1646,7 @@ mod com {
         // released before the apartment closes.
         manager: Dispatch,
         _apartment: Apartment,
+        requested_mode: FeedMode,
     }
 
     impl WiaAutomationBackend {
@@ -1311,6 +1656,7 @@ mod com {
             Ok(Self {
                 manager,
                 _apartment: apartment,
+                requested_mode: FeedMode::Flatbed,
             })
         }
 
@@ -1334,6 +1680,9 @@ mod com {
     }
 
     impl ScannerBackend for WiaAutomationBackend {
+        fn configure_feed_mode(&mut self, mode: FeedMode) {
+            self.requested_mode = mode;
+        }
         fn list_devices(&mut self) -> Result<Vec<ScannerDeviceInfo>, ScanError> {
             let infos = self.manager.get_object("DeviceInfos")?;
             let count = infos.get_i32("Count")?;
@@ -1385,7 +1734,10 @@ mod com {
             // Only drive the feeder when paper is actually loaded: on a
             // combo device that turns "the user put the invoice on the glass"
             // into a flatbed scan instead of an immediate paper-empty error.
-            let use_feeder = capabilities & FEEDER_CAPABILITY != 0 && status & FEED_READY != 0;
+            let use_feeder = self.requested_mode == FeedMode::Feeder;
+            if use_feeder && (capabilities & FEEDER_CAPABILITY == 0 || status & FEED_READY == 0) {
+                return Err(ScanError::device_error("feeder was explicitly selected but is not ready; use the flatbed profile for a single sheet"));
+            }
 
             if use_feeder {
                 properties.write_i32(WIA_DPS_DOCUMENT_HANDLING_SELECT, FEEDER_SELECT);
@@ -1397,16 +1749,114 @@ mod com {
             }
 
             let items = device.get_object("Items")?;
-            if items.get_i32("Count").unwrap_or(0) < 1 {
+            let mut candidates = Vec::new();
+            collect_sources(&items, &mut candidates, 0)?;
+            let categories = candidates
+                .iter()
+                .map(|(_, category)| category.clone())
+                .collect::<Vec<_>>();
+            let item = super::source_category_index(&categories, use_feeder)
+                .map(|index| candidates[index].0.clone())
+                .ok_or_else(|| {
+                    ScanError::device_error(
+                        "no unambiguous flatbed/feeder source; check scanner setup",
+                    )
+                })?;
+            let item_properties = PropertyBag(item.get_object("Properties")?);
+            // One image per physical transfer for BOTH profiles, including a
+            // legacy HP source mislabelled as a feeder. Never inherit Pages=0.
+            for bag in [&properties, &item_properties] {
+                if let Some(pages) = bag.negotiate(WIA_DPS_PAGES, 1)? {
+                    if pages != 1 {
+                        return Err(ScanError::device_error(
+                            "scanner refused one-page transfer mode",
+                        ));
+                    }
+                }
+            }
+            // Explicit simplex. No hidden duplex/auto-crop defaults inherited
+            // from a previous vendor application.
+            let selection = if use_feeder || capabilities & FLATBED_SELECT == 0 {
+                FEEDER_SELECT | 32
+            } else {
+                FLATBED_SELECT
+            };
+            for bag in [&properties, &item_properties] {
+                if let Some(accepted) =
+                    bag.negotiate(WIA_DPS_DOCUMENT_HANDLING_SELECT, selection)?
+                {
+                    if accepted & 4 != 0 {
+                        return Err(ScanError::device_error("scanner refused simplex mode"));
+                    }
+                }
+            }
+            item_properties.negotiate(6146, 1 | 0x20000)?;
+            let datatype = item_properties.negotiate(4103, 3)?;
+            if datatype != Some(3) {
                 return Err(ScanError::device_error(
-                    "the scanner offered nothing to scan",
+                    "scanner does not support colour acquisition",
                 ));
             }
-            let item = items.get_object_indexed("Item", VARIANT::from(1))?;
-
-            let item_properties = PropertyBag(item.get_object("Properties")?);
-            item_properties.write_i32(WIA_IPS_XRES, SCAN_DPI);
-            item_properties.write_i32(WIA_IPS_YRES, SCAN_DPI);
+            let depth = item_properties.negotiate(4104, 24)?;
+            if !depth.is_some_and(|v| v >= 24) {
+                return Err(ScanError::device_error(
+                    "scanner does not support 24-bit colour",
+                ));
+            }
+            let xres = item_properties.negotiate(WIA_IPS_XRES, SCAN_DPI)?;
+            let yres = item_properties.negotiate(WIA_IPS_YRES, SCAN_DPI)?;
+            // Extents are pixels, so set them only AFTER accepted DPI. Drivers
+            // advertising a maximum range provide the full physical surface.
+            let x_position = item_properties.negotiate(6149, 0)?;
+            let y_position = item_properties.negotiate(6150, 0)?;
+            let mut accepted_extents = Vec::new();
+            for (extent, max_size, root_size, dpi) in [
+                (6151, 6165, if use_feeder { 3076 } else { 3074 }, xres),
+                (6152, 6166, if use_feeder { 3077 } else { 3075 }, yres),
+            ] {
+                let property = item_properties.find(extent);
+                let pixels = property
+                    .as_ref()
+                    .and_then(|p| p.get_i32("SubTypeMax").ok())
+                    .or_else(|| {
+                        item_properties
+                            .read_i32(max_size)
+                            .or_else(|| properties.read_i32(root_size))
+                            .zip(dpi)
+                            .map(|(thousandths, dpi)| {
+                                (i64::from(thousandths) * i64::from(dpi) / 1000) as i32
+                            })
+                    });
+                let pixels = pixels.filter(|v| *v > 0).ok_or_else(|| {
+                    ScanError::device_error("scanner did not advertise a full-page extent")
+                })?;
+                accepted_extents.push(item_properties.negotiate(extent, pixels)?);
+            }
+            let expected_dimensions = super::full_page_dimensions(
+                x_position,
+                y_position,
+                accepted_extents[0],
+                accepted_extents[1],
+            )?;
+            let accepted_dpi = xres
+                .zip(yres)
+                .filter(|(x, y)| x == y && *x >= SCAN_DPI)
+                .map(|(x, _)| x as u32);
+            if accepted_dpi.is_none() {
+                return Err(ScanError::device_error(format!(
+                    "scanner could not confirm the 300 DPI profile: X={xres:?}, Y={yres:?}"
+                )));
+            }
+            tracing::info!(
+                device_id,
+                ?xres,
+                ?yres,
+                ?depth,
+                ?datatype,
+                ?expected_dimensions,
+                use_feeder,
+                "WIA accepted scan profile (simplex)"
+            );
 
             let format = choose_format(&item);
 
@@ -1420,8 +1870,39 @@ mod com {
                 },
                 properties,
                 transferred: 0,
+                accepted_dpi,
+                expected_dimensions,
             }))
         }
+    }
+
+    fn collect_sources(
+        items: &Dispatch,
+        out: &mut Vec<(Dispatch, String)>,
+        depth: usize,
+    ) -> Result<(), ScanError> {
+        if depth > 8 {
+            return Err(ScanError::device_error("scanner source tree is too deep"));
+        }
+        for index in 1..=items.get_i32("Count")? {
+            let item = items.get_object_indexed("Item", VARIANT::from(index))?;
+            let properties = PropertyBag(item.get_object("Properties")?);
+            let category = properties
+                .read_string(4125)
+                .unwrap_or_default()
+                .trim_matches(['{', '}'])
+                .to_ascii_uppercase();
+            if category == "FB607B1F-43F3-488B-855B-FB703EC342A6"
+                || category == "FE131934-F84C-42AD-8DA4-6129CDDD7288"
+                || category.is_empty()
+            {
+                out.push((item.clone(), category));
+            }
+            if let Ok(children) = item.get_object("Items") {
+                collect_sources(&children, out, depth + 1)?;
+            }
+        }
+        Ok(())
     }
 
     /// Pick the transfer format up front, from what the item says it supports.
@@ -1480,6 +1961,8 @@ mod com {
         feed_mode: FeedMode,
         properties: PropertyBag,
         transferred: usize,
+        accepted_dpi: Option<u32>,
+        expected_dimensions: (u32, u32),
     }
 
     impl WiaAutomationJob {
@@ -1529,6 +2012,12 @@ mod com {
     }
 
     impl ScannerJob for WiaAutomationJob {
+        fn expected_dimensions(&self) -> Option<(u32, u32)> {
+            Some(self.expected_dimensions)
+        }
+        fn accepted_dpi(&self) -> Option<u32> {
+            self.accepted_dpi
+        }
         fn feed_mode(&self) -> FeedMode {
             self.feed_mode
         }
@@ -1544,7 +2033,7 @@ mod com {
             let scratch = std::env::temp_dir().join(format!(
                 "the-small-scan-{}-{}.img",
                 std::process::id(),
-                self.transferred
+                uuid::Uuid::new_v4()
             ));
 
             // Exactly one transfer per sheet. A retry here would ask the feeder
@@ -1682,6 +2171,9 @@ mod tests {
     }
 
     impl ScannerJob for MockJob {
+        fn accepted_dpi(&self) -> Option<u32> {
+            Some(300)
+        }
         fn feed_mode(&self) -> FeedMode {
             self.plan.feed_mode
         }
@@ -1763,6 +2255,7 @@ mod tests {
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .expect("list capture dir")
             .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) != Some("original"))
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .collect();
         names.sort();
@@ -2033,10 +2526,19 @@ mod tests {
         );
 
         let dir = files::capture_dir(temp.path(), "capture-a").expect("capture dir");
-        assert_eq!(
-            page_names(&dir),
-            ["page-000.jpg", "page-001.jpg", "page-002.jpg"]
-        );
+        let mut expected = outcome
+            .pages
+            .iter()
+            .map(|p| {
+                p.file_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(page_names(&dir), expected);
     }
 
     #[test]
@@ -2096,15 +2598,20 @@ mod tests {
         );
 
         let dir = files::capture_dir(temp.path(), "capture-a").expect("capture dir");
+        assert_eq!(page_names(&dir).len(), 4);
         assert_eq!(
-            page_names(&dir),
-            [
-                "page-000.png",
-                "page-001.png",
-                "page-002.jpg",
-                "page-003.jpg"
-            ],
-            "the two formats coexist, and the zero-padded index still orders them",
+            page_names(&dir)
+                .iter()
+                .filter(|n| n.ends_with(".png"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            page_names(&dir)
+                .iter()
+                .filter(|n| n.ends_with(".jpg"))
+                .count(),
+            2
         );
     }
 
@@ -2346,9 +2853,10 @@ mod tests {
             0,
             MAX_CAPTURE_PAGES,
         )
-        .expect_err("a busy device with no pages is a failure");
+        .expect("structured failure");
 
-        assert_eq!(error.code, ScanErrorCode::DeviceBusy);
+        assert!(error.pages.is_empty());
+        assert_eq!(error.failure.unwrap().code, ScanErrorCode::DeviceBusy);
     }
 
     #[test]
@@ -2369,16 +2877,12 @@ mod tests {
             0,
             MAX_CAPTURE_PAGES,
         )
-        .expect_err("device removed");
+        .expect("partial pages and structured failure");
 
-        assert_eq!(error.code, ScanErrorCode::DeviceRemoved);
+        assert_eq!(error.failure.unwrap().code, ScanErrorCode::DeviceRemoved);
 
         let dir = files::capture_dir(temp.path(), "capture-a").expect("capture dir");
-        assert_eq!(
-            page_names(&dir),
-            ["page-000.jpg", "page-001.jpg"],
-            "a failure never takes already-captured pages with it",
-        );
+        assert_eq!(page_names(&dir).len(), 2);
     }
 
     #[test]
@@ -2500,10 +3004,13 @@ mod tests {
         let expected_dir =
             files::capture_dir(temp.path(), TEST_SCAN_CAPTURE_ID).expect("test capture dir");
         assert_eq!(outcome.file_path.parent(), Some(expected_dir.as_path()));
-        assert_eq!(
-            outcome.file_path.file_name().and_then(|n| n.to_str()),
-            Some("page-000.jpg"),
-        );
+        assert!(outcome
+            .file_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("page-"));
+        assert_eq!(outcome.file_path.extension().unwrap(), "jpg");
 
         let bytes = std::fs::read(&outcome.file_path).expect("test page on disk");
         assert_eq!(outcome.byte_size, bytes.len() as u64);
@@ -2536,9 +3043,9 @@ mod tests {
 
         let dir = files::capture_dir(temp.path(), TEST_SCAN_CAPTURE_ID).expect("test capture dir");
         assert_eq!(
-            page_names(&dir),
-            ["page-000.jpg"],
-            "test scans must not accumulate files on the terminal",
+            page_names(&dir).len(),
+            1,
+            "test scans must not accumulate files"
         );
     }
 
@@ -2688,5 +3195,502 @@ mod tests {
             .expect("acquire");
         assert_eq!(outcome.pages.len(), 3);
         assert!(outcome.feeder_used);
+    }
+    #[test]
+    fn transparent_invoice_background_is_white_in_the_upload_derivative() {
+        let mut source = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([0, 0, 0, 0]),
+        ))
+        .write_to(&mut source, image::ImageFormat::Png)
+        .unwrap();
+        let page = normalize_to_jpeg(&source.into_inner()).unwrap();
+        let decoded = image::load_from_memory(&page).unwrap().into_rgb8();
+        assert_eq!(decoded.get_pixel(3, 3).0, [255, 255, 255]);
+    }
+
+    #[test]
+    fn exif_orientation_is_baked_into_pixels_and_not_left_as_a_hint() {
+        let original = normalize_to_jpeg(&coloured_page([20, 40, 60])).unwrap();
+        // Independent little-endian TIFF IFD: Orientation (0x0112), SHORT, 6.
+        let exif: &[u8] =
+            b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
+        let mut tagged = original[..2].to_vec();
+        tagged.extend_from_slice(&[0xff, 0xe1]);
+        tagged.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+        tagged.extend_from_slice(exif);
+        tagged.extend_from_slice(&original[2..]);
+        let upright = normalize_to_jpeg(&tagged).unwrap();
+        let decoded = image::load_from_memory(&upright).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (24, 16));
+        let rotated = normalize_to_jpeg_rotated(&upright, 1).unwrap();
+        let decoded = image::load_from_memory(&rotated).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (16, 24));
+    }
+
+    fn coloured_page(colour: [u8; 3]) -> Vec<u8> {
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(16, 24, image::Rgb(colour)))
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn scanner_receipts_edits_and_uploaded_bytes_keep_exact_order_after_mid_stack_failure() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = Arc::new(crate::tests::harness::TestDb::open());
+        let id = "scand-integration";
+        {
+            let conn = db.state.conn.lock().unwrap();
+            super::super::store::create_document(
+                &conn,
+                &super::super::store::NewCaptureDocument {
+                    id: id.into(),
+                    source_kind: super::super::CaptureSourceKind::ConnectedScanner,
+                    source_name: Some("HP test".into()),
+                    staff_id: None,
+                    captured_at: "2026-11-16T10:00:00Z".into(),
+                    content_hash: None,
+                },
+            )
+            .unwrap();
+        }
+        let colours = [
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [255, 255, 0],
+            [255, 0, 255],
+        ];
+        let images = colours.map(coloured_page);
+        let expected = images
+            .iter()
+            .map(|bytes| normalize_to_jpeg(bytes).unwrap())
+            .collect::<Vec<_>>();
+        let callback_db = db.clone();
+        let observer: Arc<PageObserver> = Arc::new(move |guard, receipt| {
+            let conn = callback_db.state.conn.lock().unwrap();
+            // Each previous sheet is already reachable before the next receipt.
+            super::super::store::apply_scan_receipt(&conn, guard, callback_db.dir(), id, receipt)
+        });
+        let guard = files::lock_lifecycle(db.dir(), id).unwrap();
+        let mut scanner = MockScanner::with_plan(JobPlan {
+            feed_mode: FeedMode::Feeder,
+            steps: VecDeque::from([
+                Ok(PageTransfer::Page(images[0].clone())),
+                Ok(PageTransfer::Page(images[1].clone())),
+                Ok(PageTransfer::Page(images[2].clone())),
+                Err(ScanError::removed("unplugged after third sheet")),
+            ]),
+        });
+        let outcome = acquire_pages_guarded(
+            &mut scanner,
+            "HP-exact-id",
+            db.dir(),
+            id,
+            0,
+            10,
+            &guard,
+            None,
+            Some(observer.as_ref()),
+        )
+        .unwrap();
+        assert_eq!(outcome.pages.len(), 3);
+        assert_eq!(outcome.failure.unwrap().code, ScanErrorCode::DeviceRemoved);
+        {
+            let conn = db.state.conn.lock().unwrap();
+            assert_eq!(super::super::store::list_pages(&conn, id).unwrap().len(), 3);
+            super::super::store::reorder_pages(&conn, id, &[2, 0, 1]).unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            super::super::store::delete_page(&tx, id, 1).unwrap();
+            super::super::store::compact_page_indexes(&tx, id).unwrap();
+            tx.commit().unwrap();
+        }
+        scanner.plan = Some(JobPlan {
+            feed_mode: FeedMode::Flatbed,
+            steps: VecDeque::from([Ok(PageTransfer::Page(images[3].clone()))]),
+        });
+        acquire_pages_guarded(
+            &mut scanner,
+            "HP-exact-id",
+            db.dir(),
+            id,
+            2,
+            10,
+            &guard,
+            None,
+            Some(observer.as_ref()),
+        )
+        .unwrap();
+        let target = {
+            let conn = db.state.conn.lock().unwrap();
+            super::super::store::list_pages(&conn, id).unwrap()[1]
+                .content_hash
+                .clone()
+        };
+        scanner.plan = Some(JobPlan {
+            feed_mode: FeedMode::Feeder,
+            steps: VecDeque::from([
+                Ok(PageTransfer::Page(images[4].clone())),
+                Ok(PageTransfer::Page(images[0].clone())),
+            ]),
+        });
+        let before = scanner.transfers.load(Ordering::SeqCst);
+        acquire_pages_guarded(
+            &mut scanner,
+            "HP-exact-id",
+            db.dir(),
+            id,
+            1,
+            1,
+            &guard,
+            Some(&target),
+            Some(observer.as_ref()),
+        )
+        .unwrap();
+        assert_eq!(
+            scanner.transfers.load(Ordering::SeqCst) - before,
+            1,
+            "replacement consumes exactly one sheet"
+        );
+        let conn = db.state.conn.lock().unwrap();
+        let pages = super::super::store::list_pages(&conn, id).unwrap();
+        let uploaded = pages
+            .iter()
+            .map(|page| {
+                files::read_stored_page(
+                    db.dir(),
+                    id,
+                    Path::new(&page.file_path),
+                    &page.content_hash,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            uploaded,
+            vec![
+                expected[2].clone(),
+                expected[4].clone(),
+                expected[3].clone()
+            ]
+        );
+        let paths = pages
+            .iter()
+            .map(|p| &p.file_path)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(paths.len(), 3);
+        let manifest = super::super::store::page_manifest(&conn, db.dir(), id).unwrap();
+        for (index, bytes) in uploaded.iter().enumerate() {
+            assert_eq!(manifest[index]["index"], index);
+            assert_eq!(manifest[index]["sha256"], files::sha256_hex(bytes));
+            assert_eq!(manifest[index]["dpi"], 300);
+        }
+    }
+
+    #[test]
+    fn timeout_then_late_completion_keeps_capture_fenced_and_records_the_sheet() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = Arc::new(crate::tests::harness::TestDb::open());
+        let id = "scand-timeout";
+        super::super::store::create_document(
+            &db.state.conn.lock().unwrap(),
+            &super::super::store::NewCaptureDocument {
+                id: id.into(),
+                source_kind: super::super::CaptureSourceKind::ConnectedScanner,
+                source_name: None,
+                staff_id: None,
+                captured_at: "2026-11-16T10:00:00Z".into(),
+                content_hash: None,
+            },
+        )
+        .unwrap();
+        struct SlowBackend(Arc<Mutex<Option<mpsc::Receiver<()>>>>);
+        struct SlowJob(Option<mpsc::Receiver<()>>);
+        impl ScannerBackend for SlowBackend {
+            fn list_devices(&mut self) -> Result<Vec<ScannerDeviceInfo>, ScanError> {
+                Ok(vec![])
+            }
+            fn open_job(&mut self, _: &str) -> Result<Box<dyn ScannerJob>, ScanError> {
+                Ok(Box::new(SlowJob(self.0.lock().unwrap().take())))
+            }
+        }
+        impl ScannerJob for SlowJob {
+            fn feed_mode(&self) -> FeedMode {
+                FeedMode::Flatbed
+            }
+            fn transfer_page(&mut self) -> Result<PageTransfer, ScanError> {
+                self.0.take().unwrap().recv().unwrap();
+                Ok(PageTransfer::Page(coloured_page([42, 64, 128])))
+            }
+        }
+        let (release, wait) = mpsc::channel();
+        let receiver = Arc::new(Mutex::new(Some(wait)));
+        let host = WiaHost::with_backend_factory(Arc::new(move || {
+            Ok(Box::new(SlowBackend(receiver.clone())))
+        }));
+        let (done, recorded) = mpsc::channel();
+        let callback_db = db.clone();
+        let context = Arc::new(AcquisitionContext {
+            guard: Arc::new(files::lock_lifecycle(db.dir(), id).unwrap()),
+            replace_hash: None,
+            finish: None,
+            feed_mode: FeedMode::Flatbed,
+            observer: Arc::new(move |guard, receipt| {
+                let conn = callback_db.state.conn.lock().unwrap();
+                super::super::store::apply_scan_receipt(
+                    &conn,
+                    guard,
+                    callback_db.dir(),
+                    id,
+                    receipt,
+                )?;
+                done.send(()).unwrap();
+                Ok(())
+            }),
+        });
+        let request = HostRequest::Acquire {
+            device_id: "saved-device".into(),
+            app_data_dir: db.dir().into(),
+            capture_id: id.into(),
+            start_page_index: 0,
+            max_pages: 1,
+            context: Some(context),
+        };
+        assert!(matches!(
+            host.dispatch(request, Duration::from_millis(10)),
+            Dispatched::Replied(Err(ScanError {
+                code: ScanErrorCode::DeviceBusy,
+                ..
+            }))
+        ));
+        assert!(files::try_lock_lifecycle(db.dir(), id).unwrap().is_none());
+        assert_eq!(
+            host.acquire("saved-device", db.dir(), id, 0)
+                .unwrap_err()
+                .code,
+            ScanErrorCode::DeviceBusy
+        );
+        assert_eq!(
+            host.start_count(),
+            1,
+            "timeout never starts a concurrent apartment"
+        );
+        release.send(()).unwrap();
+        recorded.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            super::super::store::list_pages(&db.state.conn.lock().unwrap(), id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    #[test]
+    fn first_middle_and_last_replacements_work_at_cap_without_consuming_surplus_sheets() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = Arc::new(crate::tests::harness::TestDb::open());
+        let id = "scand-cap";
+        super::super::store::create_document(
+            &db.state.conn.lock().unwrap(),
+            &super::super::store::NewCaptureDocument {
+                id: id.into(),
+                source_kind: super::super::CaptureSourceKind::ConnectedScanner,
+                source_name: None,
+                staff_id: None,
+                captured_at: "2026-11-16T10:00:00Z".into(),
+                content_hash: None,
+            },
+        )
+        .unwrap();
+        let guard = files::lock_lifecycle(db.dir(), id).unwrap();
+        let callback_db = db.clone();
+        let observer: Arc<PageObserver> = Arc::new(move |guard, receipt| {
+            super::super::store::apply_scan_receipt(
+                &callback_db.state.conn.lock().unwrap(),
+                guard,
+                callback_db.dir(),
+                id,
+                receipt,
+            )
+        });
+        let mut scanner = MockScanner::with_plan(JobPlan::feeder(12));
+        let initial = acquire_pages_guarded(
+            &mut scanner,
+            "HP",
+            db.dir(),
+            id,
+            0,
+            10,
+            &guard,
+            None,
+            Some(observer.as_ref()),
+        )
+        .unwrap();
+        assert!(initial.reached_page_cap);
+        assert_eq!(scanner.transfers.load(Ordering::SeqCst), 10);
+        for index in [0, 5, 9] {
+            let before =
+                super::super::store::list_pages(&db.state.conn.lock().unwrap(), id).unwrap();
+            let expected_hash = before[index].content_hash.clone();
+            scanner.plan = Some(JobPlan {
+                feed_mode: FeedMode::Feeder,
+                steps: VecDeque::from([
+                    Ok(PageTransfer::Page(coloured_page([index as u8, 30, 40]))),
+                    Ok(PageTransfer::Page(coloured_page([99, 99, 99]))),
+                ]),
+            });
+            let transfers = scanner.transfers.load(Ordering::SeqCst);
+            acquire_pages_guarded(
+                &mut scanner,
+                "HP",
+                db.dir(),
+                id,
+                index,
+                1,
+                &guard,
+                Some(&expected_hash),
+                Some(observer.as_ref()),
+            )
+            .unwrap();
+            assert_eq!(scanner.transfers.load(Ordering::SeqCst) - transfers, 1);
+            let after =
+                super::super::store::list_pages(&db.state.conn.lock().unwrap(), id).unwrap();
+            assert_eq!(after.len(), 10);
+            for slot in 0..10 {
+                if slot == index {
+                    assert_ne!(after[slot].file_path, before[slot].file_path);
+                } else {
+                    assert_eq!(after[slot].file_path, before[slot].file_path);
+                }
+            }
+        }
+    }
+    #[test]
+    fn row_failure_stops_before_the_next_sheet_and_reconciles_the_pending_receipt() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = Arc::new(crate::tests::harness::TestDb::open());
+        let id = "scand-db-failure";
+        super::super::store::create_document(
+            &db.state.conn.lock().unwrap(),
+            &super::super::store::NewCaptureDocument {
+                id: id.into(),
+                source_kind: super::super::CaptureSourceKind::ConnectedScanner,
+                source_name: None,
+                staff_id: None,
+                captured_at: "2026-11-16T10:00:00Z".into(),
+                content_hash: None,
+            },
+        )
+        .unwrap();
+        let guard = files::lock_lifecycle(db.dir(), id).unwrap();
+        let callback_db = db.clone();
+        let observer: Arc<PageObserver> = Arc::new(move |guard, receipt| {
+            if receipt.page.page_index == 1 {
+                return Err("injected database failure".into());
+            }
+            super::super::store::apply_scan_receipt(
+                &callback_db.state.conn.lock().unwrap(),
+                guard,
+                callback_db.dir(),
+                id,
+                receipt,
+            )
+        });
+        let mut scanner = MockScanner::with_plan(JobPlan::feeder(4));
+        let outcome = acquire_pages_guarded(
+            &mut scanner,
+            "HP",
+            db.dir(),
+            id,
+            0,
+            10,
+            &guard,
+            None,
+            Some(observer.as_ref()),
+        )
+        .unwrap();
+        assert_eq!(
+            scanner.transfers.load(Ordering::SeqCst),
+            2,
+            "never request sheet 3 before row 2 commits"
+        );
+        assert_eq!(outcome.pages.len(), 1);
+        assert!(outcome.failure.unwrap().detail.contains("database failure"));
+        let conn = db.state.conn.lock().unwrap();
+        assert_eq!(super::super::store::list_pages(&conn, id).unwrap().len(), 1);
+        super::super::store::reconcile_scan_receipts(&conn, &guard, db.dir(), id).unwrap();
+        assert_eq!(super::super::store::list_pages(&conn, id).unwrap().len(), 2);
+    }
+    #[test]
+    fn source_selection_uses_the_requested_category_instead_of_child_one() {
+        let flatbed = "FB607B1F-43F3-488B-855B-FB703EC342A6".to_string();
+        let feeder = "FE131934-F84C-42AD-8DA4-6129CDDD7288".to_string();
+        let categories = vec![feeder.clone(), flatbed.clone()];
+        assert_eq!(source_category_index(&categories, false), Some(1));
+        assert_eq!(source_category_index(&categories, true), Some(0));
+        assert_eq!(
+            source_category_index(&[feeder], false),
+            Some(0),
+            "single legacy HP source still uses one-sheet mode"
+        );
+        assert_eq!(source_category_index(&[flatbed], true), None);
+        assert_eq!(
+            source_category_index(&[String::new(), String::new()], false),
+            None
+        );
+    }
+
+    #[test]
+    fn full_page_geometry_refuses_missing_readback_and_nonzero_crop_offsets() {
+        assert_eq!(
+            full_page_dimensions(Some(0), Some(0), Some(2480), Some(3508)).unwrap(),
+            (2480, 3508)
+        );
+        assert!(full_page_dimensions(Some(1), Some(0), Some(2480), Some(3508)).is_err());
+        assert!(full_page_dimensions(Some(0), None, Some(2480), Some(3508)).is_err());
+        assert!(full_page_dimensions(Some(0), Some(0), None, Some(3508)).is_err());
+        assert!(full_page_dimensions(Some(0), Some(0), Some(12001), Some(3508)).is_err());
+    }
+
+    #[test]
+    fn a_transfer_with_cropped_dimensions_is_held_with_its_original() {
+        struct Backend;
+        struct Job;
+        impl ScannerBackend for Backend {
+            fn list_devices(&mut self) -> Result<Vec<ScannerDeviceInfo>, ScanError> {
+                Ok(vec![])
+            }
+            fn open_job(&mut self, _: &str) -> Result<Box<dyn ScannerJob>, ScanError> {
+                Ok(Box::new(Job))
+            }
+        }
+        impl ScannerJob for Job {
+            fn feed_mode(&self) -> FeedMode {
+                FeedMode::Flatbed
+            }
+            fn expected_dimensions(&self) -> Option<(u32, u32)> {
+                Some((2480, 3508))
+            }
+            fn transfer_page(&mut self) -> Result<PageTransfer, ScanError> {
+                Ok(PageTransfer::Page(coloured_page([10, 20, 30])))
+            }
+        }
+        let temp = TempDir::new();
+        let result = acquire_pages(&mut Backend, "HP", temp.path(), "cropped", 0, 1).unwrap();
+        assert!(result.pages.is_empty());
+        assert!(result
+            .failure
+            .unwrap()
+            .detail
+            .contains("accepted full page"));
+        let originals = std::fs::read_dir(files::capture_dir(temp.path(), "cropped").unwrap())
+            .unwrap()
+            .map(|p| p.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(originals.len(), 1);
+        assert_eq!(originals[0].extension().unwrap(), "original");
     }
 }

@@ -95,13 +95,13 @@ fn spawn_catalogue(
 ) {
     // Human confirmation must not stall the command transport lane.
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let result = (|| {
+        let result = catalogue_attempt(|| {
             let store = rusqlite::Connection::open(path).map_err(|_| "INTERNAL_ERROR")?;
             store
                 .busy_timeout(std::time::Duration::from_millis(100))
                 .map_err(|_| "INTERNAL_ERROR")?;
             super::catalogue::run(&app, &rt, &store, &c, approval)
-        })();
+        });
         let mut core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
         let now = core.now();
         match result {
@@ -121,6 +121,13 @@ fn spawn_catalogue(
         }
         Ok(())
     });
+}
+
+fn catalogue_attempt(run: impl FnOnce() -> Result<Value, String>) -> Result<Value, String> {
+    // Keep the runtime mutex outside the unwind boundary: a read panic must
+    // settle as unknown rather than abandon an executing command or poison core.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+        .unwrap_or_else(|_| Err("OUTCOME_UNKNOWN".into()))
 }
 
 pub async fn drive(app: &tauri::AppHandle, rt: &Arc<Runtime>) {
@@ -357,6 +364,21 @@ pub async fn drive(app: &tauri::AppHandle, rt: &Arc<Runtime>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn catalogue_panics_settle_as_unknown_without_poisoning_the_runtime_lock() {
+        let state = std::sync::Mutex::new(());
+        let result = super::catalogue_attempt(|| {
+            assert!(state.try_lock().is_ok());
+            panic!("test catalogue read panic")
+        });
+        assert_eq!(result, Err("OUTCOME_UNKNOWN".into()));
+        assert!(state.lock().is_ok());
+        assert_eq!(
+            super::catalogue_attempt(|| Ok(serde_json::json!({"complete":true}))).unwrap()
+                ["complete"],
+            true
+        );
+    }
     use super::*;
     #[test]
     fn no_command_without_active_session_and_visible_banner() {

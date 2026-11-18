@@ -206,23 +206,20 @@ fn parse_modules_save_cache_payload(arg0: Option<serde_json::Value>) -> ModulesS
     }
 }
 
-fn current_module_identity(db: &db::DbState) -> (String, String, String, String) {
-    let organization_id = storage::get_credential("organization_id")
-        .or_else(|| crate::read_local_setting(db, "terminal", "organization_id"))
-        .unwrap_or_default();
-    let branch_id = storage::get_credential("branch_id")
-        .or_else(|| crate::read_local_setting(db, "terminal", "branch_id"))
-        .unwrap_or_default();
-    let terminal_id = storage::get_credential("terminal_id")
-        .or_else(|| crate::read_local_setting(db, "terminal", "terminal_id"))
-        .unwrap_or_default();
-    let admin_dashboard_url = storage::get_credential("admin_dashboard_url")
-        .or_else(|| crate::read_local_setting(db, "terminal", "admin_dashboard_url"))
-        .unwrap_or_default();
-    (organization_id, branch_id, terminal_id, admin_dashboard_url)
+pub(crate) fn current_module_identity(_db: &db::DbState) -> (String, String, String, String) {
+    // Credential Manager is the terminal identity authority. Native report/check-in
+    // readers may already hold SQLite; never reacquire its mutex for a cache read.
+    // Missing credentials fail closed rather than adopting a plaintext legacy mirror.
+    let read = |key: &str| storage::get_credential(key).unwrap_or_default();
+    (
+        read("organization_id"),
+        read("branch_id"),
+        read("terminal_id"),
+        read("admin_dashboard_url"),
+    )
 }
 
-fn cache_identity_matches(
+pub(crate) fn cache_identity_matches(
     cache: &serde_json::Value,
     organization_id: &str,
     branch_id: &str,
@@ -250,14 +247,14 @@ fn cache_identity_matches(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // Module caches written before the repair rollout did not carry a branch.
-    // Preserve their established generic-module offline fallback when the
-    // original org/terminal/origin tuple still matches. Repair access never
-    // relies on this compatibility path: it is filtered independently through
-    // the native branch-bound entitlement below.
-    let compatible_branch = cached_branch.is_empty() || cached_branch == branch_id;
+    // v3 is the ownership-backfill boundary. Never adopt organization-wide caches.
+    let compatible_branch = !branch_id.is_empty() && cached_branch == branch_id;
 
-    cached_org == organization_id
+    cache.get("storeScopeVersion").and_then(|v| v.as_u64()) == Some(3)
+        && !organization_id.is_empty()
+        && !terminal_id.is_empty()
+        && !admin_dashboard_url.is_empty()
+        && cached_org == organization_id
         && compatible_branch
         && cached_terminal == terminal_id
         && cached_admin == admin_dashboard_url
@@ -439,11 +436,16 @@ pub async fn modules_fetch_from_admin(
         emit_modules_sync_error(&app, &payload);
         return Ok(payload);
     };
+    let module_identity = current_module_identity(&db);
     let path = format!("/api/pos/modules/enabled?terminal_id={terminal_id}");
     let access_decision = crate::repairs::start_authoritative_access_decision()?;
     let binding_digest = crate::commands::settings::current_access_binding_digest()?;
 
-    match crate::admin_fetch_detailed(Some(&db), &path, "GET", None).await {
+    let result = crate::admin_fetch_detailed(Some(&db), &path, "GET", None).await;
+    if current_module_identity(&db) != module_identity {
+        return Err("MODULE_SCOPE_CHANGED".to_string());
+    }
+    match result {
         Ok(resp) => {
             if crate::commands::settings::current_access_binding_digest()? != binding_digest {
                 crate::repairs::latch_authoritative_access_pending(access_decision)?;
@@ -470,6 +472,14 @@ pub async fn modules_fetch_from_admin(
                     return Ok(failure);
                 }
             };
+            if !repair_access.matches(&module_identity.0, &module_identity.1, &module_identity.2) {
+                crate::repairs::latch_authoritative_access_pending(access_decision)?;
+                crate::core_helpers::invalidate_module_cache(&db)?;
+                return Ok(serde_json::json!({
+                    "success": false, "identityMatch": false, "modules": null,
+                    "error": "MODULE_RESPONSE_IDENTITY_MISMATCH"
+                }));
+            }
             if binding_digest.is_some() {
                 let organization = storage::get_credential_strict("organization_id")?
                     .ok_or("REPAIR_NATIVE_SCOPE_REQUIRED")?;
@@ -564,7 +574,11 @@ pub async fn modules_fetch_from_admin(
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!(0));
 
+            if current_module_identity(&db) != module_identity {
+                return Err("MODULE_SCOPE_CHANGED".to_string());
+            }
             let cache_payload = serde_json::json!({
+                "storeScopeVersion": 3,
                 "apiModules": api_modules,
                 "organizationId": organization_id,
                 "branchId": branch_id,
@@ -703,6 +717,7 @@ pub async fn modules_fetch_from_admin(
                             "success": true,
                             "modules": api_modules,
                             "organization_id": organization_id,
+                            "branch_id": current_branch,
                             "terminal_id": terminal_id_cached,
                             "timestamp": api_timestamp,
                             "stats": crate::stats_for_modules(&api_modules),
@@ -781,6 +796,7 @@ pub async fn modules_get_cached(app: tauri::AppHandle) -> Result<serde_json::Val
                 "success": true,
                 "modules": api_modules,
                 "organization_id": organization_id,
+                "branch_id": current_branch,
                 "terminal_id": terminal_id,
                 "timestamp": api_timestamp,
                 "stats": crate::stats_for_modules(&api_modules),
@@ -842,18 +858,12 @@ pub async fn modules_save_cache(
             "timestamp": Utc::now().timestamp_millis(),
             "apiTimestamp": api_timestamp,
         });
-        crate::write_module_cache(&db, &cache_payload)?;
-        let _ = app.emit(
-            "modules_refresh_needed",
-            serde_json::json!({
-                "count": cache_payload
-                    .get("apiModules")
-                    .and_then(|v| v.as_array())
-                    .map(|v| v.len())
-                    .unwrap_or(0)
-            }),
-        );
-
+        let authoritative = crate::read_module_cache(&db)?;
+        if authoritative.get("apiModules") != cache_payload.get("apiModules") {
+            return Err("MODULE_AUTHORITATIVE_SYNC_REQUIRED".to_string());
+        }
+        // The renderer cannot certify an organization-wide legacy list as store-owned.
+        // The native fetch is the only publisher of v3 entitlement snapshots.
         Ok(serde_json::json!({ "success": true }))
     })
     .await
@@ -1028,7 +1038,53 @@ mod dto_tests {
     }
 
     #[test]
-    fn legacy_cache_without_branch_preserves_only_generic_offline_compatibility() {
+    fn store_module_cache_never_grants_another_store_or_terminal() {
+        let cache = serde_json::json!({
+            "storeScopeVersion": 3, "organizationId": "org", "branchId": "A",
+            "terminalId": "till", "adminDashboardUrl": "https://admin.test",
+            "apiModules": [{ "module_id": "tables" }]
+        });
+        assert!(cache_identity_matches(
+            &cache,
+            "org",
+            "A",
+            "till",
+            "https://admin.test"
+        ));
+        assert!(!cache_identity_matches(
+            &cache,
+            "org",
+            "B",
+            "till",
+            "https://admin.test"
+        ));
+        assert!(!cache_identity_matches(
+            &cache,
+            "org",
+            "A",
+            "other",
+            "https://admin.test"
+        ));
+        assert!(!cache_identity_matches(
+            &cache,
+            "org",
+            "A",
+            "till",
+            "https://other.test"
+        ));
+        let mut legacy = cache.clone();
+        legacy.as_object_mut().unwrap().remove("storeScopeVersion");
+        assert!(!cache_identity_matches(
+            &legacy,
+            "org",
+            "A",
+            "till",
+            "https://admin.test"
+        ));
+    }
+
+    #[test]
+    fn legacy_cache_without_branch_requires_authoritative_store_resync() {
         let legacy = serde_json::json!({
             "apiModules": [
                 { "module_id": "orders" },
@@ -1040,22 +1096,13 @@ mod dto_tests {
             "adminDashboardUrl": "https://admin.example.com"
         });
 
-        assert!(cache_identity_matches(
+        assert!(!cache_identity_matches(
             &legacy,
             "11111111-1111-4111-8111-111111111111",
             "22222222-2222-4222-8222-222222222222",
             "terminal-alpha",
             "https://admin.example.com",
         ));
-        assert_eq!(
-            cached_modules_for_native_access(&legacy, false)
-                .iter()
-                .filter_map(|module| module.get("module_id").and_then(serde_json::Value::as_str))
-                .collect::<Vec<_>>(),
-            vec!["orders", "users"],
-            "legacy generic modules remain available, while repairs still requires native branch-bound access",
-        );
-
         let mut branch_bound = legacy;
         branch_bound["branchId"] = serde_json::json!("33333333-3333-4333-8333-333333333333");
         assert!(!cache_identity_matches(

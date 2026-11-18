@@ -55,6 +55,7 @@ mod escpos;
 pub mod fiscal; // pub so integration tests (tests/*.rs) can exercise enqueue_for_order, active_cache, etc.
 mod gift_financial_closing;
 mod gift_financial_opening;
+mod group_scope;
 mod hardware_manager;
 mod hosted_staff_sessions;
 mod hotel_folio;
@@ -70,6 +71,10 @@ mod money;
 mod native_crash;
 mod offline_check_in;
 mod order_header_preflight;
+mod order_notice_auto;
+mod order_notice_evidence;
+mod order_notice_gate;
+mod order_notice_recovery;
 mod order_ownership;
 mod order_state;
 mod panic_hook;
@@ -1080,6 +1085,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
         // are unaffected.
         .enable_macos_default_menu(false)
         .setup(|app| {
+            crate::order_notice_recovery::install_events(app.handle().clone());
             use std::sync::Arc;
             use tauri::Manager;
 
@@ -1724,6 +1730,9 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::sync_queue::sync_queue_length,
             commands::sync_queue::sync_queue_status,
             commands::sync_queue::sync_queue_list_items,
+            commands::sync_queue::order_sync_notices,
+            commands::sync_queue::order_notice_editing,
+            commands::sync_queue::order_notice_employee_attempt,
             commands::sync_queue::sync_queue_retry_item,
             commands::sync_queue::sync_queue_make_due,
             commands::sync_queue::sync_queue_items_by_id,
@@ -2152,6 +2161,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             use tauri::Manager;
             if let tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } = &event {
                 support::critical_op::clear_payment_signals(Some(label));
+                order_notice_auto::clear_window(label);
                 if label == "main" { support::session::withdraw_banner(); }
             }
             if let tauri::RunEvent::ExitRequested { .. } = event {

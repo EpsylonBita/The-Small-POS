@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   getCaptureDocument: vi.fn(),
   getCapturePagePreview: vi.fn(async () => 'data:image/png;base64,AAA'),
+  rotateCapturePage: vi.fn(async () => ({ success: true })),
   removeCapturePage: vi.fn(async () => ({ success: true })),
   reorderCapturePages: vi.fn(async () => ({ success: true })),
   acquireFromScanner: vi.fn(),
@@ -56,6 +57,7 @@ vi.mock('../../../services/capture-client', async (importOriginal) => {
     getCaptureDocument: mocks.getCaptureDocument,
     getCapturePagePreview: mocks.getCapturePagePreview,
     removeCapturePage: mocks.removeCapturePage,
+    rotateCapturePage: mocks.rotateCapturePage,
     reorderCapturePages: mocks.reorderCapturePages,
     acquireFromScanner: mocks.acquireFromScanner,
   };
@@ -197,28 +199,15 @@ describe('CapturePagesPanel', () => {
     await waitFor(() => expect(mocks.reorderCapturePages).toHaveBeenCalledWith('cap-1', [1, 0]));
   });
 
-  it('re-scans a page in place: new bytes first, then the old page drops into its slot', async () => {
+  it('requests exactly one replacement and never deletes or reorders pages in the renderer', async () => {
     renderPanel();
     await screen.findByTestId('capture-page-0');
-
-    // The replacement lands on the end, so the store reports three pages.
-    mocks.getCaptureDocument.mockResolvedValue(documentWith(3));
-
-    fireEvent.click(
-      within(screen.getByTestId('capture-page-0')).getByLabelText('Scan this page again'),
-    );
-
-    await waitFor(() => expect(mocks.acquireFromScanner).toHaveBeenCalled());
-    // Acquire happens before the old page is dropped: a scanner that fails
-    // must leave the original page untouched.
-    expect(mocks.acquireFromScanner.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.removeCapturePage.mock.invocationCallOrder[0],
-    );
-    await waitFor(() => expect(mocks.removeCapturePage).toHaveBeenCalledWith('cap-1', 0));
-    // Last page moved back to index 0 — the user sees a page improve, not move.
-    await waitFor(() =>
-      expect(mocks.reorderCapturePages).toHaveBeenCalledWith('cap-1', [2, 0, 1]),
-    );
+    fireEvent.click(within(screen.getByTestId('capture-page-0')).getByLabelText('Scan this page again'));
+    await waitFor(() => expect(mocks.acquireFromScanner).toHaveBeenCalledWith({
+      captureId: 'cap-1', deviceId: 'device-1', replacePageIndex: 0,
+    }));
+    expect(mocks.removeCapturePage).not.toHaveBeenCalled();
+    expect(mocks.reorderCapturePages).not.toHaveBeenCalled();
     await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith('Page replaced.'));
   });
 
@@ -254,41 +243,48 @@ describe('CapturePagesPanel', () => {
     expect(message).not.toContain('WIA');
   });
 
-  it('offers to finish and start another at the page cap instead of blocking', async () => {
+  it('holds a page-capped invoice together and permits a one-page replacement at the cap', async () => {
     mocks.getCaptureDocument.mockResolvedValue(documentWith(10));
     const { props } = renderPanel();
-
-    const capMessage = await screen.findByTestId('capture-page-cap');
-    expect(capMessage).toHaveTextContent(
-      'That is as many pages as one invoice can hold. Finish this one and start another for the rest.',
-    );
-    // A sentence, not a refusal: Done still works, and Add is simply spent.
+    const message = await screen.findByTestId('capture-page-cap');
+    expect(message).toHaveTextContent('Keep the complete invoice together');
     expect(screen.getByTestId('capture-add-page')).toBeDisabled();
-    expect(screen.getByTestId('capture-done')).toBeEnabled();
-
-    fireEvent.click(screen.getByTestId('capture-done'));
-    await waitFor(() => expect(props.onDone).toHaveBeenCalledWith('cap-1'));
+    expect(screen.getByTestId('capture-done')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Finish this one and start another' })).toBeNull();
+    fireEvent.click(within(screen.getByTestId('capture-page-4')).getByLabelText('Scan this page again'));
+    await waitFor(() => expect(mocks.acquireFromScanner).toHaveBeenCalledWith({
+      captureId: 'cap-1', deviceId: 'device-1', replacePageIndex: 4,
+    }));
+    expect(props.onDone).not.toHaveBeenCalled();
   });
 
-  it('surfaces the finish-and-start-another action when the feeder hits the cap', async () => {
-    const { props } = renderPanel();
+  it('observes the first scan, blocks edits, then refreshes and enables Done without Add', async () => {
+    mocks.getCaptureDocument.mockResolvedValue(documentWith(0));
+    const { rerender, props } = renderPanel({ acquisitionBusy: true, refreshToken: 1 });
+    expect(screen.getByTestId('capture-add-page')).toBeDisabled();
+    expect(screen.getByTestId('capture-done')).toBeDisabled();
+    mocks.getCaptureDocument.mockResolvedValue(documentWith(1));
+    rerender(<CapturePagesPanel {...(props as never)} acquisitionBusy={false} refreshToken={2} />);
     await screen.findByTestId('capture-page-0');
+    await waitFor(() => expect(screen.getByTestId('capture-done')).toBeEnabled());
+    expect(mocks.acquireFromScanner).not.toHaveBeenCalled();
+  });
 
-    mocks.getCaptureDocument.mockResolvedValue(documentWith(10));
-    mocks.acquireFromScanner.mockResolvedValue({
-      ok: true,
-      pages: Array.from({ length: 10 }, (_unused, index) => page(index)),
-      feederUsed: true,
-      reachedPageCap: true,
-    });
+  it('keeps a durable partial scan on hold instead of enabling Done', async () => {
+    mocks.getCaptureDocument.mockResolvedValue({ document: { ...documentWith(2).document, reasonCode: 'scan_incomplete' } });
+    renderPanel();
+    await screen.findByTestId('capture-page-0');
+    expect(screen.getByTestId('capture-done')).toBeDisabled();
+    expect(screen.getByTestId('capture-add-page')).toBeEnabled();
+    expect(screen.getByTestId('capture-pages-notice')).toHaveTextContent('The scanner stopped');
+  });
 
-    fireEvent.click(screen.getByTestId('capture-add-page'));
-
-    const notice = await screen.findByTestId('capture-pages-notice');
-    expect(notice).toHaveTextContent('Finish this one and start another');
-
-    fireEvent.click(screen.getByRole('button', { name: 'Finish this one and start another' }));
-    await waitFor(() => expect(props.onFinishAndStartAnother).toHaveBeenCalledWith('cap-1'));
+  it('observes native acquisition after closing and reopening the panel', async () => {
+    mocks.getCaptureDocument.mockResolvedValue({ document: { ...documentWith(1).document, acquiring: true } });
+    renderPanel();
+    await screen.findByTestId('capture-page-0');
+    expect(screen.getByTestId('capture-add-page')).toBeDisabled();
+    expect(within(screen.getByTestId('capture-page-0')).getByLabelText('Scan this page again')).toBeDisabled();
   });
 
   it('says the run was cut short instead of letting it look like a clean finish', async () => {

@@ -486,6 +486,211 @@ pub(crate) fn record_validated_page(
     Ok(())
 }
 
+fn finish_recovered_flatbed_sheet(
+    conn: &Connection,
+    capture_id: &str,
+    page: &WrittenPage,
+) -> Result<(), String> {
+    // A flatbed acquisition is exactly one physical page. A durable derivative
+    // plus its retained original proves that single-page transfer completed,
+    // even if the process stopped before the host's final response. Feeder
+    // receipts never imply the stack was drained.
+    if page.file_path.with_extension("original").is_file()
+        && latest_event_details(conn, capture_id, "capture_source")?
+            .is_some_and(|s| s["feedMode"] == "flatbed")
+    {
+        conn.execute("UPDATE capture_documents SET error_message = NULL WHERE id = ?1 AND status = 'capturing' AND error_message = 'scan_incomplete'", [capture_id]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Store receipt and geometry together. Replacement is a compare-and-swap of
+/// one row; failure keeps the old page and the pending receipt for recovery.
+pub(crate) fn apply_scan_receipt(
+    conn: &Connection,
+    guard: &files::CaptureLifecycleGuard,
+    app_data_dir: &std::path::Path,
+    capture_id: &str,
+    receipt: &files::ScanReceipt,
+) -> Result<(), String> {
+    let page = &receipt.page;
+    files::read_stored_page(
+        app_data_dir,
+        capture_id,
+        &page.file_path,
+        &page.content_hash,
+    )?;
+    let existing = list_pages(conn, capture_id)?;
+    if existing
+        .iter()
+        .any(|row| row.file_path == page.file_path.to_string_lossy())
+    {
+        return finish_recovered_flatbed_sheet(conn, capture_id, page);
+    }
+    if let Some(expected) = &receipt.replace_hash {
+        if !existing
+            .iter()
+            .any(|row| row.page_index == page.page_index as i64 && &row.content_hash == expected)
+        {
+            return Err("Replacement target changed; original pages retained".into());
+        }
+    } else if existing
+        .iter()
+        .any(|row| row.page_index == page.page_index as i64)
+    {
+        return Err("Pending scan conflicts with an existing page; both files retained".into());
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let validated = validate_written_page(guard, capture_id, page)?;
+    record_validated_page(&tx, capture_id, &validated)?;
+    tx.execute(
+        "UPDATE capture_documents SET storage_keys_json = NULL WHERE id = ?1",
+        [capture_id],
+    )
+    .map_err(|e| e.to_string())?;
+    record_event(
+        &tx,
+        Some(capture_id),
+        "page_geometry",
+        None,
+        Some(&serde_json::json!({
+            "sha256": page.content_hash, "dpi": receipt.dpi
+        })),
+    )?;
+    page_manifest(&tx, app_data_dir, capture_id)?;
+    finish_recovered_flatbed_sheet(&tx, capture_id, page)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+/// Replay only pending journals, never arbitrary image files or removed pages.
+pub(crate) fn reconcile_scan_receipts(
+    conn: &Connection,
+    guard: &files::CaptureLifecycleGuard,
+    app_data_dir: &std::path::Path,
+    capture_id: &str,
+) -> Result<(), String> {
+    guard.check(capture_id)?;
+    let mut pending = Vec::new();
+    for entry in std::fs::read_dir(files::capture_dir(app_data_dir, capture_id)?)
+        .map_err(|e| e.to_string())?
+    {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".receipt.json") || n.ends_with(".receipt.part"))
+        {
+            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+            let receipt: files::ScanReceipt =
+                serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            pending.push((path, receipt));
+        }
+    }
+    pending.sort_by_key(|(_, r)| r.page.page_index);
+    for (path, receipt) in pending {
+        if !receipt.page.file_path.exists() {
+            let dir = files::capture_dir(app_data_dir, capture_id)?;
+            if receipt.page.file_path.parent() != Some(dir.as_path()) {
+                return Err("Pending page path escapes capture".into());
+            }
+            let original = receipt.page.file_path.with_extension("original");
+            let bytes = if original.exists() {
+                super::wia::normalize_to_jpeg(&std::fs::read(original).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?
+            } else {
+                let name = receipt
+                    .page
+                    .file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or("Invalid pending identity")?;
+                files::read_stored_page(
+                    app_data_dir,
+                    capture_id,
+                    &dir.join(format!("{name}.part")),
+                    &receipt.page.content_hash,
+                )?
+            };
+            files::commit_prepared_page(guard, app_data_dir, capture_id, &receipt.page, &bytes)?;
+        }
+        apply_scan_receipt(conn, guard, app_data_dir, capture_id, &receipt)?;
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn latest_event_details(
+    conn: &Connection,
+    capture_id: &str,
+    kind: &str,
+) -> Result<Option<Value>, String> {
+    let raw: Option<String> = conn.query_row(
+        "SELECT details_json FROM capture_events WHERE capture_id = ?1 AND event_type = ?2 ORDER BY rowid DESC LIMIT 1",
+        params![capture_id, kind], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+    raw.map(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+        .transpose()
+}
+
+/// Ordered hashes are computed from the actual immutable bytes, persisted before
+/// upload and recomputed before recognition. Geometry is optional for old pages.
+pub(crate) fn page_manifest(
+    conn: &Connection,
+    app_data_dir: &std::path::Path,
+    capture_id: &str,
+) -> Result<Value, String> {
+    let pages = list_pages(conn, capture_id)?;
+    let events = list_events(conn, capture_id)?;
+    let mut manifest = Vec::new();
+    for (index, page) in pages.iter().enumerate() {
+        if page.page_index != index as i64 {
+            return Err("Capture page order has a gap".into());
+        }
+        let bytes = files::read_stored_page(
+            app_data_dir,
+            capture_id,
+            std::path::Path::new(&page.file_path),
+            &page.content_hash,
+        )?;
+        let mut entry = serde_json::json!({ "index": index, "sha256": files::sha256_hex(&bytes) });
+        if let Ok((width, height)) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?
+            .into_dimensions()
+        {
+            entry["width"] = width.into();
+            entry["height"] = height.into();
+        }
+        for event in events
+            .iter()
+            .rev()
+            .filter(|e| e.event_type == "page_geometry")
+        {
+            if let Some(details) = event
+                .details_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            {
+                if details["sha256"] == page.content_hash {
+                    if let Some(dpi) = details["dpi"].as_u64() {
+                        entry["dpi"] = dpi.into();
+                    }
+                    break;
+                }
+            }
+        }
+        manifest.push(entry);
+    }
+    let manifest = Value::Array(manifest);
+    record_event(
+        conn,
+        Some(capture_id),
+        "page_manifest",
+        None,
+        Some(&manifest),
+    )?;
+    Ok(manifest)
+}
+
 /// Pages in document order.
 pub fn list_pages(conn: &Connection, capture_id: &str) -> Result<Vec<CapturePage>, String> {
     let mut statement = conn
@@ -786,6 +991,8 @@ pub fn reorder_pages(conn: &Connection, capture_id: &str, order: &[i64]) -> Resu
         return Err("Page order must list every existing page exactly once".into());
     }
 
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let conn = &tx;
     // Park every row in a negative index first so the final assignment can
     // never collide with a row that has not moved yet.
     for (offset, current) in order.iter().enumerate() {
@@ -803,13 +1010,19 @@ pub fn reorder_pages(conn: &Connection, capture_id: &str, order: &[i64]) -> Resu
         .map_err(|e| format!("apply capture page order: {e}"))?;
     }
 
+    conn.execute(
+        "UPDATE capture_documents SET storage_keys_json = NULL WHERE id = ?1",
+        [capture_id],
+    )
+    .map_err(|e| e.to_string())?;
     record_event(
         conn,
         Some(capture_id),
         "pages_reordered",
         None,
         Some(&serde_json::json!({ "order": order })),
-    )
+    )?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// Renumber a document's pages to close the gap a removal left.
@@ -907,7 +1120,135 @@ mod tests {
     }
 
     #[test]
+    fn pending_receipt_recovers_once_after_restart_and_removed_pages_never_return() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = TestDb::open();
+        let page =
+            files::write_page_blocking(db.dir(), "pending", 0, PNG, b"durable bytes").unwrap();
+        create_document(
+            &db.state.conn.lock().unwrap(),
+            &new_document("pending", "2026-11-16T10:00:00Z"),
+        )
+        .unwrap();
+        files::journal_receipt(&files::ScanReceipt {
+            page: page.clone(),
+            replace_hash: None,
+            dpi: Some(300),
+        })
+        .unwrap();
+        let db = db.restart();
+        let guard = files::lock_lifecycle(db.dir(), "pending").unwrap();
+        let conn = db.state.conn.lock().unwrap();
+        reconcile_scan_receipts(&conn, &guard, db.dir(), "pending").unwrap();
+        assert_eq!(list_pages(&conn, "pending").unwrap().len(), 1);
+        reconcile_scan_receipts(&conn, &guard, db.dir(), "pending").unwrap();
+        assert_eq!(list_pages(&conn, "pending").unwrap().len(), 1);
+        delete_page(&conn, "pending", 0).unwrap();
+        reconcile_scan_receipts(&conn, &guard, db.dir(), "pending").unwrap();
+        assert!(list_pages(&conn, "pending").unwrap().is_empty());
+        assert!(
+            page.file_path.exists(),
+            "only pending journals are replayed, never orphan image files"
+        );
+    }
+
+    #[test]
+    fn restart_rebuilds_a_prejournalled_derivative_from_the_retained_original() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = TestDb::open();
+        let id = "before-derivative";
+        create_document(
+            &db.state.conn.lock().unwrap(),
+            &new_document(id, "2026-11-16T10:00:00Z"),
+        )
+        .unwrap();
+        let mut original = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            16,
+            24,
+            image::Rgb([10, 20, 30]),
+        ))
+        .write_to(&mut original, image::ImageFormat::Png)
+        .unwrap();
+        let bytes = super::super::wia::normalize_to_jpeg(original.get_ref()).unwrap();
+        let path = files::capture_dir(db.dir(), id)
+            .unwrap()
+            .join("page-prepared.jpg");
+        std::fs::write(path.with_extension("original"), original.into_inner()).unwrap();
+        let receipt = files::ScanReceipt {
+            page: WrittenPage {
+                page_index: 0,
+                file_path: path.clone(),
+                content_hash: files::sha256_hex(&bytes),
+                byte_size: bytes.len() as u64,
+                mime: "image/jpeg".into(),
+            },
+            replace_hash: None,
+            dpi: Some(300),
+        };
+        {
+            let conn = db.state.conn.lock().unwrap();
+            record_event(
+                &conn,
+                Some(id),
+                "capture_source",
+                None,
+                Some(&serde_json::json!({ "feedMode": "flatbed" })),
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE capture_documents SET error_message = 'scan_incomplete' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        }
+        let journal = files::journal_receipt(&receipt).unwrap();
+        std::fs::rename(&journal, journal.with_extension("part")).unwrap();
+        assert!(!path.exists());
+        let db = db.restart();
+        let guard = files::lock_lifecycle(db.dir(), id).unwrap();
+        let conn = db.state.conn.lock().unwrap();
+        reconcile_scan_receipts(&conn, &guard, db.dir(), id).unwrap();
+        let pages = list_pages(&conn, id).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert!(get_document(&conn, id)
+            .unwrap()
+            .unwrap()
+            .error_message
+            .is_none());
+        assert_eq!(
+            files::read_stored_page(db.dir(), id, &path, &pages[0].content_hash).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn reorder_failure_rolls_back_every_index_change() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = TestDb::open();
+        seed_capture(&db, "atomic-order", "2026-11-16T10:00:00Z");
+        let page = files::write_page_blocking(db.dir(), "atomic-order", 1, PNG, b"second").unwrap();
+        let conn = db.state.conn.lock().unwrap();
+        record_page(&conn, "atomic-order", &page).unwrap();
+        let before = list_pages(&conn, "atomic-order").unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_order BEFORE UPDATE OF page_index ON capture_pages WHEN NEW.page_index = 0 BEGIN SELECT RAISE(ABORT, 'injected order failure'); END;").unwrap();
+        assert!(reorder_pages(&conn, "atomic-order", &[1, 0]).is_err());
+        let after = list_pages(&conn, "atomic-order").unwrap();
+        assert_eq!(
+            before
+                .iter()
+                .map(|p| (&p.file_path, p.page_index))
+                .collect::<Vec<_>>(),
+            after
+                .iter()
+                .map(|p| (&p.file_path, p.page_index))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn a_captured_document_starts_capturing_with_its_pages_indexed() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         let page = seed_capture(&db, "capture-a", "2026-08-05T09:00:00Z");
 
@@ -930,6 +1271,7 @@ mod tests {
 
     #[test]
     fn a_page_row_can_never_exist_before_its_bytes_do() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         let page = files::write_page_blocking(db.dir(), "capture-a", 0, PNG, b"page-bytes")
             .expect("write page");
@@ -957,6 +1299,7 @@ mod tests {
 
     #[test]
     fn re_scanning_a_page_replaces_the_row_and_keeps_the_page_count_true() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed_capture(&db, "capture-a", "2026-08-05T09:00:00Z");
 
@@ -993,6 +1336,7 @@ mod tests {
 
     #[test]
     fn the_store_refuses_transitions_the_state_machine_forbids() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed_capture(&db, "capture-a", "2026-08-05T09:00:00Z");
         let conn = db.state.conn.lock().expect("lock");
@@ -1041,6 +1385,7 @@ mod tests {
 
     #[test]
     fn a_committed_document_is_frozen() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed_capture(&db, "capture-a", "2026-08-05T09:00:00Z");
         let conn = db.state.conn.lock().expect("lock");
@@ -1069,6 +1414,7 @@ mod tests {
 
     #[test]
     fn the_queue_lists_open_documents_oldest_first() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed_capture(&db, "capture-late", "2026-08-05T11:00:00Z");
         seed_capture(&db, "capture-early", "2026-08-05T09:00:00Z");
@@ -1102,6 +1448,7 @@ mod tests {
 
     #[test]
     fn uploads_resume_at_the_first_page_without_a_storage_key() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed_capture(&db, "capture-a", "2026-08-05T09:00:00Z");
 
@@ -1155,6 +1502,7 @@ mod tests {
 
     #[test]
     fn offline_and_parked_waits_never_burn_the_retry_budget() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed_capture(&db, "capture-a", "2026-08-05T09:00:00Z");
         let conn = db.state.conn.lock().expect("lock");
@@ -1190,6 +1538,7 @@ mod tests {
 
     #[test]
     fn the_ingest_ledger_records_each_content_hash_once() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         let conn = db.state.conn.lock().expect("lock");
 
@@ -1219,6 +1568,7 @@ mod tests {
     /// exactly the edits, not a re-derived approximation.
     #[test]
     fn a_restart_restores_documents_edits_statuses_and_history() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed_capture(&db, "capture-review", "2026-08-05T09:00:00Z");
         seed_capture(&db, "capture-waiting", "2026-08-05T09:30:00Z");
@@ -1313,6 +1663,7 @@ mod tests {
 
     #[test]
     fn a_discard_is_recorded_with_who_did_it() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed_capture(&db, "capture-a", "2026-08-05T09:00:00Z");
         let conn = db.state.conn.lock().expect("lock");
@@ -1342,6 +1693,7 @@ mod tests {
 
     #[test]
     fn hostile_capture_ids_never_reach_the_database() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         let conn = db.state.conn.lock().expect("lock");
 

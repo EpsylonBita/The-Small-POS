@@ -17,6 +17,100 @@ use crate::database_lock::run_blocking_command;
 use crate::db::DbState;
 use crate::sync_queue;
 
+#[tauri::command]
+pub async fn order_notice_editing(
+    window: tauri::WebviewWindow,
+    arg0: serde_json::Value,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    run_blocking_command("order_notice_editing", move || {
+        let session = arg0["session"].as_str().ok_or("ORDER_EDIT_LEASE_INVALID")?;
+        let ids: Vec<String> = serde_json::from_value(arg0["orderIds"].clone())
+            .map_err(|_| "ORDER_EDIT_LEASE_INVALID")?;
+        crate::order_notice_auto::set_editing(format!("{label}:{session}"), ids)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn order_notice_employee_attempt(
+    app: tauri::AppHandle,
+    arg0: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    run_blocking_command("order_notice_employee_attempt", move || {
+        let db = app.state::<DbState>();
+        crate::order_notice_recovery::observe(
+            "employee_attempt",
+            (|| {
+                let permit = crate::support::critical_op::global()
+                    .try_begin_support(true, None)
+                    .map_err(str::to_string)?;
+                let conn = crate::order_notice_recovery::observer_connection(&db.db_path, true)?;
+                let tx = permit.begin_write_nowait(&conn)?;
+                let result = crate::order_notice_evidence::employee_attempt(&tx, &arg0)?;
+                tx.commit().map_err(|e| e.to_string())?;
+                Ok(result)
+            })(),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn order_sync_notices(
+    app: tauri::AppHandle,
+    arg0: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let order_ids = order_notice_ids(arg0)?;
+    run_blocking_command("order_sync_notices", move || {
+        let db = app.state::<DbState>();
+        crate::order_notice_recovery::observe(
+            "order_sync_notices",
+            (|| {
+                let conn = crate::order_notice_recovery::observer_connection(&db.db_path, false)?;
+                crate::order_notice_recovery::notices(&conn, order_ids.as_deref())
+            })(),
+        )
+    })
+    .await
+}
+
+// PlatformBridge.invoke uses the positional arg0 envelope. An invalid list
+// must fail the read, never broaden a per-order request to every order.
+fn order_notice_ids(arg0: Option<serde_json::Value>) -> Result<Option<Vec<String>>, String> {
+    let Some(request) = arg0 else { return Ok(None) };
+    let ids = request
+        .get("orderIds")
+        .ok_or("Invalid order notice request")?;
+    serde_json::from_value(ids.clone()).map_err(|_| "Invalid order notice IDs".into())
+}
+
+#[cfg(test)]
+mod order_notice_command_tests {
+    use super::order_notice_ids;
+    use serde_json::json;
+
+    #[test]
+    fn order_notice_recovery_arg0_envelope_preserves_the_requested_ids() {
+        let envelope = json!({"arg0":{"orderIds":["local-order"]}});
+        assert_eq!(
+            order_notice_ids(Some(envelope["arg0"].clone())).unwrap(),
+            Some(vec!["local-order".into()])
+        );
+        assert_eq!(
+            order_notice_ids(Some(json!({"orderIds":[]}))).unwrap(),
+            Some(vec![])
+        );
+        assert_eq!(
+            order_notice_ids(Some(json!({"orderIds":null}))).unwrap(),
+            None
+        );
+        assert_eq!(order_notice_ids(None).unwrap(), None);
+        assert!(order_notice_ids(Some(json!({"orderIds":"wrong"}))).is_err());
+        assert!(order_notice_ids(Some(json!({"wrongName":["local-order"]}))).is_err());
+    }
+}
+
 /// Enqueue a new item into the offline sync queue.
 ///
 /// Returns the generated UUID for the item.

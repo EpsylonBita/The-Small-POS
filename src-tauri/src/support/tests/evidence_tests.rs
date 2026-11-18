@@ -334,6 +334,7 @@ fn personal_value_substitution_cannot_corrupt_closed_wire_enums() {
             "about".into(),
             "untrusted_till_data".into(),
         ],
+        ..Default::default()
     };
     assert_eq!(policy.string("[REDACTED]"), "[REDACTED]");
     let value=policy.record(json!({"status":"pending","section":"about","message":{"kind":"untrusted_till_data","value":"pending"}}));
@@ -406,6 +407,7 @@ fn known_people_are_masked_case_insensitively_without_corrupting_unicode_boundar
             "\u{039d}\u{03af}\u{03ba}\u{03bf}\u{03c2}".into(),
             "Stra\u{00df}e".into(),
         ],
+        ..Default::default()
     };
     assert_eq!(
         policy.string(
@@ -431,6 +433,7 @@ fn placeholder_pii_never_masks_characters_inside_operational_values() {
             "server".into(),
             "Li".into(),
         ],
+        ..Default::default()
     };
     for text in [
         "fa45af00-e86c-4f92-a2e4-7727a8845dfc",

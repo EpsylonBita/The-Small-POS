@@ -465,8 +465,16 @@ async fn fetch_branch_scoped_payload(
     scope_key: &str,
     path: String,
 ) -> Result<Value, String> {
+    let shared_scope = crate::group_scope::SharedScope::capture(db)?;
+    let shared_cache_identity = format!("group:{}", shared_scope.key());
+    let branch_id = if cache_key == CACHE_KEY_COUPONS {
+        shared_cache_identity.as_str()
+    } else {
+        branch_id
+    };
     match crate::admin_fetch(Some(db), &path, "GET", None).await {
         Ok(response) => {
+            shared_scope.ensure(db)?;
             let mut payload = extract_payload(response);
             // The staff schedule carries PIN hashes: neither this cache nor
             // the renderer keeps them (staff_pin_vault.rs).
@@ -921,19 +929,19 @@ pub async fn branch_data_get_bundle_status(
             cached_dataset_status(&conn, &branch_id, CACHE_KEY_TABLES, "all"),
             cached_dataset_status_latest(&conn, &branch_id, CACHE_KEY_STAFF_SCHEDULE),
             cached_dataset_status(&conn, &branch_id, CACHE_KEY_DELIVERY_ZONES, "all"),
-            cached_dataset_status(&conn, &branch_id, CACHE_KEY_COUPONS, "all"),
+            cached_dataset_status(&conn, &format!("group:{}",crate::group_scope::SharedScope::read(&conn).key()), CACHE_KEY_COUPONS, "all"),
             cached_dataset_status(&conn, &branch_id, CACHE_KEY_CATALOG_OFFERS, "menu::active"),
         ];
         let mut advisory_datasets = vec![
             sqlite_table_dataset_status(
                 &conn,
-                "SELECT MAX(last_synced_at), COUNT(*) FROM loyalty_settings",
+                "SELECT MAX(last_synced_at), COUNT(*) FROM loyalty_settings WHERE group_id=(SELECT group_key FROM pos_shared_scope) AND cache_terminal_id=(SELECT terminal_id FROM pos_shared_scope)",
                 "loyalty_settings",
                 "default",
             ),
             sqlite_table_dataset_status(
                 &conn,
-                "SELECT MAX(last_synced_at), COUNT(*) FROM loyalty_customers",
+                "SELECT MAX(last_synced_at), COUNT(*) FROM loyalty_customers WHERE group_id=(SELECT group_key FROM pos_shared_scope) AND cache_terminal_id=(SELECT terminal_id FROM pos_shared_scope)",
                 "loyalty_customers",
                 "default",
             ),

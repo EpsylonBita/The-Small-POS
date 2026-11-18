@@ -6987,6 +6987,12 @@
   },
   "suppliers": {
     "capture": {
+      "subtype": {
+        "scanner": "Skaner",
+        "file": "Skedar",
+        "camera": "Kamerë",
+        "unknown": "Burim i panjohur"
+      },
       "settings": {
         "title": "Cilësimet e skanimit",
         "subtitle": "Nga i merr kjo arkë faturat e skanuara.",
@@ -7033,7 +7039,16 @@
         "rescanned": "Faqja u zëvendësua.",
         "moveEarlier": "Lëvize më përpara",
         "moveLater": "Lëvize më prapa",
-        "capReached": "Kaq faqe mban një faturë. Përfundoje këtë dhe fillo një tjetër për pjesën që mbetet.",
+        "paperSource": "Burimi i letrës",
+        "flatbed": "Skaner i sheshtë / një fletë",
+        "feeder": "Ushqyes / pirg në një anë",
+        "folderBoundary": "Një faturë për skanim. Ruajeni një faturë me disa faqe në një PDF; skedarët e veçantë të imazheve bëhen skanime të veçanta.",
+        "oneInvoice": "Një faturë për skanim",
+        "capReached": "Kjo faturë ka arritur kufirin e faqeve. Faqet janë ruajtur këtu. Mbajeni faturën e plotë së bashku; mos e dërgoni në pjesë.",
+        "admissionReview": "Leximet duhen kontrolluar. Fatura dhe të gjitha faqet e saj janë ruajtur.",
+        "rotate": "Rrotullo faqen djathtas",
+        "admissionRecorded": "Fatura u regjistrua",
+        "admissionWaiting": "Në pritje të leximit të faturës",
         "stoppedEarly": "Skaneri ndaloi para se të mbaronin fletët në tabaka. Nëse kanë mbetur faqe brenda, shtoji para se të përfundosh.",
         "finishAndStartAnother": "Përfundoje këtë dhe fillo një tjetër",
         "needAPage": "Shto të paktën një faqe para se të përfundosh."
@@ -7096,6 +7111,7 @@
         "device_error": "Skaneri s'u përgjigj. Kontrollo që është i ndezur dhe i lidhur."
       },
       "status": {
+        "excluded": "Nuk është faturë",
         "capturing": "Ende duke skanuar",
         "waiting": "Pret të lexohet",
         "uploading": "Duke dërguar faqet",
@@ -7307,6 +7323,14 @@
       "emptyDescription": "Këtu do të shfaqen kontaktet dhe faturat e furnitorit."
     },
     "import": {
+      "negativeStockWarning": "Stoku është negativ pas këtij regjistrimi. Kontrolloni gjendjen e stokut.",
+      "appliedStockQuantity": "Sasia e zbatuar: {{quantity}}",
+      "staffSessionRequired": "Lidhuni me zyrën dhe hyni përsëri në turn. Të dhënat tuaja ruhen.",
+      "tillSpreadsheetUnavailable": "Importi i fletëllogaritjeve nuk është ende i disponueshëm në këtë arkë. Rreshtat tuaj ruhen.",
+      "documentRetained": "Dokumenti u ruajt për lexim. Ndiqni ecurinë te faturat e skanuara.",
+      "documentRetainedUnsupported": "Dokumenti origjinal Word ruhet në këtë arkë. Ngarkimi Word nuk është ende i disponueshëm. Eksportojeni si PDF dhe zgjidhni PDF-në.",
+      "poLinkOnly": "Lidheni faturën me porosinë e blerjes (pa regjistruar sasi të dorëzuara).",
+      "stockLineResult": "Rreshti {{row}}: stoku u regjistrua për {{item}} · lëvizja {{movement}}",
       "open": "Importo artikuj",
       "title": "Importo artikujt e furnitorit",
       "subtitle": "Kontrollo rreshtat e importuar para se të sinkronizohen me inventarin.",
@@ -9358,6 +9382,12 @@
     "portionNotSaved": "Karta u debitua, pagesa ende nuk është ruajtur. Mos e debito përsëri."
   },
   "recovery": {
+    "confirmations": {
+      "cashDrawerControl": {
+        "title": "Konfirmo veprimin e rikuperimit",
+        "subtitle": "Fut PIN-in e arkëtarit ose të menaxherit për të kryer këtë veprim rikuperimi."
+      }
+    },
     "common": {
       "reference": "Referenca",
       "entityId": "ID e entitetit",
@@ -9604,6 +9634,17 @@
       }
     },
     "recipes": {
+      "orderCustomerCorrection": {
+        "title": "Ndryshim te të dhënat e klientit",
+        "summary": "Ndryshimi i bërë te të dhënat e klientit nuk u ruajt. Shitja dhe pagesa nuk preken.",
+        "guidance": "Ruaje ndryshimin përsëri ose mbaji të dhënat siç janë tani.",
+        "resend": "Ruaje përsëri ndryshimin e të dhënave të klientit",
+        "resendExplanation": "Provo ta ruash përsëri të njëjtin ndryshim te të dhënat e klientit.",
+        "pending": "Po ruhet… Prit pak.",
+        "keep": "Mbaji të dhënat siç janë tani",
+        "keepExplanation": "Përdor të dhënat e klientit dhe të dërgesës që janë regjistruar tashmë. Ndryshimi i paruajtur do të mbetet në historik.",
+        "confirmed": "Porosia tani përdor të dhënat e regjistruara tashmë."
+      },
       "restoreLastKnownPrinterBrand": {
         "title": "Gjuha e printerit nuk u njoh",
         "label": "Rikthe gjuhën e ruajtur të printerit",
@@ -10674,5 +10715,39 @@
     "attention": "Karta e punës: {{count}} lëvizje kërkojnë veprim. Shihni admin → Orari i stafit → Regjistri ERGANI.",
     "zHint": "Çdo person duhet të mbyllë turnin me PIN-in e vet, që të dërgohet dalja e kartës së punës.",
     "dismiss": "Fshihe për 1 orë"
+  }
+,
+  "orderSyncNotice": {
+    "checkUnavailableHealth": "Arka nuk mund të kontrollojë tani nëse porositë kanë ndonjë problem të pazgjidhur. Ato mbeten te porositë aktive.",
+    "checkUnavailableGuidance": "Provo përsëri pas pak. Nëse vazhdon, telefono mbështetjen.",
+    "checkUnavailable": "Arka nuk mund të kontrollojë tani nëse porosia #{{number}} ka një problem të pazgjidhur, prandaj ajo mbetet te porositë aktive. Provo përsëri pas pak. Nëse vazhdon, telefono mbështetjen.",
+    "checkUnavailableMany": "Arka nuk mund të kontrollojë tani nëse porositë {{numbers}} kanë një problem të pazgjidhur, prandaj ato mbeten te porositë aktive. Provo përsëri pas pak. Nëse vazhdon, telefono mbështetjen.",
+    "moveBlocked": "Porosia {{number}} ka një problem që duhet zgjidhur më parë. Hape për të parë çfarë të bësh.",
+    "movesBlocked": "Nuk u zhvendosën: {{numbers}}. Kanë një problem që duhet zgjidhur më parë.",
+    "remainsActive": "Derisa të zgjidhet, porosia mbetet te porositë aktive.",
+    "needsAction": "Kërkon vëmendje",
+    "customer_correction_refused": "Ndryshimi i bërë te të dhënat e klientit nuk u ruajt. Shitja dhe pagesa nuk preken.",
+    "change_refused": "Një ndryshim në këtë porosi nuk u ruajt. Mund të vazhdosh shërbimin.",
+    "payment_not_on_server": "Një pagesë e kësaj porosie nuk është regjistruar ende. Mos e ngarko klientin përsëri.",
+    "next": "Shtyp butonin për ta ruajtur përsëri.",
+    "resend": "Ruaje përsëri",
+    "guided": "Kontrollo këtë porosi",
+    "pending": "Po ruhet… Prit pak.",
+    "failedAgain": "Ndryshimi nuk u ruajt as këtë herë. Njofto përgjegjësin.",
+    "failed": "Ndryshimi nuk u ruajt. Provo përsëri pas pak. Nëse vazhdon, njofto përgjegjësin.",
+    "changed": "Porosia ka ndryshuar ndërkohë. Njofto përgjegjësin.",
+    "offline": "Nuk ka lidhje interneti. Provo përsëri kur të kthehet.",
+    "wait": "Përfundo fillimisht shitjen, pagesën ose mbylljen, pastaj provo përsëri.",
+    "busy": "Po kontrollohet…",
+    "loading": "Po kontrollohet porosia…",
+    "stale": "Njoftimi nuk u rifreskua. Shfaqet i fundit që dihet.",
+    "shift": "Porosi për t’u kontrolluar para se të largohesh",
+    "shiftHint": "Nuk të pengojnë të mbyllësh turnin.",
+    "order": "Porosia {{number}}",
+    "toast": "Porosia {{number}} kërkon vëmendje. Hape.",
+    "saving": "Po ruhet…",
+    "tryAgain": "Provo përsëri",
+    "notSolved": "Problemi nuk u zgjidh. Njofto përgjegjësin.",
+    "noRemedy": "Ky problem nuk mund të zgjidhet këtu. Njofto përgjegjësin."
   }
 }

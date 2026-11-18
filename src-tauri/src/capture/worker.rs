@@ -591,6 +591,12 @@ pub fn ocr_request_body(document: &CaptureDocument, storage_keys: &[String]) -> 
         "storageKeys": storage_keys,
         "captureId": document.id,
         "sourceKind": document.source_kind,
+        "captureSubtype": match document.source_kind.as_str() {
+            "connected_scanner" | "usb_scanner" => "scanner",
+            "camera" => "camera",
+            "file_pick" => "file",
+            _ => "unknown",
+        },
     });
 
     if let Some(name) = document
@@ -610,9 +616,23 @@ pub fn ocr_request_body(document: &CaptureDocument, storage_keys: &[String]) -> 
 
 /// The server's own recording, if this response carries one.
 pub fn recorded_automation(response: &Value) -> Option<&Value> {
-    response
-        .get(AUTOMATION_KEY)
-        .filter(|block| block.is_object())
+    if response.get("success").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    response.get(AUTOMATION_KEY).filter(|block| {
+        matches!(
+            block["outcome"].as_str(),
+            Some("recorded" | "recorded_stock_updated")
+        ) && block["invoiceId"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+            && block["supplierInvoiceId"].as_str() == block["invoiceId"].as_str()
+            && block["amount"].as_f64().is_some_and(|v| v.is_finite())
+            && block["invoiceNumber"].is_string()
+            && block["supplierName"].is_string()
+            && block["attachmentPending"].is_boolean()
+            && (block["attachmentUrl"].is_null() || block["attachmentUrl"].is_string())
+    })
 }
 
 /// Apply one recognition answer to the document, and report the status it now
@@ -637,12 +657,102 @@ pub fn apply_recognition(
     capture_id: &str,
     response: &Value,
 ) -> Result<CaptureStatus, String> {
+    if response.get("success").and_then(Value::as_bool) == Some(false) {
+        return Err("Server refused invoice reading".into());
+    }
     // The reading is stored whichever way the decision went: the drawer opens
     // from it when the person asks to correct the recorded invoice, and a
     // stored reading is what makes a restart lose nothing.
     store::set_recognition_json(conn, capture_id, &response.to_string())?;
-    store::clear_retry(conn, capture_id)?;
+    if response
+        .pointer("/admission/status")
+        .and_then(Value::as_str)
+        != Some("waiting")
+    {
+        store::clear_retry(conn, capture_id)?;
+    }
 
+    if let Some(admission) = response.get("admission") {
+        let job_id = admission["jobId"]
+            .as_str()
+            .filter(|s| uuid::Uuid::parse_str(s).is_ok())
+            .ok_or("Invalid invoice admission job id")?;
+        if store::latest_event_details(conn, capture_id, "admission_job")?
+            .and_then(|v| v.get("jobId").and_then(Value::as_str).map(str::to_owned))
+            .as_deref()
+            != Some(job_id)
+        {
+            store::record_event(
+                conn,
+                Some(capture_id),
+                "admission_job",
+                None,
+                Some(&json!({ "jobId": job_id })),
+            )?;
+        }
+        match admission["status"].as_str() {
+            Some("excluded") if admission["reason"].is_string() => {
+                // Existing local SQLite CHECK has no excluded status. Retain the
+                // canonical outcome and use a non-actionable held state: never poll
+                // or re-upload it, including after a restart.
+                store::set_status(
+                    conn,
+                    capture_id,
+                    CaptureStatus::NeedsAttention,
+                    Some("CAPTURE_EXCLUDED"),
+                )?;
+                return Ok(CaptureStatus::NeedsAttention);
+            }
+            Some("waiting") => {
+                store::set_status(conn, capture_id, CaptureStatus::Reading, None)?;
+                let attempts = store::get_document(conn, capture_id)?
+                    .ok_or("capture missing")?
+                    .attempts;
+                store::schedule_retry(
+                    conn,
+                    capture_id,
+                    &(Utc::now() + ChronoDuration::seconds(backoff_delay_secs(attempts)))
+                        .to_rfc3339(),
+                    true,
+                )?;
+                return Ok(CaptureStatus::Reading);
+            }
+            Some("recorded")
+                if admission["invoiceId"]
+                    .as_str()
+                    .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
+                    && admission["undoId"]
+                        .as_str()
+                        .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
+                    && matches!(
+                        admission["stock"].as_str(),
+                        Some("applied" | "pending_mapping" | "none")
+                    )
+                    && admission["balanceConfirmed"].is_boolean() =>
+            {
+                store::set_status(conn, capture_id, CaptureStatus::ReadyReview, None)?;
+                store::set_status(conn, capture_id, CaptureStatus::Committing, None)?;
+                // Admission proves recording, but does not prove remote attachment
+                // persistence. Keep local evidence unless that proof also arrives.
+                confirm_commit(conn, capture_id, admission, None)?;
+                return Ok(CaptureStatus::Committed);
+            }
+            Some("needs_review" | "failed") if admission["reasons"].is_array() => {
+                store::set_status(
+                    conn,
+                    capture_id,
+                    CaptureStatus::NeedsAttention,
+                    Some(if admission["status"] == "failed" {
+                        "CAPTURE_UNREADABLE"
+                    } else {
+                        "CAPTURE_REVIEW_REQUIRED"
+                    }),
+                )?;
+                return Ok(CaptureStatus::NeedsAttention);
+            }
+            _ => return Err("Invalid invoice admission outcome".into()),
+        }
+    }
     let Some(automation) = recorded_automation(response).cloned() else {
         store::set_status(conn, capture_id, CaptureStatus::ReadyReview, None)?;
         return Ok(CaptureStatus::ReadyReview);
@@ -691,12 +801,63 @@ async fn advance_document(
 ) -> Result<(), String> {
     let capture_id = document.id.clone();
 
+    // A durable job id owns the rest of the workflow. After a restart poll
+    // this terminal-authenticated route, never re-upload or submit another job.
+    let pending_job = {
+        let conn = lock(db)?;
+        store::latest_event_details(&conn, &capture_id, "admission_job")?
+    };
+    if let Some(job) = pending_job {
+        {
+            let conn = lock(db)?;
+            if document.status == CaptureStatus::Waiting {
+                store::set_status(&conn, &capture_id, CaptureStatus::Uploading, None)?;
+                store::set_status(&conn, &capture_id, CaptureStatus::Reading, None)?;
+            }
+        }
+        let id = job["jobId"]
+            .as_str()
+            .filter(|s| uuid::Uuid::parse_str(s).is_ok())
+            .ok_or("invalid persisted job id")?;
+        let response = crate::admin_fetch_detailed_with_timeout(
+            Some(db.as_ref()),
+            &format!("/api/pos/suppliers/import/jobs/{id}"),
+            "GET",
+            None,
+            OCR_RECOGNITION_TIMEOUT,
+        )
+        .await;
+        let status = match response {
+            Ok(result) => {
+                let conn = lock(db)?;
+                match apply_recognition(&conn, &capture_id, &result) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        warn!(%error, "Invalid admission reply; retrying retained job");
+                        apply_step_failure(&conn, &document, &StepFailure::Transient)?
+                    }
+                }
+            }
+            Err(error) => {
+                let conn = lock(db)?;
+                apply_step_failure(&conn, &document, &classify_admin_error(&error))?
+            }
+        };
+        emit_status(app, &capture_id, status, None);
+        return Ok(());
+    }
+
     // ---- pages, and the client-side limits ------------------------------ //
     let pages = {
         let conn = lock(db)?;
         store::list_pages(&conn, &capture_id)?
     };
-    if let Some(failure) = precheck_pages(&pages) {
+    let precheck = if pages.len() as i64 != document.page_count {
+        Some(StepFailure::NeedsAttention(REASON_UNREADABLE))
+    } else {
+        precheck_pages(&pages)
+    };
+    if let Some(failure) = precheck {
         let status = {
             let conn = lock(db)?;
             apply_step_failure(&conn, &document, &failure)?
@@ -705,6 +866,22 @@ async fn advance_document(
         return Ok(());
     }
 
+    let manifest = {
+        let conn = lock(db)?;
+        store::page_manifest(&conn, app_data_dir, &capture_id)
+    };
+    if manifest.is_err() {
+        let status = {
+            let conn = lock(db)?;
+            apply_step_failure(
+                &conn,
+                &document,
+                &StepFailure::NeedsAttention(REASON_UNREADABLE),
+            )?
+        };
+        emit_status(app, &capture_id, status, Some(REASON_UNREADABLE));
+        return Ok(());
+    }
     // ---- upload, resuming at the first page without a storage key ------- //
     if document.status != CaptureStatus::Reading {
         let conn_status = {
@@ -719,10 +896,10 @@ async fn advance_document(
                 let bytes = {
                     let dir = app_data_dir.to_path_buf();
                     let id = capture_id.clone();
-                    let index = page.page_index.max(0) as usize;
-                    let mime = page.mime.clone();
+                    let stored_path = PathBuf::from(&page.file_path);
+                    let expected_hash = page.content_hash.clone();
                     tokio::task::spawn_blocking(move || {
-                        files::read_page_blocking(&dir, &id, index, &mime)
+                        files::read_stored_page(&dir, &id, &stored_path, &expected_hash)
                     })
                     .await
                     .map_err(|error| format!("read capture page task: {error}"))?
@@ -760,6 +937,27 @@ async fn advance_document(
 
                 match response {
                     Ok(body) => {
+                        if body.get("admission").is_some() {
+                            let status = {
+                                let conn = lock(db)?;
+                                store::set_status(
+                                    &conn,
+                                    &capture_id,
+                                    CaptureStatus::Reading,
+                                    None,
+                                )?;
+                                match apply_recognition(&conn, &capture_id, &body) {
+                                    Ok(status) => status,
+                                    Err(_) => apply_step_failure(
+                                        &conn,
+                                        &document,
+                                        &StepFailure::Transient,
+                                    )?,
+                                }
+                            };
+                            emit_status(app, &capture_id, status, None);
+                            return Ok(());
+                        }
                         let Some(storage_key) = read_storage_key(&body) else {
                             // A 2xx without a key is a contract break, not a
                             // document fault: retry rather than blame the scan.
@@ -795,12 +993,70 @@ async fn advance_document(
     }
 
     // ---- recognition ----------------------------------------------------- //
+    // PDF originals are evidence as well as the rendered pages. The deterministic
+    // upload key and durable receipt make interrupted uploads safe to repeat.
+    let original_key = {
+        let conn = lock(db)?;
+        store::latest_event_details(&conn, &capture_id, "original_uploaded")?
+            .and_then(|value| value["storageKey"].as_str().map(str::to_owned))
+    };
+    let original_path = files::original_path(app_data_dir, &capture_id)?;
+    let original_key = if original_key.is_none() && original_path.is_file() {
+        let bytes = tokio::task::spawn_blocking(move || std::fs::read(original_path))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let digest = files::sha256_hex(&bytes);
+        let path = format!(
+            "{ATTACHMENTS_PATH}?captureId={}&kind=original&sourceKind={}",
+            capture_id, document.source_kind
+        );
+        let reply = crate::admin_fetch_raw(
+            Some(db.as_ref()),
+            &path,
+            "POST",
+            OCTET_STREAM,
+            &[
+                ("x-capture-content-type", "application/pdf"),
+                ("x-capture-content-hash", &digest),
+            ],
+            bytes,
+        )
+        .await;
+        match reply {
+            Ok(reply) => {
+                let key = read_storage_key(&reply)
+                    .ok_or("Missing original storage key")?
+                    .to_string();
+                let conn = lock(db)?;
+                store::record_event(
+                    &conn,
+                    Some(&capture_id),
+                    "original_uploaded",
+                    None,
+                    Some(&json!({ "storageKey": key })),
+                )?;
+                Some(key)
+            }
+            Err(error) => {
+                let failure = classify_admin_error(&error);
+                let status = {
+                    let conn = lock(db)?;
+                    apply_step_failure(&conn, &document, &failure)?
+                };
+                emit_status(app, &capture_id, status, reason_of(&failure));
+                return Ok(());
+            }
+        }
+    } else {
+        original_key
+    };
     let storage_keys = {
         let conn = lock(db)?;
         store::storage_keys(&conn, &capture_id)?
     };
     let ordered: Vec<String> = storage_keys.into_iter().flatten().collect();
-    if ordered.len() < pages.len() {
+    if ordered.len() != pages.len() {
         // Should not happen (the loop above only exits early on failure), but
         // fail closed onto the retry path rather than recognizing a partial
         // document as if it were the whole invoice.
@@ -818,11 +1074,19 @@ async fn advance_document(
     }
     emit_status(app, &capture_id, CaptureStatus::Reading, None);
 
+    let mut body = ocr_request_body(&document, &ordered);
+    if let Some(key) = original_key {
+        body["originalKey"] = json!(key);
+    }
+    body["page_manifest"] = {
+        let conn = lock(db)?;
+        store::page_manifest(&conn, app_data_dir, &capture_id)?
+    };
     let recognition = crate::admin_fetch_detailed_with_timeout(
         Some(db.as_ref()),
         OCR_PATH,
         "POST",
-        Some(ocr_request_body(&document, &ordered)),
+        Some(body),
         OCR_RECOGNITION_TIMEOUT,
     )
     .await;
@@ -831,7 +1095,13 @@ async fn advance_document(
         Ok(result) => {
             let status = {
                 let conn = lock(db)?;
-                apply_recognition(&conn, &capture_id, &result)?
+                match apply_recognition(&conn, &capture_id, &result) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        warn!(%error, "Invalid recognition reply");
+                        apply_step_failure(&conn, &document, &StepFailure::Transient)?
+                    }
+                }
             };
             // The finished result surfaces here — nothing had to stay on
             // screen, and nothing was cancelled by walking away (R6.2, R11.9).
@@ -1074,6 +1344,99 @@ mod tests {
     // -- classification ---------------------------------------------------- //
 
     #[test]
+    fn capture_excluded_outcome_is_retained_and_stops_after_waiting_even_after_restart() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = TestDb::open();
+        seed(&db, "excluded-capture", "2026-11-16T10:00:00Z", 1);
+        read_document(&db, "excluded-capture");
+        let conn = db.state.conn.lock().unwrap();
+        let job = "61c6de87-61b1-4f60-a445-7ad8117299b8";
+        apply_recognition(
+            &conn,
+            "excluded-capture",
+            &json!({ "admission": { "status": "waiting", "jobId": job, "reason": "queued" } }),
+        )
+        .unwrap();
+        let outcome = json!({ "admission": { "status": "excluded", "jobId": job, "reason": "not_invoice", "captureSubtype": "file" } });
+        assert_eq!(
+            apply_recognition(&conn, "excluded-capture", &outcome).unwrap(),
+            CaptureStatus::NeedsAttention
+        );
+        let held = store::get_document(&conn, "excluded-capture")
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.error_message.as_deref(), Some("CAPTURE_EXCLUDED"));
+        assert!(held.next_retry_at.is_none());
+        assert_eq!(
+            serde_json::from_str::<Value>(&held.recognition_json.unwrap()).unwrap(),
+            outcome
+        );
+        assert!(next_actionable(&conn, Utc::now() + ChronoDuration::days(1))
+            .unwrap()
+            .is_none());
+        drop(conn);
+        let reopened = rusqlite::Connection::open(&db.state.db_path).unwrap();
+        assert!(
+            next_actionable(&reopened, Utc::now() + ChronoDuration::days(1))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn admission_waiting_persists_job_and_backs_off_then_records_without_confirmation() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = TestDb::open();
+        seed(&db, "job-capture", "2026-11-16T10:00:00Z", 1);
+        read_document(&db, "job-capture");
+        let conn = db.state.conn.lock().unwrap();
+        let job = "61c6de87-61b1-4f60-a445-7ad8117299b8";
+        let waiting =
+            json!({ "admission": { "status": "waiting", "jobId": job, "reason": "queued" } });
+        assert_eq!(
+            apply_recognition(&conn, "job-capture", &waiting).unwrap(),
+            CaptureStatus::Reading
+        );
+        let first = store::get_document(&conn, "job-capture").unwrap().unwrap();
+        assert!(first.next_retry_at.is_some());
+        assert_eq!(first.attempts, 1);
+        apply_recognition(&conn, "job-capture", &waiting).unwrap();
+        let second = store::get_document(&conn, "job-capture").unwrap().unwrap();
+        assert_eq!(second.attempts, 2);
+        assert!(second.next_retry_at > first.next_retry_at);
+        assert_eq!(
+            store::latest_event_details(&conn, "job-capture", "admission_job")
+                .unwrap()
+                .unwrap()["jobId"],
+            job
+        );
+        let recorded = json!({ "admission": { "status": "recorded", "jobId": job,
+            "invoiceId": "92d22c3e-e6ed-45c9-b9dd-b81a50385f00", "undoId": "ec5b965a-489a-46a6-8ba8-54c90962d6d0",
+            "stock": "pending_mapping", "balanceConfirmed": false } });
+        assert_eq!(
+            apply_recognition(&conn, "job-capture", &recorded).unwrap(),
+            CaptureStatus::Committed
+        );
+        assert!(
+            cleanup_committed_captures(&conn, db.dir())
+                .unwrap()
+                .is_empty(),
+            "recording alone is not attachment durability proof"
+        );
+    }
+
+    #[test]
+    fn arbitrary_automation_objects_can_never_be_recorded() {
+        for block in [
+            json!({}),
+            json!({ "outcome": "failed", "invoiceId": "x" }),
+            json!({ "outcome": "recorded" }),
+        ] {
+            assert!(recorded_automation(&json!({ "automation": block })).is_none());
+        }
+    }
+
+    #[test]
     fn every_transport_outcome_maps_onto_the_documented_failure_policy() {
         // No status = the request never got an answer.
         assert_eq!(
@@ -1143,6 +1506,7 @@ mod tests {
 
     #[test]
     fn offline_keeps_the_document_waiting_and_burns_nothing() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-08-05T09:00:00Z", 1);
         let conn = db.state.conn.lock().expect("lock");
@@ -1170,6 +1534,7 @@ mod tests {
 
     #[test]
     fn a_module_denial_parks_on_the_slow_cadence_without_burning_an_attempt() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-08-05T09:00:00Z", 1);
         let conn = db.state.conn.lock().expect("lock");
@@ -1215,6 +1580,7 @@ mod tests {
 
     #[test]
     fn a_parked_capture_resumes_by_itself_and_a_parked_commit_is_left_to_the_queue() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-recognition", "2026-08-05T09:00:00Z", 1);
         seed(&db, "capture-commit", "2026-08-05T09:30:00Z", 1);
@@ -1292,6 +1658,7 @@ mod tests {
 
     #[test]
     fn a_transient_failure_backs_off_and_burns_exactly_one_attempt() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-08-05T09:00:00Z", 1);
         let conn = db.state.conn.lock().expect("lock");
@@ -1315,6 +1682,7 @@ mod tests {
 
     #[test]
     fn a_typed_client_error_needs_attention_and_keeps_the_document_and_its_edits() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-08-05T09:00:00Z", 1);
         let draft = r#"{"rows":[{"name":"Tomatoes","quantity":6}]}"#;
@@ -1357,6 +1725,7 @@ mod tests {
 
     #[test]
     fn the_queue_is_drained_oldest_first_and_skips_documents_still_backing_off() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-late", "2026-08-05T11:00:00Z", 1);
         seed(&db, "capture-early", "2026-08-05T09:00:00Z", 1);
@@ -1401,6 +1770,7 @@ mod tests {
 
     #[test]
     fn an_interrupted_upload_resumes_at_the_first_page_without_a_storage_key() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-08-05T09:00:00Z", 4);
         let conn = db.state.conn.lock().expect("lock");
@@ -1476,6 +1846,7 @@ mod tests {
 
     #[test]
     fn the_upload_path_carries_the_metadata_that_rides_outside_the_body() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-08-05T09:00:00Z", 1);
         let path = page_upload_path(&document(&db, "capture-a"), 2);
@@ -1541,6 +1912,7 @@ mod tests {
 
     #[test]
     fn cleanup_removes_the_local_copy_only_after_the_server_confirmed_the_attachment() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-08-05T09:00:00Z", 2);
         let conn = db.state.conn.lock().expect("lock");
@@ -1570,9 +1942,12 @@ mod tests {
             2,
         );
         assert!(
-            files::page_path(db.dir(), "capture-a", 0, PNG)
-                .expect("page path")
-                .exists(),
+            std::path::PathBuf::from(
+                store::list_pages(&conn, "capture-a").unwrap()[0]
+                    .file_path
+                    .clone()
+            )
+            .exists(),
             "an attachment-pending invoice keeps its only copy",
         );
 
@@ -1588,9 +1963,12 @@ mod tests {
             cleanup_committed_captures(&conn, db.dir()).expect("cleanup"),
             vec!["capture-a".to_string()],
         );
-        assert!(!files::page_path(db.dir(), "capture-a", 0, PNG)
-            .expect("page path")
-            .exists());
+        assert!(!std::path::PathBuf::from(
+            store::list_pages(&conn, "capture-a").unwrap()[0]
+                .file_path
+                .clone()
+        )
+        .exists());
 
         // The history says what happened to the bytes.
         assert!(store::list_events(&conn, "capture-a")
@@ -1601,6 +1979,7 @@ mod tests {
 
     #[test]
     fn cleanup_never_touches_a_document_that_is_not_committed() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         let uncommitted = [
             ("capture-waiting", CaptureStatus::Waiting),
@@ -1653,9 +2032,10 @@ mod tests {
                 .expect("document");
             assert_eq!(document.status, expected);
             assert!(
-                files::page_path(db.dir(), id, 0, PNG)
-                    .expect("page path")
-                    .exists(),
+                std::path::PathBuf::from(
+                    store::list_pages(&conn, id).unwrap()[0].file_path.clone()
+                )
+                .exists(),
                 "{id} is not committed — its bytes are untouchable (R11.8)",
             );
         }
@@ -1663,6 +2043,7 @@ mod tests {
 
     #[test]
     fn a_committed_document_without_a_server_result_keeps_its_local_copy() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-08-05T09:00:00Z", 1);
         let conn = db.state.conn.lock().expect("lock");
@@ -1682,13 +2063,17 @@ mod tests {
         assert!(cleanup_committed_captures(&conn, db.dir())
             .expect("cleanup")
             .is_empty());
-        assert!(files::page_path(db.dir(), "capture-a", 0, PNG)
-            .expect("page path")
-            .exists());
+        assert!(std::path::PathBuf::from(
+            store::list_pages(&conn, "capture-a").unwrap()[0]
+                .file_path
+                .clone()
+        )
+        .exists());
     }
 
     #[test]
     fn the_stored_commit_result_is_the_servers_words_verbatim() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-08-05T09:00:00Z", 1);
         let conn = db.state.conn.lock().expect("lock");
@@ -1766,6 +2151,7 @@ mod tests {
 
     #[test]
     fn a_reading_the_office_recorded_is_confirmed_through_the_committed_door() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-09-08T09:00:00Z", 1);
         read_document(&db, "capture-a");
@@ -1845,6 +2231,7 @@ mod tests {
 
     #[test]
     fn a_reading_without_the_block_is_ready_to_check_exactly_as_today() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-09-08T09:00:00Z", 1);
         read_document(&db, "capture-a");
@@ -1879,6 +2266,7 @@ mod tests {
 
     #[test]
     fn the_recognition_request_names_the_capture_so_the_office_can_decide() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = TestDb::open();
         seed(&db, "capture-a", "2026-09-08T09:00:00Z", 1);
         let keys = vec!["org/branch/captures/capture-a/page-000.png".to_string()];

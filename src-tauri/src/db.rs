@@ -57,7 +57,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 108;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 109;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -897,6 +897,20 @@ where
     }
     if current < 108 {
         run_migration_tx(conn, 108, migrate_v108)?;
+    }
+    // v109: phase 2 store groups (group-scoped shared caches). v108 is the
+    // till-cancel fix on master; Viva takes the next free number at its merge.
+    if current < 109 {
+        // Capture keyring-owned identity before writer admission. On installed tills
+        // the plaintext terminal mirrors have already been purged.
+        #[cfg(not(test))]
+        let legacy_scope = crate::terminal_helpers::TerminalScopeSnapshot::capture(conn)?;
+        #[cfg(test)]
+        let legacy_scope = crate::terminal_helpers::TerminalScopeSnapshot::from_mirrors(conn);
+        run_migration_tx(conn, 109, |conn| {
+            crate::group_scope::prime_legacy_terminal_scope(conn, &legacy_scope)?;
+            crate::group_scope::migrate_v109(conn)
+        })?;
     }
 
     Ok(())
@@ -2429,6 +2443,10 @@ enum PreMigrationRecoveryMode {
 const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[
     56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
     98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108,
+    // v109 (store groups) only reads queue ids into separate scope sidecars and rebuilds
+    // loyalty_customers; every queue row, payload, claim and index stays byte-for-byte
+    // (group_scope migration tests). A till holding repair data must still upgrade.
+    109,
 ];
 
 fn computed_pending_migrations(
@@ -8350,6 +8368,7 @@ pub fn read_setting_strict(
 
 /// Get a single setting value.
 pub fn get_setting(conn: &Connection, category: &str, key: &str) -> Option<String> {
+    let key = crate::group_scope::setting_key(conn, category, key);
     conn.query_row(
         "SELECT setting_value FROM local_settings WHERE setting_category = ?1 AND setting_key = ?2",
         params![category, key],
@@ -8362,6 +8381,7 @@ pub fn get_setting(conn: &Connection, category: &str, key: &str) -> Option<Strin
 /// does not exist. Used by the post-hydration purge to remove plaintext
 /// credentials from `local_settings` once they're safely in the OS keyring.
 pub fn delete_setting(conn: &Connection, category: &str, key: &str) -> Result<usize, String> {
+    let key = crate::group_scope::setting_key(conn, category, key);
     conn.execute(
         "DELETE FROM local_settings WHERE setting_category = ?1 AND setting_key = ?2",
         params![category, key],
@@ -8376,6 +8396,7 @@ pub fn set_setting(
     key: &str,
     value: &str,
 ) -> Result<(), String> {
+    let key = crate::group_scope::setting_key(conn, category, key);
     conn.execute(
         "INSERT INTO local_settings (setting_category, setting_key, setting_value, updated_at)
          VALUES (?1, ?2, ?3, datetime('now'))
@@ -10071,7 +10092,7 @@ mod tests {
 
         assert_eq!(
             computed_pending_migrations(102, false, false, false, false),
-            vec![103, 104, 105, 106, 107, 108]
+            vec![103, 104, 105, 106, 107, 108, 109]
         );
         run_migrations(&conn).expect("v102 to the current schema");
 
@@ -10235,21 +10256,21 @@ mod tests {
             computed_pending_migrations(75, true, false, false, false),
             vec![
                 56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
-                96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108
+                96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109
             ]
         );
         assert_eq!(
             computed_pending_migrations(78, false, false, false, false),
             vec![
                 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-                100, 101, 102, 103, 104, 105, 106, 107, 108
+                100, 101, 102, 103, 104, 105, 106, 107, 108, 109
             ]
         );
         assert_eq!(
             computed_pending_migrations(79, false, true, false, false),
             vec![
                 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-                100, 101, 102, 103, 104, 105, 106, 107, 108
+                100, 101, 102, 103, 104, 105, 106, 107, 108, 109
             ]
         );
         // A v81 whose columns went missing is re-run even though it is no longer
@@ -10307,7 +10328,10 @@ mod tests {
         // nullable order timestamp. The queue-upgrade regression proves both
         // preservation and rollback; it invokes no repair dispatcher.
         assert!(native_repair_atomic_only_allowed(107, &[108]));
-        assert!(!native_repair_atomic_only_allowed(108, &[109]));
+        // v109 (store groups) writes only sidecar scope tables and loyalty_customers;
+        // it leaves every parity/sync queue row byte-for-byte.
+        assert!(native_repair_atomic_only_allowed(108, &[109]));
+        assert!(!native_repair_atomic_only_allowed(109, &[110]));
         assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
@@ -10592,7 +10616,7 @@ mod tests {
             computed_pending_migrations(85, false, false, false, false),
             vec![
                 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104,
-                105, 106, 107, 108
+                105, 106, 107, 108, 109
             ]
         );
         assert!(native_repair_atomic_only_allowed(85, &[86]));
@@ -10606,7 +10630,7 @@ mod tests {
             computed_pending_migrations(86, false, false, false, false),
             vec![
                 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105,
-                106, 107, 108
+                106, 107, 108, 109
             ]
         );
         assert!(native_repair_atomic_only_allowed(86, &[87]));
@@ -10715,7 +10739,7 @@ mod tests {
             computed_pending_migrations(87, false, false, false, false),
             vec![
                 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
-                107, 108
+                107, 108, 109
             ]
         );
         assert!(native_repair_atomic_only_allowed(87, &[88]));
@@ -10758,7 +10782,7 @@ mod tests {
             computed_pending_migrations(83, false, false, false, true),
             vec![
                 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102,
-                103, 104, 105, 106, 107, 108
+                103, 104, 105, 106, 107, 108, 109
             ]
         );
         let error = run_migrations_with_preflight(

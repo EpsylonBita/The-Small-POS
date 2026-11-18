@@ -62,4 +62,13 @@ describe('Windows POS photo contract through actual MenuService', () => {
     expect(combos[0].image_url).toBe('https://images.example.test/combo.jpg');
     expect(combos[0].items[0].subcategory).toMatchObject({ id: row.id, price: 3, image_url: null });
   });
+  it('reads the scoped native snapshot again after a store switch instead of reusing renderer memory', async () => {
+    mocks.invoke.mockResolvedValueOnce([{ ...row, id: 'store-a-item' }]);
+    expect((await menuService.getMenuItems())[0].id).toBe('store-a-item');
+    mocks.invoke.mockResolvedValueOnce([{ ...row, id: 'store-b-item' }]);
+    expect((await menuService.getMenuItems())[0].id).toBe('store-b-item');
+    mocks.invoke.mockResolvedValueOnce([]);
+    expect(await menuService.getMenuItems()).toEqual([]);
+  });
+
 });

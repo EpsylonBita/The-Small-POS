@@ -16,6 +16,7 @@ import { RecoveryCenterPanel } from './RecoveryCenterPanel';
 import { CashierRecovery } from '../../contexts/cashier-gate-context';
 import {
   buildSyncRecoveryIssues,
+  orderRecoveryIssues,
   type BuildSyncRecoveryIssuesResult,
 } from './sync-recovery-issues';
 import {
@@ -30,6 +31,7 @@ export interface SyncRecoveryOpenContext {
 }
 
 interface SyncRecoveryModalProps {
+  orderId?: string;
   isOpen: boolean;
   onClose: () => void;
   initialContext?: SyncRecoveryOpenContext | null;
@@ -47,6 +49,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
   onClose,
   initialContext,
   onOpenSnapshots,
+  orderId,
 }) => {
   const { t, i18n } = useTranslation();
   const bridge = getBridge();
@@ -91,9 +94,12 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
         nextRecentActions,
       ] = await Promise.all([
         bridge.diagnostics.getSystemHealth(),
-        bridge.sync.getFailedFinancialItems(250),
+        bridge.sync.getFailedFinancialItems(250, orderId),
         bridge.sync.validateFinancialIntegrity(),
-        syncQueue.listItems({ limit: 250 }),
+        orderId ? bridge.invoke('order_sync_notices', { orderIds: [orderId] }).then(value => {
+          if (!Array.isArray(value)) { throw new Error('Order notices unavailable'); }
+          return syncQueue.itemsById(value.map(notice => notice.queueId).filter((id: string) => !id.startsWith('financial:')));
+        }) : syncQueue.listItems({ limit: 250 }),
         bridge.recovery.listActionLog(25).catch(() => []),
       ]);
 
@@ -101,7 +107,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
         return;
       }
 
-      if (!nextSystemHealth || !Array.isArray(nextFinancialItems) ||
+      if (!nextSystemHealth || (orderId && nextSystemHealth.orderNotices === null) || !Array.isArray(nextFinancialItems) ||
           !nextIntegrity || !Array.isArray(nextIntegrity.issues) ||
           !Array.isArray(nextParityItems)) {
         throw new Error('Incomplete recovery diagnostics');
@@ -153,7 +159,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
     setLastCheckedAt(null);
     setLoadFailed(false);
     void loadRecoveryState();
-  }, [initialContext, isOpen]);
+  }, [initialContext, isOpen, orderId]);
 
   useEffect(
     () => () => {
@@ -173,20 +179,25 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
   );
 
   const issueResult: BuildSyncRecoveryIssuesResult = useMemo(
-    () =>
-      buildSyncRecoveryIssues({
+    () => {
+      const result = buildSyncRecoveryIssues({
         systemHealth,
         lastParitySync,
         parityItems,
         financialItems,
         integrity,
         localizePaymentBlocker,
-      }),
+      });
+      return orderId
+        ? { ...result, issues: orderRecoveryIssues(result.issues, orderId, systemHealth?.orderNotices ?? [], parityItems, financialItems) }
+        : result;
+    },
     [
       financialItems,
       integrity,
       lastParitySync,
       localizePaymentBlocker,
+      orderId,
       parityItems,
       systemHealth,
     ],

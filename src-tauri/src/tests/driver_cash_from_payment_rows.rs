@@ -21,6 +21,7 @@ use crate::tests::fake_keyring;
 use crate::tests::harness::TestDb;
 
 const BRANCH: &str = "branch-courier";
+const ORGANIZATION: &str = "organization-courier";
 const TERMINAL: &str = "terminal-courier";
 const DRIVER: &str = "driver-courier";
 const DRIVER_SHIFT: &str = "shift-courier";
@@ -29,7 +30,11 @@ const OPENING: f64 = 20.0;
 const NOW: &str = "2026-09-30T12:00:00Z";
 
 fn seed_shifts(conn: &Connection) {
+    // Assignment now checks the same scoped notices as the card before its
+    // incidental completion. Model a configured till, without keyring guesses.
     for (category, key, value) in [
+        ("terminal", "organization_id", ORGANIZATION),
+        ("terminal", "terminal_id", TERMINAL),
         ("terminal", "branch_id", BRANCH),
         ("restaurant", "store_currency_branch_id", BRANCH),
         ("restaurant", "store_currency_available", "true"),
@@ -87,12 +92,12 @@ fn seed_delivery(conn: &Connection, order_id: &str) {
         "INSERT INTO orders (
              id, order_number, items, order_type, total_amount, total_amount_cents,
              tip_amount, tip_amount_cents, delivery_fee, delivery_fee_cents,
-             status, payment_status, sync_status, branch_id, terminal_id,
+             status, payment_status, sync_status, branch_id, terminal_id, organization_id,
              created_at, updated_at, currency
          ) VALUES (?1, ?1, '[]', 'delivery', 13.0, 1300, 1.0, 100, 2.0, 200,
-                   'pending', 'pending', 'synced', ?2, ?3,
+                   'pending', 'pending', 'synced', ?2, ?3, ?4,
                    '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z', 'EUR')",
-        params![order_id, BRANCH, TERMINAL],
+        params![order_id, BRANCH, TERMINAL, ORGANIZATION],
     )
     .expect("seed delivery");
 }
