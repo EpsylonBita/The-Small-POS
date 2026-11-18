@@ -170,3 +170,25 @@ Evening files: native `order_notice_gate.rs` (new), `order_notice_recovery.rs`, 
 Concurrent coordinator edits outside `pos-tauri/` were observed and left untouched. The original containment pass changed no staff-facing text or locale; the evening follow-up adds the four plain-language keys listed above. No additional worker was launched.
 
 Worker: OpenAI Codex (GPT-6 family); no cross-provider client or delegated agent was used.
+
+## Known incident, 18/11/2026: both customer-correction buttons did nothing (desktop 1.4.153)
+
+- **Symptom.** A delivered, paid order showed "the change to the customer's details was not saved". Both
+  buttons («Αποθήκευση ξανά», «Να μείνουν τα στοιχεία όπως είναι τώρα») asked for the PIN and then answered
+  "the action failed". The till's single automatic attempt had been interrupted, so nothing else could resolve
+  the row, and the parked `orders` row (`conflict`, `UNKNOWN_CONFLICT_REVIEW`) held the store's Z: the pre-Z
+  drain counts every refused row except the customer directory, and the «Παράκαμψη» list offers only money
+  and shift rows. Remote support could not move it either (confirmed commands refuse a `conflict` row).
+- **Root cause.** `commands::recovery::health_action_admission` chose the recipe with
+  `request["recipeId"].as_str().unwrap_or(match action { .. _ => return Err("REMEDY_NOT_APPLICABLE") })`. Rust
+  evaluates the argument of `unwrap_or` first, so every action outside the three fallback names returned
+  `REMEDY_NOT_APPLICABLE` even when its request named a valid recipe. No test drove these two actions through
+  the dispatcher the screen calls.
+- **Fix (1.4.154).** The fallback applies only when the request names no recipe.
+- **Regression.** `commands::recovery::tests::customer_correction_buttons_pass_admission_and_free_the_day_close`
+  drives both actions through `recovery_execute_action_core` with a fixture shaped like the store's row and the
+  history 1.4.153 had recorded, and asserts that nothing refused is left for the day close to count. It runs
+  in the blocking `cargo test --lib` CI job.
+- **Still open, tracked for the next release.** An expired till sign-in or a missing shift still refuses before
+  the PIN can help; a refused `orders` row has no set-aside; the automatic attempt is spent after one
+  interruption.

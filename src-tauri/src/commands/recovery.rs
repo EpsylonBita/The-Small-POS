@@ -872,12 +872,18 @@ pub(crate) fn health_action_admission(
 ) -> Result<&'static crate::support::remedies::Remedy, String> {
     use crate::support::remedies::{self, Match};
     let action = request["actionId"].as_str().ok_or("INVALID_INPUT")?;
-    let id = request["recipeId"].as_str().unwrap_or(match action {
-        "nativeCustomerAddressDefaultRetry" => "customer-address-default.retry",
-        "printerReprobe" => "printerReprobe",
-        "testPrint" => "testPrint",
-        _ => return Err("REMEDY_NOT_APPLICABLE".into()),
-    });
+    // The fallback is chosen only when the request names no recipe. Written as
+    // `unwrap_or(match ..)` it was evaluated first, so an action outside the
+    // three below was refused even when its request carried a valid recipe
+    // (18/11/2026: both customer-correction buttons answered
+    // REMEDY_NOT_APPLICABLE after the PIN and the row held the store's Z).
+    let id = match (request["recipeId"].as_str(), action) {
+        (Some(id), _) => id,
+        (None, "nativeCustomerAddressDefaultRetry") => "customer-address-default.retry",
+        (None, "printerReprobe") => "printerReprobe",
+        (None, "testPrint") => "testPrint",
+        (None, _) => return Err("REMEDY_NOT_APPLICABLE".into()),
+    };
     let r = remedies::recipe(id, request["recipeVersion"].as_u64().unwrap_or(1))?;
     if r.action_id != action {
         return Err("PAYLOAD_MISMATCH".into());
@@ -2241,6 +2247,296 @@ mod tests {
 
     impl TerminalEventSink for NoopTerminalEventSink {
         fn emit_json(&self, _event: &str, _payload: serde_json::Value) {}
+    }
+
+    const CORRECTION_ORDER: &str = "11111111-1111-4111-8111-111111111111";
+    const CORRECTION_QUEUE: &str = "44444444-4444-4444-8444-444444444444";
+    const CORRECTION_REMOTE_ORDER: &str = "55555555-5555-4555-8555-555555555555";
+    const CORRECTION_TERMINAL: &str = "terminal-correction-fixture";
+
+    /// The shape of the row that held a store's Z on 18/11/2026 (desktop
+    /// 1.4.153): a delivered, paid delivery order with one manual line, whose
+    /// customer correction the server answered with an unknown 409, parked as
+    /// a conflict. Returns the till and the server's exact-order answer.
+    fn refused_customer_correction_fixture() -> (crate::tests::harness::TestDb, Value) {
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        for (key, value) in [
+            ("organization_id", "fixture-org"),
+            ("branch_id", "fixture-branch"),
+            ("terminal_id", CORRECTION_TERMINAL),
+        ] {
+            db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        let local_items = json!([{
+            "id":"manual-fixture-line","isManual":true,"is_manual":true,
+            "menuItemId":null,"menu_item_id":null,"name":"Manual line","menuItemName":"Manual line",
+            "menu_item_name":"Manual line","quantity":1,"price":14.5,"unitPrice":14.5,"unit_price":14.5,
+            "totalPrice":14.5,"total_price":14.5,"originalUnitPrice":14.5,"original_unit_price":14.5,
+            "isPriceOverridden":false,"is_price_overridden":false,"customizations":[],
+            "priceIncludesVat":true,"vatClass":"standard","fiscalDocumentProfile":"manual_item",
+            "categoryPath":"Manual category","service_id":null,"appointment_id":null
+        }]);
+        let payload = json!({"client_event_id":"original-correction-event",
+            "customer_id":"33333333-3333-4333-8333-333333333333",
+            "customer_name":"Corrected customer","customer_phone":"Corrected phone",
+            "delivery_address":"Corrected address","delivery_floor":"2","delivery_notes":null,
+            "expected_version":1,"name_on_ringer":"Corrected bell",
+            "orderId":CORRECTION_ORDER,"organization_id":"fixture-org","status":"pending"});
+        conn.execute(
+            "INSERT INTO orders(id,supabase_id,organization_id,branch_id,terminal_id,order_type,status,payment_status,
+                sync_status,version,remote_version,total_amount,total_amount_cents,items,customer_id,customer_name,
+                customer_phone,delivery_address,delivery_floor,delivery_notes,name_on_ringer,created_at,updated_at)
+             VALUES(?1,?2,'fixture-org','fixture-branch',?3,'delivery','delivered','paid','synced',1,NULL,
+                14.5,1450,?4,'33333333-3333-4333-8333-333333333333','Corrected customer','Corrected phone',
+                'Corrected address','2',NULL,'Corrected bell','2026-11-18T03:58:00Z','2026-11-18T04:13:12Z')",
+            rusqlite::params![
+                CORRECTION_ORDER,
+                CORRECTION_REMOTE_ORDER,
+                CORRECTION_TERMINAL,
+                local_items.to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,sync_state,sync_status,
+                remote_payment_id,created_at,updated_at)
+             VALUES('fixture-payment',?1,'cash',14.50,1450,'EUR','completed','applied','synced','remote-fixture-payment',
+                '2026-11-18T04:13:12Z','2026-11-18T04:13:12Z')",
+            [CORRECTION_ORDER],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,status,
+                error_message,attempts,created_at,conflict_strategy,version,module_type)
+             VALUES(?1,'orders',?2,'UPDATE',?3,'fixture-org','conflict','UNKNOWN_CONFLICT_REVIEW',0,
+                '2026-11-18T04:13:13Z','server-wins',1,'orders')",
+            rusqlite::params![CORRECTION_QUEUE, CORRECTION_ORDER, payload.to_string()],
+        )
+        .unwrap();
+        let mut order =
+            crate::edit_settlement_recovery::capture_order_headers(&conn, CORRECTION_ORDER)
+                .unwrap();
+        // The exact-order lookup answers the stored rows and a display
+        // projection of them. The projection carries display metadata and
+        // leaves out the line's original price and override.
+        let customizations = json!({"_meta":{"line_kind":"manual_item","category_id":null,
+            "product_name":"Manual line","category_name":null}});
+        let line_id = "22222222-2222-4222-8222-222222222222";
+        let raw_line = json!({"id":line_id,"order_id":CORRECTION_REMOTE_ORDER,"menu_item_id":null,
+            "menu_item_name":"Manual line","quantity":1,"unit_price":14.5,"total_price":14.5,
+            "original_unit_price":14.5,"is_price_overridden":false,"notes":null,
+            "customizations":customizations,"service_id":null,"appointment_id":null});
+        let hydrated = json!({"id":line_id,"menu_item_id":null,"menuItemId":null,
+            "menu_item_name":"Manual line","menuItemName":"Manual line","name":"Manual line","quantity":1,
+            "unit_price":14.5,"unitPrice":14.5,"price":14.5,"total_price":14.5,"totalPrice":14.5,
+            "notes":null,"special_instructions":null,"customizations":customizations,
+            "category_name":null,"categoryName":null,"category_path":null,"categoryPath":null});
+        order.as_object_mut().unwrap().extend(
+            json!({
+                "id":CORRECTION_REMOTE_ORDER,"client_order_id":CORRECTION_ORDER,
+                "organization_id":"fixture-org","branch_id":"fixture-branch",
+                "status":"delivered","payment_status":"paid","version":4,
+                "total_amount":14.5,"total_amount_cents":1450,
+                "customer_name":"Earlier customer","customer_phone":"Earlier phone",
+                "delivery_address":"Earlier address","name_on_ringer":"Earlier bell","notes":null,
+                "special_instructions":null,"order_items":[raw_line],"items":[hydrated]
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        drop(conn);
+        (
+            db,
+            json!({"success":true,"orders":[order],"total_count":1,"has_more":false,"exact_order_lookup":true}),
+        )
+    }
+
+    /// What 1.4.153 had written by the time staff gave up: its one automatic
+    /// claim, left interrupted, and the staff presses refused before and at
+    /// admission. None of it may keep a later press from working.
+    fn refused_customer_correction_history(conn: &Connection) {
+        for (index, (time, action, reason)) in [
+            ("04:13:15", "resendOrderCustomerCorrection", None),
+            (
+                "07:00:00",
+                "resendOrderCustomerCorrection",
+                Some("Active cashier or manager shift required on this terminal"),
+            ),
+            (
+                "07:00:14",
+                "keepServerOrderCustomerDetails",
+                Some("Active cashier or manager shift required on this terminal"),
+            ),
+            (
+                "08:02:23",
+                "resendOrderCustomerCorrection",
+                Some("Active session required"),
+            ),
+            (
+                "08:02:47",
+                "keepServerOrderCustomerDetails",
+                Some("Active session required"),
+            ),
+            (
+                "08:31:00",
+                "employeeOrderAttempt",
+                Some("REMEDY_NOT_APPLICABLE"),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let automatic = reason.is_none();
+            let recipe = match action {
+                "resendOrderCustomerCorrection" => Some("order-customer-correction.resend"),
+                "keepServerOrderCustomerDetails" => Some("order-customer-correction.keep-server"),
+                _ => None,
+            };
+            let id = if automatic {
+                format!("automatic-order-header:{CORRECTION_QUEUE}")
+            } else {
+                format!("legacy-audit-{index}")
+            };
+            let target = if automatic {
+                CORRECTION_ORDER
+            } else {
+                CORRECTION_QUEUE
+            };
+            conn.execute(
+                "INSERT INTO recovery_action_log(id,action_id,issue_code,issue_id,recipe_id,recipe_version,
+                  entity_type,entity_id,order_id,success,created_at,error_message,payload_json)
+                 VALUES(?1,?2,'customer_correction_refused',?3,?4,1,'order',?5,?6,0,?7,?8,?9)",
+                rusqlite::params![
+                    id,
+                    action,
+                    CORRECTION_QUEUE,
+                    recipe,
+                    target,
+                    CORRECTION_ORDER,
+                    format!("2026-11-18T{time}Z"),
+                    reason,
+                    json!({"automatic":automatic,"automaticIntent":automatic,"outcome":"failed",
+                        "noticeQueueId":CORRECTION_QUEUE,"organizationId":"fixture-org",
+                        "errorMessage":reason})
+                    .to_string()
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    /// Regression for 18/11/2026: on desktop 1.4.153 both customer-correction
+    /// buttons answered REMEDY_NOT_APPLICABLE after the PIN, because the
+    /// admission evaluated its no-recipe fallback even for a request that
+    /// named its recipe. The parked row then held the store's Z with no way
+    /// out. Each button is driven through the dispatcher the screen calls,
+    /// with the history that till had recorded, and must leave nothing of the
+    /// row for the day close to count.
+    #[test]
+    #[serial_test::serial]
+    fn customer_correction_buttons_pass_admission_and_free_the_day_close() {
+        use crate::order_notice_recovery as owner;
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        for (action, recipe) in [
+            (owner::KEEP, "order-customer-correction.keep-server"),
+            (owner::RESEND, "order-customer-correction.resend"),
+        ] {
+            let (db, answer) = refused_customer_correction_fixture();
+            let server = crate::tests::fake_http::MockServer::new(answer.to_string());
+            crate::tests::fake_keyring::set("terminal_id", CORRECTION_TERMINAL);
+            crate::tests::fake_keyring::set("admin_dashboard_url", &server.url);
+            crate::tests::fake_keyring::set(
+                "pos_api_key",
+                &json!({"key":"your-test-key","tid":CORRECTION_TERMINAL,"url":&server.url})
+                    .to_string(),
+            );
+            {
+                let conn = db.state.conn.lock().unwrap();
+                refused_customer_correction_history(&conn);
+                assert_eq!(
+                    sync_queue::get_closeout_blocking_status(&conn)
+                        .unwrap()
+                        .conflicts,
+                    1,
+                    "{action}: the parked correction holds the day close"
+                );
+                // A request that names no recipe keeps its closed fallback.
+                assert_eq!(
+                    health_action_admission(&conn, &json!({"actionId":action}), 0, false, false)
+                        .err()
+                        .as_deref(),
+                    Some("REMEDY_NOT_APPLICABLE")
+                );
+            }
+            let auth = auth::AuthState::new();
+            auth::tests::login_as_admin(&db.state, &auth);
+            auth::tests::insert_active_shift(&db.state, CORRECTION_TERMINAL, "manager");
+            auth::tests::grant_cash_drawer_for_test(&auth);
+            let snapshot = recovery::create_pre_recovery_action_snapshot(&db.state).unwrap();
+            let request = json!({"actionId":action,"issueCode":"customer_correction_refused",
+                "recipeId":recipe,"recipeVersion":1,"entityType":"order","entityId":CORRECTION_QUEUE,
+                "params":{"queueId":CORRECTION_QUEUE},"snapshotPointId":snapshot.id});
+            let result = tauri::async_runtime::block_on(recovery_execute_action_core(
+                Some(request),
+                false,
+                &db.state,
+                &auth,
+                &std::sync::Arc::new(sync::SyncState::new()),
+                &tokio_util::sync::CancellationToken::new(),
+                &NoopTerminalEventSink,
+            ))
+            .unwrap_or_else(|error| panic!("{action}: {error:?}"));
+            assert_eq!(result["success"], true, "{action}: {result}");
+            let requests = server.recorded();
+            assert_eq!(requests.len(), 1, "{action}");
+            assert_eq!(requests[0].method, "GET");
+            assert_eq!(
+                requests[0].path,
+                format!("/api/pos/orders/sync?order_id={CORRECTION_REMOTE_ORDER}")
+            );
+            let conn = db.state.conn.lock().unwrap();
+            assert!(
+                owner::refused(&conn, CORRECTION_QUEUE).unwrap().is_none(),
+                "{action}: the refused correction is resolved"
+            );
+            let closeout = sync_queue::get_closeout_blocking_status(&conn).unwrap();
+            assert_eq!(
+                (closeout.conflicts, closeout.failed),
+                (0, 0),
+                "{action}: nothing refused is left to hold the day close"
+            );
+            // Keeping the server's details leaves nothing queued; saving again
+            // queues exactly the one replacement, to be sent like any edit.
+            assert_eq!(
+                closeout.pending,
+                i64::from(action == owner::RESEND),
+                "{action}"
+            );
+            let order: (i64, String, String) = conn
+                .query_row(
+                    "SELECT total_amount_cents,status,payment_status FROM orders WHERE id=?1",
+                    [CORRECTION_ORDER],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (order.0, order.1.as_str(), order.2.as_str()),
+                (1450, "delivered", "paid"),
+                "{action}"
+            );
+            let payment: (i64, i64) = conn
+                .query_row(
+                    "SELECT COUNT(*),SUM(amount_cents) FROM order_payments WHERE order_id=?1",
+                    [CORRECTION_ORDER],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(payment, (1, 1450), "{action}");
+        }
     }
 
     fn address_retry_fixture() -> (
