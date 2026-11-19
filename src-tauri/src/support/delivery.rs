@@ -135,6 +135,15 @@ pub fn recheck(
     Ok(())
 }
 
+pub(super) fn recovery_reference(text: &str) -> bool {
+    text.as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphanumeric)
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+}
+
 /// Closed subset of the emitted payload schemas. Unknown formats fail closed.
 pub fn valid_schema(s: &serde_json::Value, v: &serde_json::Value, depth: usize) -> bool {
     if depth > 32 {
@@ -235,6 +244,13 @@ pub fn valid_schema(s: &serde_json::Value, v: &serde_json::Value, depth: usize) 
                             return false;
                         }
                     }
+                    Some("^[A-Za-z0-9][A-Za-z0-9_.:-]*$") => {
+                        if !recovery_reference(text) {
+                            return false;
+                        }
+                    }
+                    Some("^[A-Z]{3}$")
+                        if text.len() == 3 && text.bytes().all(|b| b.is_ascii_uppercase()) => {}
                     Some("^[a-f0-9]{64}$") => {
                         if text.len() != 64
                             || !text

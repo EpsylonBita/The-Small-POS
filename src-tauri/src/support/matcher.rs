@@ -147,7 +147,26 @@ impl MatcherRead {
 pub async fn support_matcher_inputs(app: tauri::AppHandle) -> Result<Value, String> {
     crate::database_lock::run_blocking_command("support_matcher_inputs", move || {
         let db = app.state::<DbState>();
-        Ok(MatcherRead::open(&db.db_path)?.collect())
+        // The scoped order owner gets its own budget before the generic
+        // inputs. A missing or slow integrity export cannot veto it.
+        let order_notices = MatcherRead::open(&db.db_path)
+            .map(|read| {
+                read.checked(
+                    read.db
+                        .conn
+                        .lock()
+                        .map_err(|_| "INTERNAL_ERROR".to_owned())
+                        .and_then(|conn| {
+                            super::remedies::correction_notices(&conn, None).map(|rows| json!(rows))
+                        }),
+                )
+            })
+            .unwrap_or_else(|_| unavailable());
+        let mut inputs = MatcherRead::open(&db.db_path).map(|read|read.collect()).unwrap_or_else(|_| {
+            json!({"systemHealth":unavailable(),"integrity":unavailable(),"financialItems":unavailable(),"parityItems":unavailable()})
+        });
+        inputs["orderNotices"] = order_notices;
+        Ok(inputs)
     })
     .await
 }

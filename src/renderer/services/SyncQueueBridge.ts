@@ -149,8 +149,10 @@ export class SyncQueueBridge implements SyncQueue {
   /**
    * Process all pending items by syncing to the admin API.
    */
-  async processQueue(): Promise<SyncResult> {
-    const result = await this.invokeFn<SyncResult>('sync_queue_process');
+  async processQueue(reportHealthTargets = false): Promise<SyncResult & { acknowledgedIds?: string[] }> {
+    const result = await this.invokeFn<SyncResult & { acknowledgedIds?: string[] }>(
+      'sync_queue_process', ...(reportHealthTargets ? [{ reportHealthTargets }] : []),
+    );
     await this.refreshPendingCount();
     return result;
   }

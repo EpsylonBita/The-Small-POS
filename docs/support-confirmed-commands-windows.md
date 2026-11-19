@@ -292,3 +292,36 @@ Paths below are relative to `pos-tauri/`. Generated build output/logs are ignore
 7. Review server incident projection/outbox retry and receipts against actual native output. Review the raw INSERT limitation before capability enablement. Do not run Z, submit fiscal documents, alter a payment, or access actual credentials during the rehearsal.
 
 Remaining risks: no hardware/live server/package rehearsal yet; unchanged owner prerequisites may refuse the store's particular blocked data; fiscal/Z linkage checks conservatively refuse rows with a later Z in the local database rather than infer missing per-document attribution; whole-file restore deliberately becomes unavailable after any relevant state moves; full snapshots/watermarks on large tills may hit existing size/time budgets and refuse safely; active persistent SQL triggers/cascades are deliberately conservative; crash/commit uncertainty is unknown and requires fresh diagnosis, not blind retry; staged restore can verify unknown after startup housekeeping changes. The consent model records the operator's founder-confirmation assertion and cannot prove conversation assent cryptographically. Server switches/consent and coordinator full-suite review are separate integration work.
+
+## Windows recovery actions, 2026-11-18
+
+Windows advertises `support.confirmed-actions.v2` when the native queue
+collector is registered and both correction owners match the embedded
+manifest. The recovery-attempts capability requires the diagnostics
+collector and can be advertised independently. Confirmed commands pin the
+authenticated session heartbeat's 1.1 offer before acknowledgment. The
+session heartbeat refreshes that authority and revokes in-flight permits on
+a kill or loss of transport. The terminal's ordinary availability cache
+does not supply the confirmed-command consent pin.
+
+A confirmed correction takes a support snapshot, fetches the canonical
+order and verifies the scoped source fingerprint before committing through
+the native order owner. It uses a new queue row for a resend and reports
+pending until the ordinary sender verifies the exact replacement. Keep
+server verifies the locally adopted header and saves a snapshot reference
+for undo. Tier two uses the same scoped order notices for matching and the
+ordinary on-site confirmation and privileged grant.
+
+Queue v2 previews bind the parked root and its exact dependent group.
+Retry schedules one original, replayable order header mutation. Set-aside
+and return preserve the payload and all business records. The pre-Z count
+and the `PARITY_PRE_Z` support blocker use the same queue predicate. The
+support projection names a bounded sample of counted rows, oldest within
+status, and discloses any omitted count. Store staff remain the owners of
+the Z and its on-site set-aside list.
+
+Recovery-attempt reads project a closed set of facts from Windows
+`recovery_action_log`. Automatic intent and the resulting action have
+separate entries. Text logs accept the daily file names produced by the
+desktop writer. A replica read can report pending and then complete under
+the same command ID.

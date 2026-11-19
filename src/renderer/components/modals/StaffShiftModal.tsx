@@ -5148,7 +5148,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 >
                   <span className="truncate liquid-glass-modal-text-muted">
                     {t('modals.staffShift.tipOrder', { defaultValue: 'Order' })}{' '}
-                    {formatGridOrderNumber({ order_number: allocation.orderNumber, order_id: allocation.orderId })}
+                    {formatGridOrderNumber({ ...allocation, order_number: allocation.orderNumber, order_id: allocation.orderId })}
                   </span>
                   <span className="font-black text-yellow-800 dark:text-yellow-200">
                     {formatCurrency(Number(allocation.amount || 0))}
@@ -7995,7 +7995,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             >
                               <span className="liquid-glass-modal-text-muted">
                                 {t('modals.staffShift.tipOrder', 'Order')}{' '}
-                                {formatGridOrderNumber({ order_number: allocation.orderNumber, order_id: allocation.orderId })}
+                                {formatGridOrderNumber({ ...allocation, order_number: allocation.orderNumber, order_id: allocation.orderId })}
                               </span>
                               <span className="font-bold text-emerald-700 dark:text-emerald-400">
                                 {formatCurrency(Number(allocation.amount || 0))}

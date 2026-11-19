@@ -1,3 +1,5 @@
+import { seedCardProviderMark } from '../../../services/__tests__/cardProviderMark.fixture';
+import { updateTerminalCredentialCache } from '../../../services/terminal-credentials';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -124,6 +126,8 @@ const notSavedAnswer = {
 
 describe('SplitPaymentModal: a terminal portion charged but not saved', () => {
   beforeEach(() => {
+    updateTerminalCredentialCache({ organizationId: 'fixture-org', branchId: 'fixture-branch', terminalId: 'fixture-till' });
+    seedCardProviderMark();
     vi.clearAllMocks();
     mocks.getSettlementSnapshot.mockResolvedValue({ unresolvedDirectSale: null });
     mocks.getOrderPayments.mockResolvedValue([]);

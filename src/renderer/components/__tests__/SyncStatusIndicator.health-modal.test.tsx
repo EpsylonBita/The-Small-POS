@@ -80,7 +80,10 @@ vi.mock('../../services/ParitySyncCoordinator', () => ({
 vi.mock('../OrderSyncRouteIndicator', () => ({ OrderSyncRouteIndicator: () => null }))
 vi.mock('../FinancialSyncPanel', () => ({ FinancialSyncPanel: () => null }))
 vi.mock('../support/HealthSupportEntryPoint', () => ({ HealthSupportEntryPoint: () => null }))
-vi.mock('../recovery/RecoveryCenterPanel', () => ({ RecoveryCenterPanel: () => null }))
+
+vi.mock('../recovery/RecoveryPanel', () => ({ RecoveryPanel: () => null }))
+
+vi.mock('../support/SupportDetailsPanel', () => ({ SupportDetailsPanel: () => null }))
 
 import { SyncStatusIndicator } from '../SyncStatusIndicator'
 
@@ -154,6 +157,23 @@ const renderIndicator = (showDetails = false) =>
 
 const renderHealthModal = () => renderIndicator(true)
 
+const openSupport = async () => {
+  const toggle = await screen.findByRole('button', { name: new RegExp(i18n.t('tillHealth.support.title')) });
+  if (toggle.getAttribute('aria-expanded') === 'false') fireEvent.click(toggle);
+};
+
+const openAdvanced = async () => {
+  await openSupport();
+  const label = screen.getByText(i18n.t('sync.healthModal.actions.openAdvanced'));
+  label.closest('details')!.open = true;
+};
+
+const staffOnly = (dialog: HTMLElement) => {
+  const clone = dialog.cloneNode(true) as HTMLElement;
+  clone.querySelector('.till-health-support-content')?.remove();
+  return clone;
+};
+
 const normalized = (value: string | null | undefined) => value?.replace(/\s+/g, ' ').trim() ?? ''
 const HEALTH_FRESHNESS_THRESHOLD_MS = 10 * 60 * 1_000
 
@@ -192,12 +212,12 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     renderHealthModal()
 
     const dialog = await screen.findByRole('dialog', {
-      name: i18n.t('sync.healthModal.title'),
+      name: i18n.t('tillHealth.title'),
     })
 
     expect(dialog).toHaveAttribute('aria-modal', 'true')
     expect(
-      screen.getByRole('button', { name: i18n.t('sync.healthModal.close') }),
+      screen.getByRole('button', { name: i18n.t('common.actions.close') }),
     ).toBeInTheDocument()
   })
 
@@ -208,27 +228,24 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
       remoteSupport: { status: 'unavailable', code: 'SUPPORT_DATABASE_UNAVAILABLE', guidance: 'RAW_GUIDANCE' },
     })
     renderHealthModal()
-    const row = await screen.findByRole('region', { name: i18n.t('sync.healthModal.remoteSupport.title') })
-    expect(row).toHaveTextContent(i18n.t('sync.healthModal.remoteSupport.impact'))
-    expect(row).toHaveTextContent(i18n.t('sync.healthModal.remoteSupport.action'))
-    expect(row.className).toContain('bg-(--pos-s-surface-2)')
-    expect(row.className).not.toMatch(/red|rose|danger/)
-    expect(row.querySelector('button')).toBeNull()
-    expect(screen.getByText(i18n.t('sync.healthModal.states.healthy.title'))).toBeInTheDocument()
-    expect(screen.getByTestId('health-service-support')).toHaveTextContent(i18n.t('sync.healthModal.status.notNeeded'))
-    expect(screen.queryByText(/SUPPORT_DATABASE_UNAVAILABLE|RAW_GUIDANCE/)).not.toBeInTheDocument()
-    fireEvent.click(screen.getByText(i18n.t('sync.healthModal.sections.supportActions')))
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('sync.healthModal.actions.openAdvanced') }))
+    const row = await screen.findByTestId('health-remote-support')
+    expect(row).toHaveTextContent(i18n.t('tillHealth.help.unavailable'))
+    expect(row.className).toBe('till-health-help')
+    expect(row).not.toHaveTextContent(/restart|RAW_GUIDANCE|SUPPORT_DATABASE_UNAVAILABLE/i)
+    expect(screen.getByTestId('health-service-support')).toHaveTextContent(i18n.t('tillHealth.status.unavailable'))
+    expect(screen.getByText(i18n.t('tillHealth.states.support.title'))).toBeInTheDocument()
+    await openAdvanced()
     const details = screen.getByTestId('health-remote-support-details')
     expect(details).toHaveTextContent('SUPPORT_DATABASE_UNAVAILABLE')
     expect(details).toHaveTextContent('unavailable')
+    expect(screen.getByRole('button', {name: i18n.t('tillHealth.report.new')})).toBeEnabled()
     document.documentElement.classList.remove('dark')
   })
 
   it.each([undefined, { status: 'available' }, { status: 'not_observed' }])('hides the remote support row for %j', async remoteSupport => {
     bridge.diagnostics.getSystemHealth.mockResolvedValue({ ...HEALTHY_SYSTEM_HEALTH, remoteSupport })
     renderHealthModal()
-    await screen.findByText(i18n.t('sync.healthModal.states.healthy.title'))
+    await screen.findByText(i18n.t('tillHealth.states.ok.title'))
     expect(screen.queryByTestId('health-remote-support')).not.toBeInTheDocument()
   })
 
@@ -243,10 +260,10 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
       queueItem({ tableName: 'payments', nextRetryAt: '2026-01-13T14:01:00.000Z' }),
     ])
     renderHealthModal()
-    expect(await screen.findByText(i18n.t('sync.healthModal.problems.failedPayments'))).toBeInTheDocument()
-    expect(screen.queryByText(i18n.t('sync.healthModal.problems.printerNotConfigured'))).not.toBeInTheDocument()
+    expect(await screen.findByText(i18n.t('tillHealth.states.support.title'))).toBeInTheDocument()
+    expect(screen.queryByText(i18n.t('tillHealth.families.printer.title'))).not.toBeInTheDocument()
     expect(document.body).not.toHaveTextContent(i18n.t('sync.healthModal.failure.nextRetryValue', { value: '' }).trim())
-    expect(screen.getByRole('button', { name: i18n.t('sync.dashboard.openRecovery') })).toBeInTheDocument()
+    expect(screen.getByTestId('till-health-card')).toBeInTheDocument()
   })
 
   it('renders operator-facing Health Status copy from the active Greek locale', async () => {
@@ -256,10 +273,10 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     renderHealthModal()
 
     await screen.findByRole('button', {
-      name: i18n.t('sync.healthModal.actions.refresh'),
+      name: i18n.t('tillHealth.action.recheck'),
     })
     expect(screen.queryByRole('button', {name: i18n.t('sync.dashboard.openRecovery')})).not.toBeInTheDocument()
-    await screen.findByText(i18n.t('sync.healthModal.states.healthy.title'))
+    await screen.findByText(i18n.t('tillHealth.states.ok.title'))
 
     for (const englishFragment of [
       'Health Status',
@@ -275,12 +292,12 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
       expect(document.body).not.toHaveTextContent(englishFragment)
     }
 
-    expect(document.body).toHaveTextContent(i18n.t('sync.healthModal.title'))
+    expect(document.body).toHaveTextContent(i18n.t('tillHealth.title'))
     expect(document.body).toHaveTextContent(
-      i18n.t('sync.healthModal.states.healthy.title'),
+      i18n.t('tillHealth.states.ok.title'),
     )
     expect(document.body).toHaveTextContent(
-      i18n.t('sync.healthModal.sections.supportActions'),
+      i18n.t('tillHealth.support.title'),
     )
   })
 
@@ -296,10 +313,10 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     })
 
     expect(
-      await screen.findByText(i18n.t('sync.healthModal.states.unavailable.title')),
+      await screen.findByText(i18n.t('tillHealth.states.stale.title')),
     ).toBeInTheDocument()
     expect(
-      screen.queryByText(i18n.t('sync.healthModal.states.healthy.title')),
+      screen.queryByText(i18n.t('tillHealth.states.ok.title')),
     ).not.toBeInTheDocument()
     expect(
       screen.queryByText(i18n.t('sync.healthModal.problems.ready')),
@@ -317,10 +334,10 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     renderHealthModal()
 
     expect(
-      await screen.findByText(i18n.t('sync.healthModal.loading.message')),
+      await screen.findByText(i18n.t('tillHealth.states.loading.detail')),
     ).toBeInTheDocument()
     expect(
-      screen.queryByText(i18n.t('sync.healthModal.states.healthy.title')),
+      screen.queryByText(i18n.t('tillHealth.states.ok.title')),
     ).not.toBeInTheDocument()
     expect(
       screen.queryByText(i18n.t('sync.healthModal.problems.ready')),
@@ -328,7 +345,7 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
 
     await act(async () => resolveHealth(HEALTHY_SYSTEM_HEALTH))
     expect(
-      await screen.findByText(i18n.t('sync.healthModal.states.healthy.title')),
+      await screen.findByText(i18n.t('tillHealth.states.ok.title')),
     ).toBeInTheDocument()
   })
 
@@ -339,41 +356,39 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     await settleFakeTimerWork()
 
     expect(
-      screen.getByText(i18n.t('sync.healthModal.states.healthy.title')),
+      screen.getByText(i18n.t('tillHealth.states.ok.title')),
     ).toBeInTheDocument()
     expect(
-      screen.queryByText(i18n.t('sync.healthModal.stale.message')),
+      screen.queryByText(/information below is from/i),
     ).not.toBeInTheDocument()
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(HEALTH_FRESHNESS_THRESHOLD_MS)
     })
     expect(
-      screen.queryByText(i18n.t('sync.healthModal.stale.message')),
+      screen.queryByText(/information below is from/i),
     ).not.toBeInTheDocument()
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1)
     })
     expect(
-      screen.getByText(i18n.t('sync.healthModal.stale.message')),
+      screen.getByText(/information below is from/i),
     ).toBeInTheDocument()
-    expect(
-      screen.getByText(i18n.t('sync.healthModal.states.healthy.title')),
-    ).toBeInTheDocument()
+    expect(screen.queryByText(i18n.t('tillHealth.states.ok.title'))).not.toBeInTheDocument()
 
     fireEvent.click(
       screen.getByRole('button', {
-        name: i18n.t('sync.healthModal.actions.refresh'),
+        name: i18n.t('tillHealth.action.recheck'),
       }),
     )
     await settleFakeTimerWork()
 
     expect(
-      screen.queryByText(i18n.t('sync.healthModal.stale.message')),
+      screen.queryByText(/information below is from/i),
     ).not.toBeInTheDocument()
     expect(
-      screen.getByText(i18n.t('sync.healthModal.states.healthy.title')),
+      screen.getByText(i18n.t('tillHealth.states.ok.title')),
     ).toBeInTheDocument()
   })
 
@@ -384,10 +399,12 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     ])
     renderHealthModal()
 
+    await screen.findByText(i18n.t('tillHealth.states.ok.title')).catch(() => null)
+    await openAdvanced()
     await screen.findByText(i18n.t('sync.healthModal.syncDetails'))
 
     expect(document.body).not.toHaveTextContent(rawStatus)
-    expect(document.body).toHaveTextContent(i18n.t('sync.healthModal.status.unknown'))
+    expect(document.body).toHaveTextContent(i18n.t('tillHealth.status.unknown'))
   })
 
   it('does not expose raw backend error details to the operator', async () => {
@@ -398,10 +415,10 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     ])
     renderHealthModal()
 
-    await screen.findByText(i18n.t('sync.healthModal.syncDetails'))
+    await screen.findByText(i18n.t('tillHealth.states.support.title'))
 
     expect(document.body).not.toHaveTextContent(sensitiveBackendError)
-    expect(document.body).toHaveTextContent(i18n.t('sync.healthModal.failure.safeError'))
+    expect(document.body).toHaveTextContent(i18n.t('tillHealth.states.support.title'))
   })
 
   it('never exposes raw terminal, branch, organization, or incident UUIDs in the Health Status dialog', async () => {
@@ -426,39 +443,43 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     renderHealthModal()
 
     const dialog = await screen.findByRole('dialog', {
-      name: i18n.t('sync.healthModal.title'),
+      name: i18n.t('tillHealth.title'),
     })
+    await openSupport()
     fireEvent.click(
       await within(dialog).findByRole('button', {
-        name: i18n.t('sync.healthModal.actions.sendSupport'),
+        name: i18n.t('tillHealth.report.new'),
       }),
     )
     await waitFor(() => {
       expect(bridge.diagnostics.sendRemoteIncident).toHaveBeenCalledTimes(1)
     })
-    fireEvent.click(
-      within(dialog).getByRole('button', {
-        name: i18n.t('sync.healthModal.actions.openAdvanced'),
-      }),
-    )
-
+    await openAdvanced()
     for (const rawId of Object.values(rawIds)) {
-      expect(dialog).not.toHaveTextContent(rawId)
+      expect(staffOnly(dialog)).not.toHaveTextContent(rawId)
     }
+    expect(dialog).toHaveTextContent(rawIds.terminalId)
   })
 
-  it('exports only redacted diagnostics from the operator Health Status dialog', async () => {
+  it('queues only redacted diagnostics while offline from the operator Health Status dialog', async () => {
+    bridge.sync.getStatus.mockResolvedValue({ ...HEALTHY_SYNC_STATUS, isOnline: false })
+    bridge.diagnostics.getSystemHealth.mockResolvedValue({ ...HEALTHY_SYSTEM_HEALTH, isOnline: false })
+    bridge.diagnostics.sendRemoteIncident.mockResolvedValueOnce({
+      success: false, localPrepared: true, deliveryState: 'waiting', path: 'C:/till/report.zip',
+    })
     renderHealthModal()
-    await screen.findByText(i18n.t('sync.healthModal.states.healthy.title'))
+    await screen.findByText(i18n.t('tillHealth.states.offline.title'))
+    await openSupport()
+
 
     fireEvent.click(
       await screen.findByRole('button', {
-        name: i18n.t('sync.healthModal.actions.export'),
+        name: i18n.t('tillHealth.report.new'),
       }),
     )
 
     await waitFor(() => {
-      expect(bridge.diagnostics.export).toHaveBeenCalledWith({
+      expect(bridge.diagnostics.sendRemoteIncident).toHaveBeenCalledWith({
         includeLogs: true,
         redactSensitive: true,
         // What the operator saw, for the bundle's health_view.json.
@@ -467,12 +488,14 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
           platform: 'windows',
           source: 'health_modal',
           availability: 'ready',
-          state: 'healthy',
-          primaryAction: 'none',
+          state: 'attention',
+          primaryAction: 'waitForConnection',
           escalated: false,
         }),
       })
     })
+    expect(await screen.findByText(i18n.t('tillHealth.report.waiting'), { selector: '[role="status"]' })).toBeInTheDocument()
+    expect(bridge.diagnostics.export).not.toHaveBeenCalled()
   })
 
   it('the export carries the incoming-order alert’s missed / escalated entries for support', async () => {
@@ -494,16 +517,20 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
       JSON.stringify([{ ...missed, event: 'alerting', waitedMs: 0 }, missed]),
     )
     try {
-      renderHealthModal()
+      bridge.sync.getStatus.mockResolvedValue({ ...HEALTHY_SYNC_STATUS, isOnline: false })
+    bridge.diagnostics.getSystemHealth.mockResolvedValue({ ...HEALTHY_SYSTEM_HEALTH, isOnline: false })
+    renderHealthModal()
+    await screen.findByText(i18n.t('tillHealth.states.offline.title'))
+    await openSupport()
 
       fireEvent.click(
         await screen.findByRole('button', {
-          name: i18n.t('sync.healthModal.actions.export'),
+          name: i18n.t('tillHealth.report.new'),
         }),
       )
 
       await waitFor(() => {
-        expect(bridge.diagnostics.export).toHaveBeenCalledWith(
+        expect(bridge.diagnostics.sendRemoteIncident).toHaveBeenCalledWith(
           expect.objectContaining({
             healthView: expect.objectContaining({
               format: 'thesmall-pos-health-view-v1',
@@ -534,20 +561,21 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
       'recovery queue items',
       () => queueBridge.listItems.mockRejectedValueOnce(new Error('queue sidecar failed')),
     ],
-  ])('keeps successful core health available when %s loading fails', async (_name, rejectAncillaryCall) => {
+  ])('shows unavailable when the first %s check fails', async (_name, rejectAncillaryCall) => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
     rejectAncillaryCall()
     renderHealthModal()
 
     expect(
-      await screen.findByText(i18n.t('sync.healthModal.states.healthy.title')),
+      await screen.findByText(i18n.t('tillHealth.states.stale.title')),
     ).toBeInTheDocument()
     expect(
-      screen.queryByText(i18n.t('sync.healthModal.states.unavailable.title')),
+      screen.queryByText(i18n.t('tillHealth.states.ok.title')),
     ).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: i18n.t('tillHealth.action.recheck') }).length).toBeGreaterThan(0)
   })
 
-  it('does not claim all checks passed when no printer is configured', async () => {
+  it('keeps a printer setup note on its own row without changing the overall state', async () => {
     bridge.diagnostics.getSystemHealth.mockResolvedValueOnce({
       ...HEALTHY_SYSTEM_HEALTH,
       printerStatus: {
@@ -559,21 +587,17 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     })
     renderHealthModal()
 
-    await screen.findByText(i18n.t('sync.healthModal.status.notConfigured'))
-    expect(
-      screen.queryByText(i18n.t('sync.healthModal.states.healthy.title')),
-    ).not.toBeInTheDocument()
-    expect(
-      screen.queryByText(i18n.t('sync.healthModal.problems.ready')),
-    ).not.toBeInTheDocument()
+    await screen.findByText(i18n.t('tillHealth.status.not_configured'))
+    expect(screen.getByText(i18n.t('tillHealth.states.ok.title'))).toBeInTheDocument()
+    expect(screen.queryByTestId('till-health-card')).not.toBeInTheDocument()
   })
 
   it('offers a recheck without a repair entry for an offline terminal with no blocked changes', async () => {
     bridge.sync.getStatus.mockResolvedValue({...HEALTHY_SYNC_STATUS, isOnline:false})
     bridge.diagnostics.getSystemHealth.mockResolvedValue({...HEALTHY_SYSTEM_HEALTH,isOnline:false})
     renderHealthModal()
-    await screen.findByText(i18n.t('sync.healthModal.problems.offline'))
-    expect(screen.getByRole('button',{name:i18n.t('sync.healthModal.actions.refresh')})).toBeInTheDocument()
+    await screen.findByText(i18n.t('tillHealth.states.offline.title'))
+    expect(screen.getByRole('button',{name:i18n.t('tillHealth.action.recheck')})).toBeInTheDocument()
     expect(screen.queryByRole('button',{name:i18n.t('sync.dashboard.openRecovery')})).not.toBeInTheDocument()
     expect(screen.queryByRole('heading',{name:i18n.t('sync.healthModal.advanced.title')})).not.toBeInTheDocument()
   })
@@ -583,7 +607,7 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
 
     expect(
       await screen.findByRole('button', {
-        name: 'Online | Sync health: Healthy',
+        name: `${i18n.t('tillHealth.title')} · ${i18n.t('tillHealth.states.ok.title')}`,
       }),
     ).toBeInTheDocument()
   })
@@ -603,11 +627,12 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
       },
       queueStatus: { pending: 0, failed: 1, conflicts: 0, total: 1 },
     })
-    renderIndicator()
-
+    renderHealthModal()
+    await openSupport()
+    screen.getByText(i18n.t('tillHealth.support.tools')).closest('details')!.open = true
     fireEvent.click(
       await screen.findByRole('button', {
-        name: 'Retry sync',
+        name: i18n.t('sync.actions.retry'),
       }),
     )
     await waitFor(() => {
@@ -636,7 +661,8 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     ])
     renderHealthModal()
 
-    await screen.findByText(i18n.t('sync.healthModal.nextRetry'), { exact: false })
+    await openAdvanced()
+    await screen.findByText(i18n.t('sync.healthModal.failure.nextRetryValue', {value: ''}).trim(), { exact: false })
 
     const expectedGreekDateTime = normalized(new Date(retryAt).toLocaleString('el-GR'))
     const renderedText = normalized(document.body.textContent)

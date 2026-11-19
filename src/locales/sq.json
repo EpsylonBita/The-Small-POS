@@ -3663,9 +3663,9 @@
     "zGate": {
       "approvalTitle": "Mirato me PIN-in tënd",
       "approvalSubtitle": "Lënia mënjanë e një regjistrimi kërkon të drejtën për të anuluar pagesa. Një anëtar i stafit që e ka fut PIN-in e vet. Asgjë nuk fshihet dhe nuk tarifohet.",
-      "setAsideDone": "U la mënjanë. Regjistrimi mbetet në këtë arkë dhe Z-ja e shënon si jo në server.",
-      "undoDone": "Regjistrimi u kthye: e mban sërish mbylljen e ditës derisa ta pranojë serveri.",
-      "actionFailed": "Nuk u bë dot. Nuk ndryshoi asgjë.",
+      "setAsideDone": "U la mënjanë për kontroll. Arka e ruan regjistrimin dhe e shënon në Z.",
+      "undoDone": "Ky regjistrim pret sërish të dërgohet. Deri atëherë mund ta vonojë mbylljen ditore.",
+      "actionFailed": "Ndryshimi nuk u konfirmua. Kontrolloni sërish listën.",
       "stale": "Kjo listë nuk u lexua dot sërish. Tregon leximin e fundit të saktë.",
       "unavailable": "Ditët e mbyllura në këtë arkë nuk u lexuan dot. Provo sërish.",
       "localTitle": "Ditë të mbyllura në këtë arkë, ende jo në server: {{count}}",
@@ -6663,6 +6663,8 @@
     "kioskCardPending": "KARTË",
     "kioskCashPendingA11y": "Para në dorë e zgjedhur në kiosk; pagesë në pritje",
     "kioskCardPendingA11y": "Kartë e zgjedhur në kiosk; pagesë në pritje",
+    "platformCashPendingA11y": "Para në dorë të zgjedhura në platformë; pagesë në pritje",
+    "platformCardPendingA11y": "Kartë e zgjedhur në platformë; pagesë në pritje",
     "platformPayment": "PAGESË PLATFORME",
     "platformPaymentA11y": "Pagesë e shlyer nga platforma; dyqani nuk arkëton"
   },
@@ -9382,6 +9384,34 @@
     "portionNotSaved": "Karta u debitua, pagesa ende nuk është ruajtur. Mos e debito përsëri."
   },
   "recovery": {
+    "actionStatus": {
+      "signIn": "Identifikohuni përsëri",
+      "sendRecord": "Dërgo këtë regjistrim",
+      "sendWaiting": "Dërgo regjistrimet në pritje",
+      "preparePaymentUpdates": "Përgatit përditësimet e pagesave për dërgim",
+      "exportCopy": "Eksporto një kopje për mbështetjen",
+      "reviewOrders": "Kontrollo të dhënat e porosive",
+      "removeLabel": "Hiq regjistrimet e pavlefshme të dërgimit",
+      "removeTitle": "Të hiqen regjistrimet e pavlefshme të dërgimit?",
+      "removeMessage": "Regjistrimet e zgjedhura të dërgimit do të kontrollohen përsëri para se të hiqen. Arka ruan një kopje. Porositë dhe pagesat mbeten në arkë.",
+      "sent": "U dërgua",
+      "waiting": "Në pritje të një regjistrimi të lidhur",
+      "untouched": "Ende në pritje për t’u dërguar",
+      "refused": "Nuk u dërgua dot",
+      "set_aside": "U la mënjanë për kontroll",
+      "unknown": "Dërgimi nuk u konfirmua",
+      "checked": "Kontrolli përfundoi",
+      "reportNotified": "Raporti u mor. Mbështetja u njoftua.",
+      "reportStored": "Raporti u mor. Njoftimi nuk u konfirmua.",
+      "reportPrepared": "Një kopje është ruajtur në këtë arkë. Marrja nuk u konfirmua.",
+      "reportFailed": "Raporti nuk mund të përgatitej në këtë arkë.",
+      "grantExpired": "Miratimi juaj ka skaduar. Vendosni përsëri PIN-in e arkës.",
+      "permissionRequired": "Kërkoni miratim nga një person i autorizuar.",
+      "approverUnavailable": "Miratuesi nuk dihet",
+      "recordTitle": "Ky regjistrim kërkon vëmendje",
+      "recordSummary": "Arka e ruan këtë regjistrim për kontroll.",
+      "recordGuidance": "Hapni hollësitë ose dërgoni një raport te mbështetja."
+    },
     "confirmations": {
       "cashDrawerControl": {
         "title": "Konfirmo veprimin e rikuperimit",
@@ -10718,6 +10748,13 @@
   }
 ,
   "orderSyncNotice": {
+    "sessionExpired": "Hyrja në arkë ka skaduar. Futni përsëri PIN-in e arkës.",
+    "signInAgain": "Hyni përsëri në arkë.",
+    "shiftRequired": "Një arkëtar ose përgjegjës duhet të jetë në turn në këtë arkë.",
+    "pinLocked": "Shumë tentativa me PIN të gabuar. Prisni disa minuta dhe provoni përsëri.",
+    "cancelled": "Asgjë nuk ndryshoi.",
+    "callSupport": "Nuk funksionoi. Telefononi mbështetjen.",
+    "saved": "Ndryshimi u ruajt.",
     "checkUnavailableHealth": "Arka nuk mund të kontrollojë tani nëse porositë kanë ndonjë problem të pazgjidhur. Ato mbeten te porositë aktive.",
     "checkUnavailableGuidance": "Provo përsëri pas pak. Nëse vazhdon, telefono mbështetjen.",
     "checkUnavailable": "Arka nuk mund të kontrollojë tani nëse porosia #{{number}} ka një problem të pazgjidhur, prandaj ajo mbetet te porositë aktive. Provo përsëri pas pak. Nëse vazhdon, telefono mbështetjen.",

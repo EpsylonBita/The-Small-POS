@@ -216,6 +216,7 @@ pub async fn auth_confirm_privileged_action(
     arg0: Option<Value>,
     db: tauri::State<'_, db::DbState>,
     auth_state: tauri::State<'_, auth::AuthState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, auth::PrivilegedActionError> {
     // A manager's approval is checked against the store's current staff
     // permissions when the till is online (as Android does); offline, the
@@ -223,7 +224,16 @@ pub async fn auth_confirm_privileged_action(
     if auth::confirmation_asks_manager_approval(arg0.as_ref()) {
         refresh_approval_directory(&db).await;
     }
-    auth::confirm_privileged_action(arg0, &db, &auth_state)
+    let result = auth::confirm_privileged_action(arg0, &db, &auth_state)?;
+    if let Some(expires_at) = result["sessionRenewedUntil"].as_str() {
+        let _ = app.emit(
+            "app-login-renewed",
+            serde_json::json!({
+                "sessionId": result["sessionId"], "expiresAt": expires_at
+            }),
+        );
+    }
+    Ok(result)
 }
 
 #[tauri::command]

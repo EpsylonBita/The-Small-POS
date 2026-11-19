@@ -1,54 +1,34 @@
+import { verifiedSupportReceipt } from '../services/support/SupportRemedyRunner';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import ReactDOM from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
-import {
-  RefreshCw,
-  Download,
-  Printer,
-  FileText,
-  Database,
-  CheckCircle2,
-  AlertTriangle,
-  Clock,
-  FolderOpen,
-  ChevronDown,
-  Send,
-  Wifi,
-  WifiOff,
-  X,
-  type LucideIcon,
-} from 'lucide-react';
-import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
+import { AlertTriangle } from 'lucide-react';
+import { SUPPORT_PROTOCOL_VERSION } from '../../../../shared/pos/support/protocol';
+import { TillHealthButton, TillHealthWindow, type TillHealthOrderDetails } from './recovery/TillHealthWindow';
+import { TillHealthConfirmation, TillHealthSupport } from './recovery/TillHealthSupport';
+import { useTillHealthActions } from './recovery/useTillHealthActions';
+import { useTillHealthReports } from './recovery/useTillHealthReports';
+import { buildTillHealthCards, OPEN_TILL_HEALTH, safeOrderNumber, tillHealthState, tillHealthTone, type TillHealthOpenContext, type TillHealthState } from './recovery/till-health-model';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
-import { HealthSupportEntryPoint } from './support/HealthSupportEntryPoint';
-import { SupportConnectAction } from './support/SupportConnectAction';
-import { SupportDetailsPanel } from './support/SupportDetailsPanel';
 import { supportSessionLive, useSupportSession } from '../hooks/useSupportSession';
 import { registerSupportHealthObservation } from '../services/support/SupportMatcherBridge';
-import { RecoveryCenterPanel } from './recovery/RecoveryCenterPanel';
-import type { SyncRecoveryOpenContext } from './recovery/SyncRecoveryModal';
 import {
   buildSyncRecoveryIssues,
-  getRepresentativeParityFailureReason,
+  orderRecoveryIssues,
 } from './recovery/sync-recovery-issues';
 import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { useFeatures } from '../hooks/useFeatures';
 import { useShift } from '../contexts/shift-context';
 import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
 import { useSystemClock } from '../hooks/useSystemClock';
-import { formatCurrency, formatDate, formatDateTime, formatNumber, formatTime } from '../utils/format';
+import { formatCurrency, formatDateTime, formatNumber } from '../utils/format';
 import { isPosDayOpenTooLong } from '../utils/pos-day-open';
 import { cn } from '../utils/cn';
 import { liquidGlassModalTone } from '../styles/designSystem';
-import { useBackgroundAccessibilityIsolation } from './ui/pos-glass-components';
-import { CashierRecovery } from '../contexts/cashier-gate-context';
-import { buildHealthSupportContext } from '../support';
 import { readRemoteSupportUnavailable } from '../support/adapters';
 import {
   getLocalizedPaymentBlockerFix,
   getLocalizedPaymentBlockerReason,
-  getLocalizedSyncBlockerReason,
 } from '../../lib/payment-integrity';
 import {
   getBridge,
@@ -77,7 +57,6 @@ import type {
   SyncQueueItem,
 } from '../../../../shared/pos/sync-queue-types';
 import {
-  HEALTH_PRIMARY_ACTIONS,
   type HealthAvailability,
   type HealthPrimaryActionId,
   type HealthProblemCode,
@@ -103,22 +82,9 @@ import {
   summarizeCloseout,
   type CloseoutBlockerInput,
 } from '../../../../shared/pos/health/closeout-blockers';
-import {
-  healthDuration,
-  healthGuidanceKey,
-  healthImpactKey,
-  healthProblemKey,
-  healthRecommendationKey,
-  healthStateKeys,
-  healthStatusLabelKey,
-} from '../../../../shared/pos/health/health-i18n';
 import { buildHealthView } from '../../../../shared/pos/health/diagnostics-bundle';
-import {
-  closeoutServiceTone,
-  healthServiceTone,
-  healthStateTone,
-  type HealthTone,
-} from '../../../../shared/pos/health/health-tone';
+import { sanitizeOperationalError } from '../../../../shared/pos/health/diagnostics-redaction';
+import { healthDuration } from '../../../../shared/pos/health/health-i18n';
 import { buildIncomingOrderAlertSupportEvidence } from '../services/incomingOrderAlert';
 import { getSyncQueueBridge, type MadeDueRow } from '../services/SyncQueueBridge';
 import {
@@ -126,8 +92,10 @@ import {
   syncNowIssueCode,
   syncNowRemainder,
   syncNowTargetItems,
+  syncNowTargetOutcomes,
 } from './recovery/sync-now-attempt';
 import type { SubscriptionConnectionStatus } from '../services/RealtimeManager';
+import { isPrivilegedConfirmationCancelled, privilegedActionFeedback } from '../utils/privileged-actions';
 import { usePrivilegedActionConfirmation } from '../hooks/usePrivilegedActionConfirmation';
 import type {
   LocalZWaitsFor,
@@ -135,27 +103,6 @@ import type {
   ZGateRefusedRow,
 } from '../../lib/ipc-adapter';
 
-/**
- * A system health read whose backlog query failed says so
- * (`syncBacklogStatus: 'unavailable'`, with an empty backlog). The last known
- * backlog is kept instead of that empty one, so nothing downstream reads a
- * failed read as "nothing waiting"; the backlog card says it could not be
- * read (health-recovery rule, review 30/09/2026).
- */
-function withLastKnownBacklog(
-  next: DiagnosticsSystemHealth,
-  previous: DiagnosticsSystemHealth | null,
-): DiagnosticsSystemHealth {
-  return next.syncBacklogStatus === 'unavailable' && previous?.syncBacklog
-    ? { ...next, syncBacklog: previous.syncBacklog }
-    : next;
-}
-
-/**
- * The Health summary is the shared one (shared/pos/health), so this terminal
- * and the Android POS reach the same state with the same words. Re-exported for
- * the characterization test that pinned the desktop behaviour before the port.
- */
 export { buildSimpleHealthSummary };
 
 // ---------------------------------------------------------------------------
@@ -191,7 +138,7 @@ interface ParityQueueSnapshot {
 interface SyncStatusIndicatorProps {
   className?: string;
   showDetails?: boolean;
-  onOpenRecovery?: (context: SyncRecoveryOpenContext) => void;
+  onHealthState?: (state: TillHealthState) => void;
   /** 'rail' (founder 31/10): stacked in the right utility rail; offline and backlog become icons. */
   layout?: 'inline' | 'rail';
 }
@@ -215,26 +162,6 @@ interface QueueFailureInfo {
   classification: QueueFailureClassification;
 }
 
-type SyncHealthState = 'healthy' | 'pending' | 'blocked' | 'error' | 'stale';
-
-interface SyncHealthPresentation {
-  label: string;
-  badgeClassName: string;
-  textClassName: string;
-  dotClassName: string;
-  detail: string;
-  panelClassName: string;
-  iconClassName: string;
-}
-
-interface VisibleSyncFailure {
-  id: string;
-  title: string;
-  recordId: string | null;
-  status: 'failed' | 'conflict' | 'processing' | 'waiting' | 'unknown';
-  nextRetryAt: string | null;
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -244,89 +171,6 @@ const createDefaultFinancialStats = (): DiagnosticsFinancialQueueStatus => ({
   staff_payments: { pending: 0, failed: 0 },
   shift_expenses: { pending: 0, failed: 0 },
 });
-
-const parseObjectPayload = (raw?: string | null): Record<string, unknown> => {
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {};
-  }
-};
-
-const stringFromUnknown = (value: unknown): string | null => {
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
-};
-
-const formatSyncErrorForDisplay = (raw?: string | null): string | null => {
-  const text = raw?.trim();
-  if (!text) return null;
-
-  const jsonStart = text.indexOf('{');
-  if (jsonStart >= 0) {
-    try {
-      const parsed = JSON.parse(text.slice(jsonStart));
-      const details =
-        stringFromUnknown(parsed?.details) ||
-        stringFromUnknown(parsed?.error) ||
-        stringFromUnknown(parsed?.message);
-      if (details) {
-        const prefix = text.slice(0, jsonStart).trim().replace(/:\s*$/, '');
-        return prefix ? `${prefix}: ${details}` : details;
-      }
-    } catch {
-      // Keep the raw queue error when the server body is not JSON.
-    }
-  }
-
-  return text;
-};
-
-const buildVisibleParityFailure = (
-  item: SyncQueueItem,
-  tableLabel: string,
-): VisibleSyncFailure | null => {
-  const hasError = formatSyncErrorForDisplay(item.errorMessage) !== null;
-  const status = String(item.status || '').trim();
-  if (!hasError && !['failed', 'conflict', 'processing'].includes(status)) {
-    return null;
-  }
-
-  const payload = parseObjectPayload(item.data);
-  const recordId =
-    stringFromUnknown(payload.orderNumber) ||
-    stringFromUnknown(payload.order_number) ||
-    null;
-
-  return {
-    id: item.id,
-    title: tableLabel,
-    recordId,
-    status: normalizeOperatorSyncStatus(status),
-    nextRetryAt: ['pending', 'retrying'].includes(status) &&
-      item.nextRetryAt && toTimestamp(item.nextRetryAt)! > Date.now() ? item.nextRetryAt : null,
-  };
-};
-
-const normalizeOperatorSyncStatus = (
-  value?: string | null,
-): VisibleSyncFailure['status'] => {
-  switch (value?.trim().toLowerCase()) {
-    case 'failed':
-    case 'conflict':
-    case 'processing':
-      return value.trim().toLowerCase() as VisibleSyncFailure['status'];
-    case 'pending':
-    case 'retrying':
-    case 'queued':
-      return 'waiting';
-    default:
-      return 'unknown';
-  }
-};
 
 const normalizeFinancialStats = (stats: any): DiagnosticsFinancialQueueStatus => {
   if (!stats || typeof stats !== 'object') return createDefaultFinancialStats();
@@ -554,178 +398,6 @@ const normalizeLastParitySync = (
   };
 };
 
-const formatBytes = (bytes: number) => {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-};
-
-
-// Translate backend entity type names (e.g. "order" → "Παραγγελία")
-const ENTITY_TYPE_KEYS: Record<string, string> = {
-  order: 'sync.entityTypes.order',
-  payment: 'sync.entityTypes.payment',
-  shift: 'sync.entityTypes.shift',
-  z_report: 'sync.entityTypes.zReport',
-  payment_adjustment: 'sync.entityTypes.paymentAdjustment',
-  shift_expense: 'sync.entityTypes.shiftExpense',
-  driver_earning: 'sync.entityTypes.driverEarning',
-  staff_cash_return: 'sync.entityTypes.paymentAdjustment',
-  staff_payment: 'sync.entityTypes.staffPayment',
-};
-
-/** Icons of the Health modal's recommended actions that have a button here. */
-const PRIMARY_ACTION_ICONS: Partial<Record<HealthPrimaryActionId, LucideIcon>> = {
-  syncNow: RefreshCw,
-  exportDiagnostics: Download,
-  openRecovery: Database,
-  openConnectionSettings: Wifi,
-  configurePrinter: Printer,
-  checkPrinting: Printer,
-  refresh: RefreshCw,
-};
-
-/** The kit colour of each status tone (shared/pos/health/health-tone.ts): only status words are coloured. */
-const HEALTH_TONE_TEXT: Record<HealthTone, string> = {
-  ok: 'text-(--pos-s-ok)',
-  warn: 'text-(--pos-s-warn)',
-  bad: 'text-(--pos-s-bad)',
-  neutral: 'text-(--pos-s-fg)',
-  muted: 'text-(--pos-s-muted)',
-};
-
-/**
- * The headline state icon without a box (founder 01/11: «βγάλε από το εικονίδιο κινδύνου το wrapper και γέμισε
- * με χρώμα το εικονίδιο»): the shape itself is filled with the state colour, the mark inside it contrasts.
- */
-const HealthStateGlyph: React.FC<{ state: 'healthy' | 'attention' | 'support_needed' }> = ({ state }) =>
-  state === 'healthy' ? (
-    <svg viewBox="0 0 24 24" className="h-11 w-11 shrink-0" aria-hidden="true" data-health-state-glyph={state}>
-      <circle cx="12" cy="12" r="11" className="fill-emerald-600 dark:fill-emerald-400" />
-      <path d="m7.4 12.4 3.1 3.1 6.1-6.6" fill="none" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className="stroke-white dark:stroke-zinc-950" />
-    </svg>
-  ) : (
-    <svg viewBox="0 0 24 24" className="h-11 w-11 shrink-0" aria-hidden="true" data-health-state-glyph={state}>
-      <path
-        d="M10.27 3.1a2 2 0 0 1 3.46 0l8.66 15A2 2 0 0 1 20.66 21H3.34a2 2 0 0 1-1.73-3l8.66-14.9Z"
-        className={state === 'attention' ? 'fill-amber-500 dark:fill-amber-400' : 'fill-rose-600 dark:fill-rose-500'}
-      />
-      <path
-        d="M12 8.6v5.2"
-        fill="none"
-        strokeWidth="2.4"
-        strokeLinecap="round"
-        className={state === 'attention' ? 'stroke-zinc-950' : 'stroke-white'}
-      />
-      <circle cx="12" cy="17.3" r="1.35" className={state === 'attention' ? 'fill-zinc-950' : 'fill-white'} />
-    </svg>
-  );
-
-const resolveSyncErrorMessage = (
-  error: string | null,
-  t: ReturnType<typeof useTranslation>['t'],
-) => {
-  if (!error) {
-    return null;
-  }
-
-  if (error === 'sync_queue_failed_items') {
-    return t('sync.health.errorDetail', {
-      defaultValue: 'Failed sync rows are blocking a clean state.',
-    });
-  }
-
-  return t('sync.healthModal.failure.safeError', {
-    defaultValue: 'A sync item needs attention. Technical details are available to support.',
-  });
-};
-
-const getSyncHealthPresentation = (
-  t: ReturnType<typeof useTranslation>['t'],
-  state: SyncHealthState,
-): SyncHealthPresentation => {
-  switch (state) {
-    case 'error':
-      return {
-        label: t('sync.health.error', { defaultValue: 'Sync Error' }),
-        badgeClassName:
-          'bg-(--pos-s-surface-2) border border-(--pos-s-border) text-red-700 dark:text-red-300',
-        textClassName: 'text-red-700 dark:text-red-300',
-        dotClassName: 'bg-red-500',
-        panelClassName:
-          'border-(--pos-s-border) bg-(--pos-s-surface-2)',
-        iconClassName: 'text-red-600 dark:text-red-300',
-        detail: t('sync.health.errorDetail', {
-          defaultValue: 'Failed sync rows are blocking a clean state.',
-        }),
-      };
-    case 'blocked':
-      return {
-        label: t('sync.health.blocked', { defaultValue: 'Blocked' }),
-        badgeClassName:
-          'bg-(--pos-s-surface-2) border border-(--pos-s-border) text-orange-700 dark:text-orange-300',
-        textClassName: 'text-orange-700 dark:text-orange-300',
-        dotClassName: 'bg-orange-500',
-        panelClassName:
-          'border-(--pos-s-border) bg-(--pos-s-surface-2)',
-        iconClassName: 'text-orange-600 dark:text-orange-300',
-        detail: t('sync.health.blockedDetail', {
-          defaultValue: 'A queue item is stuck and needs intervention.',
-        }),
-      };
-    case 'pending':
-      return {
-        label: t('sync.health.pending', { defaultValue: 'Pending' }),
-        badgeClassName:
-          'bg-(--pos-s-surface-2) border border-(--pos-s-border) text-amber-700 dark:text-amber-300',
-        textClassName: 'text-amber-700 dark:text-amber-300',
-        dotClassName: 'bg-amber-500',
-        panelClassName:
-          'border-(--pos-s-border) bg-(--pos-s-surface-2)',
-        iconClassName: 'text-amber-600 dark:text-amber-300',
-        detail: t('sync.health.pendingDetail', {
-          defaultValue: 'Sync work is queued or currently processing.',
-        }),
-      };
-    case 'stale':
-      return {
-        label: t('sync.health.stale', { defaultValue: 'Telemetry Stale' }),
-        badgeClassName:
-          'bg-slate-500/10 border border-slate-500/30 text-slate-700 dark:text-slate-300',
-        textClassName: 'text-slate-700 dark:text-slate-300',
-        dotClassName: 'bg-slate-500',
-        panelClassName:
-          'border-slate-200/80 bg-slate-50/80 dark:border-white/10 dark:bg-white/5',
-        iconClassName: 'text-slate-600 dark:text-slate-300',
-        detail: t('sync.health.staleDetail', {
-          defaultValue:
-            'Reachability looks fine, but sync telemetry is older than expected.',
-        }),
-      };
-    case 'healthy':
-    default:
-      return {
-        label: t('sync.health.healthy', { defaultValue: 'Healthy' }),
-        badgeClassName:
-          'bg-(--pos-s-surface-2) border border-(--pos-s-border) text-green-700 dark:text-green-300',
-        textClassName: 'text-green-700 dark:text-green-300',
-        dotClassName: 'bg-green-500',
-        panelClassName:
-          'border-(--pos-s-border) bg-(--pos-s-surface-2)',
-        iconClassName: 'text-emerald-600 dark:text-emerald-300',
-        detail: t('sync.health.healthyDetail', {
-          defaultValue: 'No local sync backlog or failures are currently visible.',
-        }),
-      };
-  }
-};
-
-// ---------------------------------------------------------------------------
-// Days closed on this till, and rows the server refused for good
-// (offline week Ω3/Ω4, founder 21/10/2026)
-// ---------------------------------------------------------------------------
-
-/** The kind of a refused Z-gate row, as `sync.zGate.kind.*` names it. */
 const Z_GATE_ROW_KIND: Record<string, string> = {
   payments: 'payment',
   order_payments: 'payment',
@@ -767,7 +439,7 @@ const Z_GATE_KIND_DEFAULTS: Record<string, string> = {
  * day lists it as "not on the server". "Bring back" undoes it. A failed read
  * keeps the last good list, marked stale.
  */
-export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className }) => {
+export const ZGateSetAsidePanel: React.FC<{ className?: string; refreshEpoch?: number }> = ({ className, refreshEpoch }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
   const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
@@ -796,7 +468,7 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, refreshEpoch]);
 
   const handleAction = useCallback(
     async (row: ZGateRefusedRow) => {
@@ -817,25 +489,34 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
               'Setting a record aside needs the right to void payments. A staff member who has it enters their own PIN. Nothing is deleted or charged.',
           }),
         });
-        if (result?.success) {
-          setHealth(result);
-          setStale(false);
+        if (!result?.success || result.applied !== action || result.queueId !== row.queueId) {
+          throw new Error('Z_GATE_CHANGE_UNVERIFIED');
         }
+        const selected = result.refused.find(item => item.queueId === row.queueId);
+        if (!selected || Boolean(selected.setAside) !== (action === 'set_aside')) {
+          throw new Error('Z_GATE_CHANGE_UNVERIFIED');
+        }
+        setHealth(result);
+        setStale(false);
         setMessage(
           action === 'undo'
             ? t('sync.zGate.undoDone', {
-              defaultValue: 'The record is back: it holds the day close again until the server takes it.',
+              defaultValue: 'This record is waiting to be sent again. It may hold up the Z until it is sent.',
             })
             : t('sync.zGate.setAsideDone', {
               defaultValue:
-                'Set aside. The record stays on this till and the Z lists it as not on the server.',
+                'Set aside for review. The till keeps the record and lists it on the Z.',
             }),
         );
       } catch (error) {
-        if (!(error instanceof Error && error.message === 'Privileged action confirmation cancelled')) {
+        if (error instanceof Error && error.message === 'Z_GATE_CHANGE_UNVERIFIED') {
+          setStale(true);
+          void load();
+        }
+        if (!isPrivilegedConfirmationCancelled(error)) {
           setMessage(
-            t('sync.zGate.actionFailed', {
-              defaultValue: 'It could not be done. Nothing was changed.',
+            privilegedActionFeedback(error, t) ?? t('sync.zGate.actionFailed', {
+              defaultValue: 'The change could not be confirmed. Check the list again.',
             }),
           );
         }
@@ -843,13 +524,13 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
         setBusyQueueId(null);
       }
     },
-    [bridge, runWithPrivilegedConfirmation, t],
+    [bridge, load, runWithPrivilegedConfirmation, t],
   );
 
   const localZs = health?.localZs ?? [];
   const refused = health?.refused ?? [];
   if (!supported || (!health && !stale)) return null;
-  if (health && localZs.length === 0 && refused.length === 0 && !message) return null;
+  if (health && localZs.length === 0 && refused.length === 0 && !message && !stale) return null;
 
   return (
     <section
@@ -895,15 +576,13 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
                     defaultValue: Z_GATE_WAITS_FOR_DEFAULTS[z.waitsFor] ?? Z_GATE_WAITS_FOR_DEFAULTS.sending,
                   })}
                 </p>
-                {z.waitsFor === 'server_refusal' && z.serverMessage && (
-                  <p className="mt-1 wrap-break-word text-(--pos-s-muted)">{z.serverMessage}</p>
-                )}
-                {z.errorCode && (
+                {(z.errorCode || z.serverMessage) && (
                   <details className="mt-1 text-xs text-(--pos-s-muted)">
                     <summary className="min-h-touch cursor-pointer py-2">
                       {t('sync.zGate.details', { defaultValue: 'Details for support' })}
                     </summary>
                     <p className="break-all">{z.errorCode}</p>
+                    {z.serverMessage && <p className="mt-1 break-words">{z.serverMessage}</p>}
                   </details>
                 )}
               </li>
@@ -990,7 +669,7 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
 export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   className = '',
   showDetails = false,
-  onOpenRecovery,
+  onHealthState,
   layout = 'inline',
 }) => {
   const inRail = layout === 'rail';
@@ -1038,18 +717,13 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   // --- UI state ---
   const [showDetailPanel, setShowDetailPanel] = useState(showDetails);
   const [showFinancialPanel, setShowFinancialPanel] = useState(false);
-  const [justRefreshed, setJustRefreshed] = useState(false);
-  const [retryingBlockedOrder, setRetryingBlockedOrder] = useState(false);
-  const [advancedExpanded, setAdvancedExpanded] = useState(false);
-  // «Σύνδεση υποστήριξης», its code, notices and «Τέλος» live in «Ενέργειες υποστήριξης»
-  // (founder, 04/11/2026). A code, notice or live session opens that section by itself.
+  const [focus, setFocus] = useState<TillHealthOpenContext | null>(null);
   const supportSession = useSupportSession();
   const supportLive = Boolean(supportSession && (supportSession.view !== 'closed' || supportSession.code
     || supportSessionLive(supportSession.snapshot)));
-  const [supportActionsOpen, setSupportActionsOpen] = useState(supportLive);
-  useEffect(() => {
-    if (supportLive) { setSupportActionsOpen(true); }
-  }, [supportLive]);
+  const availability = supportSession?.snapshot?.availability;
+  const supportProtocolAvailable = Boolean(availability?.available && availability.min_protocol_version <= SUPPORT_PROTOCOL_VERSION);
+  const canAskSupport = supportProtocolAvailable && Boolean(supportSession?.snapshot?.can_connect && !supportSession.busy);
 
   // --- System health state (eager on modal open) ---
   const [systemHealth, setSystemHealth] =
@@ -1060,11 +734,20 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const [lastHealthCheckedAt, setLastHealthCheckedAt] = useState<string | null>(null);
   const [systemLoading, setSystemLoading] = useState(false);
   const systemLoaded = useRef(false);
-  const [exporting, setExporting] = useState(false);
-  const [exportPath, setExportPath] = useState<string | null>(null);
+  const healthReadId = useRef(0);
+  const healthScope = useRef<string | null>(null);
+  const [healthReadFailures, setHealthReadFailures] = useState<string[]>([]);
+  const [zRefreshEpoch, setZRefreshEpoch] = useState(0);
+  const [syncTargetFeedback, setSyncTargetFeedback] = useState<ReturnType<typeof syncNowTargetOutcomes>>([]);
   const [sendingSupport, setSendingSupport] = useState(false);
-  const [incidentReport, setIncidentReport] =
-    useState<RemoteIncidentReportResponse | null>(null);
+  const terminalContext = systemHealth?.terminalContext;
+  const reportScope = terminalContext?.terminalId && terminalContext.organizationId
+    ? [terminalContext.organizationId, terminalContext.branchId, terminalContext.terminalId].join(':') : '';
+  const { last: lastReport, copies: previousReports, recordReport, historyUnavailable } = useTillHealthReports(reportScope, showDetailPanel);
+  const incidentReport = lastReport?.result ?? null;
+  const [sendState, setSendState] = useState<'pending' | 'solved' | 'failed'>();
+  const [sendVerifiedAt, setSendVerifiedAt] = useState<string>();
+  const [orderDetails, setOrderDetails] = useState<ReadonlyMap<string, TillHealthOrderDetails>>(new Map());
   const [recoveryFinancialItems, setRecoveryFinancialItems] = useState<
     Awaited<ReturnType<typeof bridge.sync.getFailedFinancialItems>>
   >([]);
@@ -1096,17 +779,13 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     auditId: string | null;
     madeDue: MadeDueRow[];
     startedAt: string;
+    completed: boolean;
+    acknowledgedIds: string[];
   } | null>(null);
   const [repeatedFailureProblem, setRepeatedFailureProblem] =
     useState<HealthProblemCode | null>(null);
-  const launcherRef = useRef<HTMLButtonElement | null>(null);
-  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
-  const healthDialogTitleId = React.useId();
-  const healthDialogDescriptionId = React.useId();
-  const healthAdvancedId = React.useId();
-  const healthDialogRef = useRef<HTMLDivElement | null>(null);
-
-  const { isMobileWaiter, parentTerminalId } = useFeatures();
+  const healthDialogId = React.useId();
+  const { isMobileWaiter } = useFeatures();
   const { endOfDayStatus, isZIssuedAwaitingFinalization } = useEndOfDayStatus(
     staff?.branchId || null,
   );
@@ -1120,15 +799,6 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   // --- Sync data loading ---
 
-  const loadFinancialStats = useCallback(async () => {
-    try {
-      const stats = await bridge.sync.getFinancialStats();
-      setFinancialStats(normalizeFinancialStats(stats));
-    } catch (err) {
-      console.error('Failed to load financial stats:', err);
-    }
-  }, [bridge.sync]);
-
   const loadSyncStatus = useCallback(async () => {
     try {
       const status = await bridge.sync.getStatus();
@@ -1137,7 +807,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     } catch (error) {
       console.error('Failed to load sync status:', error);
     }
-  }, [bridge.sync, loadFinancialStats]);
+  }, [bridge.sync]);
 
   useEffect(() => {
     loadSyncStatus();
@@ -1175,27 +845,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     onEvent(PARITY_SYNC_STATUS_EVENT, handleParitySyncStatus);
     onEvent(REALTIME_STATUS_EVENT, handleRealtimeStatus);
 
-    const handleMenuRefreshed = () => {
-      setJustRefreshed(true);
-      setTimeout(() => setJustRefreshed(false), 2000);
-    };
-    window.addEventListener(
-      'menu-sync:refreshed',
-      handleMenuRefreshed as EventListener,
-    );
-
     return () => {
       offEvent('sync:status', handleSyncStatusUpdate);
       offEvent('network:status', handleNetworkStatus);
       offEvent(PARITY_QUEUE_STATUS_EVENT, handleParityQueueStatus);
       offEvent(PARITY_SYNC_STATUS_EVENT, handleParitySyncStatus);
       offEvent(REALTIME_STATUS_EVENT, handleRealtimeStatus);
-      window.removeEventListener(
-        'menu-sync:refreshed',
-        handleMenuRefreshed as EventListener,
-      );
     };
-  }, [loadSyncStatus, loadFinancialStats]);
+  }, [loadSyncStatus]);
 
   useEffect(() => {
     const handleCapacityWarning = (payload: QueueCapacityWarning | null) => {
@@ -1231,6 +888,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   /** Resolves true when a fresh health snapshot was read. */
   const loadSystemHealth = useCallback(async (): Promise<boolean> => {
+    const readId = ++healthReadId.current;
+    setZRefreshEpoch(epoch => epoch + 1);
     setSystemLoading(true);
     try {
       const [healthResult, financialResult, integrityResult, parityResult, actionsResult] =
@@ -1241,11 +900,41 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           getSyncQueueBridge().listItems({ limit: 250 }),
           bridge.recovery.listActionLog(25),
         ]);
-      if (healthResult.status === 'rejected') {
-        throw healthResult.reason;
+      if (readId !== healthReadId.current) return false;
+      const data = healthResult.status === 'fulfilled' ? healthResult.value : null;
+      const context = data?.terminalContext;
+      if (context?.terminalId && context.organizationId) {
+        const nextScope = [context.organizationId, context.branchId, context.terminalId].join(':');
+        if (healthScope.current && healthScope.current !== nextScope) {
+          systemLoaded.current = false;
+          setSystemHealth(null);
+          setLastHealthCheckedAt(null);
+          setRecoveryFinancialItems([]);
+          setRecoveryIntegrity({ valid: true, issues: [] });
+          setRecoveryParityItems([]);
+          setRecentRecoveryActions([]);
+          setOrderDetails(new Map());
+          setSyncTargetFeedback([]);
+          setSendState(undefined);
+          setFocus(null);
+        }
+        healthScope.current = nextScope;
       }
-      const data = healthResult.value;
-      setSystemHealth((previous) => withLastKnownBacklog(data, previous));
+      const financial = financialResult.status === 'fulfilled' ? financialResult.value : null;
+      const integrity = integrityResult.status === 'fulfilled' ? integrityResult.value : null;
+      const parity = parityResult.status === 'fulfilled' ? parityResult.value : null;
+      const failures = [...(data?.readFailures ?? [])];
+      if (!data) failures.push('systemHealth');
+      if (data?.syncBacklogStatus === 'unavailable') failures.push('syncBacklog');
+      if (!Array.isArray(financial)) failures.push('financialItems');
+      if (!Array.isArray(integrity?.issues)) failures.push('integrity');
+      if (!Array.isArray(parity)) failures.push('parityItems');
+      setHealthReadFailures(failures);
+      if (failures.length || !data || !financial || !integrity || !parity) {
+        setHealthAvailability(systemLoaded.current ? 'stale' : 'unavailable');
+        return false;
+      }
+      setSystemHealth(data);
       setFinancialStats(
         normalizeFinancialStats(
           data.financialQueueStatus ?? data.syncStatusSummary?.financialStats,
@@ -1257,36 +946,25 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         ),
       );
       setLastParitySync(normalizeLastParitySync(data.lastParitySync));
-      setRecoveryFinancialItems(
-        financialResult.status === 'fulfilled' && Array.isArray(financialResult.value)
-          ? financialResult.value
-          : [],
-      );
-      setRecoveryIntegrity(
-        integrityResult.status === 'fulfilled'
-          ? integrityResult.value ?? { valid: true, issues: [] }
-          : { valid: true, issues: [] },
-      );
-      setRecoveryParityItems(
-        parityResult.status === 'fulfilled' && Array.isArray(parityResult.value)
-          ? parityResult.value
-          : [],
-      );
-      setRecentRecoveryActions(
-        actionsResult.status === 'fulfilled' && Array.isArray(actionsResult.value)
-          ? actionsResult.value
-          : [],
-      );
+      setRecoveryFinancialItems(financial);
+      setRecoveryIntegrity(integrity);
+      setRecoveryParityItems(parity);
+      if (actionsResult.status === 'fulfilled' && Array.isArray(actionsResult.value)) {
+        setRecentRecoveryActions(actionsResult.value);
+      }
       setLastHealthCheckedAt(new Date().toISOString());
       systemLoaded.current = true;
       setHealthAvailability('ready');
       return true;
     } catch (err) {
       console.error('Failed to load system health:', err);
-      setHealthAvailability(systemLoaded.current ? 'stale' : 'unavailable');
+      if (readId === healthReadId.current) {
+        setHealthReadFailures(['systemHealth']);
+        setHealthAvailability(systemLoaded.current ? 'stale' : 'unavailable');
+      }
       return false;
     } finally {
-      setSystemLoading(false);
+      if (readId === healthReadId.current) setSystemLoading(false);
     }
   }, [bridge]);
 
@@ -1295,77 +973,33 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       loadSystemHealth();
     }
 
-    const handleHealthUpdate = (payload: any) => {
-      const candidate =
-        payload?.data && payload?.success ? payload.data : payload;
-      if (candidate && typeof candidate === 'object') {
-        setSystemHealth((previous) =>
-          withLastKnownBacklog(candidate as DiagnosticsSystemHealth, previous),
-        );
-        setFinancialStats(
-          normalizeFinancialStats(
-            (candidate as DiagnosticsSystemHealth).financialQueueStatus ??
-              (candidate as DiagnosticsSystemHealth).syncStatusSummary?.financialStats,
-          ),
-        );
-        setParityQueueStatus(
-          normalizeParityQueueStatus(
-            ((candidate as DiagnosticsSystemHealth).parityQueueStatus ??
-              (candidate as DiagnosticsSystemHealth).lastParitySync?.queueStatus) as
-              | QueueStatus
-              | null,
-          ),
-        );
-        setLastParitySync(
-          normalizeLastParitySync((candidate as DiagnosticsSystemHealth).lastParitySync),
-        );
-        systemLoaded.current = true;
-        setHealthAvailability('ready');
-        setLastHealthCheckedAt(new Date().toISOString());
-        void bridge.sync
-          .getFailedFinancialItems(250)
-          .then((items) => setRecoveryFinancialItems(Array.isArray(items) ? items : []))
-          .catch(() => {});
-        void bridge.sync
-          .validateFinancialIntegrity()
-          .then((result) =>
-            setRecoveryIntegrity(result ?? { valid: true, issues: [] }),
-          )
-          .catch(() => {});
-        void getSyncQueueBridge()
-          .listItems({ limit: 250 })
-          .then((items) => setRecoveryParityItems(Array.isArray(items) ? items : []))
-          .catch(() => {});
-        void bridge.recovery
-          .listActionLog(25)
-          .then((items) => setRecentRecoveryActions(Array.isArray(items) ? items : []))
-          .catch(() => {});
-      }
-    };
-    const handleIncidentUpdate = (payload: any) => {
-      if (payload && typeof payload === 'object') {
-        setIncidentReport({
-          success: Boolean(payload.success),
-          candidate: payload.candidate,
-          incidentId:
-            payload.response?.incidentId ?? payload.incidentId ?? null,
-          status: payload.response?.status ?? payload.status,
-          deduped: payload.response?.deduped ?? payload.deduped,
-          alertSent: payload.response?.alertSent ?? payload.alertSent,
-          alertStatus: payload.response?.alertStatus ?? payload.alertStatus,
-          bundleStored: payload.response?.bundleStored ?? payload.bundleStored,
-          lastSentAt: payload.lastSentAt ?? payload.lastAttemptAt,
-          error: payload.error,
-        });
-      }
-    };
+    const handleHealthUpdate = () => { void loadSystemHealth(); };
     onEvent('database-health-update', handleHealthUpdate);
-    onEvent('incident-reporting-update', handleIncidentUpdate);
     return () => {
+      healthReadId.current += 1;
       offEvent('database-health-update', handleHealthUpdate);
-      offEvent('incident-reporting-update', handleIncidentUpdate);
     };
   }, [loadSystemHealth]);
+  useEffect(() => {
+    const open = (event: Event) => {
+      setFocus((event as CustomEvent<TillHealthOpenContext>).detail ?? null);
+      setShowDetailPanel(true);
+      void loadSystemHealth();
+    };
+    window.addEventListener(OPEN_TILL_HEALTH, open);
+    return () => window.removeEventListener(OPEN_TILL_HEALTH, open);
+  }, [loadSystemHealth]);
+
+  useEffect(() => {
+    const receive = (payload: RemoteIncidentReportResponse & { response?: RemoteIncidentReportResponse }) => {
+      if (payload?.response && payload.success) {
+        recordReport({ ...payload.response, success: true }, payload.lastSentAt, true);
+      }
+    };
+    onEvent('incident-reporting-update', receive);
+    return () => offEvent('incident-reporting-update', receive);
+  }, [recordReport]);
+
 
   useEffect(() => {
     if (!lastHealthCheckedAt) return;
@@ -1397,155 +1031,10 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const parityPendingCount = parityQueueStatus.pending;
   const parityFailedCount = parityQueueStatus.failed;
   const parityConflictCount = parityQueueStatus.conflicts;
-  // Whichever capacity dimension (replayable rows vs conflict rows) is
-  // closer to its fail-closed ceiling drives the chip percentage.
-  const capacityWarningPercent = capacityWarning
-    ? Math.max(
-        capacityWarning.replayablePercent,
-        capacityWarning.conflictPercent,
-      )
-    : 0;
-
-  const hasErrors =
-    !!syncStatus.error ||
-    financialFailedCount > 0 ||
-    parityFailedCount > 0 ||
-    parityConflictCount > 0;
-
-  const hasPending =
-    syncStatus.pendingItems > 0 ||
-    syncStatus.backpressureDeferred > 0 ||
-    syncStatus.queuedRemote > 0 ||
-    syncStatus.syncInProgress ||
-    financialPendingCount > 0 ||
-    parityPendingCount > 0;
-
-  const queueFailure = syncStatus.lastQueueFailure;
-  const queueFailureNextRetryTs = queueFailure?.nextRetryAt
-    ? toTimestamp(queueFailure.nextRetryAt)
-    : null;
-  const hasScheduledRetryableQueueFailure =
-    !!queueFailure &&
-    queueFailure.status.toLowerCase() === 'pending' &&
-    (queueFailure.classification === 'transient' ||
-      queueFailure.classification === 'backpressure') &&
-    queueFailureNextRetryTs !== null &&
-    queueFailureNextRetryTs > Date.now();
-
-  const hasBlockedQueue =
-    !!queueFailure &&
-    !hasScheduledRetryableQueueFailure &&
-    (queueFailure.classification === 'permanent' ||
-      queueFailure.status.toLowerCase() === 'failed' ||
-      queueFailure.status.toLowerCase() === 'in_progress' ||
-      queueFailureNextRetryTs === null ||
-      queueFailureNextRetryTs <= Date.now());
-
-  const lastSyncTimestamp = toTimestamp(syncStatus.lastSync);
-  const telemetrySyncTimestamp = toTimestamp(systemHealth?.lastSyncTime);
-  const onlineMismatch =
-    systemHealth !== null &&
-    typeof systemHealth.isOnline === 'boolean' &&
-    systemHealth.isOnline !== syncStatus.isOnline;
-  const localSyncTelemetryLag =
-    lastSyncTimestamp !== null &&
-    telemetrySyncTimestamp !== null &&
-    Math.abs(lastSyncTimestamp - telemetrySyncTimestamp) > STALE_TELEMETRY_MS;
-  const actionableLocalState =
-    hasErrors ||
-    hasPending ||
-    hasBlockedQueue ||
-    queueFailure !== null;
-  const missingTelemetryWhileActionable =
-    syncStatus.isOnline &&
-    actionableLocalState &&
-    telemetrySyncTimestamp === null &&
-    lastSyncTimestamp === null;
-  const staleHeartbeatTelemetry =
-    syncStatus.isOnline &&
-    actionableLocalState &&
-    telemetrySyncTimestamp !== null &&
-    Date.now() - telemetrySyncTimestamp > STALE_TELEMETRY_MS;
-  const isTelemetryStale =
-    onlineMismatch ||
-    localSyncTelemetryLag ||
-    missingTelemetryWhileActionable ||
-    staleHeartbeatTelemetry;
-
-  const syncHealthState: SyncHealthState = hasBlockedQueue
-    ? 'blocked'
-    : hasErrors
-      ? 'error'
-      : isTelemetryStale
-        ? 'stale'
-        : hasPending
-          ? 'pending'
-          : 'healthy';
-
-  const syncHealthPresentation = getSyncHealthPresentation(
-    t,
-    syncHealthState,
-  );
-
-  const isSynced =
-    syncStatus.isOnline &&
-    syncHealthState === 'healthy';
-
-  const getTransportText = () =>
-    syncStatus.isOnline
-      ? t('sync.labels.online')
-      : t('sync.labels.offline');
-
-  const getStatusText = () =>
-    `${getTransportText()} | ${t('sync.health.label', {
-      defaultValue: 'Sync health',
-    })}: ${syncHealthPresentation.label || t('sync.healthModal.status.unknown', {defaultValue: 'Status unknown'})}`;
-
-  const formatLastSync = () => {
-    if (!syncStatus.lastSync) return t('sync.time.never');
-    const date = new Date(syncStatus.lastSync);
-    if (Number.isNaN(date.getTime())) return t('sync.time.never');
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    if (diffMins < 1) return t('sync.time.justNow');
-    if (diffMins < 60)
-      return t('sync.time.minutesAgo', { minutes: diffMins });
-    const diffHours = Math.floor(diffMins / 60);
-    if (diffHours < 24) return t('sync.time.hoursAgo', { hours: diffHours });
-    return formatDate(date);
-  };
-
-  const syncHealthDetail = isTelemetryStale
-    ? onlineMismatch
-      ? t('sync.health.staleMismatch', {
-          defaultValue:
-            'Transport reachability and backend telemetry disagree.',
-        })
-      : staleHeartbeatTelemetry || localSyncTelemetryLag
-        ? t('sync.health.staleAge', {
-            defaultValue:
-              'Backend telemetry is older than the current local queue state.',
-          })
-        : t('sync.health.staleMissing', {
-            defaultValue:
-              'The queue still has actionable work, but telemetry freshness is unavailable.',
-          })
-    : syncHealthPresentation.detail;
-
   const effectiveLastParitySync = useMemo(
     () => lastParitySync ?? normalizeLastParitySync(systemHealth?.lastParitySync),
     [lastParitySync, systemHealth?.lastParitySync],
   );
-  const representativeParityFailureReason = useMemo(
-    () =>
-      getRepresentativeParityFailureReason(
-        effectiveLastParitySync ?? null,
-        recoveryParityItems,
-      ),
-    [effectiveLastParitySync, recoveryParityItems],
-  );
-
   const effectiveCredentialState = useMemo(
     () =>
       effectiveLastParitySync?.credentialState ??
@@ -1553,146 +1042,22 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     [effectiveLastParitySync?.credentialState, systemHealth?.credentialState],
   );
 
-  const missingCredentialLabels = useMemo(() => {
-    if (!effectiveCredentialState) {
-      return [] as string[];
-    }
-
-    const missing: string[] = [];
-    if (!effectiveCredentialState.hasAdminUrl) {
-      missing.push(
-        t('sync.dashboard.missingAdminUrl', { defaultValue: 'Admin URL' }),
-      );
-    }
-    if (!effectiveCredentialState.hasApiKey) {
-      missing.push(
-        t('sync.dashboard.missingApiKey', { defaultValue: 'POS API key' }),
-      );
-    }
-    return missing;
-  }, [effectiveCredentialState, t]);
-
-  const parityProcessorSummary = useMemo(() => {
-    if (missingCredentialLabels.length > 0) {
-      return {
-        value: t('sync.dashboard.parityCredentialsMissing', {
-          defaultValue: 'Credentials missing',
-        }),
-        detail: t('sync.dashboard.parityCredentialsMissingDetail', {
-          defaultValue:
-            '{{items}} must be configured before the parity queue can drain.',
-          items: missingCredentialLabels.join(', '),
-        }),
-        accentClassName: 'text-red-600 dark:text-red-300',
-      };
-    }
-
-    if (!effectiveLastParitySync) {
-      return {
-        value: t('sync.dashboard.parityNoAttempts', {
-          defaultValue: 'No parity attempt recorded',
-        }),
-        detail: t('sync.dashboard.parityNoAttemptsDetail', {
-          defaultValue:
-            'The parity processor has not reported a startup or retry cycle yet.',
-        }),
-        accentClassName: 'text-slate-700 dark:text-slate-200',
-      };
-    }
-
-    if (effectiveLastParitySync.status === 'started') {
-      return {
-        value: t('sync.dashboard.parityRunning', {
-          defaultValue: 'Running now',
-        }),
-        detail: t('sync.dashboard.parityRunningDetail', {
-          defaultValue: 'The terminal is currently draining the parity queue.',
-        }),
-        accentClassName: 'text-amber-600 dark:text-amber-300',
-      };
-    }
-
-    if (effectiveLastParitySync.status === 'failed') {
-      return {
-        value: t('sync.dashboard.parityFailed', {
-          defaultValue: 'Last parity sync failed',
-        }),
-        detail:
-          representativeParityFailureReason ||
-          t('sync.dashboard.parityFailedDetail', {
-            defaultValue: 'The last parity sync attempt ended with an error.',
-          }),
-        accentClassName: 'text-red-600 dark:text-red-300',
-      };
-    }
-
-    if (effectiveLastParitySync.status === 'skipped_missing_credentials') {
-      return {
-        value: t('sync.dashboard.paritySkipped', {
-          defaultValue: 'Sync skipped',
-        }),
-        detail:
-          effectiveLastParitySync.reason ||
-          t('sync.dashboard.paritySkippedDetail', {
-            defaultValue:
-              'Parity sync could not start because terminal credentials are incomplete.',
-          }),
-        accentClassName: 'text-red-600 dark:text-red-300',
-      };
-    }
-
-    return {
-      value: t('sync.dashboard.parityCompleted', {
-        defaultValue: 'Last parity sync completed',
-      }),
-      detail: t('sync.dashboard.parityCompletedDetail', {
-        defaultValue: 'Processed {{processed}} item(s); {{remaining}} remaining.',
-        processed: effectiveLastParitySync.processed,
-        remaining: effectiveLastParitySync.remaining,
-      }),
-      accentClassName:
-        effectiveLastParitySync.remaining > 0
-          ? 'text-amber-600 dark:text-amber-300'
-          : 'text-emerald-600 dark:text-emerald-300',
-    };
-  }, [
-    effectiveLastParitySync,
-    missingCredentialLabels,
-    representativeParityFailureReason,
-    t,
-  ]);
-
-  // --- Actions ---
-
-  /**
-   * Runs one manual sync cycle. Resolves true/false when it re-read the health
-   * snapshot afterwards (fresh / refresh failed), null when it did not.
-   */
-  const handleForceSync = async (): Promise<boolean | null> => {
+  const handleForceSync = async (employeeAttempt = false): Promise<{ healthRefreshed: boolean | null; acknowledgedIds: string[] }> => {
     let healthRefreshed: boolean | null = null;
+    let acknowledgedIds: string[] = [];
     try {
       setSyncStatus((prev) => ({ ...prev, syncInProgress: true }));
-      const result = await runParitySyncCycle({ trigger: 'manual' });
+      const result = await runParitySyncCycle({ trigger: 'manual', ...(employeeAttempt ? { reportHealthTargets: true } : {}) });
+      acknowledgedIds = result.paritySyncResult?.acknowledgedIds ?? [];
       const parityResult = normalizeLastParitySync(result.paritySyncStatus);
       setLastParitySync(parityResult);
 
-      if (parityResult?.status === 'failed') {
-        toast.error(t('sync.messages.syncFailed') || 'Sync failed');
-      } else if (parityResult?.status === 'skipped_missing_credentials') {
-        toast.error(
-          t('sync.dashboard.paritySkippedDetail', {
-            defaultValue:
-              'Parity sync could not start because terminal credentials are incomplete.',
-          }),
-        );
-      } else {
-        toast.success(
-          t('sync.dashboard.parityCompletedDetail', {
-            defaultValue: 'Processed {{processed}} item(s); {{remaining}} remaining.',
-            processed: parityResult?.processed ?? 0,
-            remaining: parityResult?.remaining ?? result.queueStatus?.total ?? 0,
-          }),
-        );
+      if (!employeeAttempt && parityResult?.status === 'failed') {
+        toast.error(t('tillHealth.action.sendFailed'));
+      } else if (!employeeAttempt && parityResult?.status === 'skipped_missing_credentials') {
+        toast.error(t('tillHealth.families.connection.title'));
+      } else if (!employeeAttempt) {
+        toast(t('tillHealth.action.sendChecked'));
       }
 
       await loadSyncStatus();
@@ -1701,97 +1066,13 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       }
     } catch (error) {
       console.error('Failed to force sync:', error);
-      toast.error(t('sync.messages.syncFailed') || 'Sync failed');
+      if (!employeeAttempt) toast.error(t('tillHealth.action.sendFailed'));
     } finally {
       setSyncStatus((prev) => ({ ...prev, syncInProgress: false }));
     }
-    return healthRefreshed;
+    return { healthRefreshed, acknowledgedIds };
   };
 
-  const handleExport = async () => {
-    setExporting(true);
-    setExportPath(null);
-    try {
-      // health_view.json: what the operator saw when they exported. The
-      // bundle must still export if this view cannot be built.
-      let healthView: Record<string, unknown> | undefined;
-      try {
-        healthView = buildExportHealthView();
-      } catch (viewError) {
-        console.warn('Failed to capture the Health view for diagnostics:', viewError);
-      }
-      const options: DiagnosticsExportOptions = {
-        includeLogs: true,
-        redactSensitive: true,
-        ...(healthView ? { healthView } : {}),
-      };
-      const result = await bridge.diagnostics.export(options);
-      if (result?.success && result?.path) {
-        setExportPath(result.path);
-      }
-    } catch (err) {
-      console.error('Failed to export diagnostics:', err);
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  const handleSendDiagnosticsToSupport = async () => {
-    setSendingSupport(true);
-    try {
-      const result = await bridge.diagnostics.sendRemoteIncident({ healthView: buildExportHealthView() });
-      if (!result.success || !result.bundleStored) throw new Error('diagnostics_zip_not_confirmed');
-      setIncidentReport(result);
-      if (result.path) setExportPath(result.path);
-      if (result.alertSent || result.alertStatus === 'throttled') {
-        toast.success(t('sync.healthModal.support.sentToast'));
-      } else {
-        toast.error(t('sync.healthModal.support.notificationFailed'));
-      }
-    } catch (err) {
-      setIncidentReport({
-        success: false,
-        error: 'send_failed',
-        lastSentAt: new Date().toISOString(),
-      });
-      toast.error(t('sync.healthModal.support.sendFailedToast'));
-    } finally {
-      setSendingSupport(false);
-    }
-  };
-
-  const handleOpenExportDir = async () => {
-    if (!exportPath) return;
-    try {
-      await bridge.diagnostics.openExportDir(exportPath);
-    } catch (error) {
-      console.warn('Failed to open diagnostics export folder:', error);
-    }
-  };
-
-  const handleOpenRecovery = () => {
-    setShowFinancialPanel(false);
-    setShowDetailPanel(false);
-    onOpenRecovery?.({
-      systemHealth,
-      lastParitySync: effectiveLastParitySync ?? null,
-    });
-  };
-
-  const handleOpenConnectionSettings = () => {
-    setShowDetailPanel(false);
-    window.dispatchEvent(
-      new CustomEvent('pos:recovery-route', {
-        detail: { screen: 'connectionSettings' },
-      }),
-    );
-  };
-
-  /**
-   * Settings > Printing: the printer settings and the print queue, where
-   * waiting jobs can be retried or cancelled. Opening it is not a fix: the
-   * warning stays until a fresh check finds nothing waiting too long.
-   */
   const handleOpenPrinterSettings = () => {
     setShowDetailPanel(false);
     window.dispatchEvent(
@@ -1813,6 +1094,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const handlePrimarySyncNow = async () => {
     const attemptedProblem = simpleHealthSummary.problem;
     const startedAt = new Date().toISOString();
+    const attemptId = `health-sync-now:${crypto.randomUUID()}`;
     const nowMs = Date.now();
     const queue = getSyncQueueBridge();
     const readById = async (ids: string[]): Promise<SyncQueueItem[] | null> => {
@@ -1824,7 +1106,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         return null;
       }
     };
+    setSendState(undefined);
     setPrimaryActionBusy('syncNow');
+    setSyncTargetFeedback([]);
     try {
       const before = await readById(
         syncNowTargetItems(attemptedProblem, recoveryParityItems, nowMs).map((item) => item.id),
@@ -1842,64 +1126,31 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           console.warn('[SyncStatusIndicator] Sync now could not make its rows due:', error);
         }
       }
-      let refreshed = await handleForceSync();
+      if (!auditId) {
+        try {
+          await bridge.recovery.recordActionLog({
+            id: attemptId,
+            actionId: 'syncNow',
+            issueCode: syncNowIssueCode(attemptedProblem),
+            success: false,
+            outcome: 'pending',
+            timestamp: startedAt,
+            actor: { staffId: null, staffName: null },
+            targetRefs: { queueRowIds: (before ?? []).map(item => item.id).slice(0, 20) },
+          });
+        } catch (error) {
+          console.warn('[SyncStatusIndicator] Sync now start was not logged:', error);
+        }
+      }
+      const attempt = await handleForceSync(true);
+      let refreshed = attempt.healthRefreshed;
       if (refreshed === null) {
         refreshed = await loadSystemHealth();
       }
       const after = before ? await readById(before.map((item) => item.id)) : null;
-      if (refreshed) {
-        setSyncVerification({ problem: attemptedProblem, before, after, auditId, madeDue, startedAt });
-      }
+      setSyncVerification({ problem: attemptedProblem, before, after, auditId: auditId ?? attemptId, madeDue, startedAt, completed: refreshed === true, acknowledgedIds: attempt.acknowledgedIds });
     } finally {
       setPrimaryActionBusy(null);
-    }
-  };
-
-  const handleRecoveryPanelRefresh = useCallback(async () => {
-    await Promise.all([loadSyncStatus(), loadSystemHealth()]);
-  }, [loadSyncStatus, loadSystemHealth]);
-
-  const handleRemoveInvalidOrders = async () => {
-    if (!systemHealth?.invalidOrders?.details?.length) return;
-    try {
-      const orderIds = systemHealth.invalidOrders.details.map(
-        (o) => o.order_id,
-      );
-      const result = await bridge.sync.removeInvalidOrders(orderIds);
-      if (result?.success) {
-        await loadSystemHealth();
-      }
-    } catch (err) {
-      console.error('Failed to remove invalid orders:', err);
-    }
-  };
-
-  const handleRetryBlockedOrder = async () => {
-    const blocker = syncStatus.lastQueueFailure;
-    if (!blocker || blocker.entityType !== 'order' || !blocker.entityId) {
-      return;
-    }
-    try {
-      setRetryingBlockedOrder(true);
-      await bridge.orders.forceSyncRetry(blocker.entityId);
-      await runParitySyncCycle();
-      toast.success(
-        t('sync.blocker.retryScheduled', {
-          defaultValue: 'Order retry scheduled',
-        }),
-      );
-      setTimeout(async () => {
-        await loadSyncStatus();
-      }, 1200);
-    } catch (error) {
-      console.error('Failed to retry blocked order sync:', error);
-      toast.error(
-        t('sync.blocker.retryFailed', {
-          defaultValue: 'Failed to retry blocked order',
-        }),
-      );
-    } finally {
-      setRetryingBlockedOrder(false);
     }
   };
 
@@ -1907,7 +1158,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   const totalBacklog = countDesktopBacklog(systemHealth);
   // The last backlog read failed: the card says so, never "clear".
-  const backlogUnavailable = systemHealth?.syncBacklogStatus === 'unavailable';
+  const backlogUnavailable = healthReadFailures.includes('syncBacklog') || systemHealth?.syncBacklogStatus === 'unavailable';
 
   // P1 Health signals (shared rules in shared/pos/health).
   // Queue rows pending 30+ minutes after an attempt (or blocking the Z) are
@@ -2022,7 +1273,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       extras: healthSignalExtras,
     });
     const supportStatus = resolveSupportStatus({
-      incidentSucceeded: incidentReport?.success,
+      incidentSucceeded: incidentReport ? verifiedSupportReceipt(incidentReport) : undefined,
       incidentFailed: Boolean(incidentReport?.error),
       state: draft.state,
     });
@@ -2066,15 +1317,21 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       problemStillThere: problem === syncVerification.problem,
       nowMs: Date.now(),
     });
+    const targetOutcomes = syncNowTargetOutcomes(syncVerification.before, syncVerification.after, syncVerification.acknowledgedIds);
+    setSyncTargetFeedback(targetOutcomes);
     const outcome = judgeSyncAttempt({
-      freshCheck: remaining !== null,
+      freshCheck: remaining !== null && syncVerification.completed && targetOutcomes.length > 0
+        && targetOutcomes.every(target => target.outcome !== 'unknown'),
       ran: true,
-      remaining: remaining ?? 'problem',
+      remaining: targetOutcomes.some(target => target.outcome === 'refused') ? 'problem'
+        : targetOutcomes.every(target => target.outcome === 'sent') ? 'none' : 'progressing',
     });
+    setSendState(outcome === 'resolved' ? 'solved' : outcome === 'failed' ? 'failed' : 'pending');
+    setSendVerifiedAt(outcome === 'resolved' ? new Date().toISOString() : undefined);
     setRepeatedFailureProblem(outcome === 'failed' && SYNC_PROBLEMS.has(problem) ? problem : null);
     if (syncVerification.auditId) {
       // The entry that recorded the retry times gets the outcome.
-      const entry: RecoveryActionLogEntry = {
+      const entry: RecoveryActionLogEntry & { targetOutcomes: typeof targetOutcomes } = {
         id: syncVerification.auditId,
         actionId: 'syncNow',
         issueCode: syncNowIssueCode(syncVerification.problem),
@@ -2086,6 +1343,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           queueRowIds: (syncVerification.before ?? []).map((item) => item.id).slice(0, 20),
         },
         madeDue: syncVerification.madeDue,
+        targetOutcomes,
       };
       void Promise.resolve()
         .then(() => bridge.recovery.recordActionLog(entry))
@@ -2100,43 +1358,6 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     }
   }, [repeatedFailureProblem, simpleHealthSummary.problem]);
 
-  // `{{date}} {{time}}` of the open POS day's start, for the "open too long"
-  // sentence (closeoutOverdue).
-  const posDayStartParams = useMemo(
-    () => ({
-      date: endOfDayStatus.dayStartAt
-        ? formatDate(endOfDayStatus.dayStartAt, { day: 'numeric', month: 'numeric', year: 'numeric' })
-        : '—',
-      time: endOfDayStatus.dayStartAt
-        ? formatTime(endOfDayStatus.dayStartAt, { hour: '2-digit', minute: '2-digit' })
-        : '',
-    }),
-    [endOfDayStatus.dayStartAt, i18n?.language],
-  );
-  const localizedHealthSummary = useMemo(() => {
-    const stateKeys = healthStateKeys(simpleHealthSummary.state);
-    const problemParams = simpleHealthSummary.problemDetail.params;
-    const duration = healthDuration(problemParams?.durationMs ?? null);
-    return {
-      title: t(stateKeys.titleKey),
-      message:
-        simpleHealthSummary.state === 'healthy' && !isShiftActive
-          ? t('sync.healthModal.states.healthy.messageNoShift')
-          : t(stateKeys.messageKey),
-      guidance: t(healthGuidanceKey(simpleHealthSummary.guidance)),
-      problem: problemParams
-        ? t(healthProblemKey(simpleHealthSummary.problemDetail), {
-            count: problemParams.count ?? 0,
-            duration: t(duration.key, { count: duration.count }),
-          })
-        : t(healthProblemKey(simpleHealthSummary.problemDetail), posDayStartParams),
-      impacts: simpleHealthSummary.impacts.map((impact) => t(healthImpactKey(impact))),
-      recommendedActions: simpleHealthSummary.recommendedActions.map((action) =>
-        t(healthRecommendationKey(action)),
-      ),
-    };
-  }, [isShiftActive, posDayStartParams, simpleHealthSummary, t]);
-  const syncBlockerDetails = systemHealth?.syncBlockerDetails ?? [];
   // The checkout-blocker card renders the classifier's own sentence. Hand it
   // the operator's language, or a Greek till reads its money in English.
   const localizePaymentBlocker = useCallback(
@@ -2207,1540 +1428,185 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       extra: { incomingOrderAlerts: buildIncomingOrderAlertSupportEvidence() },
     });
 
-  const totalPending =
-    syncStatus.pendingItems + financialPendingCount + parityPendingCount;
-  const rawNextRetryAt = syncStatus.oldestNextRetryAt ?? queueFailure?.nextRetryAt;
-  const nextRetryAt = rawNextRetryAt && toTimestamp(rawNextRetryAt)! > Date.now()
-    ? rawNextRetryAt : null;
-  const hasInvalidOrders = (systemHealth?.invalidOrders?.count ?? 0) > 0;
-  const advancedIssueCount =
-    sharedRecoveryIssues.length +
-    (systemHealth === null && !systemLoading ? 1 : 0);
-  // Nothing to report except a read that failed: never "All clear".
-  const advancedUnavailableOnly = advancedIssueCount === 0 && backlogUnavailable;
-  const shouldOpenAdvancedByDefault =
-    sharedRecoveryIssues.length > 0 || (systemHealth === null && !systemLoading);
-  const syncErrorDisplay = useMemo(
-    () => resolveSyncErrorMessage(syncStatus.error, t),
-    [syncStatus.error, t],
-  );
-  const visibleSyncFailures = useMemo<VisibleSyncFailure[]>(() => {
-    const tableLabels: Record<string, string> = {
-      orders: t('sync.healthModal.table.orders', { defaultValue: 'Orders' }),
-      payments: t('sync.healthModal.table.payments', { defaultValue: 'Payments' }),
-      payment_adjustments: t('sync.healthModal.table.paymentAdjustments', {
-        defaultValue: 'Payment adjustments',
-      }),
-      z_reports: t('sync.healthModal.table.zReports', { defaultValue: 'Z-reports' }),
-    };
 
-    const failures: VisibleSyncFailure[] = [];
-    for (const item of recoveryParityItems) {
-      const tableLabel =
-        tableLabels[item.tableName] ??
-        t('sync.healthModal.fallbacks.syncItem', { defaultValue: 'Sync item' });
-      const failure = buildVisibleParityFailure(item, tableLabel);
-      if (failure) {
-        failures.push(failure);
-      }
-    }
-
-    for (const blocker of syncBlockerDetails) {
-      if (!formatSyncErrorForDisplay(blocker.lastError)) continue;
-      failures.push({
-        id: `legacy-${blocker.queueId}`,
-        title: ENTITY_TYPE_KEYS[blocker.entityType]
-          ? t(ENTITY_TYPE_KEYS[blocker.entityType], { defaultValue: blocker.entityType })
-          : t('sync.healthModal.fallbacks.syncItem', { defaultValue: 'Sync item' }),
-        recordId: blocker.orderNumber || null,
-        status: normalizeOperatorSyncStatus(blocker.queueStatus || 'failed'),
-        nextRetryAt: null,
-      });
-    }
-
-    if (failures.length === 0 && syncErrorDisplay) {
-      failures.push({
-        id: 'sync-status-error',
-        title: t('sync.healthModal.syncProcessor', { defaultValue: 'Sync processor' }),
-        recordId: null,
-        status: 'failed',
-        nextRetryAt: null,
-      });
-    }
-
-    return failures.slice(0, 4);
-  }, [recoveryParityItems, syncBlockerDetails, syncErrorDisplay, t]);
-
-  const healthSupportContext = useMemo(
-    () =>
-      buildHealthSupportContext({
-        syncStatus: {
-          ...syncStatus,
-          error: syncErrorDisplay,
-        },
-        systemHealth,
-        financialStats,
-        totalBacklog,
-        isTelemetryStale,
-        hasBlockedQueue,
-        hasScheduledRetry: hasScheduledRetryableQueueFailure,
-        // Only a Z already issued and still awaiting its submission or local
-        // finalization; a day merely ready to close is not a support case.
-        pendingReportDate: isZIssuedAwaitingFinalization
-          ? endOfDayStatus.pendingReportDate
-          : null,
-      }),
-    [
-      syncStatus,
-      syncErrorDisplay,
-      systemHealth,
-      financialStats,
-      totalBacklog,
-      isTelemetryStale,
-      hasBlockedQueue,
-      hasScheduledRetryableQueueFailure,
-      isZIssuedAwaitingFinalization,
-      endOfDayStatus.pendingReportDate,
-    ],
-  );
-
-  const handleRefreshSupport = useCallback(async () => {
-    await Promise.all([
-      loadSyncStatus(),
-      loadFinancialStats(),
-      systemLoaded.current ? loadSystemHealth() : Promise.resolve(),
-    ]);
-  }, [loadFinancialStats, loadSyncStatus, loadSystemHealth]);
-
-  const healthColor =
-    syncStatus.terminalHealth >= 80
-      ? 'text-green-600 dark:text-green-400'
-      : syncStatus.terminalHealth >= 60
-        ? 'text-yellow-600 dark:text-yellow-400'
-        : 'text-red-600 dark:text-red-400';
-
-  // A stalled print queue during a shift turns a green heart to the
-  // attention colour; a red (sync error) heart stays red.
-  const heartTone: 'healthy' | 'error' | 'attention' =
-    syncHealthState === 'healthy' && syncStatus.isOnline && !printingStallActive
-      ? 'healthy'
-      : syncHealthState === 'error'
-        ? 'error'
-        : 'attention';
-  const heartStatusClass =
-    heartTone === 'healthy'
-      ? 'text-green-400 '
-      : heartTone === 'error'
-        ? 'text-red-400 '
-        : 'text-amber-400 ';
-  // The colour is not the only signal: the heart's label says it too.
-  const heartLabel = printingStallActive
-    ? `${getStatusText()} | ${t(healthImpactKey('printingStopped'))}`
-    : getStatusText();
-
-  useEffect(() => {
-    if (showDetailPanel) {
-      setAdvancedExpanded(false);
-    }
-  }, [showDetailPanel]);
-
-  useEffect(() => {
-    if (!showDetailPanel) return;
-
-    const previousFocus = document.activeElement as HTMLElement | null;
-    const focusTimer = window.setTimeout(() => closeButtonRef.current?.focus(), 0);
-    const handleKeyDown = (event: KeyboardEvent) => {
-      const dialog = healthDialogRef.current;
-      if (!dialog) return;
-      const openDialogs = Array.from(
-        document.querySelectorAll<HTMLElement>('[role="dialog"]'),
-      );
-      if (openDialogs.at(-1) !== dialog) return;
-
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        setShowDetailPanel(false);
-        return;
-      }
-      if (event.key !== 'Tab') return;
-
-      const focusable = Array.from(
-        dialog.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), summary, [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter(
-        (element) =>
-          element.getAttribute('aria-hidden') !== 'true' &&
-          element.offsetParent !== null,
-      );
-      if (focusable.length === 0) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-
-    return () => {
-      window.clearTimeout(focusTimer);
-      document.removeEventListener('keydown', handleKeyDown);
-      window.setTimeout(() => {
-        const remainingDialogs = document.querySelectorAll('[role="dialog"]');
-        if (remainingDialogs.length > 0) return;
-        if (previousFocus?.isConnected) previousFocus.focus();
-        else launcherRef.current?.focus();
-      }, 0);
-    };
-  }, [showDetailPanel]);
-
-  useBackgroundAccessibilityIsolation(showDetailPanel);
-
-  const modalSurfaceClass =
-    'rounded-[28px] border border-slate-200/80 bg-white/92 p-5 dark:border-white/10 dark:bg-white/4 ';
-  const modalInsetClass =
-    'rounded-[22px] border border-slate-200/80 bg-slate-50/90 p-4 dark:border-white/10 dark:bg-black/20 dark:shadow-none';
-  const modalEyebrowClass =
-    'text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400';
-  const modalMutedTextClass = 'text-sm text-slate-600 dark:text-slate-300/80';
-  const metaChipClass =
-    'inline-flex items-center gap-2 rounded-full border border-slate-200/90 bg-white/88 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/4 dark:text-slate-200';
-  const footerClass =
-    'sticky bottom-0 z-10 mt-5 border-t border-(--pos-s-border) bg-(--pos-s-surface) px-6 py-4';
-  const detailPanelBlockerMetadata = useMemo(
-    () => ({
-      advancedExpanded,
-      showFinancialPanel,
-    }),
-    [advancedExpanded, showFinancialPanel],
-  );
-
-  useBlockerRegistration({
-    id: 'sync-status-detail-panel',
-    label: 'Sync detail panel',
-    source: 'sync-status',
-    active: showDetailPanel,
-    metadata: detailPanelBlockerMetadata,
+  const closeHealth = () => {
+    healthReadId.current += 1;
+    setSystemLoading(false);
+    setShowFinancialPanel(false);
+    setShowDetailPanel(false);
+    setFocus(null);
+  };
+  const retainAction = (entry: RecoveryActionLogEntry) => {
+    setRecentRecoveryActions(current => [entry, ...current.filter(old => old.id !== entry.id)].slice(0, 25));
+  };
+  const actions = useTillHealthActions({
+    terminalContext, recentActions: recentRecoveryActions, diagnosticsStale: healthAvailability !== 'ready' || systemLoading,
+    onRefresh: loadSystemHealth, onNavigate: closeHealth, onActionResolved: retainAction, onReport: recordReport,
   });
 
-  const renderMetricTile = ({
-    label,
-    value,
-    detail,
-    valueClassName,
-    surfaceClassName,
-  }: {
-    label: string;
-    value: React.ReactNode;
-    detail?: string;
-    valueClassName?: string;
-    surfaceClassName?: string;
-  }) => (
-    <div className={cn(modalInsetClass, 'space-y-2', surfaceClassName)}>
-      <div className={modalEyebrowClass}>{label}</div>
-      <div className={cn('text-2xl font-black tracking-tight text-slate-900 dark:text-white', valueClassName)}>
-        {value}
-      </div>
-      {detail ? <p className="text-xs text-slate-500 dark:text-slate-400">{detail}</p> : null}
-    </div>
-  );
+  const focusedIssues = useMemo(() => {
+    if (!focus?.orderId) return sharedRecoveryIssues;
+    const focusId = focus.orderId;
+    const matching = orderRecoveryIssues(sharedRecoveryIssues, focusId, systemHealth?.orderNotices ?? [],
+      recoveryParityItems.filter(item => item.recordId === focusId),
+      recoveryFinancialItems.filter(item => item.entityId === focusId));
+    const existing = new Set(sharedRecoveryIssues.map(issue => issue.id));
+    return [...sharedRecoveryIssues, ...matching.filter(issue => !existing.has(issue.id))];
+  }, [focus?.orderId, recoveryFinancialItems, recoveryParityItems, sharedRecoveryIssues, systemHealth?.orderNotices]);
 
-  const renderStatusTile = ({
-    label,
-    value,
-    detail,
-    accentClassName,
-  }: {
-    label: string;
-    value: React.ReactNode;
-    detail?: React.ReactNode;
-    accentClassName?: string;
-  }) => (
-    <div className={modalInsetClass}>
-      <div className={modalEyebrowClass}>{label}</div>
-      <div className={cn('mt-2 text-lg font-black text-slate-900 dark:text-white', accentClassName)}>
-        {value}
-      </div>
-      {detail ? <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{detail}</div> : null}
-    </div>
-  );
+  useEffect(() => {
+    if (!showDetailPanel || typeof bridge.orders?.getById !== 'function') return;
+    const ids = [...new Set(focusedIssues.map(issue => issue.orderId).filter((id): id is string => !!id))];
+    if (!ids.length) return;
+    let cancelled = false;
+    void Promise.allSettled(ids.map(async id => {
+      const result = await bridge.orders.getById(id) as unknown as
+        (Record<string, unknown> & { order?: Record<string, unknown>; data?: Record<string, unknown> }) | null;
+      if (!result || result.success === false) return null;
+      const fields = result.order ?? result.data ?? result;
+      const rawType = fields.orderType ?? fields.order_type;
+      const type = rawType === 'delivery' || rawType === 'pickup' || rawType === 'dine_in' ? rawType
+        : rawType === 'takeaway' ? 'pickup' : rawType === 'dine-in' ? 'dine_in' : null;
+      const amount = fields.total ?? fields.totalAmount ?? fields.total_amount;
+      const currency = fields.currency ?? fields.currency_code;
+      const total = typeof amount === 'number' && Number.isFinite(amount)
+        ? formatCurrency(amount, typeof currency === 'string' && /^[A-Z]{3}$/.test(currency) ? currency : undefined, i18n?.resolvedLanguage || i18n?.language) : null;
+      return [id, { number: safeOrderNumber(fields.orderNumber ?? fields.order_number), type, total }] as const;
+    })).then(results => {
+      if (cancelled) return;
+      setOrderDetails(current => new Map([...current, ...results.flatMap(result =>
+        result.status === 'fulfilled' && result.value ? [result.value] : [])]));
+    });
+    return () => { cancelled = true; };
+  }, [bridge.orders, focusedIssues, showDetailPanel, i18n?.resolvedLanguage, i18n?.language]);
 
-  const renderOverviewSection = () => (
-    <section className={cn(modalSurfaceClass, syncHealthPresentation.panelClassName)}>
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(300px,0.95fr)]">
-        <div className="space-y-4">
-          <div className={modalEyebrowClass}>{t('sync.dashboard.overviewEyebrow')}</div>
-          <div className="flex items-start gap-4">
-            <div className={cn('flex h-14 w-14 shrink-0 items-center justify-center rounded-[20px] border', syncHealthPresentation.panelClassName)}>
-              <svg
-                className={cn('h-7 w-7', syncHealthPresentation.iconClassName)}
-                fill="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
-              </svg>
-            </div>
+  const services = simpleHealthSummary.serviceStatuses;
+  const online = services.internet !== 'offline';
+  const availableToAsk = canAskSupport && online && !remoteSupportUnavailable;
+  const parkedOnly = parityQueueStatus.total > 0 && parityQueueStatus.conflicts === parityQueueStatus.total;
+  const canSend = simpleHealthSummary.primaryAction === 'syncNow' && !parkedOnly;
+  const currentSendState = primaryActionBusy ? 'working' : sendState;
+  const cards = buildTillHealthCards({
+    issues: focusedIssues, attempts: actions.attempts, problem: simpleHealthSummary.problem, focus,
+    printerNeedsAttention: services.printer === 'failed' || (isShiftActive && services.printer === 'attention'),
+    canSend: canSend || currentSendState === 'working',
+    sendResult: currentSendState ? { state: currentSendState, verifiedAt: sendVerifiedAt } : undefined,
+    printCount: printingStallActive ? printQueueSignal?.waitingCount : undefined,
+  });
+  for (const card of cards) {
+    if (card.family === 'printing') {
+      card.copyDetail = t('tillHealth.families.printing.detail', { count: printQueueSignal?.waitingCount ?? 0 });
+    } else if (card.localAction === 'send' && stuckSignal) {
+      const duration = healthDuration(stuckSignal.oldestAgeMs);
+      card.copyDetail = t('tillHealth.families.waiting.stuck', { count: stuckSignal.count, duration: t(duration.key, { count: duration.count }) });
+    }
+  }
+  const state = tillHealthState({
+    availability: healthAvailability, online, cards, sendState: currentSendState,
+    supportUnavailable: Boolean(remoteSupportUnavailable),
+  });
+  const tone = tillHealthTone(state);
+  useEffect(() => { onHealthState?.(state); }, [onHealthState, state]);
+  useBlockerRegistration({ id: 'sync-status-detail-panel', label: 'Till health', source: 'sync-status', active: showDetailPanel });
 
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-3">
-                <h3 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">
-                  {t('sync.dashboard.overviewTitle')}
-                </h3>
-                <span
-                  className={cn(
-                    'inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-sm font-semibold',
-                    syncHealthPresentation.badgeClassName,
-                  )}
-                >
-                  <span className={cn('h-2.5 w-2.5 rounded-full', syncHealthPresentation.dotClassName)} />
-                  {syncHealthPresentation.label}
-                </span>
-              </div>
-              <p className="mt-3 max-w-3xl text-sm text-slate-600 dark:text-slate-300/85">
-                {syncHealthDetail}
-              </p>
-              {capacityWarning && (
-                <div className="mt-3 flex max-w-3xl items-start gap-2.5 rounded-[18px] border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-orange-600 dark:text-orange-300" />
-                  <div className="min-w-0 text-sm text-orange-800 dark:text-orange-200">
-                    <p className="font-semibold">
-                      {t('sync.capacity.title', { defaultValue: 'Sync backlog growing' })}
-                    </p>
-                    <p className="mt-1 text-xs text-orange-700 dark:text-orange-200">
-                      {t('sync.capacity.detail', {
-                        defaultValue:
-                          'New sales stop when the offline queue is full. Reconnect this terminal so the backlog can drain.',
-                      })}
-                    </p>
-                    <p className="mt-1 text-xs font-medium tabular-nums">
-                      {t('sync.capacity.replayable', {
-                        defaultValue: 'Queued for replay: {{current}} of {{max}}',
-                        current: capacityWarning.replayable,
-                        max: capacityWarning.maxReplayable,
-                      })}
-                      {capacityWarning.conflicts > 0
-                        ? ` · ${t('sync.capacity.conflicts', {
-                            defaultValue: 'Unresolved conflicts: {{current}} of {{max}}',
-                            current: capacityWarning.conflicts,
-                            max: capacityWarning.maxConflicts,
-                          })}`
-                        : null}
-                    </p>
-                  </div>
-                </div>
-              )}
-              <div className="mt-4 flex flex-wrap gap-2">
-                <span className={metaChipClass}>
-                  <span className={cn('h-2 w-2 rounded-full', syncStatus.isOnline ? 'bg-green-500' : 'bg-red-500')} />
-                  {t('sync.dashboard.transportLabel')}: {syncStatus.isOnline ? t('sync.labels.online') : t('sync.labels.offline')}
-                </span>
-                <span className={metaChipClass}>
-                  {t('sync.dashboard.lastSyncLabel')}: {formatLastSync()}
-                </span>
-                <span className={cn(metaChipClass, healthColor)}>
-                  {t('sync.dashboard.healthScoreLabel')}: {Math.round(syncStatus.terminalHealth)}%
-                </span>
-                <span className={metaChipClass}>
-                  {t('sync.dashboard.realtimeLabel', { defaultValue: 'Realtime' })}: {realtimeStatus}
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="space-y-3">
-          {renderStatusTile({
-            label: t('sync.dashboard.statusSummaryTitle'),
-            value: isSynced ? t('sync.dashboard.allClear') : syncHealthPresentation.label,
-            detail: t('sync.dashboard.statusSummarySubtitle'),
-            accentClassName: syncHealthPresentation.textClassName,
-          })}
-          {renderStatusTile({
-            label: t('sync.dashboard.parityProcessorTitle', {
-              defaultValue: 'Parity processor',
-            }),
-            value: parityProcessorSummary.value,
-            detail: parityProcessorSummary.detail,
-            accentClassName: parityProcessorSummary.accentClassName,
-          })}
-          <HealthSupportEntryPoint
-            context={healthSupportContext}
-            onExportDiagnostics={handleExport}
-            onRefreshStatus={handleRefreshSupport}
-            onOpenFinancialPanel={() => setShowFinancialPanel(true)}
-            showWhenFallback
-            className="w-full"
-            buttonClassName="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:active:bg-white/8"
-          />
-          <button
-            type="button"
-            onClick={handleOpenRecovery}
-            className="pos-raised w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:active:bg-white/8 inline-flex items-center gap-2"
-          >
-            <Database className="h-4 w-4" />
-            {t('sync.dashboard.openRecovery', { defaultValue: 'Open Recovery Center' })}
-          </button>
-        </div>
-      </div>
-    </section>
-  );
-
-  const renderActionableSection = () => (
-    <section className={cn(modalSurfaceClass, 'space-y-4')}>
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className={modalEyebrowClass}>{t('sync.dashboard.actionableTitle')}</div>
-          <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/80">
-            {t('sync.dashboard.actionableSubtitle')}
-          </p>
-        </div>
-        <span
-          className={cn(
-            'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold',
-            isSynced
-              ? 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 dark:text-emerald-200'
-              : syncHealthPresentation.badgeClassName,
-          )}
-        >
-          {isSynced ? t('sync.dashboard.allClear') : t('sync.system.pending', { count: totalPending })}
-        </span>
-      </div>
-
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {renderMetricTile({
-          label: t('sync.dashboard.localQueue'),
-          value: syncStatus.pendingItems,
-          valueClassName:
-            syncStatus.pendingItems > 0
-              ? 'text-amber-600 dark:text-amber-300'
-              : 'text-emerald-600 dark:text-emerald-300',
-        })}
-        {renderMetricTile({
-          label: t('sync.dashboard.parityQueue', {
-            defaultValue: 'Parity Queue Pending',
-          }),
-          value: parityPendingCount,
-          valueClassName:
-            parityPendingCount > 0
-              ? 'text-amber-600 dark:text-amber-300'
-              : 'text-emerald-600 dark:text-emerald-300',
-        })}
-        {renderMetricTile({
-          label: t('sync.dashboard.parityConflicts', {
-            defaultValue: 'Parity Queue Conflicts',
-          }),
-          value: parityConflictCount,
-          valueClassName:
-            parityConflictCount > 0
-              ? 'text-red-600 dark:text-red-300'
-              : 'text-emerald-600 dark:text-emerald-300',
-        })}
-        {renderMetricTile({
-          label: t('sync.dashboard.pendingPayments'),
-          value: financialPendingCount,
-          valueClassName:
-            financialPendingCount > 0
-              ? 'text-amber-600 dark:text-amber-300'
-              : 'text-emerald-600 dark:text-emerald-300',
-        })}
-        {renderMetricTile({
-          label: t('sync.dashboard.failedPayments'),
-          value: financialFailedCount,
-          valueClassName:
-            financialFailedCount > 0
-              ? 'text-red-600 dark:text-red-300'
-              : 'text-emerald-600 dark:text-emerald-300',
-        })}
-        {renderMetricTile({
-          label: t('sync.dashboard.queuedRemote'),
-          value: syncStatus.queuedRemote,
-          valueClassName:
-            syncStatus.queuedRemote > 0
-              ? 'text-cyan-600 dark:text-cyan-300'
-              : 'text-slate-700 dark:text-slate-200',
-        })}
-        {renderMetricTile({
-          label: t('sync.dashboard.historicalZReportConflicts', {
-            defaultValue: 'Historical Z-report Conflicts',
-          }),
-          value: syncStatus.historicalZReportConflicts,
-          valueClassName:
-            syncStatus.historicalZReportConflicts > 0
-              ? 'text-slate-600 dark:text-slate-300'
-              : 'text-emerald-600 dark:text-emerald-300',
-        })}
-        {renderMetricTile({
-          label: t('sync.dashboard.deferred'),
-          value: syncStatus.backpressureDeferred,
-          valueClassName:
-            syncStatus.backpressureDeferred > 0
-              ? 'text-amber-600 dark:text-amber-300'
-              : 'text-slate-700 dark:text-slate-200',
-        })}
-        {renderMetricTile({
-          label: t('sync.dashboard.nextRetry'),
-          value: nextRetryAt ? new Date(nextRetryAt).toLocaleTimeString() : t('sync.dashboard.notAvailable'),
-          valueClassName: nextRetryAt ? 'text-amber-600 dark:text-amber-300 text-lg' : 'text-slate-700 dark:text-slate-200 text-lg',
-        })}
-      </div>
-
-      {queueFailure && hasBlockedQueue && (
-        <div className="rounded-[22px] border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4">
-          <div className="flex flex-col gap-3">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className={modalEyebrowClass}>{t('sync.blocker.title')}</div>
-                <div className="mt-2 text-sm font-semibold text-slate-900 dark:text-white">
-                  {ENTITY_TYPE_KEYS[queueFailure.entityType]
-                    ? t(ENTITY_TYPE_KEYS[queueFailure.entityType], { defaultValue: queueFailure.entityType })
-                    : queueFailure.entityType}{' '}
-                  {queueFailure.entityId}
-                </div>
-              </div>
-              <span className="text-xs font-bold uppercase tracking-wide text-orange-700 dark:text-orange-300">
-                {t(`sync.blocker.classification.${queueFailure.classification}`, {
-                  defaultValue: queueFailure.classification,
-                })}
-              </span>
-            </div>
-
-            <p className="wrap-break-word text-sm font-medium text-orange-800 dark:text-orange-100">
-              {queueFailure.lastError}
-            </p>
-
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="text-xs text-slate-700 dark:text-slate-200">
-                <span className="font-semibold">{t('sync.blocker.retryProgress')}:</span>{' '}
-                <span className="font-mono">{queueFailure.retryCount}/{queueFailure.maxRetries}</span>
-              </div>
-              <div className="text-xs text-slate-700 dark:text-slate-200">
-                <span className="font-semibold">{t('sync.blocker.status')}:</span>{' '}
-                <span className="font-mono">{queueFailure.status}</span>
-              </div>
-              {hasScheduledRetryableQueueFailure && queueFailure.nextRetryAt && (
-                <div className="text-xs font-semibold text-amber-700 dark:text-amber-300">
-                  {t('sync.blocker.nextRetry')}: {new Date(queueFailure.nextRetryAt).toLocaleTimeString()}
-                </div>
-              )}
-            </div>
-
-            {queueFailure.entityType === 'order' && (
-              <button
-                onClick={handleRetryBlockedOrder}
-                disabled={retryingBlockedOrder || syncStatus.syncInProgress}
-                className="pos-raised pos-raised--yellow inline-flex items-center justify-center rounded-xl bg-yellow-400 px-4 py-2.5 text-sm font-semibold text-black transition-all active:bg-yellow-500 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {retryingBlockedOrder ? t('sync.blocker.retrying') : t('sync.blocker.retryOrderNow')}
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      {queueFailure && hasScheduledRetryableQueueFailure && (
-        <div className="rounded-[22px] border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <div className={modalEyebrowClass}>{t('sync.blocker.recoveryTitle')}</div>
-              <p className="mt-2 text-sm text-slate-700 dark:text-slate-200">
-                {t('sync.blocker.recoveryDetail')}
-              </p>
-            </div>
-            <span className="text-xs font-bold uppercase tracking-wide text-amber-700 dark:text-amber-300">
-              {t(`sync.blocker.classification.${queueFailure.classification}`, {
-                defaultValue: queueFailure.classification,
-              })}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {syncErrorDisplay && (
-        <div className="rounded-[22px] border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600 dark:text-red-300" />
-            <div>
-              <div className="text-sm font-semibold text-red-700 dark:text-red-300">
-                {t('sync.labels.error')}
-              </div>
-              <p className="mt-1 text-sm text-red-700 dark:text-red-200">
-                {syncErrorDisplay}
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-    </section>
-  );
-
-  const renderOperationsSection = () => (
-    <section className={cn(modalSurfaceClass, 'space-y-4')}>
-      <div>
-        <div className={modalEyebrowClass}>{t('sync.dashboard.operationsTitle')}</div>
-        <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/80">
-          {t('sync.dashboard.operationsSubtitle')}
-        </p>
-      </div>
-
-      <div className="grid gap-3 sm:grid-cols-2">
-        {renderStatusTile({
-          label: t('sync.labels.settings'),
-          value: `v${syncStatus.settingsVersion}`,
-          accentClassName: 'text-purple-700 dark:text-purple-300',
-        })}
-        {renderStatusTile({
-          label: t('sync.labels.menu'),
-          value: `v${syncStatus.menuVersion}`,
-          accentClassName: 'text-cyan-700 dark:text-cyan-300',
-        })}
-        <div className={cn(modalInsetClass, 'sm:col-span-2')}>
-          <div className={modalEyebrowClass}>{t('sync.dashboard.versionsTitle')}</div>
-          <div className="mt-2 text-lg font-black text-slate-900 dark:text-white">
-            {isMobileWaiter
-              ? t('terminal.type.mobile_waiter', { defaultValue: 'Mobile POS' })
-              : t('terminal.type.main', { defaultValue: 'Main' })}
-          </div>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            {t('sync.dashboard.versionsSubtitle')}
-          </p>
-          {isMobileWaiter && parentTerminalId && (
-            <div className="mt-3 inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-1 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/4 dark:text-slate-200">
-              {t('terminal.labels.parentTerminal', { defaultValue: 'Parent' })}: {parentTerminalId.substring(0, 8)}...
-            </div>
-          )}
-        </div>
-      </div>
-
-      <OrderSyncRouteIndicator variant="dashboard" className="mt-0" />
-
-      <div className={modalInsetClass}>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className={modalEyebrowClass}>{t('sync.dashboard.financialSummaryTitle')}</div>
-            <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/80">
-              {t('sync.dashboard.financialSummarySubtitle')}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={async () => {
-                try {
-                  await loadFinancialStats();
-                  toast.success(
-                    t('sync.actions.refreshed', { defaultValue: 'Refreshed' }),
-                  );
-                } catch {
-                  toast.error(
-                    t('sync.actions.refreshFailed', {
-                      defaultValue: 'Refresh failed',
-                    }),
-                  );
-                }
-              }}
-              className="pos-raised inline-flex h-9 w-9 items-center justify-center rounded-full border border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 transition-colors active:bg-(--pos-s-surface-2) dark:text-emerald-200"
-              aria-label={t('sync.actions.refresh', { defaultValue: 'Refresh' })}
-            >
-              <RefreshCw className="h-4 w-4" />
-            </button>
-            <button
-              onClick={() => setShowFinancialPanel(true)}
-              className="pos-raised inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors active:bg-slate-50 dark:border-white/10 dark:bg-white/4 dark:text-slate-100 dark:active:bg-white/8"
-            >
-              {t('sync.actions.manage')}
-            </button>
-          </div>
-        </div>
-
-        <div className="mt-4 grid gap-3 sm:grid-cols-3">
-          {(
-            [
-              ['driver_earnings', 'sync.financial.driver'],
-              ['staff_payments', 'sync.financial.staff'],
-              ['shift_expenses', 'sync.financial.expenses'],
-            ] as const
-          ).map(([key, label]) => {
-            const stats = financialStats[key];
-            const hasFailed = stats.failed > 0;
-            const hasPendingItems = stats.pending > 0;
-
-            return (
-              <div
-                key={key}
-                className={cn(
-                  'rounded-[18px] border px-4 py-3',
-                  hasFailed
-                    ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
-                    : hasPendingItems
-                      ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
-                      : 'border-(--pos-s-border) bg-(--pos-s-surface-2)',
-                )}
-              >
-                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-                  {t(label)}
-                </div>
-                <div className="mt-3 text-sm font-semibold text-slate-900 dark:text-white">
-                  {hasFailed
-                    ? `${stats.failed} ${t('sync.financial.failed')}`
-                    : hasPendingItems
-                      ? `${stats.pending} ${t('sync.financial.pending')}`
-                      : t('sync.financial.complete')}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </section>
-  );
-
-  const renderAdvancedDiagnosticsSection = () => (
-    <section className={modalSurfaceClass}>
-      <button
-        type="button"
-        onClick={() => setAdvancedExpanded((current) => !current)}
-        className="flex w-full items-start justify-between gap-4 text-left"
-      >
-        <div>
-          <div className={modalEyebrowClass}>{t('sync.dashboard.advancedTitle')}</div>
-          <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/80">
-            {t('sync.dashboard.advancedSubtitle')}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <span
-            className={cn(
-              'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold',
-              advancedIssueCount > 0 || advancedUnavailableOnly
-                ? 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-amber-700 dark:text-amber-200'
-                : 'border border-(--pos-s-border) bg-(--pos-s-surface-2) text-emerald-700 dark:text-emerald-200',
-            )}
-          >
-            {advancedIssueCount > 0
-              ? t('sync.system.pending', { count: advancedIssueCount })
-              : advancedUnavailableOnly
-                ? t('sync.healthModal.status.unavailable')
-                : t('sync.dashboard.allClear')}
-          </span>
-          <ChevronDown
-            className={cn(
-              'h-5 w-5 text-slate-500 transition-transform dark:text-slate-300',
-              advancedExpanded && 'rotate-180',
-            )}
-          />
-        </div>
-      </button>
-
-      {advancedExpanded && (
-        <div className="mt-5 grid gap-4 xl:grid-cols-2">
-          {systemLoading && !systemHealth ? (
-            <div className="xl:col-span-2 flex items-center justify-center rounded-[22px] border border-slate-200/80 bg-slate-50/90 py-10 dark:border-white/10 dark:bg-black/20">
-              <div className="flex items-center gap-3 text-sm font-semibold text-slate-600 dark:text-slate-300">
-                <div className="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                {t('sync.dashboard.loadingDiagnostics')}
-              </div>
-            </div>
-          ) : systemHealth ? (
-            <>
-              <div className={cn(modalInsetClass, 'xl:col-span-2')}>
-                <div className="flex items-center justify-between">
-                  <div className={modalEyebrowClass}>
-                    {t('sync.recoveryCenter.title', { defaultValue: 'Recovery Center' })}
-                  </div>
-                  <span className={cn(
-                    'text-xs font-semibold',
-                    sharedRecoveryIssues.length > 0
-                      ? 'text-amber-600 dark:text-amber-300'
-                      : 'text-emerald-600 dark:text-emerald-300',
-                  )}>
-                    {sharedRecoveryIssues.length > 0
-                      ? t('sync.system.pending', { count: sharedRecoveryIssues.length })
-                      : t('sync.dashboard.allClear')}
-                  </span>
-                </div>
-                <div className="mt-4 space-y-3">
-                  {sharedRecoveryIssues.length > 0 ? (
-                    sharedRecoveryIssues.slice(0, 6).map((issue) => (
-                      <div
-                        key={issue.id}
-                        className={cn(
-                          'rounded-[18px] border px-4 py-3',
-                          issue.status === 'recovering'
-                            ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
-                            : issue.severity === 'critical'
-                              ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
-                              : issue.severity === 'error'
-                                ? 'border-(--pos-s-border) bg-(--pos-s-surface-2)'
-                                : 'border-slate-200/80 bg-slate-50/80 dark:border-white/10 dark:bg-black/20',
-                        )}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="text-sm font-semibold text-slate-900 dark:text-white">
-                              {t(issue.titleKey, {
-                                ...issue.params,
-                                defaultValue: issue.code,
-                              })}
-                            </div>
-                            <div className="mt-1 text-xs text-slate-600 dark:text-slate-300/80">
-                              {t(issue.summaryKey, {
-                                ...issue.params,
-                                defaultValue: issue.entityId,
-                              })}
-                            </div>
-                          </div>
-                          <span className="rounded-full border border-white/60 bg-white/80 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200">
-                            {t(`recovery.status.${issue.status}`, {
-                              defaultValue: issue.status,
-                            })}
-                          </span>
-                        </div>
-                        <div className="mt-2 text-xs text-slate-600 dark:text-slate-300/80">
-                          {t(issue.guidanceKey, {
-                            ...issue.params,
-                            defaultValue: issue.code,
-                          })}
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    <p className="text-sm text-slate-500 dark:text-slate-400">
-                      {t('sync.recoveryCenter.noIssues', {
-                        defaultValue: 'No actionable recovery issues are currently visible.',
-                      })}
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              <div className={modalInsetClass}>
-                <div className="flex items-center justify-between">
-                  <div className={modalEyebrowClass}>{t('sync.system.syncBacklog')}</div>
-                  <span
-                    data-testid="sync-backlog-status"
-                    className={cn(
-                      'text-xs font-semibold',
-                      backlogUnavailable || totalBacklog > 0
-                        ? 'text-amber-600 dark:text-amber-300'
-                        : 'text-emerald-600 dark:text-emerald-300',
-                    )}
-                  >
-                    {backlogUnavailable
-                      ? t('sync.healthModal.status.unavailable')
-                      : totalBacklog > 0
-                        ? t('sync.system.pending', { count: totalBacklog })
-                        : t('sync.system.clear')}
-                  </span>
-                </div>
-                <div className="mt-4 space-y-2">
-                  {backlogUnavailable ? (
-                    <p
-                      data-testid="sync-backlog-unavailable"
-                      className="text-sm text-slate-600 dark:text-slate-300"
-                    >
-                      {t('sync.system.backlogUnavailable')}
-                    </p>
-                  ) : totalBacklog > 0 ? (
-                    Object.entries(systemHealth.syncBacklog).map(([type, statuses]) => {
-                      const pending = Object.entries(statuses)
-                        .filter(([s]) => s !== 'synced' && s !== 'applied')
-                        .reduce((sum, [, count]) => sum + count, 0);
-                      if (pending === 0) return null;
-                      return (
-                        <div key={type} className="flex items-center justify-between text-sm text-slate-700 dark:text-slate-200">
-                          <span>{ENTITY_TYPE_KEYS[type] ? t(ENTITY_TYPE_KEYS[type], { defaultValue: type }) : type}</span>
-                          <span className="font-mono font-semibold">{pending}</span>
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <p className="text-sm text-slate-500 dark:text-slate-400">{t('sync.dashboard.allClear')}</p>
-                  )}
-                </div>
-              </div>
-
-              {syncBlockerDetails.length > 0 && (
-                <div className={cn(modalInsetClass, 'xl:col-span-2')}>
-                  <div className="flex items-center justify-between">
-                    <div className={modalEyebrowClass}>{t('sync.system.blockingItems', { defaultValue: 'Blocking Items' })}</div>
-                    <span className="text-xs font-semibold text-amber-600 dark:text-amber-300">
-                      {t('sync.system.pending', { count: syncBlockerDetails.length })}
-                    </span>
-                  </div>
-                  <div className="mt-4 space-y-3">
-                    {syncBlockerDetails.map((blocker) => {
-                      const orderReference =
-                        blocker.orderNumber || blocker.orderId || blocker.entityId;
-                      return (
-                        <div
-                          key={`${blocker.queueId}-${blocker.entityType}-${blocker.entityId}`}
-                          className="rounded-[18px] border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-3 text-sm"
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="font-semibold text-slate-900 dark:text-white">
-                              {ENTITY_TYPE_KEYS[blocker.entityType]
-                                ? t(ENTITY_TYPE_KEYS[blocker.entityType], { defaultValue: blocker.entityType })
-                                : blocker.entityType}
-                            </div>
-                            <div className="font-mono text-xs text-amber-700 dark:text-amber-200">
-                              {blocker.queueStatus}
-                            </div>
-                          </div>
-                          <div className="mt-2 text-sm text-slate-700 dark:text-slate-200">
-                            {orderReference}
-                          </div>
-                          <div className="mt-1 text-xs text-slate-600 dark:text-slate-300">
-                            {getLocalizedSyncBlockerReason(blocker, t)}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {(systemHealth.invalidOrders?.count ?? 0) > 0 && (
-                <div className="rounded-[22px] border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className={modalEyebrowClass}>{t('sync.system.invalidOrders')}</div>
-                    <span className="text-sm font-semibold text-red-700 dark:text-red-300">
-                      {t('sync.system.invalidCount', {
-                        count: systemHealth.invalidOrders!.count,
-                        defaultValue: '{{count}} invalid',
-                      })}
-                    </span>
-                  </div>
-                  <p className="mt-3 text-sm text-red-700 dark:text-red-100">
-                    {t('sync.system.invalidOrdersDesc')}
-                  </p>
-                  <button
-                    onClick={handleRemoveInvalidOrders}
-                    className="mt-4 inline-flex items-center justify-center rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors active:bg-red-700"
-                  >
-                    {t('sync.system.removeInvalidOrders')}
-                  </button>
-                  <div className="mt-4 space-y-2">
-                    {systemHealth.invalidOrders!.details.slice(0, 5).map((order) => (
-                      <div key={order.order_id} className="flex items-center justify-between text-xs text-red-700 dark:text-red-200">
-                        <span className="font-mono">{order.order_id.substring(0, 8)}...</span>
-                        <span>{order.invalid_menu_items.length} {t('sync.system.items')}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className={modalInsetClass}>
-                <div className="flex items-center justify-between">
-                  <div className={modalEyebrowClass}>{t('sync.system.printers')}</div>
-                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
-                    {systemHealth.printerStatus.configured
-                      ? t('sync.system.configured', {
-                          count: systemHealth.printerStatus.profileCount,
-                          defaultValue: '{{count}} configured',
-                        })
-                      : t('sync.system.notConfigured')}
-                  </span>
-                </div>
-                {systemHealth.printerStatus.defaultProfile && (
-                  <div className="mt-3 text-sm text-slate-600 dark:text-slate-300">
-                    {t('sync.system.defaultPrinter')}: {systemHealth.printerStatus.defaultProfile}
-                  </div>
-                )}
-                {systemHealth.printerStatus.recentJobs.length > 0 && (
-                  <div className="mt-4 space-y-2">
-                    {systemHealth.printerStatus.recentJobs.slice(0, 3).map((job) => (
-                      <div key={job.id} className="flex items-center justify-between text-xs text-slate-700 dark:text-slate-200">
-                        <span>
-                          {ENTITY_TYPE_KEYS[job.entityType]
-                            ? t(ENTITY_TYPE_KEYS[job.entityType], { defaultValue: job.entityType })
-                            : job.entityType}
-                        </span>
-                        <span
-                          className={cn(
-                            'font-mono',
-                            job.status === 'printed' || job.status === 'dispatched'
-                              ? 'text-emerald-600 dark:text-emerald-300'
-                              : job.status === 'failed'
-                                ? 'text-red-600 dark:text-red-300'
-                                : 'text-amber-600 dark:text-amber-300',
-                          )}
-                        >
-                          {job.status}
-                          {job.warningCode ? ' !' : ''}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className={modalInsetClass}>
-                <div className="flex items-center justify-between">
-                  <div className={modalEyebrowClass}>{t('sync.system.lastZReport')}</div>
-                  {systemHealth.lastZReport && <FileText className="h-4 w-4 text-blue-600 dark:text-blue-300" />}
-                </div>
-                {systemHealth.lastZReport ? (
-                  <div className="mt-4 space-y-2 text-sm text-slate-700 dark:text-slate-200">
-                    <div className="flex justify-between">
-                      <span>{t('sync.system.gross')}</span>
-                      <span className="font-semibold">{formatCurrency(systemHealth.lastZReport.totalGrossSales)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>{t('sync.system.net')}</span>
-                      <span className="font-semibold">{formatCurrency(systemHealth.lastZReport.totalNetSales)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>{t('sync.system.generated')}</span>
-                      <span className="font-mono text-xs">{new Date(systemHealth.lastZReport.generatedAt).toLocaleString()}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>{t('sync.system.syncState')}</span>
-                      <span className={cn(
-                        'font-mono',
-                        systemHealth.lastZReport.syncState === 'applied'
-                          ? 'text-emerald-600 dark:text-emerald-300'
-                          : 'text-amber-600 dark:text-amber-300',
-                      )}>
-                        {systemHealth.lastZReport.syncState}
-                      </span>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">
-                    {t('sync.system.noReports')}
-                  </p>
-                )}
-              </div>
-
-              <div className={modalInsetClass}>
-                <div className={modalEyebrowClass}>{t('sync.system.database')}</div>
-                <div className="mt-4 flex items-center gap-3">
-                  <Database className="h-5 w-5 text-purple-600 dark:text-purple-300" />
-                  <div>
-                    <div className="text-lg font-black text-purple-700 dark:text-purple-300">
-                      v{systemHealth.schemaVersion}
-                    </div>
-                    <div className="text-xs text-slate-500 dark:text-slate-400">
-                      {formatBytes(systemHealth.dbSizeBytes)}
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-4 border-t border-slate-200/80 pt-4 dark:border-white/10">
-                  <div className={modalEyebrowClass}>{t('sync.labels.pending')}</div>
-                  <div className="mt-2 flex items-center gap-2 text-lg font-black text-slate-900 dark:text-white">
-                    {systemHealth.pendingOrders === 0 ? (
-                      <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-300" />
-                    ) : (
-                      <Clock className="h-5 w-5 text-amber-600 dark:text-amber-300" />
-                    )}
-                    <span>{systemHealth.pendingOrders}</span>
-                  </div>
-                </div>
-              </div>
-
-              {Object.keys(systemHealth.lastSyncTimes).length > 0 && (
-                <div className={cn(modalInsetClass, 'xl:col-span-2')}>
-                  <div className={modalEyebrowClass}>{t('sync.system.lastSyncByEntity')}</div>
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                    {Object.entries(systemHealth.lastSyncTimes).map(([entity, ts]) => (
-                      <div key={entity} className="rounded-[18px] border border-slate-200/80 bg-white/80 px-3 py-3 dark:border-white/10 dark:bg-white/3">
-                        <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-                          {ENTITY_TYPE_KEYS[entity] ? t(ENTITY_TYPE_KEYS[entity], { defaultValue: entity }) : entity}
-                        </div>
-                        <div className="mt-2 wrap-break-word text-xs font-mono text-slate-700 dark:text-slate-200">
-                          {ts ? new Date(ts).toLocaleString() : '\u2014'}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="xl:col-span-2 rounded-[22px] border border-(--pos-s-border) bg-(--pos-s-surface-2) p-5">
-              <div className="flex items-start gap-3">
-                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
-                <div>
-                  <div className="text-sm font-semibold text-amber-700 dark:text-amber-300">
-                    {t('sync.dashboard.advancedTitle')}
-                  </div>
-                  <p className="mt-1 text-sm text-amber-700 dark:text-amber-100">
-                    {t('sync.system.retry')}
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </section>
-  );
-
-  const renderDetailModal = () => {
-    const summary = simpleHealthSummary;
-    const needsRecovery = sharedRecoveryIssues.length > 0 || visibleSyncFailures.length > 0 || financialFailedCount > 0;
-    // Founder 01/11: the surface stays neutral; only the headline and the status words carry the state colour.
-    const visual = {
-      shell: liquidGlassModalTone('neutral'),
-      titleClassName: HEALTH_TONE_TEXT[healthStateTone(summary.state)],
-    };
-    const guidanceTone: HealthTone = summary.canContinueOrders
-      ? 'ok'
-      : summary.state === 'support_needed'
-        ? 'bad'
-        : 'warn';
-    const statusLabel = (value: string) =>
-      t(healthStatusLabelKey(value), {
-        defaultValue: t('sync.healthModal.status.unknown'),
-      });
-    const serviceItems = [
-      { key: 'orders', label: t('sync.healthModal.services.orders'), value: statusLabel(summary.serviceStatuses.orders), tone: healthServiceTone(summary.serviceStatuses.orders) },
-      { key: 'internet', label: t('sync.healthModal.services.internet'), value: statusLabel(summary.serviceStatuses.internet), tone: healthServiceTone(summary.serviceStatuses.internet) },
-      { key: 'sync', label: t('sync.healthModal.services.sync'), value: statusLabel(summary.serviceStatuses.sync), tone: healthServiceTone(summary.serviceStatuses.sync) },
-      { key: 'printer', label: t('sync.healthModal.services.printer'), value: statusLabel(summary.serviceStatuses.printer), tone: healthServiceTone(summary.serviceStatuses.printer) },
-      { key: 'support', label: t('sync.healthModal.services.support'), value: statusLabel(summary.serviceStatuses.support), tone: healthServiceTone(summary.serviceStatuses.support) },
-      { key: 'closeout', label: t('sync.healthModal.services.closeout'), value: t(closeoutStatusLabelKey(summary.serviceStatuses.closeout)), tone: closeoutServiceTone(summary.serviceStatuses.closeout) },
-    ];
-    // The ONE recommended action. The desktop has no entry point from here to
-    // the Z screen, the printer settings, the shift start or a live-updates
-    // reconnect, so those (and waiting for the connection) are guidance only.
-    const primaryActionId = summary.primaryAction;
-    const primaryAction = HEALTH_PRIMARY_ACTIONS[primaryActionId];
-    const primaryActionHandlers: Partial<Record<HealthPrimaryActionId, () => void>> = {
-      syncNow: () => void handlePrimarySyncNow(),
-      exportDiagnostics: () => void handleExport(),
-      openRecovery: handleOpenRecovery,
-      openConnectionSettings: handleOpenConnectionSettings,
-      configurePrinter: handleOpenPrinterSettings,
-      checkPrinting: handleOpenPrinterSettings,
-      refresh: () => void loadSystemHealth(),
-    };
-    const runPrimaryAction = primaryActionHandlers[primaryActionId];
-    const primaryActionIsBusy =
-      primaryActionId === 'syncNow'
-        ? primaryActionBusy === 'syncNow' || syncStatus.syncInProgress
-        : primaryActionId === 'exportDiagnostics'
-          ? exporting
-          : primaryActionId === 'refresh'
-            ? systemLoading
-            : false;
-    const PrimaryActionIcon = PRIMARY_ACTION_ICONS[primaryActionId] ?? RefreshCw;
-    const primaryActionBusyMotion =
-      primaryActionId === 'exportDiagnostics' ? 'animate-bounce' : 'animate-spin';
-    const showPrimaryAction = primaryActionId !== 'none';
-    const locale = i18n?.resolvedLanguage || i18n?.language;
-    const formatHealthDateTime = (value: string) =>
-      formatDateTime(value, {}, locale);
-    const lastChecked = lastHealthCheckedAt
-      ? formatHealthDateTime(lastHealthCheckedAt)
-      : t('sync.healthModal.notCheckedYet');
-    const describedBy =
-      healthAvailability === 'stale'
-        ? `${healthDialogDescriptionId}-stale ${healthDialogDescriptionId}`
-        : healthDialogDescriptionId;
-    // Health is a support path: a locked cashier day (no open shift) must not fence
-    // it off, or the dialog opens and then ignores every click and key — even Close.
-    return ReactDOM.createPortal(
-      <CashierRecovery>
-      <div
-        className="fixed inset-0 z-10000"
-        style={{ isolation: 'isolate' }}
-        data-liquid-glass-modal-viewport
-        data-cashier-recovery="true"
-      >
-        <div
-          className="pos-glass-scrim absolute inset-0"
-          aria-hidden="true"
-          onClick={() => setShowDetailPanel(false)}
-        />
-
-        <div
-          className="absolute inset-0 z-10050 flex items-center justify-center px-3 py-4 sm:px-6 sm:py-8"
-          onClick={() => setShowDetailPanel(false)}
-        >
-          <div
-            ref={healthDialogRef}
-            id={`${healthDialogTitleId}-dialog`}
-            className="liquid-glass-modal-shell flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden text-(--pos-s-fg)"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={healthDialogTitleId}
-            aria-describedby={describedBy}
-            tabIndex={-1}
-          >
-            <div className="flex shrink-0 items-center justify-between border-b border-(--modal-glass-line) px-5 py-4">
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-(--pos-s-muted)">
-                  {t('sync.healthModal.eyebrow')}
-                </div>
-                <h2 id={healthDialogTitleId} className="truncate text-xl font-black text-slate-950 dark:text-white">
-                  {t('sync.healthModal.title')}
-                </h2>
-              </div>
-              <button
-                ref={closeButtonRef}
-                onClick={() => setShowDetailPanel(false)}
-                className="liquid-glass-modal-close"
-                aria-label={t('sync.healthModal.close')}
-              >
-                <X className="h-5 w-5" aria-hidden="true" />
-              </button>
-            </div>
-
-            <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6">
-              {healthAvailability === 'unavailable' && (
-                <section
-                  className={cn('pos-frost mb-5 rounded-3xl border p-5', liquidGlassModalTone('danger'))}
-                  role="alert"
-                >
-                  <h3 className="text-xl font-black">
-                    {t('sync.healthModal.states.unavailable.title')}
-                  </h3>
-                  <p id={healthDialogDescriptionId} className="mt-2 text-sm leading-6 text-(--pos-s-muted)">
-                    {t('sync.healthModal.states.unavailable.message')}
-                  </p>
-                </section>
-              )}
-              {healthAvailability === 'unavailable' && showPrimaryAction && (
-                <div
-                  className={cn('pos-frost mb-5 rounded-2xl border p-4', liquidGlassModalTone('neutral'))}
-                  data-testid="health-primary-action"
-                >
-                  <h4 className="text-sm font-semibold text-(--pos-s-muted)">
-                    {t('sync.healthModal.sections.recommendedActions')}
-                  </h4>
-                  <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="min-w-0 space-y-1">
-                      {!runPrimaryAction && <p className="text-base font-black">{t(primaryAction.labelKey)}</p>}
-                      <p className="text-sm font-semibold leading-6">{t(primaryAction.detailKey)}</p>
-                      <p className="text-sm leading-6 text-(--pos-s-muted)">{t(primaryAction.verificationKey)}</p>
-                    </div>
-                    {runPrimaryAction && (
-                      <button
-                        type="button"
-                        onClick={runPrimaryAction}
-                        disabled={primaryActionIsBusy}
-                        aria-busy={primaryActionIsBusy}
-                        className="pos-raised pos-raised--yellow inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
-                      >
-                        <PrimaryActionIcon className={cn('h-5 w-5', primaryActionIsBusy && primaryActionBusyMotion)} aria-hidden="true" />
-                        {t(primaryAction.labelKey)}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-              {healthAvailability === 'stale' && (
-                <div
-                  id={`${healthDialogDescriptionId}-stale`}
-                  className={cn('pos-frost mb-5 rounded-2xl border p-3 text-sm', liquidGlassModalTone('warning'))}
-                  role="status"
-                >
-                  {t('sync.healthModal.stale.message')}
-                </div>
-              )}
-              {healthAvailability === 'loading' && !systemHealth && (
-                <div
-                  id={healthDialogDescriptionId}
-                  className={cn('pos-frost mb-5 rounded-2xl border p-3 text-sm', liquidGlassModalTone('warning'))}
-                  role="status"
-                  aria-live="polite"
-                >
-                  {t('sync.healthModal.loading.message')}
-                </div>
-              )}
-              {systemHealth !== null && healthAvailability !== 'unavailable' && (
-              <section className={cn('pos-frost rounded-3xl border p-5', visual.shell)}>
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
-                  <HealthStateGlyph state={summary.state} />
-                  <div className="min-w-0 flex-1">
-                    <h3 className={cn('mt-1 text-xl font-bold tracking-tight', visual.titleClassName)}>{localizedHealthSummary.title}</h3>
-                    <p id={healthDialogDescriptionId} className="mt-2 max-w-2xl text-sm leading-6 text-(--pos-s-fg)">{summary.state === 'healthy' ? localizedHealthSummary.message : localizedHealthSummary.problem}</p>
-                    {/* "Start a shift" is already the recommended action below. */}
-                    {summary.primaryAction !== 'startShift' && (
-                      <div className={cn('mt-3 inline-flex items-center gap-2 text-sm font-bold', HEALTH_TONE_TEXT[guidanceTone])}>
-                        {summary.canContinueOrders ? (
-                          <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-300" />
-                        ) : summary.state === 'support_needed' ? (
-                          <AlertTriangle className="h-4 w-4 text-rose-700 dark:text-red-300" />
-                        ) : (
-                          <Clock className="h-4 w-4 text-amber-700 dark:text-yellow-300" />
-                        )}
-                        {localizedHealthSummary.guidance}
-                      </div>
-                    )}
-                    {localizedHealthSummary.impacts.length > 0 && (
-                      <ul className="mt-3 list-inside list-disc space-y-1 text-sm font-semibold leading-6 text-(--pos-s-fg)">
-                        {localizedHealthSummary.impacts.map((impact) => (
-                          <li key={impact}>{impact}</li>
-                        ))}
-                      </ul>
-                    )}
-                    <div className="mt-3 text-sm text-(--pos-s-muted)">
-                      {t('sync.healthModal.lastChecked', { value: lastChecked })}
-                    </div>
-                  </div>
-                </div>
-
-                {showPrimaryAction && (
-                  <div
-                    className="pos-frost mt-4 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4"
-                    data-testid="health-primary-action"
-                  >
-                    <h4 className="text-sm font-semibold text-(--pos-s-muted)">
-                      {t('sync.healthModal.sections.recommendedActions')}
-                    </h4>
-                    <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <div className="min-w-0 space-y-1">
-                        {!runPrimaryAction && <p className="text-base font-black text-(--pos-s-fg)">{t(primaryAction.labelKey)}</p>}
-                        <p className="text-sm font-semibold leading-6 text-(--pos-s-fg)">{t(primaryAction.detailKey)}</p>
-                        <p className="text-sm leading-6 text-(--pos-s-muted)">{t(primaryAction.verificationKey)}</p>
-                      </div>
-                      {runPrimaryAction && (
-                        <button
-                          type="button"
-                          onClick={runPrimaryAction}
-                          disabled={primaryActionIsBusy}
-                          aria-busy={primaryActionIsBusy}
-                          className="pos-raised pos-raised--yellow inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
-                        >
-                          <PrimaryActionIcon className={cn('h-5 w-5', primaryActionIsBusy && primaryActionBusyMotion)} aria-hidden="true" />
-                          {t(primaryAction.labelKey)}
-                        </button>
-                      )}
-                    </div>
-                    {primaryActionId === 'exportDiagnostics' && exportPath && (
-                      <button
-                        type="button"
-                        onClick={handleOpenExportDir}
-                        className="pos-raised mt-3 inline-flex min-h-[48px] items-center gap-2 rounded-xl border px-4 text-sm font-bold border-(--pos-s-border) bg-(--pos-s-surface) text-(--pos-s-fg) active:bg-(--pos-s-surface-2)"
-                      >
-                        <FolderOpen className="h-4 w-4" />
-                        {t('sync.healthModal.actions.openFolder')}
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {serviceItems.map((item) => (
-                    <div
-                      key={item.key}
-                      data-testid={`health-service-${item.key}`}
-                      className="pos-frost rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2"
-                    >
-                      <div className="text-sm font-semibold text-(--pos-s-muted)">{item.label}</div>
-                      <div className={cn('mt-1 text-base font-bold', HEALTH_TONE_TEXT[item.tone])} data-health-tone={item.tone}>{item.value}</div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-              )}
-
-              <ZGateSetAsidePanel className="mt-4" />
-
-              {remoteSupportUnavailable && (
-                <section
-                  aria-label={t('sync.healthModal.remoteSupport.title')}
-                  data-testid="health-remote-support"
-                  className="mt-4 space-y-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) p-4 text-sm text-(--pos-s-fg)"
-                >
-                  <h3 className="font-bold">{t('sync.healthModal.remoteSupport.title')}</h3>
-                  <p className="text-(--pos-s-muted)">{t('sync.healthModal.remoteSupport.impact')}</p>
-                  <p className="font-semibold">{t('sync.healthModal.remoteSupport.action')}</p>
-                </section>
-              )}
-
-              <details className={cn('pos-frost mt-4 rounded-2xl border', liquidGlassModalTone('neutral'))}
-                open={supportActionsOpen} onToggle={event => setSupportActionsOpen(event.currentTarget.open)} data-testid="health-support-actions">
-                <summary className="min-h-touch cursor-pointer px-4 py-3 text-sm font-bold">{t('sync.healthModal.sections.supportActions')}</summary>
-                <div className="space-y-4 border-t border-(--modal-glass-line) p-4">
-                  <SupportConnectAction />
-                  <ul className="list-inside list-disc space-y-2 text-sm">{localizedHealthSummary.recommendedActions.map(action => <li key={action}>{action}</li>)}</ul>
-                  {visibleSyncFailures.length > 0 && <h4 className="text-sm font-bold">{t('sync.healthModal.syncDetails', {defaultValue: 'Sync details'})}</h4>}
-                  {visibleSyncFailures.map(failure => <div key={failure.id} className="rounded-xl border border-slate-300 p-3 text-sm dark:border-white/15"><strong>{failure.title} · {statusLabel(failure.status)}</strong><p className="mt-1">{t('sync.healthModal.failure.safeError')}</p>{failure.recordId && <p className="mt-2 break-all text-xs">{t('sync.healthModal.failure.recordValue', {id: failure.recordId})}</p>}{failure.nextRetryAt && <p className="mt-2 text-xs">{t('sync.healthModal.failure.nextRetryValue', {value: formatHealthDateTime(failure.nextRetryAt)})}</p>}</div>)}
-                  <div className="grid gap-3 sm:grid-cols-2">
-                  <button
-                    onClick={handleSendDiagnosticsToSupport}
-                    disabled={sendingSupport}
-                    aria-busy={sendingSupport}
-                    className="pos-raised pos-raised--yellow inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-black disabled:opacity-50"
-                  >
-                    <Send className={cn('h-5 w-5 text-white', sendingSupport && 'animate-pulse')} />
-                    {sendingSupport
-                      ? t('sync.healthModal.actions.sending')
-                      : t('sync.healthModal.actions.sendSupport')}
-                  </button>
-                  <button
-                    onClick={handleExport}
-                    disabled={exporting}
-                    className="pos-raised inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-black text-(--pos-s-fg) disabled:opacity-50"
-                  >
-                    <Download className={cn('h-5 w-5', exporting && 'animate-bounce')} />
-                    {t('sync.healthModal.actions.export')}
-                  </button>
-                  </div>
-                  <p className="text-sm text-(--pos-s-muted)">{t('sync.healthModal.support.safeLocal')}</p>
-                  {incidentReport?.success && <p role="status">{t(!incidentReport.bundleStored ? 'sync.healthModal.support.reportReceived' : incidentReport.alertSent || incidentReport.alertStatus === 'throttled' ? 'sync.healthModal.support.received' : 'sync.healthModal.support.notificationFailed')}</p>}
-                  {incidentReport?.error && <p role="alert">{t('sync.healthModal.support.sendFailed')}</p>}
-                  <SupportDetailsPanel active={supportActionsOpen} />
-                  {exportPath && <button onClick={handleOpenExportDir} className="pos-raised inline-flex min-h-touch items-center gap-2 self-start rounded-xl border px-4 text-(--pos-s-fg)"><FolderOpen className="h-4 w-4" />{t('sync.healthModal.actions.openFolder')}</button>}
-                  <button onClick={() => setAdvancedExpanded(value => !value)} aria-expanded={advancedExpanded} aria-controls={healthAdvancedId} className="pos-raised inline-flex min-h-touch items-center gap-2 self-start rounded-xl border px-4 text-(--pos-s-fg)"><ChevronDown className="h-4 w-4" />{advancedExpanded ? t('sync.healthModal.actions.closeAdvanced') : t('sync.healthModal.actions.openAdvanced')}</button>
-
-              {advancedExpanded && (
-                <section id={healthAdvancedId} className={cn('pos-frost mt-5 space-y-4 rounded-3xl border p-5', liquidGlassModalTone('neutral'))}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h4 className="text-lg font-black text-slate-950 dark:text-white">{t('sync.healthModal.advanced.title')}</h4>
-                      <p className="mt-1 text-sm text-(--pos-s-muted)">{t('sync.healthModal.advanced.supportOnly')}</p>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {remoteSupportUnavailable && (
-                      <div data-testid="health-remote-support-details" className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface) p-3 text-sm">
-                        <h5 className="font-bold">{t('sync.healthModal.remoteSupport.details')}</h5>
-                        <p className="mt-1 break-words">{remoteSupportUnavailable.code} · {remoteSupportUnavailable.status}</p>
-                      </div>
-                    )}
-                    {[
-                      [t('sync.healthModal.advanced.fields.lastSync'), systemHealth?.lastSyncTime || syncStatus.lastSync ? formatHealthDateTime((systemHealth?.lastSyncTime || syncStatus.lastSync) as string) : t('sync.healthModal.advanced.values.never')],
-                      [t('sync.healthModal.advanced.fields.syncBacklog'), backlogUnavailable ? t('sync.healthModal.status.unavailable') : formatNumber(totalBacklog, {}, locale)],
-                      [t('sync.healthModal.advanced.fields.financialFailed'), formatNumber(financialFailedCount, {}, locale)],
-                      [t('sync.healthModal.advanced.fields.printerFailures'), formatNumber(countDesktopPrinterFailures(systemHealth), {}, locale)],
-                      [t('sync.healthModal.advanced.fields.crashCount'), formatNumber(systemHealth?.panicCount ?? 0, {}, locale)],
-                    ].map(([label, value]) => (
-                      <div key={String(label)} className="pos-frost rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface) p-3">
-                        <div className="text-sm font-semibold text-(--pos-s-muted)">{label}</div>
-                        <div className="mt-1 wrap-break-word text-sm font-black text-(--pos-s-fg)">{String(value)}</div>
-                      </div>
-                    ))}
-                  </div>
-
-                </section>
-              )}
-                </div>
-              </details>
-            </div>
-            <div className="flex shrink-0 flex-wrap gap-3 border-t border-(--modal-glass-line) px-5 py-3">
-              {systemHealth && healthAvailability !== 'unavailable' && needsRecovery && <button type="button" onClick={handleOpenRecovery} className="pos-raised inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-4 py-2 text-sm font-bold text-(--pos-s-fg) active:bg-(--pos-s-border)"><Database className="h-5 w-5" />{t('sync.dashboard.openRecovery', {defaultValue: 'Open Recovery Center'})}</button>}
-              <button type="button" onClick={loadSystemHealth} disabled={systemLoading} aria-busy={systemLoading} className="pos-raised inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border px-4 py-2 text-sm font-bold text-(--pos-s-fg) disabled:opacity-50"><RefreshCw className={cn('h-5 w-5', systemLoading && 'animate-spin')} />{t('sync.healthModal.actions.refresh')}</button>
-            </div>
-          </div>
-        </div>
-      </div>
-      </CashierRecovery>,
-      document.body,
-    );
+  const handleReport = async () => {
+    if (sendingSupport) return;
+    setSendingSupport(true);
+    try {
+      const healthView = buildExportHealthView();
+      recordReport(await bridge.diagnostics.sendRemoteIncident({ includeLogs: true, redactSensitive: true, healthView }));
+    } catch {
+      recordReport({ success: false, error: 'INCIDENT_PREPARATION_FAILED' });
+    } finally {
+      setSendingSupport(false);
+    }
   };
 
-  // =========================================================================
-  // Render
-  // =========================================================================
-
-  return (
-    <div className={`relative flex items-center ${inRail ? 'flex-col gap-2' : 'gap-1.5'} ${className}`}>
-      {/* Heart Icon Status Indicator */}
-      <button
-        ref={launcherRef}
-        className={`group relative flex min-h-touch min-w-touch items-center justify-center p-2 transition-all duration-200 active:bg-slate-100/80 dark:active:bg-white/10 ${inRail ? 'h-12 w-12 rounded-xl' : 'rounded-full'}`}
-        onClick={() => setShowDetailPanel(!showDetailPanel)}
-        aria-label={heartLabel}
-        data-heart-tone={heartTone}
-        aria-haspopup="dialog"
-        aria-expanded={showDetailPanel}
-        aria-controls={showDetailPanel ? `${healthDialogTitleId}-dialog` : undefined}
-      >
-        <svg
-          className={`w-6 h-6 transition-all duration-300 ${heartStatusClass} ${
-            syncStatus.syncInProgress ? 'animate-pulse' : ''
-          }`}
-          fill="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
-        </svg>
-
-        {syncStatus.syncInProgress && (
-          <span className="absolute inset-0 rounded-full bg-(--pos-s-surface-2) animate-ping" />
-        )}
-        {justRefreshed && (
-          <span className="absolute inset-0 rounded-full ring-2 ring-(--pos-s-fg) animate-[ping_1s_ease-out_2]" />
-        )}
-        {/* In the rail there is no room for the word: offline is a red dot on the heart. */}
-        {inRail && !syncStatus.isOnline && (
-          <span data-health-offline-dot className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full bg-red-500" aria-hidden="true" />
-        )}
-      </button>
-
-      {inRail && !syncStatus.isOnline && (
-        <button
-          onClick={handleForceSync}
-          disabled={syncStatus.syncInProgress}
-          className="flex min-h-touch min-w-touch items-center justify-center rounded-xl text-red-500 transition-colors active:bg-(--pos-s-surface-2) disabled:opacity-50 dark:text-red-400"
-          aria-label={`${t('sync.labels.offline')} · ${t('sync.actions.retry', { defaultValue: 'Retry sync' })}`}
-        >
-          <RefreshCw className={`h-4 w-4 ${syncStatus.syncInProgress ? 'animate-spin' : ''}`} />
-        </button>
-      )}
-
-      {/* Offline Mode Indicator — visible in collapsed view */}
-      {!inRail && !syncStatus.isOnline && (
-        <div className="flex items-center gap-1.5">
-          <span className="flex items-center gap-1 text-xs font-semibold text-red-500 dark:text-red-400">
-            <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />
-            {t('sync.labels.offline')}
-          </span>
-          <button
-            onClick={handleForceSync}
-            disabled={syncStatus.syncInProgress}
-            className="flex min-h-touch min-w-touch items-center justify-center p-1 rounded-md text-red-400 active:bg-(--pos-s-surface-2) transition-colors disabled:opacity-50"
-            aria-label={t('sync.actions.retry', { defaultValue: 'Retry sync' })}
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${syncStatus.syncInProgress ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
-      )}
-
-      {/* Queue capacity early warning — visible in collapsed view so staff
-          see the backlog growing long before enqueue fail-closes checkout. */}
-      {capacityWarning && (
-        <button
-          onClick={() => setShowDetailPanel(true)}
-          className="flex min-h-touch items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-orange-600 transition-colors active:bg-(--pos-s-surface-2) dark:text-orange-300"
-          aria-label={t('sync.capacity.title', { defaultValue: 'Sync backlog growing' })}
-        >
-          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-          {/* The rail is too narrow for the words; the icon opens the same details. */}
-          {!inRail && t('sync.capacity.badge', {
-            defaultValue: 'Backlog {{percent}}%',
-            percent: capacityWarningPercent,
-          })}
-        </button>
-      )}
-
-      {showDetailPanel && renderDetailModal()}
-
-      <FinancialSyncPanel
-        isOpen={showFinancialPanel}
-        onClose={() => setShowFinancialPanel(false)}
-        onRefresh={() => {
-          void loadSyncStatus();
-        }}
-        queueSummary={{
-          pending: financialPendingCount,
-          failed: financialFailedCount,
-        }}
-      />
+  const copyFolder = (path: string) => { void bridge.diagnostics.openExportDir(path).catch(error => {
+    console.warn('Failed to open diagnostics export folder:', error);
+  }); };
+  const technicalControls = <>
+    <ZGateSetAsidePanel refreshEpoch={zRefreshEpoch} />
+    <div className="flex flex-wrap gap-2">
+      <TillHealthButton onClick={() => void handleForceSync()} disabled={syncStatus.syncInProgress}>{t('sync.actions.retry')}</TillHealthButton>
+      <TillHealthButton onClick={() => void handlePrimarySyncNow()} disabled={!!primaryActionBusy || systemLoading || healthAvailability !== 'ready' || parkedOnly}>
+        {t('tillHealth.action.send')}
+      </TillHealthButton>
+      <TillHealthButton onClick={() => setShowFinancialPanel(true)}>{t('sync.dashboard.financialSummaryTitle')}</TillHealthButton>
+      <TillHealthButton onClick={handleOpenPrinterSettings}>{t('tillHealth.action.printer')}</TillHealthButton>
+      <TillHealthButton onClick={() => {
+        closeHealth();
+        window.dispatchEvent(new CustomEvent('pos:recovery-route', { detail: { screen: 'connectionSettings' } }));
+      }}>{t('tillHealth.action.openConnection')}</TillHealthButton>
     </div>
-  );
+  </>;
+  const diagnostics = <div className="space-y-2">
+    {remoteSupportUnavailable && <code data-testid="health-remote-support-details">{remoteSupportUnavailable.code} · {remoteSupportUnavailable.status}</code>}
+    {healthReadFailures.length > 0 && <code>{healthReadFailures.join(', ')}</code>}
+    <p>{t('sync.healthModal.advanced.fields.lastSync')} · {systemHealth?.lastSyncTime || syncStatus.lastSync || t('sync.healthModal.advanced.values.never')}</p>
+    <p><span>{t('sync.healthModal.advanced.fields.syncBacklog')}</span> · {backlogUnavailable ? t('sync.healthModal.status.unavailable') : formatNumber(totalBacklog)}</p>
+    <p>{t('sync.healthModal.advanced.fields.financialFailed')} · {formatNumber(financialFailedCount)}</p>
+    <p>{t('sync.healthModal.advanced.fields.printerFailures')} · {formatNumber(countDesktopPrinterFailures(systemHealth))}</p>
+    <p>{t('sync.healthModal.advanced.fields.crashCount')} · {formatNumber(systemHealth?.panicCount ?? 0)}</p>
+    <code>{[realtimeStatus, effectiveLastParitySync?.error, effectiveLastParitySync?.reason, syncStatus.error].map(value => sanitizeOperationalError(value)).filter(Boolean).join(' · ')}</code>
+    {recoveryParityItems.length > 0 && <h4>{t('sync.healthModal.syncDetails')}</h4>}
+    {recoveryParityItems.slice(0, 10).map(item => {
+      const queueStatus = String(item.status);
+      const status = queueStatus === 'pending' || queueStatus === 'deferred' ? 'waiting'
+        : queueStatus === 'failed' || queueStatus === 'conflict' || queueStatus === 'dead_letter' ? 'failed' : 'unknown';
+      return <div key={item.id}>
+        <p>{t(`tillHealth.status.${status}`)} · <code>{item.id}</code></p>
+        {item.nextRetryAt && <p>{t('sync.healthModal.failure.nextRetryValue', {
+          value: formatDateTime(item.nextRetryAt, {}, i18n?.resolvedLanguage || i18n?.language),
+        })}</p>}
+      </div>;
+    })}
+    {syncTargetFeedback.map(result => <p key={result.id}><code>{result.id}</code> · {t(`recovery.actionStatus.${result.outcome}`)}</p>)}
+  </div>;
+
+  return <div className={`relative flex items-center ${inRail ? 'flex-col gap-2' : 'gap-1.5'} ${className}`}>
+      <button type="button" className={`till-health-launcher flex min-h-touch min-w-touch items-center justify-center p-2 ${inRail ? 'h-12 w-12 rounded-xl' : 'rounded-full'}`}
+      onClick={() => { if (showDetailPanel) closeHealth(); else { setFocus(null); setShowDetailPanel(true); void loadSystemHealth(); } }}
+      aria-label={`${t('tillHealth.title')} · ${t(`tillHealth.states.${state}.title`)}`}
+      data-heart-tone={tone === 'ok' ? 'healthy' : tone === 'bad' ? 'error' : 'attention'} data-health-tone={tone}
+      aria-haspopup="dialog" aria-expanded={showDetailPanel} aria-controls={showDetailPanel ? healthDialogId : undefined}>
+      <svg className="h-6 w-6" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.218l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
+      </svg>
+    </button>
+    {capacityWarning && <button type="button" onClick={() => { setShowDetailPanel(true); void loadSystemHealth(); }}
+      className="flex min-h-touch min-w-touch items-center justify-center rounded-xl active:bg-(--pos-s-surface-2)"
+      aria-label={t('tillHealth.capacity')}><AlertTriangle className="h-4 w-4" aria-hidden="true" /></button>}
+    {showDetailPanel && <TillHealthWindow id={healthDialogId} state={state} availability={healthAvailability} cards={cards} services={services}
+      isShiftActive={isShiftActive} online={online} lastChecked={lastHealthCheckedAt} dayStart={endOfDayStatus.dayStartAt ?? null}
+      busy={systemLoading || actions.busy || Boolean(primaryActionBusy)} canAskSupport={availableToAsk}
+      supportCanConnect={supportProtocolAvailable && online && !remoteSupportUnavailable}
+      supportUnavailable={Boolean(remoteSupportUnavailable)} supportFlowOpen={!focus?.orderId && supportLive} focusKey={focus?.orderId} orderDetails={orderDetails}
+      onClose={closeHealth} onRefresh={() => void loadSystemHealth()} onAskSupport={() => { void supportSession?.start(); }}
+      onCardAction={(card, action) => {
+        if (action && card.issue) actions.handleActionClick(card.issue, action);
+        else if (card.localAction === 'printer') handleOpenPrinterSettings();
+        else if (card.localAction === 'send') void handlePrimarySyncNow();
+      }}
+      onDismissSolved={card => {
+        if (card.sendPhase === 'solved') setSendState(undefined);
+        else if (card.issue) actions.dismissAttempt(card.issue.id);
+      }}
+      overlays={<>
+        {actions.busy && actions.confirmationModal}
+        <TillHealthConfirmation confirmation={actions.confirmingAction} busy={actions.busy}
+          onClose={() => actions.setConfirmingAction(null)} onConfirm={actions.handleConfirmDestructiveAction} />
+        {showFinancialPanel && <FinancialSyncPanel isOpen onClose={() => setShowFinancialPanel(false)} onRefresh={() => { void loadSyncStatus(); }}
+          queueSummary={{ pending: financialPendingCount, failed: financialFailedCount }} />}
+      </>}
+      support={<TillHealthSupport issues={focusedIssues} recentActions={recentRecoveryActions} terminal={terminalContext}
+        online={online} stale={healthAvailability !== 'ready' || systemLoading} busy={actions.busy}
+        supportTools={technicalControls} diagnostics={diagnostics} previousReports={previousReports} lastReport={lastReport}
+        historyUnavailable={historyUnavailable} sending={sendingSupport}
+        onOpenCopy={copyFolder} onIssueAction={actions.handleActionClick}
+        onReport={(issue, action) => {
+          if (issue && action) actions.handleActionClick(issue, action);
+          else void handleReport();
+        }} />} />}
+  </div>;
 };

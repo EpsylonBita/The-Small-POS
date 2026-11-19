@@ -514,15 +514,24 @@ pub(crate) fn build_system_health(db: &DbState, business: &DbState) -> Result<Va
         Value::Null
     });
     let credential_state = get_credential_state(db);
+    let mut order_evidence_failure_code: Option<String> = None;
     let order_issue_evidence = crate::order_notice_recovery::observe(
         "health_order_evidence",
         crate::order_notice_recovery::observer_connection(&db.db_path, false)
             .and_then(|conn| crate::order_notice_evidence::collect(&conn)),
     )
-    .unwrap_or_else(|_| {
+    .unwrap_or_else(|error| {
         observer_failures.push("orderIssueEvidence");
+        // What reaches us names the kind of failure, never its text.
+        order_evidence_failure_code =
+            Some(crate::order_notice_recovery::notice_failure_code(&error));
         Value::Null
     });
+    // Founder, 17/11/2026: a till that cannot read the details of its order
+    // issues says so itself, with how many issues it could not describe when
+    // the list of them was readable.
+    let order_evidence_failure = order_evidence_failure_code
+        .map(|code| json!({"code": code, "open_notices": order_notices.as_array().map(Vec::len)}));
     let checkout_payment_blockers = get_checkout_payment_blockers(db).unwrap_or_else(|error| {
         warn!(
             error = %error,
@@ -564,6 +573,7 @@ pub(crate) fn build_system_health(db: &DbState, business: &DbState) -> Result<Va
         "parityQueueStatus": parity_queue_status,
         "orderNotices": order_notices,
         "orderIssueEvidence": order_issue_evidence,
+        "orderIssueEvidenceFailure": order_evidence_failure,
         "orderNoticeGate": crate::order_notice_gate::health(&db.db_path),
         "observerFailures": observer_failures,
         "financialQueueStatus": financial_queue_status,
@@ -764,7 +774,12 @@ fn get_sync_blocker_details_json(
     parity_blockers: Vec<Value>,
 ) -> Value {
     let mut combined = match serde_json::to_value(details) {
-        Ok(Value::Array(items)) => items,
+        Ok(Value::Array(mut items)) => {
+            for item in &mut items {
+                item["queue"] = json!("sync_queue");
+            }
+            items
+        }
         _ => Vec::new(),
     };
     combined.extend(parity_blockers);
@@ -1405,10 +1420,16 @@ fn export_diagnostics_bundle_with_log_dir(
     let export_started = std::time::Instant::now();
     let generated_at = chrono::Utc::now();
     let timestamp = generated_at.format("%Y%m%d_%H%M%S").to_string();
-    let zip_name = format!("thesmall-pos-diagnostics-{timestamp}.zip");
+    let zip_name = format!(
+        "thesmall-pos-diagnostics-{timestamp}-{}.zip",
+        uuid::Uuid::new_v4()
+    );
     let zip_path = output_dir.join(&zip_name);
 
-    let file = fs::File::create(&zip_path)
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&zip_path)
         .map_err(|e| format!("Failed to create diagnostics zip: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
 

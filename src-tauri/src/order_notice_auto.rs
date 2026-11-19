@@ -1,5 +1,4 @@
-//! One durable automatic attempt per original refused header edit. The intent
-//! survives a crash; an interrupted attempt is left for a person, never replayed.
+//! Durable, bounded retries of failures known to precede an order change.
 use crate::{db::DbState, order_notice_recovery as owner, sync::SyncState};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -84,14 +83,51 @@ pub(crate) fn set_editing(session: String, ids: Vec<String>) -> Result<(), Strin
 pub(crate) fn editing(order: &str) -> bool {
     editors().editing(order)
 }
+/// Holds the editor registry across a confirmed owner's local transaction.
+pub(crate) struct UneditedOrder {
+    _guard: std::sync::MutexGuard<'static, Editors>,
+}
+
+pub(crate) fn claim_unedited_order(order: &str) -> Result<UneditedOrder, String> {
+    let guard = editors()
+        .0
+        .try_lock()
+        .map_err(|_| "ORDER_CORRECTION_NEWER_HEADER_EDIT")?;
+    if guard.values().any(|ids| ids.iter().any(|id| id == order)) {
+        return Err("ORDER_CORRECTION_NEWER_HEADER_EDIT".into());
+    }
+    Ok(UneditedOrder { _guard: guard })
+}
+
 pub(crate) fn clear_window(window: &str) {
     editors().clear_window(window)
 }
 
+const ATTEMPT_CAP: i64 = 3;
+const COOLDOWN_MS: i64 = 60_000;
+
 pub(crate) fn eligible(conn: &Connection, row: &owner::Refused) -> Result<bool, String> {
     // Any replacement (manual or automatic) is terminal for automatic retries.
-    conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM recovery_action_log WHERE id=?1 OR (json_extract(payload_json,'$.nativeOrderCorrection')=1 AND json_extract(payload_json,'$.replacementQueueId')=?2))",
-        params![format!("automatic-order-header:{}", row.id), row.id], |r| r.get(0)).map_err(|e| e.to_string())
+    conn.query_row(
+        "SELECT NOT EXISTS(
+            SELECT 1 FROM recovery_action_log
+            WHERE (id=?1 AND NOT (
+                COALESCE(json_extract(payload_json,'$.outcome'),'')='failed'
+                AND COALESCE(json_extract(payload_json,'$.attemptCount'),?3)<?3
+                AND COALESCE(json_extract(payload_json,'$.retryAtMs'),?4+1)<=?4
+            ))
+            OR (json_extract(payload_json,'$.nativeOrderCorrection')=1
+                AND json_extract(payload_json,'$.replacementQueueId')=?2)
+        )",
+        params![
+            format!("automatic-order-header:{}", row.id),
+            row.id,
+            ATTEMPT_CAP,
+            chrono::Utc::now().timestamp_millis()
+        ],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
 }
 
 pub(crate) fn admitted(
@@ -104,22 +140,70 @@ pub(crate) fn admitted(
     Ok(online && !busy && !edited && eligible(conn, row)?)
 }
 
-/// The primary key is the cross-window/restart claim. Caller owns the immediate
-/// transaction; claiming is the attempt's first durable action, before I/O.
+/// Caller owns an immediate transaction. Only an explicitly retryable failed
+/// claim can be used again. A legacy claim has no retry metadata.
 pub(crate) fn claim(conn: &Connection, row: &owner::Refused) -> Result<bool, String> {
     if !eligible(conn, row)? {
         return Ok(false);
     }
     let scope = crate::table_session_cache::current_scope(conn)?;
-    conn.execute("INSERT OR IGNORE INTO recovery_action_log(id,action_id,issue_code,issue_id,recipe_id,recipe_version,entity_type,entity_id,order_id,success,created_at,payload_json) VALUES (?1,?2,'customer_correction_refused',?3,'order-customer-correction.resend',1,'order',?4,?4,0,?5,?6)",
-        params![format!("automatic-order-header:{}",row.id), owner::RESEND, row.id, row.order, chrono::Utc::now().to_rfc3339(), json!({"openedAt":owner::opened_at(conn, &row.id)?,"automatic":true,"automaticIntent":true,"outcome":"running","organizationId":scope.organization,"retiredQueueId":row.id,"retiredRequest":row.data,"reason":row.error}).to_string()])
+    conn.execute(
+        "INSERT INTO recovery_action_log(id,action_id,issue_code,issue_id,recipe_id,recipe_version,entity_type,entity_id,order_id,success,created_at,payload_json)
+         VALUES (?1,?2,'customer_correction_refused',?3,'order-customer-correction.resend',1,'order',?4,?4,0,?5,?6)
+         ON CONFLICT(id) DO UPDATE SET created_at=excluded.created_at, error_message=NULL,
+           payload_json=json_set(excluded.payload_json,
+             '$.attemptCount',json_extract(recovery_action_log.payload_json,'$.attemptCount')+1,
+             '$.attemptFailures',json(COALESCE(json_extract(recovery_action_log.payload_json,'$.attemptFailures'),'[]')))",
+        params![format!("automatic-order-header:{}",row.id), owner::RESEND, row.id, row.order, chrono::Utc::now().to_rfc3339(),
+            json!({"openedAt":owner::opened_at(conn, &row.id)?,"automatic":true,"automaticIntent":true,"outcome":"running","attemptCount":1,"organizationId":scope.organization,"retiredQueueId":row.id,"retiredRequest":row.data,"reason":row.error}).to_string()])
         .map(|count| count == 1).map_err(|e| e.to_string())
 }
 
-pub(crate) fn fail(conn: &Connection, queue: &str, reason: &str) -> Result<(), String> {
-    conn.execute("UPDATE recovery_action_log SET payload_json=json_set(payload_json,'$.outcome','failed','$.machineReason',?2) WHERE id=?1 AND json_extract(payload_json,'$.outcome')='running'",
-        params![format!("automatic-order-header:{queue}"), reason]).map_err(|e| e.to_string())?;
+fn fail_at(
+    conn: &Connection,
+    queue: &str,
+    reason: &str,
+    retry_at: Option<i64>,
+) -> Result<(), String> {
+    conn.execute("UPDATE recovery_action_log SET error_message=?2,
+        payload_json=json_set(payload_json,'$.outcome','failed','$.machineReason',?2,'$.retryAtMs',?3,
+          '$.attemptFailures',json_insert(COALESCE(json_extract(payload_json,'$.attemptFailures'),'[]'),
+            '$[#]',json_object('reason',?2,'finishedAt',?4)))
+        WHERE id=?1 AND json_extract(payload_json,'$.outcome')='running'",
+        params![format!("automatic-order-header:{queue}"), reason, retry_at, chrono::Utc::now().to_rfc3339()]).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn fail(conn: &Connection, queue: &str, reason: &str) -> Result<(), String> {
+    fail_at(conn, queue, reason, None)
+}
+
+#[derive(Debug)]
+pub(crate) struct FailedAttempt {
+    reason: String,
+    retry_at: Option<i64>,
+}
+
+impl FailedAttempt {
+    fn new(error: &str, entered_apply: bool) -> Self {
+        let mut reason = crate::order_notice_evidence::machine_code(error);
+        if reason == "UNCLASSIFIED_REFUSAL" {
+            reason = owner::notice_failure_code(error);
+        }
+        let retry_at = (!entered_apply
+            && matches!(
+                reason.as_str(),
+                "NOTICE_DATABASE_BUSY"
+                    | "ORDER_NOTICE_DATABASE_UNAVAILABLE"
+                    | "PREEMPTED_BY_CRITICAL_OPERATION"
+                    | "CONCURRENT_OPERATION"
+                    | "ORDER_BEING_EDITED"
+                    | "EDIT_CANONICAL_PREFLIGHT_UNREACHABLE"
+            ))
+        .then(|| chrono::Utc::now().timestamp_millis() + COOLDOWN_MS);
+        Self { reason, retry_at }
+    }
 }
 
 pub(crate) fn apply(
@@ -143,119 +227,109 @@ pub(crate) fn apply(
     Ok(result)
 }
 
-async fn attempt(
+pub(crate) async fn attempt(
     db: &DbState,
     state: &SyncState,
     cancel: &tokio_util::sync::CancellationToken,
     id: &str,
-) -> Result<(), String> {
+) -> Result<Option<FailedAttempt>, String> {
     if !owner::online() || crate::support::critical_op::global().active() {
-        return Ok(());
+        return Ok(None);
     }
     crate::support::remedies::recipe("order-customer-correction.resend", 1)?;
     let permit = crate::support::critical_op::global()
         .try_begin_support(true, None)
         .map_err(|_| "CONCURRENT_OPERATION")?;
-    // The normal binding fence is retained, but its local steps use a private
-    // handle. The automatic helper never acquires the business mutex.
     let isolated = DbState {
         conn: Mutex::new(owner::observer_connection(&db.db_path, true)?),
         db_path: db.db_path.clone(),
     };
-    let db = &isolated;
-    let prepared = crate::sync::guarded_renderer_local_mutation(db, state, cancel, |conn| {
-        let result = (|| {
-            let tx = permit.begin_write_nowait(conn)?;
-            let Some(row) = owner::refused(&tx, id)? else {
-                return Ok(None);
-            };
-            if !admitted(
-                &tx,
-                &row,
-                owner::online(),
-                permit.is_cancelled(),
-                editing(&row.order),
-            )? {
-                return Ok(None);
-            }
-            if !claim(&tx, &row)? {
-                return Ok(None);
-            }
-            // Capture failure consumes the attempt too, with no order changes.
-            let before = owner::capture(&tx, &row);
-            if let Err(reason) = &before {
-                fail(
-                    &tx,
-                    &row.id,
-                    &crate::order_notice_evidence::machine_code(reason),
-                )?;
-            }
-            tx.commit().map_err(|e| e.to_string())?;
-            Ok(before.ok().map(|before| (row, before)))
-        })();
-        conn.progress_handler(0, None::<fn() -> bool>);
-        result
-    })
-    .await?;
+    let context =
+        crate::sync::RendererParityExecutionContext::new(&isolated, state, cancel).await?;
+    let prepared = context.run_local_step(|conn| {
+        let Some(row) = owner::refused(conn, id)? else {
+            return Ok(None);
+        };
+        if !admitted(
+            conn,
+            &row,
+            owner::online(),
+            permit.is_cancelled(),
+            editing(&row.order),
+        )? {
+            return Ok(None);
+        }
+        // Capturing original lines and header state is read-only. Keep it
+        // outside the deadline for the short, durable intent transaction.
+        let before = owner::capture(conn, &row);
+        let tx = permit.begin_write_nowait(conn)?;
+        let Some(current) = owner::refused(&tx, id)? else {
+            return Ok(None);
+        };
+        if current.data != row.data
+            || current.status != row.status
+            || current.error != row.error
+            || !claim(&tx, &row)?
+        {
+            return Ok(None);
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(Some((row, before)))
+    })?;
     let Some((row, before)) = prepared else {
-        owner::notify_queue_changed();
-        return Ok(());
+        return Ok(None);
     };
     owner::notify_queue_changed();
+    let mut entered_apply = false;
     let result: Result<(), String> = async {
-        let remote = crate::order_header_preflight::remote_id(&before)?
-            .ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
-        let answer = crate::admin_fetch_detailed(
-            Some(db),
-            &format!("/api/pos/orders/sync?order_id={remote}"),
-            "GET",
-            None,
-        )
-        .await
-        .map_err(|_| "EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
+        let before = before?;
+        let answer = owner::fetch_canonical(&isolated, &before).await?;
         owner::verify(&before, &answer)?;
-        crate::sync::guarded_renderer_local_mutation(db, state, cancel, |conn| {
-            let result = (|| {
-                let tx = permit.begin_write_nowait(conn)?;
-                // Held until this transaction ends: a lease is either seen
-                // here or registered after the commit. Its other holders keep
-                // it for a map operation only, so waiting cannot consume the
-                // order's single automatic attempt the way a refusal would.
-                let leases = editors()
-                    .0
-                    .lock()
-                    .map_err(|_| "ORDER_EDIT_LEASE_UNAVAILABLE")?;
-                if leases.values().any(|ids| ids.contains(&row.order)) {
-                    return Err("ORDER_BEING_EDITED".into());
-                }
-                if !owner::online() {
-                    return Err("EDIT_CANONICAL_PREFLIGHT_REQUIRED".into());
-                }
-                apply(&tx, &row, &before, &answer)?;
-                if permit.is_cancelled() {
-                    return Err("CONCURRENT_OPERATION".into());
-                }
-                tx.commit().map_err(|e| e.to_string())?;
-                Ok(())
-            })();
-            conn.progress_handler(0, None::<fn() -> bool>);
-            result
+        context.run_local_step(|conn| {
+            let tx = permit.begin_write_nowait(conn)?;
+            // A lease is seen here or registered after the transaction ends.
+            let leases = editors()
+                .0
+                .lock()
+                .map_err(|_| "ORDER_EDIT_LEASE_UNAVAILABLE")?;
+            if leases.values().any(|ids| ids.contains(&row.order)) {
+                return Err("ORDER_BEING_EDITED".into());
+            }
+            if !owner::online() {
+                return Err("EDIT_CANONICAL_PREFLIGHT_UNREACHABLE".into());
+            }
+            if permit.is_cancelled() {
+                return Err("CONCURRENT_OPERATION".into());
+            }
+            entered_apply = true;
+            apply(&tx, &row, &before, &answer)?;
+            if permit.is_cancelled() {
+                return Err("CONCURRENT_OPERATION".into());
+            }
+            tx.commit().map_err(|e| e.to_string())
         })
-        .await
     }
     .await;
-    if let Err(reason) = result {
-        let conn = db.conn.lock().map_err(|_| "AUTOMATIC_AUDIT_UNAVAILABLE")?;
-        let tx = permit.begin_write_nowait(&conn)?;
-        fail(
-            &tx,
-            &row.id,
-            &crate::order_notice_evidence::machine_code(&reason),
-        )?;
-        tx.commit().map_err(|e| e.to_string())?;
-    }
-    owner::notify_queue_changed();
-    Ok(())
+    Ok(result
+        .err()
+        .map(|reason| FailedAttempt::new(&reason, entered_apply)))
+}
+
+/// Failure recording owns a fresh permit. If its non-waiting writer is busy,
+/// the worker retains the classified failure and tries the audit again before
+/// considering a new claim for this row. It never reuses a cancelled permit.
+pub(crate) fn persist_failure(
+    path: &std::path::Path,
+    queue: &str,
+    failure: &FailedAttempt,
+) -> Result<(), String> {
+    let permit = crate::support::critical_op::global()
+        .try_begin_support(true, None)
+        .map_err(str::to_string)?;
+    let conn = owner::observer_connection(path, true)?;
+    let tx = permit.begin_write_nowait(&conn)?;
+    fail_at(&tx, queue, &failure.reason, failure.retry_at)?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 pub(crate) fn start(
@@ -267,18 +341,31 @@ pub(crate) fn start(
         return;
     }
     tauri::async_runtime::spawn(async move {
-        // A crash after claiming cannot cause a second attempt. The queue is
-        // untouched unless its final transaction committed.
+        let mut startup_cleanup = true;
+        let mut pending_failures = HashMap::new();
         loop {
             if cancel.is_cancelled() {
                 break;
             }
-            // Also finishes a prior pass whose failure audit was pre-empted.
-            // This single native worker never has an active attempt here.
-            let _ = owner::observe(
-                "automatic_startup",
-                interrupt_previous_attempts(&db.db_path),
-            );
+            if startup_cleanup {
+                if owner::observe(
+                    "automatic_startup",
+                    interrupt_previous_attempts(&db.db_path),
+                )
+                .is_err()
+                {
+                    tokio::select! { _ = cancel.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(5)) => {} }
+                    continue;
+                }
+                startup_cleanup = false;
+            }
+            pending_failures.retain(|id: &String, failure| {
+                owner::observe(
+                    "automatic_failure_audit",
+                    persist_failure(&db.db_path, id, failure),
+                )
+                .is_err()
+            });
             let ids = owner::observe(
                 "automatic_notices",
                 owner::observer_connection(&db.db_path, false)
@@ -293,12 +380,27 @@ pub(crate) fn start(
                 }
                 if notice["kind"] == "customer_correction_refused" {
                     if let Some(id) = notice["queueId"].as_str() {
-                        let reason = owner::observe(
+                        if pending_failures.contains_key(id) {
+                            continue;
+                        }
+                        let reason = match owner::observe(
                             "automatic_attempt",
                             attempt(&db, &state, &cancel, id).await,
-                        )
-                        .err()
-                        .map(|error| crate::order_notice_evidence::machine_code(&error));
+                        ) {
+                            Ok(Some(failure)) => {
+                                if owner::observe(
+                                    "automatic_failure_audit",
+                                    persist_failure(&db.db_path, id, &failure),
+                                )
+                                .is_err()
+                                {
+                                    pending_failures.insert(id.into(), failure);
+                                }
+                                None
+                            }
+                            Ok(None) => None,
+                            Err(error) => Some(owner::notice_failure_code(&error)),
+                        };
                         if let Ok(mut deferred) = DEFERRED.get_or_init(Mutex::default).try_lock() {
                             if let Some(reason) = reason {
                                 deferred.insert(id.into(), reason);
@@ -321,7 +423,7 @@ fn interrupt_previous_attempts(path: &std::path::Path) -> Result<(), String> {
         .map_err(str::to_string)?;
     let conn = owner::observer_connection(path, true)?;
     let tx = permit.begin_write_nowait(&conn)?;
-    tx.execute("UPDATE recovery_action_log SET payload_json=json_set(payload_json,'$.outcome','failed','$.machineReason','AUTOMATIC_ATTEMPT_INTERRUPTED') WHERE json_extract(payload_json,'$.automaticIntent')=1 AND json_extract(payload_json,'$.outcome')='running'", [])
+    tx.execute("UPDATE recovery_action_log SET error_message='AUTOMATIC_ATTEMPT_INTERRUPTED',payload_json=json_set(payload_json,'$.outcome','failed','$.machineReason','AUTOMATIC_ATTEMPT_INTERRUPTED') WHERE json_valid(payload_json) AND json_extract(payload_json,'$.automaticIntent')=1 AND json_extract(payload_json,'$.outcome')='running'", [])
         .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
@@ -329,6 +431,39 @@ fn interrupt_previous_attempts(path: &std::path::Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_change_failures_retry_until_the_persisted_cap_but_apply_failures_do_not() {
+        let conn = crate::commands::orders::driver_restore_tests::test_conn();
+        crate::commands::orders::driver_restore_tests::paid_delivery_order(&conn);
+        let row = owner::Refused {
+            id: "retry-cap-fixture".into(),
+            order: crate::commands::orders::driver_restore_tests::ORDER.into(),
+            data: "{}".into(),
+            error: "UNKNOWN_CONFLICT_REVIEW".into(),
+            status: "conflict".into(),
+        };
+        conn.execute("INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,created_at,conflict_strategy,version,status)
+                      VALUES(?1,'orders',?2,'UPDATE','{}',?3,'2026-11-18T04:13:00Z','server-wins',1,'conflict')",
+            params![row.id, row.order, crate::commands::orders::driver_restore_tests::ORG]).unwrap();
+        for _ in 0..ATTEMPT_CAP {
+            let tx = crate::db::immediate_transaction(&conn).unwrap();
+            assert!(claim(&tx, &row).unwrap());
+            let refusal = FailedAttempt::new("ORDER_BEING_EDITED", false);
+            assert!(refusal.retry_at.is_some());
+            fail_at(&tx, &row.id, &refusal.reason, refusal.retry_at).unwrap();
+            tx.commit().unwrap();
+            assert!(!eligible(&conn, &row).unwrap());
+            conn.execute("UPDATE recovery_action_log SET payload_json=json_set(payload_json,'$.retryAtMs',0)", []).unwrap();
+        }
+        assert!(!eligible(&conn, &row).unwrap());
+        let history: i64 = conn.query_row("SELECT json_array_length(payload_json,'$.attemptFailures') FROM recovery_action_log",[],|r|r.get(0)).unwrap();
+        assert_eq!(history, ATTEMPT_CAP);
+        assert!(FailedAttempt::new("NOTICE_DATABASE_BUSY", true)
+            .retry_at
+            .is_none());
+        assert!(FailedAttempt::new("HTTP_403", false).retry_at.is_none());
+    }
 
     /// A lease change that meets an automatic attempt's final transaction is
     /// never lost: registering waits for it, and a closed window is released

@@ -3084,7 +3084,7 @@ mod dto_tests {
         .expect_err("no session, no decision");
         assert!(matches!(
             refused,
-            crate::auth::GuardedCommandError::Structured(ref error) if error.code == "UNAUTHORIZED"
+            crate::auth::GuardedCommandError::Structured(ref error) if error.code == "AUTH_SESSION_REQUIRED"
         ));
         assert_eq!(set_aside_status(&db), "duplicate_review");
 
@@ -3208,7 +3208,7 @@ mod dto_tests {
         .expect_err("no session, no decision");
         assert!(matches!(
             refused,
-            crate::auth::GuardedCommandError::Structured(ref error) if error.code == "UNAUTHORIZED"
+            crate::auth::GuardedCommandError::Structured(ref error) if error.code == "AUTH_SESSION_REQUIRED"
         ));
         assert_eq!(remaining(&db), 1);
 

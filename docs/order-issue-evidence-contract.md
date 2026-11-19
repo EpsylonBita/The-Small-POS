@@ -67,3 +67,30 @@ cargo fmt --check
 ```
 
 Results: the final selected Rust run passed all 61 tests (0 failed, 4986 filtered out); `cargo fmt --check` passed. Scoped `git diff --check` passed. No full Rust suite, renderer suite, live incident submission or admin-app execution was performed for this native contract alignment. No commits were made.
+
+## Tomikro follow-up, 18 November 2026
+
+Both staff surfaces now record machine reasons for refused customer
+corrections against the notice's queue ID. Health stores the code in
+`error_message` and its audit payload. The order screen updates the
+employee-attempt record. An incorrect PIN stays in the PIN prompt with its
+existing copy and records `AUTH_PIN_WRONG` while the person can try again.
+The incident projector recognizes the following additional causes:
+
+- `AUTH_SESSION_REQUIRED` for a missing login, `AUTH_SESSION_EXPIRED` for a
+  retained login that needs PIN renewal, and `AUTH_SHIFT_REQUIRED` when the
+  active shift is ineligible.
+- `AUTH_PIN_WRONG`, `AUTH_LOCKED_OUT` and `AUTH_CONFIRMATION_CANCELLED`.
+- Leading snapshot, payload, set-aside, notice and admission codes.
+  `NOTICE_STALE` identifies a stale action separately from native recipe
+  admission. `NOTICE_DATABASE_BUSY` identifies zero-wait writer contention.
+
+Only the leading code or the code immediately inside a numeric HTTP
+envelope is projected. The rest of the diagnostic message is discarded.
+The automatic audit retains bounded retry timing and failure history
+locally. The incident still carries the same three attempt fields and no
+request or customer values. See the known incident and its native
+regressions in [Order notice observer containment](order-notice-observer-containment.md).
+The OrderSyncNotice and SupportManualGuardParity renderer regressions
+exercise plain instructions and demonstrate that a code reaches the
+recorded employee attempt without the diagnostic message.

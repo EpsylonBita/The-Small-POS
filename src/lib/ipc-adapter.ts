@@ -1664,7 +1664,13 @@ export interface EcrDiscoveryResponse {
  */
 export interface EcrDeviceAdmissionResult {
   success: boolean;
-  cardTerminal: { admitted: boolean; fetchedAt: string | null };
+  cardTerminal: {
+    admitted: boolean;
+    fetchedAt: string | null;
+    organizationId: string | null;
+    branchId: string | null;
+    terminalId: string | null;
+  };
   cashRegister: {
     admitted: boolean;
     fetchedAt: string | null;
@@ -2839,6 +2845,7 @@ export interface PlatformBridge {
     ): Promise<DiagnosticsExportResponse>;
     openExportDir(path: string): Promise<DiagnosticsOpenExportDirResponse>;
     sendRemoteIncident(options?: DiagnosticsExportOptions): Promise<RemoteIncidentReportResponse>;
+    listReports(): Promise<RemoteIncidentReportResponse[]>;
     checkDeliveredOrders(): Promise<any>;
     fixMissingDriverIds(driverId: string): Promise<any>;
   };
@@ -3387,6 +3394,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "diagnostics:export": "diagnostics.export",
   "diagnostics:open-export-dir": "diagnostics.openExportDir",
   "diagnostics:send-remote-incident": "diagnostics.sendRemoteIncident",
+  "diagnostics:list-reports": "diagnostics.listReports",
   "diagnostic:check-delivered-orders": "diagnostics.checkDeliveredOrders",
   "diagnostic:fix-missing-driver-ids": "diagnostics.fixMissingDriverIds",
   "recovery:list-points": "recovery.listPoints",
@@ -4656,6 +4664,7 @@ export class TauriBridge implements PlatformBridge {
     openExportDir: (path: string) =>
       this.inv("diagnostics:open-export-dir", { path }),
     sendRemoteIncident: (options?: DiagnosticsExportOptions) => this.inv("diagnostics:send-remote-incident", ...buildDiagnosticsExportArgs(options)),
+    listReports: () => this.inv("diagnostics:list-reports"),
     checkDeliveredOrders: () => this.inv("diagnostic:check-delivered-orders"),
     fixMissingDriverIds: (driverId: string) =>
       this.inv("diagnostic:fix-missing-driver-ids", driverId),

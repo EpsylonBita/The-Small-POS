@@ -1,9 +1,9 @@
+import { applyCardProviderSnapshot, clearCardProviderMark } from '../cardProviderMark';
+import { seedCardProviderMark } from './cardProviderMark.fixture';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Desktop manual card rule (Android parity: requireNoConnectedPaymentProvider).
-// A manual card is admitted only with no enabled ECR terminal on this till AND
-// a fresh, exact-scope server answer that no payment provider is connected.
-// Every other answer fails closed and nothing is cached between asks.
+// Set-mark fixtures keep the existing exact-scope resolver. Empty marks below
+// record without reads, with only cached evidence when a no-provider answer exists.
 
 const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
@@ -48,6 +48,7 @@ beforeEach(() => {
   mocks.scope.organizationId = 'org-a';
   mocks.scope.branchId = 'branch-a';
   mocks.scope.terminalId = 'terminal-a';
+  seedCardProviderMark();
   mocks.fetch.mockReset();
   mocks.getDefaultTerminal.mockReset();
   mocks.getDeviceStatus.mockReset();
@@ -104,10 +105,19 @@ describe('admitManualCard', () => {
     ['a network error', () => mocks.fetch.mockRejectedValue(new Error('network down'))],
     ['a failed device lookup', () => mocks.getDefaultTerminal.mockRejectedValue(new Error('db locked'))],
     ['an unreadable device lookup', () => mocks.getDefaultTerminal.mockResolvedValue({ success: false, error: 'boom' })],
-    ['a missing terminal identity', () => { mocks.scope.terminalId = ''; }],
   ])('fails closed on %s', async (_label, arrange) => {
     arrange();
     expect(await admitManualCard()).toEqual({ admitted: false, reason: 'unavailable' });
+  });
+
+  // Strict identity: a stored "connected" counts only for a complete, equal
+  // identity. A blank id makes the mark unknown, and unknown records at once.
+  it.each(['organizationId', 'branchId', 'terminalId'] as const)('a blank %s voids the connected mark: the card records with no read', async key => {
+    mocks.scope[key] = '';
+    expect(await admitManualCard()).toEqual({ admitted: true, basis: 'none' });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(mocks.getDefaultTerminal).not.toHaveBeenCalled();
+    expect(mocks.getDeviceAdmission).not.toHaveBeenCalled();
   });
 
   it('drops an answer read across a re-pair of the terminal', async () => {
@@ -224,7 +234,50 @@ describe('manualCardAdmissionMetadata', () => {
   it('carries the basis and the answer time, nothing without an admission', () => {
     expect(manualCardAdmissionMetadata({ admitted: true, basis: 'cached', checkedAt: '2026-11-01T09:00:00.000Z' }))
       .toEqual({ admission_basis: 'cached', admission_checked_at: '2026-11-01T09:00:00.000Z' });
+    expect(manualCardAdmissionMetadata({ admitted: true, basis: 'live', checkedAt: '2026-11-06T09:00:00.000Z' }))
+      .toEqual({ admission_basis: 'live', admission_checked_at: '2026-11-06T09:00:00.000Z' });
+    expect(manualCardAdmissionMetadata({ admitted: true, basis: 'none' })).toBeUndefined();
     expect(manualCardAdmissionMetadata({ admitted: false, reason: 'unavailable' })).toBeUndefined();
     expect(manualCardAdmissionMetadata(null)).toBeUndefined();
   });
+});
+
+
+it('records with no provider reads when the mark is empty', async () => {
+  clearCardProviderMark();
+  expect(await admitManualCard()).toEqual({ admitted: true, basis: 'none' });
+  expect(await lookupCardTerminal()).toEqual({ kind: 'none' });
+  expect(mocks.getDefaultTerminal).not.toHaveBeenCalled();
+  expect(mocks.getDeviceAdmission).not.toHaveBeenCalled();
+  expect(mocks.fetch).not.toHaveBeenCalled();
+});
+
+
+it.each(['online', 'offline', 'no snapshot', 'stale row', 'held lock'])('empty mark completes with all reads hanging and no timer: %s', async fixture => {
+  clearCardProviderMark();
+  vi.useFakeTimers();
+  const network = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(fixture !== 'offline');
+  try {
+    for (const read of [mocks.getDefaultTerminal, mocks.getDeviceStatus, mocks.getDeviceAdmission, mocks.fetch]) {
+      read.mockImplementation(() => new Promise(() => {}));
+    }
+    expect(await lookupCardTerminal()).toEqual({ kind: 'none' });
+    const admission = await admitManualCard();
+    expect(admission).toEqual({ admitted: true, basis: 'none' });
+    expect(manualCardAdmissionMetadata(admission)).toBeUndefined();
+    for (const read of [mocks.getDefaultTerminal, mocks.getDeviceStatus, mocks.getDeviceAdmission, mocks.fetch]) {
+      expect(read).not.toHaveBeenCalled();
+    }
+    expect(vi.getTimerCount()).toBe(0);
+  } finally { network.mockRestore(); vi.useRealTimers(); }
+});
+
+it('uses only the cached time for an in-scope no-provider answer, never live evidence', async () => {
+  // The seeded "connected" answer is newer; an older answer would be ignored, so start from an empty mark.
+  clearCardProviderMark();
+  applyCardProviderSnapshot({ success: true, cardTerminal: { ...mocks.scope, admitted: false, fetchedAt: '2026-11-06T08:00:00.000Z' } });
+  const admission = await admitManualCard();
+  expect(manualCardAdmissionMetadata(admission)).toEqual({ admission_basis: 'cached', admission_checked_at: '2026-11-06T08:00:00.000Z' });
+  expect(mocks.getDefaultTerminal).not.toHaveBeenCalled(); expect(mocks.getDeviceAdmission).not.toHaveBeenCalled();
+  expect(mocks.fetch).not.toHaveBeenCalled();
 });

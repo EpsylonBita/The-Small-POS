@@ -1,7 +1,7 @@
 {
   "name": "the-small-pos-tauri",
   "private": true,
-  "version": "1.4.154",
+  "version": "1.4.155",
   "description": "The Small POS - Tauri v2 desktop application",
   "type": "module",
   "scripts": {
@@ -32,6 +32,7 @@
     "pos:tauri:verify:win": "tsc --noEmit && npm run locale:parity && npm run test:support-layer && vite build && powershell -ExecutionPolicy Bypass -File scripts/verify-rust.ps1 && npm run parity:contract && npm run test:native-runtime"
   },
   "dependencies": {
+    "@gsap/react": "^2.1.2",
     "@supabase/realtime-js": "2.110.8",
     "@supabase/supabase-js": "^2.110.8",
     "@tauri-apps/api": "^2.12.4",
@@ -43,6 +44,7 @@
     "@tauri-apps/plugin-updater": "^2.14.1",
     "dompurify": "^3.4.17",
     "framer-motion": "^14.1.0",
+    "gsap": "^3.15.1",
     "i18next": "^26.4.4",
     "libphonenumber-js": "1.13.9",
     "lucide-react": "^1.55.0",

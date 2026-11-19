@@ -3,6 +3,7 @@ import { KitchenDisplayProvider } from './pages/KitchenDisplayOwner';
 import { LocalPreparationScopeSync } from './hooks/useLocalPreparation';
 import React, { lazy, Suspense, useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { HashRouter } from "react-router-dom";
+import { listen } from '@tauri-apps/api/event';
 import { MotionConfig, motion } from "framer-motion";
 import { Toaster, toast } from "react-hot-toast";
 import { AlertTriangle } from "lucide-react";
@@ -13,6 +14,7 @@ import { I18nextProvider } from 'react-i18next';
 import displayI18n from '../lib/i18n';
 import { ModuleProvider } from "./contexts/module-context";
 import { BarcodeScannerProvider } from "./contexts/barcode-scanner-context";
+import { openRecoveryOrderPayment } from './services/OrderPaymentRoute';
 import LoginPage, {
   LOGIN_RETURN_COVER_S,
   LOGIN_RETURN_TOTAL_S,
@@ -38,9 +40,7 @@ import { SupportInteractionHost } from './components/support/SupportOnsiteSheet'
 import { SupportRestoreNotice } from './components/support/SupportRestoreNotice';
 import { CallerIdCustomerSearchModalHost } from "./components/callerid/CallerIdCustomerSearchModalHost";
 import { DeferredModal } from "./components/ui/DeferredModal";
-import SyncRecoveryModal, {
-  type SyncRecoveryOpenContext,
-} from "./components/recovery/SyncRecoveryModal";
+import { openTillHealth, type TillHealthState } from "./components/recovery/till-health-model";
 import PageLoadMotion from "./components/ui/PageLoadMotion";
 import PortaledToaster from "./components/PortaledToaster";
 
@@ -86,6 +86,7 @@ import {
   updateTerminalCredentialCache,
 } from "./services/terminal-credentials";
 import { clearStoredAppointmentClaims } from "./services/appointment-checkout-claims";
+import { startCardProviderMark } from './services/cardProviderMark';
 import { DesktopRealtimeManager } from "./services/RealtimeManager";
 import { RealtimeAuthService } from "./services/RealtimeAuthService";
 import { SupportDoorbell } from './services/support/SupportDoorbell';
@@ -302,6 +303,9 @@ export function ConfigGuard({ children }: { children: React.ReactNode }) {
     configuredState.current = configured;
     setIsConfigured(configured);
   }, []);
+
+  // The card provider mark loads on its own; nothing here waits for it.
+  useEffect(() => startCardProviderMark(), []);
 
   // Check configuration status on startup and sync credentials to in-memory cache
   useEffect(() => {
@@ -769,6 +773,18 @@ function AppContent() {
   const { t } = useI18n();
   const bridge = getBridge();
   const [user, setUser] = useState<any>(null);
+  useEffect(() => {
+    if (isBrowser()) return;
+    let disposed = false;
+    const unlisten = listen<{ sessionId: string; expiresAt: string }>('app-login-renewed', ({ payload }) => {
+      if (disposed) return;
+      const cached = getSecureSessionSync();
+      if (cached?.sessionId === payload.sessionId) {
+        void setSecureSession({ ...cached, expiresAt: payload.expiresAt });
+      }
+    }).catch(() => undefined);
+    return () => { disposed = true; void unlisten.then(stop => stop?.()); };
+  }, []);
   // Founder 31/10 («να κατεβαίνει από εκεί που είναι στο κέντρο και μετά να κάνει zoom ... σβήνοντας και το
   // modal του login»): the sign-in screen starts leaving the moment the PIN is accepted (the card fades while
   // its logo glides down to the middle), the session is completed meanwhile, then the whole sign-in layer
@@ -797,9 +813,8 @@ function AppContent() {
   const [showConnectionSettings, setShowConnectionSettings] = useState(false);
   const [connectionSettingsInitialSection, setConnectionSettingsInitialSection] =
     useState<ConnectionSettingsSection>(null);
-  const [showSyncRecoveryModal, setShowSyncRecoveryModal] = useState(false);
-  const [syncRecoveryContext, setSyncRecoveryContext] =
-    useState<SyncRecoveryOpenContext | null>(null);
+  const [tillHealthState, setTillHealthState] = useState<TillHealthState>('stale');
+  const reopenHealthIssue = useRef<string | null>(null);
   const [realtimeReady, setRealtimeReady] = useState(false);
   const [terminalRealtimeSession, setTerminalRealtimeSession] =
     useState<TerminalRealtimeSession | null>(null);
@@ -905,8 +920,6 @@ function AppContent() {
       bridge.terminalConfig.refresh().catch(() => {
         // Ignore refresh errors and still open recovery/settings.
       });
-      setShowSyncRecoveryModal(false);
-      setSyncRecoveryContext(null);
       setConnectionSettingsInitialSection(section);
       setShowConnectionSettings(true);
     },
@@ -916,18 +929,6 @@ function AppContent() {
   const closeConnectionSettings = useCallback(() => {
     setShowConnectionSettings(false);
     setConnectionSettingsInitialSection(null);
-  }, []);
-
-  const openSyncRecovery = useCallback((context?: SyncRecoveryOpenContext | null) => {
-    setShowConnectionSettings(false);
-    setConnectionSettingsInitialSection(null);
-    setSyncRecoveryContext(context ?? null);
-    setShowSyncRecoveryModal(true);
-  }, []);
-
-  const closeSyncRecoveryModal = useCallback(() => {
-    setShowSyncRecoveryModal(false);
-    setSyncRecoveryContext(null);
   }, []);
 
   const openCallerIdCustomerSearch = useCallback(
@@ -971,23 +972,8 @@ function AppContent() {
       }
 
       if (detail.screen === 'orderPayment') {
-        setShowSyncRecoveryModal(false);
-        setSyncRecoveryContext(null);
         if (typeof window !== 'undefined') {
-          window.sessionStorage.setItem(
-            'pos-recovery-order-payment-target',
-            JSON.stringify({
-              orderId: detail.orderId ?? null,
-              orderNumber: detail.orderNumber ?? null,
-              params: detail.params ?? {},
-              createdAt: Date.now(),
-            }),
-          );
-          window.dispatchEvent(
-            new CustomEvent('pos:navigate-view', {
-              detail: { view: 'orders' },
-            }),
-          );
+          openRecoveryOrderPayment(detail);
         }
       }
     };
@@ -1624,6 +1610,27 @@ function AppContent() {
     }
   };
 
+  useEffect(() => {
+    const signInForHealth = (event: Event) => {
+      const issueId = (event as CustomEvent<{ issueId: string }>).detail?.issueId;
+      if (!issueId || !user) return;
+      reopenHealthIssue.current = issueId;
+      void handleLogout();
+    };
+    window.addEventListener('pos:health-sign-in', signInForHealth);
+    return () => window.removeEventListener('pos:health-sign-in', signInForHealth);
+  }, [user, handleLogout]);
+
+  useEffect(() => {
+    if (!user || !reopenHealthIssue.current) return;
+    const issueId = reopenHealthIssue.current;
+    const timer = window.setTimeout(() => {
+      reopenHealthIssue.current = null;
+      openTillHealth({ preferredIssueId: issueId });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [user]);
+
   if (externalDisplayKind) {
     const ExternalDisplayPage =
       externalDisplayKind === 'kitchen_display' ? KitchenDisplayPage : CustomerDisplayPage;
@@ -1760,7 +1767,7 @@ function AppContent() {
 
             {/* Founder 31/10: health, expenses and theme in a small fixed rail on the right (health used
                 to float top-left of the page, expenses top-right). */}
-            <UtilityRail onOpenRecovery={openSyncRecovery} />
+            <UtilityRail onHealthState={setTillHealthState} />
 
 
 
@@ -1790,17 +1797,11 @@ function AppContent() {
                 isOpen={showConnectionSettings}
                 initialSection={connectionSettingsInitialSection}
                 onCheckForUpdates={openUpdateCheck}
+                tillHealthState={tillHealthState}
+                onOpenTillHealth={openTillHealth}
                 onClose={closeConnectionSettings}
               />
             </DeferredModal>
-
-            <SyncRecoveryModal
-              isOpen={showSyncRecoveryModal}
-              initialContext={syncRecoveryContext}
-              onClose={closeSyncRecoveryModal}
-              onOpenConnectionSettings={() => openConnectionSettings()}
-              onOpenSnapshots={() => openConnectionSettings('recovery')}
-            />
             </CashierRecovery>
 
             {/* Sync Notification Manager */}

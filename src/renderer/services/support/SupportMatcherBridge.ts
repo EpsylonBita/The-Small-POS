@@ -1,5 +1,5 @@
 import { getBridge, type RecoveryActionDescriptor, type RecoveryIssue } from '../../../lib';
-import { buildSyncRecoveryIssues, RECOVERY_RECIPES } from '../../components/recovery/sync-recovery-issues';
+import { buildSyncRecoveryIssues, customerCorrectionIssue, RECOVERY_RECIPES } from '../../components/recovery/sync-recovery-issues';
 import type { HealthProblemCode } from '../../../../../shared/pos/health/health-contract';
 import { syncNowTargetItems } from '../../components/recovery/sync-now-attempt';
 
@@ -17,6 +17,7 @@ export interface SupportMatcherInputs {
   financialItems: MatcherObservation<HealthMatcherInput['financialItems']>;
   integrity: MatcherObservation<HealthMatcherInput['integrity']>;
   parityItems: MatcherObservation<HealthMatcherInput['parityItems']>;
+  orderNotices?: MatcherObservation<import('../../../lib/order-sync-notices').OrderSyncNotice[]>;
 }
 export type SupportTranslate = (key: string, params?: Record<string, unknown>) => string;
 export interface HealthSupportObservation { problem: HealthProblemCode; realtime: string; stale: boolean; observedAt?: number }
@@ -67,7 +68,7 @@ export function matchHealthRemedies(input: HealthMatcherInput, stale: boolean, t
   });
   const addressRepair = recipes.find(recipe => recipe.id === 'customer-address-default-conflict.repair');
   const nativeAddress: RendererRemedyMatch[] = addressRepair ? [{ ...addressRepair, id: 'customer-address-default.retry',
-    targets: addressRepair.targets.map(target => ({ ...target, key: target.issue.entityId,
+    targets: addressRepair.targets.map(target => ({ ...target, key: String(target.issue.params?.sampleItemId ?? ''),
       action: { ...target.action, id: 'nativeCustomerAddressDefaultRetry', recipeId: 'customer-address-default.retry', recipeVersion: 1, requiresSnapshot: true } })) }] : [];
   return [...recipes, ...nativeAddress, ...manual];
 }
@@ -78,7 +79,8 @@ export async function readHealthRemedyMatches(t: SupportTranslate): Promise<Rend
   const inputs: SupportMatcherInputs = await getBridge().invoke('support_matcher_inputs').catch(() => ({
     systemHealth: unavailable(), financialItems: unavailable(), integrity: unavailable(), parityItems: unavailable(),
   }));
-  const values = Object.values(inputs);
+  const { orderNotices, ...genericInputs } = inputs;
+  const values = Object.values(genericInputs);
   const status = values.some(value => value.status === 'unavailable') ? 'unavailable'
     : values.some(value => value.status === 'stale') ? 'stale' : 'fresh';
   const { systemHealth, financialItems, integrity, parityItems } = inputs;
@@ -87,8 +89,17 @@ export async function readHealthRemedyMatches(t: SupportTranslate): Promise<Rend
   const matches = matchHealthRemedies({ systemHealth: systemHealth.content,
     lastParitySync: systemHealth.content?.lastParitySync, financialItems: financialItems.content ?? [],
     integrity: integrity.content, parityItems: parityItems.content ?? [] }, status !== 'fresh' || missing, t);
-  const metadata = Object.fromEntries(Object.entries(inputs).map(([key, { status: inputStatus, at, age_ms }]) => [key, { status: inputStatus, at, age_ms }]));
+  const metadata = Object.fromEntries(Object.entries(genericInputs).map(([key, { status: inputStatus, at, age_ms }]) => [key, { status: inputStatus, at, age_ms }]));
   return matches.map(match => {
+    if (match.id === 'order-customer-correction.resend' || match.id === 'order-customer-correction.keep-server') {
+      const source = orderNotices ?? unavailable();
+      const targets = source.status === 'fresh' ? (source.content ?? []).flatMap(notice => {
+        const issue = customerCorrectionIssue(notice);
+        return issue.actions.filter(action => action.recipeId === match.id).map(action => ({ key: notice.queueId, issue, action }));
+      }) : [];
+      const observation = { status: source.status, inputs: { orderNotices: { status: source.status, at: source.at, age_ms: source.age_ms } } };
+      return { ...match, matches_now: source.status === 'fresh' ? targets.length > 0 : 'not_applicable', target_count: targets.length, targets, observation };
+    }
     const observation: NonNullable<RendererRemedyMatch['observation']> = {
       status: missing || status === 'unavailable' || match.observation?.status === 'unavailable' ? 'unavailable'
         : status === 'stale' || match.observation?.status === 'stale' ? 'stale' : 'fresh',

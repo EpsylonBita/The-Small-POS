@@ -467,6 +467,13 @@
     "queueSetAside": "Metti da parte la voce {{queue_id}} e quelle in attesa, conservandone i dati",
     "queueReturn": "Rimetti in coda la voce {{queue_id}} e il suo gruppo",
     "undoSnapshot": "Annulla usando la copia salvata {{snapshot_id}}",
+    "runRemedy": "Correggere i dati cliente non salvati per l’ordine {{order_id}}",
+    "resendCustomerCorrection": "Salvare i nuovi dati cliente per l’ordine {{order_id}}",
+    "keepServerCustomerDetails": "Mantenere i dati cliente già presenti nell’ordine {{order_id}}",
+    "retryParkedRow": "Inviare di nuovo la modifica originale {{queue_id}}. Potrebbe essere rifiutata ancora.",
+    "setAsideParkedGroup": "Mettere da parte la modifica {{queue_id}} e quelle che dipendono da essa. Non verranno inviate.",
+    "returnParkedGroup": "Riportare la modifica {{queue_id}} e quelle che dipendono da essa. Resteranno in pausa.",
+    "restorePaymentReceiptMirror": "Ripristinare la copia locale mancante del pagamento {{server_payment_id}} per l’ordine {{order_id}}",
     "outcomes": {
       "pending": "In attesa di sincronizzazione",
       "resolved": "Risolto",

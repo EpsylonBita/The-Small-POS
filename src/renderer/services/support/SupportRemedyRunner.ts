@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { listen } from '@tauri-apps/api/event';
 import { getBridge, type RecoveryActionDescriptor, type RecoveryActionRequest, type RecoveryActionResult, type RecoveryActionLogEntry, type RecoveryIssue } from '../../../lib';
 import type { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
+import { extractPrivilegedActionError } from '../../utils/privileged-actions';
 import { readHealthRemedyMatches, type RendererRemedyMatch, type SupportTranslate } from './SupportMatcherBridge';
 
 export const OnsiteRequestSchema = z.object({
@@ -35,6 +36,10 @@ export function acquireRecoveryAction(): (() => void) | null {
   recoveryInFlight = true;
   return () => { recoveryInFlight = false; };
 }
+export function healthActionChangesState(action: RecoveryActionDescriptor): boolean {
+  return !['openConnectionSettings', 'openOrderPaymentFix', 'contactDev', 'validatePendingOrders', 'printerReprobe', 'testPrint'].includes(action.id);
+}
+
 export function buildRecoveryActionRequest(issue: RecoveryIssue, action: RecoveryActionDescriptor): RecoveryActionRequest {
   return { actionId: action.id, issueId: issue.id, issueCode: issue.code, queueId: issue.queueId ?? null,
     entityType: issue.entityType, entityId: issue.entityId, orderId: issue.orderId ?? null, orderNumber: issue.orderNumber ?? null,
@@ -44,14 +49,64 @@ export function buildRecoveryActionRequest(issue: RecoveryIssue, action: Recover
     recipeId: action.recipeId ?? issue.knownSolution?.recipeId ?? null,
     recipeVersion: action.recipeVersion ?? issue.knownSolution?.version ?? null, routeTarget: action.routeTarget ?? null, params: issue.params };
 }
+
+export function recoveryFailureCode(error: unknown): string {
+  const privileged = extractPrivilegedActionError(error);
+  if (privileged) { return privileged.code; }
+  const value = error instanceof Error ? error.message : error;
+  if (typeof value !== 'string') { return 'UNCLASSIFIED_REFUSAL'; }
+  const text = value.trim();
+  const detail = text.replace(/^HTTP_\d{3}(?:_CLIENT_ERROR|_SERVER_ERROR|_RATE_LIMITED)?:\s*/, '');
+  const leadingCode = (message: string) => {
+    const token = message.split(/[:\s]/, 1)[0];
+    const families = /^(?:ORDER|PAYMENT|EDIT|CONCURRENT|REMEDY|SNAPSHOT|PAYLOAD|SET_ASIDE|NOTICE|PARITY|PREEMPTED|TERMINAL|REMOTE|INVALID|PHONE|SYNC|HTTP|TABLE|FINANCIAL|PARENT|FISCAL|POS|PLATFORM|MISSING|ONSITE|INSUFFICIENT|TIER|POLICY|UNKNOWN)_/;
+    return token === 'FORBIDDEN' || (families.test(token) && /^[A-Z0-9_]{3,64}$/.test(token)) ? token : null;
+  };
+  return leadingCode(detail) ?? leadingCode(text) ?? 'UNCLASSIFIED_REFUSAL';
+}
+
+export function orderRecoveryFeedback(code: string): string {
+  switch (code) {
+    case 'AUTH_SESSION_REQUIRED': return 'signInAgain';
+    case 'AUTH_SESSION_EXPIRED': return 'sessionExpired';
+    case 'AUTH_SHIFT_REQUIRED': return 'shiftRequired';
+    case 'AUTH_GRANT_EXPIRED': return 'grantExpired';
+    case 'AUTH_PERMISSION_REQUIRED':
+    case 'UNAUTHORIZED': return 'permissionRequired';
+    case 'AUTH_PIN_WRONG': return 'wrongPin';
+    case 'AUTH_LOCKED_OUT': return 'pinLocked';
+    case 'AUTH_CONFIRMATION_CANCELLED': return 'cancelled';
+    case 'PREEMPTED_BY_CRITICAL_OPERATION':
+    case 'NOTICE_DATABASE_BUSY':
+    case 'CONCURRENT_OPERATION': return 'wait';
+    case 'EDIT_CANONICAL_PREFLIGHT_UNREACHABLE': return 'offline';
+    case 'NOTICE_STALE': return 'stale';
+    default: return 'callSupport';
+  }
+}
+
+export type HealthTargetOutcome = 'sent' | 'waiting' | 'untouched' | 'refused' | 'set_aside' | 'unknown';
+
+export type DesktopHealthActionResult = RecoveryActionResult & {
+  changedIds?: string[];
+  targetOutcome?: HealthTargetOutcome;
+  targetOutcomes?: Array<{ id: string; outcome: HealthTargetOutcome }>;
+};
+
+export function verifiedSupportReceipt(report: { success: boolean; bundleStored?: boolean; incidentId?: string | null }): boolean {
+  return report.success === true && report.bundleStored === true && !!report.incidentId?.trim();
+}
+
 export async function executeHealthRecoveryAction(options: {
   request: RecoveryActionRequest; action: RecoveryActionDescriptor; stale(): boolean; critical?(): boolean;
   authorize: PrivilegedRunner; t: SupportTranslate; onSnapshot?(id: string): void;
   beforeExecute?(): Promise<void>;
-}): Promise<RecoveryActionResult> {
+  onPinRefused?(): Promise<void> | void;
+}): Promise<DesktopHealthActionResult> {
   const { request, action, authorize, t } = options;
+  const correction = request.issueCode === 'customer_correction_refused';
   const check = () => {
-    if (options.stale()) { throw new Error('REMEDY_NOT_APPLICABLE'); }
+    if (options.stale()) { throw new Error(correction ? 'NOTICE_STALE' : 'REMEDY_NOT_APPLICABLE'); }
     if (options.critical?.()) { throw new Error('CONCURRENT_OPERATION'); }
   };
   check();
@@ -65,19 +120,29 @@ export async function executeHealthRecoveryAction(options: {
   }
   let snapshotPointId: string | null = null;
   if (action.requiresSnapshot) {
-    const snapshot = await getBridge().recovery.createPreActionSnapshot();
-    if (!snapshot?.id) { throw new Error('Recovery snapshot was not confirmed'); }
+    const snapshot = await getBridge().recovery.createPreActionSnapshot().catch(error => {
+      if (['PREEMPTED_BY_CRITICAL_OPERATION', 'CONCURRENT_OPERATION'].includes(recoveryFailureCode(error))) {
+        throw error;
+      }
+      throw correction ? new Error('SNAPSHOT_FAILED') : error;
+    });
+    if (!snapshot?.id) { throw new Error(correction ? 'SNAPSHOT_FAILED' : 'Recovery snapshot was not confirmed'); }
     options.onSnapshot?.(snapshot.id);
     snapshotPointId = snapshot.id;
   }
   return authorize({ scope: 'cash_drawer_control',
     action: async () => { check(); await options.beforeExecute?.(); check();
       return getBridge().recovery.executeAction({ ...request, ...(snapshotPointId ? { snapshotPointId } : {}) }); },
+    onPinRefused: options.onPinRefused,
     title: t('recovery.confirmations.cashDrawerControl.title', { defaultValue: 'Confirm recovery action' }),
     subtitle: t('recovery.confirmations.cashDrawerControl.subtitle', { defaultValue: 'Enter the cashier or manager PIN to run this recovery action.' }) });
 }
 
 function refusalCode(error: unknown): string | null {
+  const code = extractPrivilegedActionError(error)?.code;
+  if (code && ['AUTH_SESSION_REQUIRED', 'AUTH_SESSION_EXPIRED', 'AUTH_SHIFT_REQUIRED', 'AUTH_PIN_WRONG', 'AUTH_LOCKED_OUT'].includes(code)) {
+    return 'UNAUTHORIZED';
+  }
   const value = error instanceof Error ? error.message : typeof error === 'object' && error !== null && 'code' in error ? error.code : error;
   return typeof value === 'string' && ['FORBIDDEN', 'UNAUTHORIZED', 'REAUTH_REQUIRED', 'POLICY_REFUSED', 'CONCURRENT_OPERATION', 'REMEDY_NOT_APPLICABLE', 'REMEDY_COOLDOWN', 'REMEDY_ATTEMPT_CAP'].includes(value) ? value : null;
 }
@@ -128,7 +193,7 @@ export class SupportRemedyRunner {
       this.assertCurrent(input.session_id);
       const targets = remedy?.targets.filter(target => !input.target_key || target.key === input.target_key) ?? [];
       if (!remedy || remedy.matches_now !== true || targets.length === 0) { throw new Error('REMEDY_NOT_APPLICABLE'); }
-      const mutates = targets.some(target => !target.action.routeTarget);
+      const mutates = targets.some(target => healthActionChangesState(target.action));
       if (mutates && !(input.unattended && input.unattended_verified)) {
         const decision = await this.options.onsite({ request_id: input.request_id, session_id: input.session_id,
           title: remedy.title, description: remedy.explanation, technical_details: JSON.stringify({ recipe_id: input.recipe_id,
@@ -172,14 +237,17 @@ export class SupportRemedyRunner {
         Object.assign(audit, {
           success: result.success === true && result.verification?.status === 'passed',
           outcome: result.verification?.status === 'unknown' ? 'unknown' : result.success !== true || result.verification?.status === 'failed' ? 'failed'
-            : currentTarget.action.routeTarget ? 'unknown' : result.verification?.status === 'passed' ? 'resolved' : 'pending',
+            : !healthActionChangesState(currentTarget.action) ? 'unknown' : result.verification?.status === 'passed' ? 'resolved' : 'pending',
           timestamp: new Date().toISOString(), recipeId: input.recipe_id, recipeVersion: input.recipe_version,
           snapshotPointId: snapshotId, actor: { staffId: null, staffName: null }, targetRefs: { entityId: currentTarget.issue.entityId },
           source: 'remote_support', sessionId: input.session_id,
         });
         await getBridge().recovery.recordActionLog(audit);
         if (result.success !== true || result.verification?.status === 'failed') { throw new Error('REMEDY_NOT_APPLICABLE'); }
-        if (result.routeTarget) { window.dispatchEvent(new CustomEvent('pos:recovery-route', { detail: result.routeTarget })); }
+        const route = result.routeTarget ?? currentTarget.action.routeTarget;
+        if (route && (!healthActionChangesState(currentTarget.action) || result.verification?.status === 'passed')) {
+          window.dispatchEvent(new CustomEvent('pos:recovery-route', { detail: route }));
+        }
       }
       // The native diagnostics owner publishes this read; Rust checks its time
       // against execution admission and never trusts the renderer's outcome.

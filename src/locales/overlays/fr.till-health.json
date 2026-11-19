@@ -1,0 +1,338 @@
+{
+  "tillHealth": {
+    "title": "État de la caisse",
+    "lastChecked": "Dernière vérification à {{time}}",
+    "notChecked": "En attente de la première vérification",
+    "checkedServices": "La caisse à {{time}}",
+    "capacity": "Des changements s’accumulent. Ouvrez l’état de la caisse.",
+    "closeoutHint": "Faites la clôture en fin de service.",
+    "progress": "Avancement",
+    "states": {
+      "ok": {
+        "title": "Tout fonctionne normalement",
+        "detail": "Vous pouvez prendre des commandes."
+      },
+      "noShift": {
+        "detail": "Ouvrez un service pour prendre des commandes."
+      },
+      "issue": {
+        "title": "Un point demande votre attention",
+        "detail": "Voyez ci-dessous ce qui demande votre attention et comment agir."
+      },
+      "working": {
+        "title": "Enregistrement en cours",
+        "detail": "Vous pouvez continuer à travailler pendant que la caisse termine."
+      },
+      "pending": {
+        "title": "En attente de confirmation",
+        "detail": "La caisse vérifie encore le résultat. Vous pouvez continuer à travailler."
+      },
+      "solved": {
+        "title": "Résolu",
+        "detail": "La caisse a confirmé le résultat."
+      },
+      "support": {
+        "title": "L’assistance est nécessaire",
+        "detail": "Voyez ci-dessous ce qui est concerné. Demandez de l’aide à The Small."
+      },
+      "offline": {
+        "title": "La caisse fonctionne hors ligne",
+        "detail": "Les commandes restent sur cette caisse et partiront au retour de la connexion."
+      },
+      "stale": {
+        "title": "La vérification n’a pas abouti",
+        "detail": "Les informations ci-dessous datent de {{time}}."
+      },
+      "unavailable": {
+        "detail": "La caisse n’a pas pu être vérifiée. Relancez la vérification dans un instant."
+      },
+      "loading": {
+        "detail": "La caisse est en cours de vérification."
+      }
+    },
+    "action": {
+      "recheck": "Vérifier à nouveau",
+      "saveAgain": "Enregistrer à nouveau",
+      "saveAddress": "Enregistrer à nouveau l’adresse",
+      "restorePrinter": "Rétablir le dernier réglage de l’imprimante",
+      "printer": "Ouvrir les réglages de l’imprimante",
+      "openPayment": "Ouvrir le paiement",
+      "openConnection": "Ouvrir les réglages de connexion",
+      "send": "Envoyer maintenant",
+      "signIn": "Se reconnecter",
+      "askSupport": "Demander de l’aide",
+      "supportDetails": "Ouvrir les informations pour l’assistance",
+      "noSafeAction": "L’assistance doit vérifier ce point.",
+      "noLongerNeeded": "Le changement n’est plus nécessaire",
+      "keepDetails": "Conserver les informations actuelles",
+      "keepExplanation": "La commande conserve les informations affichées et le dossier est clos.",
+      "offline": "Cette action nécessite une connexion internet.",
+      "sendFailed": "Les modifications n’ont pas pu être envoyées.",
+      "sendChecked": "La vérification de l’envoi est terminée."
+    },
+    "phase": {
+      "working": "Enregistrement",
+      "pending": "En attente de confirmation",
+      "solved": "Résolu à {{time}}",
+      "failed": "Le changement n’a pas abouti.",
+      "busy": "La caisse effectuait une autre opération. Appuyez à nouveau dans un instant.",
+      "signIn": "Votre connexion a expiré. Reconnectez-vous à la caisse.",
+      "shift": "Un caissier ou un responsable doit avoir un service ouvert sur cette caisse.",
+      "pin": "Le code PIN ne correspond pas.",
+      "permission": "Demandez au responsable de vérifier.",
+      "grant": "L’autorisation a expiré. Appuyez à nouveau pour confirmer.",
+      "parked": "Ce changement nécessite l’assistance.",
+      "checkingOld": "D’après la dernière vérification réussie",
+      "correctionWorking": "Les informations du client sont en cours d’enregistrement",
+      "correctionPending": "La modification des informations du client attend confirmation",
+      "correctionSaved": "Les informations du client ont été enregistrées",
+      "correctionKept": "Les informations du client ont été conservées"
+    },
+    "step": {
+      "save": "Enregistrement",
+      "confirm": "Confirmation",
+      "done": "Résolu"
+    },
+    "subject": {
+      "orderNumber": "Commande nº {{number}}",
+      "order": "Commande",
+      "till": "Caisse",
+      "expense": "Dépense",
+      "staffPayment": "Paiement au personnel",
+      "driverPayment": "Paiement au livreur",
+      "payment": "Paiement",
+      "printer": "Imprimante",
+      "closeout": "Clôture de journée (Z)"
+    },
+    "orderType": {
+      "delivery": "Livraison",
+      "pickup": "À emporter",
+      "dine_in": "Sur place"
+    },
+    "services": {
+      "title": "La caisse maintenant",
+      "orders": "Commandes",
+      "internet": "Internet",
+      "sync": "Envoi au bureau",
+      "printer": "Imprimante",
+      "closeout": "Clôture de journée (Z)",
+      "support": "Assistance"
+    },
+    "status": {
+      "working": "En service",
+      "limited": "Limité",
+      "blocked": "À vérifier",
+      "start_shift": "Service à ouvrir",
+      "connected": "Connecté",
+      "offline": "Hors ligne",
+      "unknown": "Non confirmé",
+      "healthy": "Tout a été envoyé",
+      "waiting": "En attente d’envoi",
+      "stuck": "À vérifier",
+      "failed": "Échec",
+      "ready": "Prêt",
+      "attention": "À vérifier",
+      "not_configured": "Non configurée",
+      "via_main_terminal": "Sur la caisse principale",
+      "not_needed": "Inutile pour le moment",
+      "notified": "Rapport reçu",
+      "not_sent": "Aucun rapport envoyé",
+      "failed_to_notify": "Envoi non confirmé",
+      "open": "Ouverte",
+      "openSince": "Ouverte depuis {{time}}",
+      "overdue": "Toujours ouverte",
+      "submitted": "En attente de confirmation",
+      "unavailable": "Indisponible",
+      "not_checked": "Vérifié à la clôture",
+      "not_applicable": "Sur la caisse principale"
+    },
+    "help": {
+      "title": "Besoin d’aide ?",
+      "available": "The Small peut se connecter à cette caisse. Un code s’affichera pour le lui communiquer.",
+      "unavailable": "L’assistance à distance n’a pas démarré. Demandez au responsable d’organiser une intervention. Vous pouvez toujours enregistrer un rapport.",
+      "offline": "The Small peut se connecter au retour d’internet. Vous pouvez enregistrer un rapport maintenant.",
+      "permission": "Demandez au responsable de demander la connexion. Vous pouvez toujours préparer un rapport."
+    },
+    "support": {
+      "title": "Pour l’assistance",
+      "hint": "Uniquement à la demande de l’assistance",
+      "attempts": "Ce qui a été tenté",
+      "identifiers": "Informations",
+      "automaticActor": "La caisse",
+      "unknownActor": "Employé non identifié",
+      "report": "Rapport à The Small",
+      "reportTopic": "Sujet du rapport",
+      "allTopics": "Toute la caisse",
+      "tools": "Outils d’assistance et sauvegardes de la caisse"
+    },
+    "report": {
+      "new": "Nouveau rapport",
+      "preparing": "Préparation du rapport…",
+      "none": "Aucun rapport n’a encore été envoyé.",
+      "sent": "The Small a reçu le rapport. Une copie est enregistrée ici ({{time}}).",
+      "automatic": "Envoyé automatiquement à {{time}}. The Small a reçu le rapport.",
+      "local": "Enregistré seulement sur cette caisse à {{time}}. Le rapport n’a pas été envoyé.",
+      "failed": "Le rapport n’a pas été envoyé.",
+      "explanation": "Le rapport est enregistré sur cette caisse. Avec une connexion, il est aussi envoyé à The Small.",
+      "previous": "Copies précédentes",
+      "noCopies": "Aucune copie enregistrée pour le moment.",
+      "openCopy": "Ouvrir le dossier de la copie du {{date}}",
+      "waiting": "Le rapport est enregistré sur cette caisse. Il sera envoyé dès que la connexion sera rétablie.",
+      "sendFailed": "Le rapport est enregistré ici. La livraison n’a pas pu être confirmée.",
+      "historyUnavailable": "Impossible de lire les rapports enregistrés.",
+      "archivedLocal": "Enregistré sur cette caisse.",
+      "pending": "Le rapport est enregistré sur la caisse. Il n’a pas encore été envoyé."
+    },
+    "families": {
+      "customerCorrection": {
+        "title": "Les nouvelles informations du client n’ont pas été enregistrées",
+        "detail": "La commande conserve les informations précédentes. La vente et le paiement ne sont pas touchés."
+      },
+      "connection": {
+        "title": "La caisse n’est plus reliée au magasin",
+        "detail": "Le responsable peut relier la caisse depuis les réglages de connexion."
+      },
+      "invalidOrders": {
+        "title": "Certaines commandes contiennent des articles inconnus de la caisse",
+        "detail": "Le responsable doit vérifier ces commandes."
+      },
+      "order": {
+        "title": "Une modification de la commande n’a pas été enregistrée",
+        "detail": "Vérifiez la commande affichée avant de la modifier de nouveau."
+      },
+      "wrongMoney": {
+        "title": "Le paiement et le total de la commande diffèrent",
+        "detail": "Ne facturez pas le client une seconde fois. Faites vérifier les montants par le responsable."
+      },
+      "driver": {
+        "title": "L’affectation du livreur n’a pas été enregistrée",
+        "detail": "Vérifiez qui doit livrer cette commande."
+      },
+      "orderPaymentWait": {
+        "title": "Une modification de la commande n’a pas abouti",
+        "detail": "Le paiement attend cette modification. Ne facturez pas le client de nouveau."
+      },
+      "orderWaiting": {
+        "title": "La modification attend la commande d’origine",
+        "detail": "La caisse recherche la commande avant d’enregistrer la modification."
+      },
+      "orderMissing": {
+        "title": "La commande d’origine est introuvable",
+        "detail": "La modification doit être vérifiée avant d’être enregistrée."
+      },
+      "catalog": {
+        "title": "La disponibilité de l’article n’a pas changé sur les autres caisses",
+        "detail": "Vérifiez la disponibilité avant d’accepter une commande pour cet article."
+      },
+      "address": {
+        "title": "La nouvelle adresse n’a pas été définie comme adresse principale",
+        "detail": "La commande n’est pas touchée."
+      },
+      "customerDuplicate": {
+        "title": "Un client a déjà ce numéro de téléphone",
+        "detail": "Vérifiez s’il s’agit de la même personne."
+      },
+      "customerPhone": {
+        "title": "Le numéro de téléphone du client doit être corrigé",
+        "detail": "La commande et la clôture ne sont pas touchées."
+      },
+      "customerDirectory": {
+        "title": "Les nouvelles informations du client sont restées sur cette caisse",
+        "detail": "Les modifications peuvent manquer sur les autres caisses."
+      },
+      "shiftClosed": {
+        "title": "Le service a été clôturé sur une autre caisse",
+        "detail": "Faites vérifier les montants par le responsable. Ne répétez aucun encaissement ni remboursement."
+      },
+      "oldOrderCorrection": {
+        "title": "Une ancienne correction de commande n’a pas abouti",
+        "detail": "Le responsable compare la commande au reçu avant la clôture."
+      },
+      "phoneShifts": {
+        "title": "La clôture attend les services sur téléphone",
+        "detail": "Clôturez le service sur le téléphone ou dans Personnel. La clôture sera alors envoyée automatiquement."
+      },
+      "uncertainPayment": {
+        "title": "Le paiement par carte n’est pas confirmé",
+        "detail": "Vérifiez le terminal bancaire. Ne facturez pas le client de nouveau."
+      },
+      "platform": {
+        "title": "Le paiement de la plateforme est à vérifier",
+        "detail": "La plateforme a encaissé le paiement. Ne l’encaissez pas de nouveau en caisse."
+      },
+      "balance": {
+        "title": "La commande a un solde à régler",
+        "detail": "Ouvrez le paiement pour vérifier le solde."
+      },
+      "payment": {
+        "title": "Une opération de paiement est à vérifier",
+        "detail": "Ne répétez aucun encaissement ni remboursement."
+      },
+      "paymentWaiting": {
+        "title": "Le paiement attend la commande",
+        "detail": "Le paiement figure sur cette caisse. Ne facturez pas le client de nouveau."
+      },
+      "refundWaiting": {
+        "title": "Le remboursement attend le paiement initial",
+        "detail": "Ne saisissez pas une deuxième fois le remboursement ou l’annulation."
+      },
+      "refundMissing": {
+        "title": "Le paiement initial de ce remboursement est introuvable",
+        "detail": "Faites vérifier le paiement par l’assistance avant toute autre modification."
+      },
+      "oldPayments": {
+        "title": "D’anciens paiements sont à vérifier",
+        "detail": "Le responsable doit vérifier l’historique des paiements."
+      },
+      "courierMoney": {
+        "title": "Le paiement en espèces et la saisie du livreur diffèrent",
+        "detail": "Demandez au responsable de vérifier le service du livreur."
+      },
+      "courierCheck": {
+        "title": "Les espèces du livreur n’ont pas pu être vérifiées",
+        "detail": "Le responsable doit vérifier ce service."
+      },
+      "printerSetting": {
+        "title": "L’imprimante n’a pas reconnu son réglage des reçus",
+        "detail": "Rétablissez le dernier réglage et vérifiez un reçu de test."
+      },
+      "printer": {
+        "title": "L’imprimante est à vérifier",
+        "detail": "Les commandes sont toujours enregistrées. Vérifiez le papier, l’alimentation et la connexion."
+      },
+      "waiting": {
+        "title": "Des modifications sont en attente d’envoi",
+        "detail": "Les modifications sont enregistrées sur cette caisse.",
+        "stuck": "Modifications en attente d’envoi : {{count}}. La plus ancienne attend depuis {{duration}}."
+      },
+      "printing": {
+        "title": "Les reçus ne s’impriment pas",
+        "detail": "Reçus en attente : {{count}}. Vérifiez le papier, l’alimentation et la connexion."
+      },
+      "sending": {
+        "title": "Certaines modifications n’ont pas pu être envoyées",
+        "detail": "Elles restent sur cette caisse et doivent être vérifiées avant l’envoi."
+      },
+      "orderCheck": {
+        "title": "La caisse n’a pas pu vérifier la commande",
+        "detail": "Elle reste dans les commandes actives. Vérifiez-la à nouveau dans un instant."
+      },
+      "dayClose": {
+        "title": "La clôture de journée est à vérifier",
+        "detail": "Vérifiez les commandes et les paiements avant la clôture."
+      },
+      "dayOverdue": {
+        "title": "La journée est toujours ouverte",
+        "detail": "Faites la clôture en fin de service."
+      },
+      "fiscal": {
+        "title": "Certains reçus ne sont pas parvenus au service fiscal",
+        "detail": "La clôture attend ces reçus."
+      },
+      "crash": {
+        "title": "La caisse s’est fermée inopinément",
+        "detail": "Vérifiez la dernière commande avant de la saisir de nouveau."
+      }
+    }
+  }
+}

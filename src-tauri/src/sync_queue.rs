@@ -643,6 +643,10 @@ pub struct EnqueueInput {
 pub struct SyncResult {
     pub success: bool,
     pub processed: i64,
+    /// Exact changes acknowledged by the office and committed by the local owner.
+    /// Keep this out of persisted aggregate telemetry.
+    #[serde(default)]
+    pub acknowledged_ids: Vec<String>,
     pub failed: i64,
     pub conflicts: i64,
     /// Rows newly quarantined during this processing batch.
@@ -6031,7 +6035,6 @@ fn renderer_retry_and_dequeue_exact(
         return Err("PARITY_ITEM_ID_INVALID".to_string());
     }
     retry_transaction(conn, |conn| {
-        quarantine_existing_refused_table_batches(conn)?;
         refuse_terminal_table_retry(conn, item_id)?;
         let semantic_reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
         let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
@@ -6049,6 +6052,7 @@ fn renderer_retry_and_dequeue_exact(
         match ownership {
             Some((true, _)) => return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string()),
             Some((false, true)) => return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".to_string()),
+            None => return Ok(None),
             _ => {}
         }
 
@@ -6064,6 +6068,19 @@ fn renderer_retry_and_dequeue_exact(
         if queue_row_is_set_aside(conn, item_id)? {
             return Err(PARITY_ITEM_SET_ASIDE.to_string());
         }
+        let eligible: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM parity_sync_queue
+               WHERE id=?1 AND status IN ('pending','failed')
+                 AND COALESCE(error_message,'') NOT LIKE '%UNKNOWN_CONFLICT_REVIEW%')",
+                [item_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !eligible {
+            return Ok(None);
+        }
+        audit_transient_schedule(conn, item_id, "exact_renderer_retry")?;
         let now = Utc::now().to_rfc3339();
         let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
         let sql = format!(
@@ -6072,7 +6089,8 @@ fn renderer_retry_and_dequeue_exact(
                     next_retry_at = NULL, last_attempt = ?1,
                     retry_delay_ms = ?2, claim_generation = claim_generation + 1
               WHERE id = ?3
-                AND status IN ('pending', 'failed', 'conflict')
+                AND status IN ('pending', 'failed')
+                AND COALESCE(error_message, '') NOT LIKE '%UNKNOWN_CONFLICT_REVIEW%'
                 AND {generic_owner}
                 AND {ownership_exclusion}
              RETURNING id, table_name, record_id, operation, data, organization_id,
@@ -6716,11 +6734,7 @@ pub fn get_status(conn: &Connection) -> Result<QueueStatus, String> {
 pub(crate) fn get_closeout_blocking_status(conn: &Connection) -> Result<QueueStatus, String> {
     // A row a manager set aside no longer holds the Z (Ω4): it stays queued
     // and is listed on the Z as "not on the server".
-    let predicate = format!(
-        "status<>'superseded' AND NOT {} AND {}",
-        closeout_exempt_row_predicate(),
-        set_aside_exclusion_sql("parity_sync_queue")
-    );
+    let predicate = closeout_blocking_queue_predicate();
     let count = |status_filter: &str| -> Result<i64, String> {
         let sql = format!(
             "SELECT COUNT(*) FROM parity_sync_queue
@@ -6764,6 +6778,39 @@ pub(crate) fn get_closeout_blocking_status(conn: &Connection) -> Result<QueueSta
         dead_lettered,
         oldest_item_age: oldest_queue_item_age_ms(conn, Some(&predicate))?,
     })
+}
+
+fn closeout_blocking_queue_predicate() -> String {
+    format!(
+        "status<>'superseded' AND NOT {} AND {}",
+        closeout_exempt_row_predicate(),
+        set_aside_exclusion_sql("parity_sync_queue")
+    )
+}
+
+/// The same parity rows the pre-Z drain counts. Only bounded identifiers and
+/// machine codes leave the queue owner. Call inside the readiness read transaction.
+pub(crate) fn closeout_blocking_row_evidence(conn: &Connection) -> Result<Value, String> {
+    const SAMPLE_LIMIT: i64 = 5;
+    let count = get_closeout_blocking_status(conn)?.total;
+    let mut query = conn.prepare(&format!(
+        "SELECT id,table_name,status,error_message FROM parity_sync_queue WHERE {}
+         ORDER BY CASE status WHEN 'conflict' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END,created_at,id LIMIT ?",
+        closeout_blocking_queue_predicate()
+    )).map_err(|e| format!("sync_queue closeout evidence prepare: {e}"))?;
+    let rows = query.query_map([SAMPLE_LIMIT], |row| {
+        let error: Option<String> = row.get(3)?;
+        let code = error.as_deref().and_then(bounded_queue_error_code).filter(|code| {
+            code.contains('_') && code.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_' || b == b':')
+                && crate::diagnostics::scrub_and_bound_text(code,96) == *code
+        });
+        Ok(serde_json::json!({"queue_id":row.get::<_,String>(0)?,"table":row.get::<_,String>(1)?,
+            "status":row.get::<_,String>(2)?,"code":code,"set_aside":false}))
+    }).map_err(|e| format!("sync_queue closeout evidence query: {e}"))?
+        .collect::<Result<Vec<_>,_>>().map_err(|e| format!("sync_queue closeout evidence row: {e}"))?;
+    Ok(
+        serde_json::json!({"count":count,"omitted":count.saturating_sub(rows.len() as i64),"rows":rows}),
+    )
 }
 
 /// One closeout-exempt row that is still unsynced when the Z runs. Only
@@ -7234,6 +7281,81 @@ pub fn retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
     })
 }
 
+/// Support v2 can reschedule only a retained, replayable original. Unlike the
+/// bulk owner path, this does not quarantine or wake any neighbouring rows.
+pub(crate) fn confirm_parked_retry_ready(conn: &Connection, item_id: &str) -> Result<(), String> {
+    let row = load_queue_row(conn, item_id)?.ok_or("PAYLOAD_DRIFT")?;
+    if !matches!(row.status.as_str(), "failed" | "conflict")
+        || !is_refused_for_good(
+            row.error_message.as_deref().unwrap_or_default(),
+            &row.module_type,
+        )
+        || queue_row_is_set_aside(conn, item_id)?
+    {
+        return Err("SET_ASIDE_NOT_ELIGIBLE".into());
+    }
+    refuse_terminal_table_retry(conn, item_id)?;
+    let generic = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let repair = semantic_reserved_repair_owner_predicate("parity_sync_queue");
+    let money = semantic_repair_financial_queue_owner_predicate("parity_sync_queue");
+    let (allowed, repair, money): (bool, bool, bool) = conn
+        .query_row(
+            &format!(
+                "SELECT ({generic}), ({repair}), ({money}) FROM parity_sync_queue WHERE id=?1"
+            ),
+            [item_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| "POLICY_REFUSED")?;
+    if repair {
+        return Err("REPAIR_TYPED_CONFLICT_REQUIRED".into());
+    }
+    if money {
+        return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".into());
+    }
+    if !allowed {
+        return Err("PROTECTED_RECORD".into());
+    }
+    let payload: Value = serde_json::from_str(&row.data).map_err(|_| "POLICY_REFUSED")?;
+    if row.table_name != "orders"
+        || row.operation != "UPDATE"
+        || !has_only_order_header_keys(&payload)
+        || !is_identified_order_edit_payload(&payload)
+    {
+        return Err("REPAIR_TYPED_CONFLICT_REQUIRED".into());
+    }
+    let remote: Option<String> = conn
+        .query_row(
+            "SELECT supabase_id FROM orders WHERE id=?1 AND organization_id=?2",
+            params![row.record_id, row.organization_id],
+            |record| record.get(0),
+        )
+        .map_err(|_| "PROTECTED_RECORD")?;
+    if remote.as_deref().is_none_or(|id| id.trim().is_empty())
+        || payload["id"]
+            .as_str()
+            .is_some_and(|id| remote.as_deref() != Some(id))
+    {
+        return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".into());
+    }
+    support_retry_dependencies_ready(conn, item_id)
+}
+
+pub(crate) fn retry_confirmed_parked_row(conn: &Connection, item_id: &str) -> Result<(), String> {
+    confirm_parked_retry_ready(conn, item_id)?;
+    let changed = conn
+        .execute(
+            "UPDATE parity_sync_queue SET status='pending', attempts=0, error_message=NULL,
+             next_retry_at=NULL, last_attempt=NULL, retry_delay_ms=?1 WHERE id=?2",
+            params![DEFAULT_INITIAL_RETRY_DELAY_MS, item_id],
+        )
+        .map_err(|_| "POLICY_REFUSED")?;
+    if changed != 1 {
+        return Err("PAYLOAD_DRIFT".into());
+    }
+    Ok(())
+}
+
 /// Read on the confirmed command's writer reservation. A scheduling reset
 /// cannot make an unacknowledged parent ready or bypass a set-aside original.
 pub(crate) fn support_retry_dependencies_ready(
@@ -7474,6 +7596,7 @@ pub(crate) fn renderer_items_by_id(
     }
     let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
     let placeholders = (1..=ids.len())
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
@@ -7482,7 +7605,7 @@ pub(crate) fn renderer_items_by_id(
         "SELECT id, table_name, record_id, operation, data, organization_id,
                 created_at, attempts, last_attempt, error_message, next_retry_at,
                 retry_delay_ms, priority, COALESCE(module_type, 'orders'), conflict_strategy, version,
-                claim_generation, status
+                claim_generation, CASE WHEN {not_set_aside} THEN status ELSE 'set_aside' END
            FROM parity_sync_queue
           WHERE id IN ({placeholders})
             AND {generic_owner}
@@ -17213,6 +17336,7 @@ where
                 return Ok(SyncResult {
                     success: false,
                     processed: 0,
+                    acknowledged_ids: Vec::new(),
                     failed: 0,
                     conflicts: 0,
                     quarantined: 0,
@@ -17253,6 +17377,7 @@ where
                 return Ok(SyncResult {
                     success: false,
                     processed: 0,
+                    acknowledged_ids: Vec::new(),
                     failed: 0,
                     conflicts: 0,
                     quarantined: 0,
@@ -17390,6 +17515,7 @@ where
         .build()
         .map_err(|e| format!("repair sync client build: {e}"))?;
     let mut processed: i64 = 0;
+    let mut acknowledged_ids = Vec::new();
     let mut failed: i64 = 0;
     let mut conflicts: i64 = 0;
     let mut dead_lettered: i64 = 0;
@@ -18083,6 +18209,9 @@ where
                     if applied.is_some() {
                         processed += 1;
                         telemetry.record_success(&item);
+                        if acknowledged_ids.len() < MAX_ITEMS_BY_ID {
+                            acknowledged_ids.push(item.id.clone());
+                        }
                         if item.table_name == "z_reports" {
                             // Ω3: the server confirmed this Z. Its own
                             // transaction (W2's `on_z_report_confirmed`) marks
@@ -19102,13 +19231,16 @@ where
     let telemetry = {
         let db = crate::database_lock::lock(conn, "parity_queue_process")
             .map_err(|e| format!("lock: {e}"))?;
-        reconcile_payment_queue_mirrors(&db, None)?;
+        if !exact_renderer_item {
+            reconcile_payment_queue_mirrors(&db, None)?;
+        }
         telemetry.finish(&db, processed, failed, conflicts, visibility)?
     };
 
     Ok(SyncResult {
         success,
         processed,
+        acknowledged_ids,
         failed,
         conflicts,
         quarantined,
@@ -19937,6 +20069,59 @@ pub(crate) fn set_aside_queue_row(
     staff_id: &str,
     reason: &str,
 ) -> Result<SetAsideEntry, String> {
+    set_aside_exact_row(conn, queue_id, staff_id, reason, true)
+}
+
+/// Group membership and all writes are fenced by the confirmed executor.
+pub(crate) fn set_aside_confirmed_row(
+    conn: &Connection,
+    queue_id: &str,
+    actor: &str,
+) -> Result<SetAsideEntry, String> {
+    set_aside_exact_row(conn, queue_id, actor, "founder_confirmed", false)
+}
+
+pub(crate) fn support_set_aside_owner_check(
+    conn: &Connection,
+    queue_id: &str,
+) -> Result<(), String> {
+    let row = set_aside_owner_candidate(conn, queue_id)?;
+    if is_closeout_exempt_row(&row.table_name, &row.module_type) {
+        return Err("SET_ASIDE_NOT_A_Z_GATE".into());
+    }
+    Ok(())
+}
+
+fn set_aside_owner_candidate(conn: &Connection, queue_id: &str) -> Result<SyncQueueItem, String> {
+    let row = load_queue_row(conn, queue_id)?.ok_or_else(|| "SET_ASIDE_NOT_FOUND".to_string())?;
+    // Native repair rows and repair-settlement money have their own
+    // recovery routes; a refused table batch (not replayable) may still
+    // be set aside, so the replay predicate is not asked here.
+    let reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
+    let repair_money = semantic_repair_financial_queue_owner_predicate("parity_sync_queue");
+    let (reserved, repair_money): (bool, bool) = conn
+        .query_row(
+            &format!("SELECT ({reserved}), ({repair_money}) FROM parity_sync_queue WHERE id = ?1"),
+            params![queue_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("sync_queue set-aside owner guard: {e}"))?;
+    if reserved {
+        return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string());
+    }
+    if repair_money {
+        return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".to_string());
+    }
+    Ok(row)
+}
+
+fn set_aside_exact_row(
+    conn: &Connection,
+    queue_id: &str,
+    staff_id: &str,
+    reason: &str,
+    wake_related: bool,
+) -> Result<SetAsideEntry, String> {
     let staff_id = staff_id.trim();
     if staff_id.is_empty() || staff_id.len() > 128 {
         return Err("SET_ASIDE_STAFF_REQUIRED".to_string());
@@ -19944,28 +20129,7 @@ pub(crate) fn set_aside_queue_row(
     let reason_code =
         bounded_set_aside_reason(reason).ok_or_else(|| "SET_ASIDE_REASON_INVALID".to_string())?;
     in_own_transaction(conn, |conn| {
-        let row =
-            load_queue_row(conn, queue_id)?.ok_or_else(|| "SET_ASIDE_NOT_FOUND".to_string())?;
-        // Native repair rows and repair-settlement money have their own
-        // recovery routes; a refused table batch (not replayable) may still
-        // be set aside, so the replay predicate is not asked here.
-        let reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
-        let repair_money = semantic_repair_financial_queue_owner_predicate("parity_sync_queue");
-        let (reserved, repair_money): (bool, bool) = conn
-            .query_row(
-                &format!(
-                    "SELECT ({reserved}), ({repair_money}) FROM parity_sync_queue WHERE id = ?1"
-                ),
-                params![queue_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|e| format!("sync_queue set-aside owner guard: {e}"))?;
-        if reserved {
-            return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string());
-        }
-        if repair_money {
-            return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".to_string());
-        }
+        let row = set_aside_owner_candidate(conn, queue_id)?;
         if queue_row_is_set_aside(conn, queue_id)? {
             return Err("SET_ASIDE_ALREADY".to_string());
         }
@@ -20031,7 +20195,9 @@ pub(crate) fn set_aside_queue_row(
         // earlier Z, an order create for its checkout's loyalty release, a
         // shift opening for an earlier shift row) looks again in the next
         // pass, not at its recheck.
-        wake_rows_after_success(conn, &row)?;
+        if wake_related {
+            wake_rows_after_success(conn, &row)?;
+        }
         let evidence = serde_json::json!({
             "queueId": row.id,
             "tableName": row.table_name,

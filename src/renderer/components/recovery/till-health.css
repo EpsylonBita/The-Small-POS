@@ -1,0 +1,193 @@
+.till-health-viewport {
+  inset: 0;
+  isolation: isolate;
+}
+
+.till-health-viewport > .liquid-glass-modal-backdrop,
+.till-health-viewport > .till-health-window {
+  animation: none;
+}
+
+.till-health-window {
+  max-width: 48rem;
+  color: var(--pos-s-fg);
+  font-size: 1rem;
+  line-height: 1.5;
+  hyphens: none;
+}
+
+.till-health-window h2,
+.till-health-window h3,
+.till-health-window h4 {
+  font-weight: 750;
+  line-height: 1.2;
+}
+
+.till-health-window h2 { font-size: 1.5rem; }
+.till-health-window h3 { font-size: 1.2rem; }
+.till-health-window p { max-inline-size: 60ch; }
+
+.till-health-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.15rem 0.75rem;
+  padding: 0.6rem clamp(1rem, 3vw, 1.5rem) 0.75rem;
+  border-bottom: 1px solid var(--modal-glass-line);
+}
+
+.till-health-header p {
+  grid-column: 1 / -1;
+  color: var(--pos-s-muted);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.till-health-header .liquid-glass-modal-close { flex-shrink: 0; }
+
+.till-health-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  gap: 1.25rem;
+  padding: 1rem clamp(1rem, 3vw, 1.5rem) 1.5rem;
+}
+
+.till-health-headline,
+.till-health-help {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+}
+
+.till-health-headline > div,
+.till-health-help > div { flex: 1 1 20rem; min-width: 0; }
+
+.till-health-headline h3 {
+  display: flex;
+  align-items: start;
+  gap: 0.5em;
+  font-size: 1.85rem;
+  font-weight: 800;
+  letter-spacing: -0.015em;
+}
+
+.till-health-headline h3 svg {
+  flex: none;
+  width: 1em;
+  height: 1em;
+  margin-top: 0.11em;
+}
+
+.till-health-headline p,
+.till-health-help p { margin-top: 0.35rem; }
+
+.till-health-card,
+.till-health-now,
+.till-health-help,
+.till-health-support {
+  min-width: 0;
+  background: var(--pos-s-surface);
+  border-radius: 0.8rem;
+  box-shadow: var(--pos-s-depth-card);
+  padding: 0.9rem;
+}
+
+.till-health-card {
+  display: grid;
+  justify-items: start;
+  gap: 0.45rem;
+}
+
+.till-health-kicker {
+  font-weight: 650;
+  color: var(--pos-s-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.till-health-card-action,
+.till-health-other { display: grid; justify-items: start; gap: 0.45rem; margin-top: 0.3rem; }
+
+.till-health-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5em;
+  text-align: center;
+  white-space: normal;
+  max-width: 100%;
+  min-height: 44px;
+  border-radius: 0.75rem;
+  padding: 0.45em 0.9em;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.till-health-button.pos-raised--yellow { min-height: 56px; }
+.till-health-button svg { width: 1.15em; height: 1.15em; flex: none; }
+.till-health-window button:focus-visible { outline: 2px solid var(--pos-s-yellow); outline-offset: 3px; }
+.till-health-window:focus { outline: none; }
+
+.till-health-quiet {
+  min-height: 44px;
+  text-align: start;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.till-health-quiet:active { translate: 0 1px; }
+
+.till-health-steps { display: flex; flex-wrap: wrap; gap: 0.25em 1.25em; color: var(--pos-s-muted); }
+.till-health-steps [aria-current] { color: var(--pos-s-warn); font-weight: 700; }
+
+.till-health-now ul { margin-top: 0.45rem; }
+.till-health-now li {
+  padding: 0.42em 0;
+  border-bottom: 1px solid var(--pos-s-border);
+}
+.till-health-now li:last-child { border-bottom: 0; padding-bottom: 0; }
+.till-health-now li p { color: var(--pos-s-muted); margin-top: 0.25em; }
+
+.till-health-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.15em 0.75em;
+}
+.till-health-row > * { flex: 0 1 auto; max-width: 100%; }
+.till-health-row strong { font-weight: 700; }
+
+.till-health-window [data-health-tone='ok'] { color: var(--pos-s-ok); }
+.till-health-window [data-health-tone='warn'] { color: var(--pos-s-warn); }
+.till-health-window [data-health-tone='bad'] { color: var(--pos-s-bad); }
+.till-health-window [data-health-tone='money'] { color: #be123c; }
+.dark .till-health-window [data-health-tone='money'] { color: #fda4af; }
+.till-health-launcher[data-health-tone='ok'] { color: var(--pos-s-ok); }
+.till-health-launcher[data-health-tone='warn'] { color: var(--pos-s-warn); }
+.till-health-launcher[data-health-tone='bad'] { color: var(--pos-s-bad); }
+.till-health-launcher:focus-visible { outline: 2px solid var(--pos-s-yellow); }
+button.till-health-launcher:active { background: var(--pos-s-raised-press); translate: 0 1px; }
+
+.till-health-support { padding: 0; }
+.till-health-support-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.8rem 0.9rem;
+  border-radius: inherit;
+  text-align: start;
+}
+.till-health-support-toggle small { display: block; color: var(--pos-s-muted); font-size: 0.875em; }
+.till-health-support-toggle svg { flex: none; width: 1.15em; height: 1.15em; }
+.till-health-support-toggle[aria-expanded='true'] svg { transform: rotate(180deg); }
+.till-health-support-content { padding: 0.9rem; border-top: 1px solid var(--pos-s-border); }
+.till-health-support-content[hidden] { display: none; }
+.till-health-support-content code,
+.till-health-support-content pre { white-space: pre-wrap; overflow-wrap: anywhere; }

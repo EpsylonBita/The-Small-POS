@@ -378,7 +378,7 @@ test('Round 325: Data section is three zones — recovery, green safe fixes, the
   const db = databaseSection(source);
 
   // Zone order: RecoveryPanel -> safe fixes -> danger tools.
-  const recoveryAt = db.indexOf('<RecoveryPanel');
+  const recoveryAt = db.indexOf('onClick={handleOpenTillHealth}');
   const safeAt = db.indexOf('data-database-safe-fixes');
   const dangerAt = db.indexOf('data-database-danger-zone');
   assert.ok(recoveryAt >= 0, 'RecoveryPanel must render in the data section');

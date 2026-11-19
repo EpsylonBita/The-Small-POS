@@ -6,6 +6,7 @@ import {
   rowsWaitingOutRetry,
   syncNowIssueCode,
   syncNowRemainder,
+  syncNowTargetOutcomes,
   syncNowTargetItems,
   wasAttempted,
 } from '../sync-now-attempt';
@@ -129,7 +130,7 @@ describe('syncNowRemainder', () => {
   it('says not verified when the rows could not be read again, and never failed with no rows', () => {
     expect(syncNowRemainder({ before, after: null, problemStillThere: true, nowMs: NOW })).toBeNull();
     expect(syncNowRemainder({ before: [], after: [], problemStillThere: true, nowMs: NOW })).toBe('progressing');
-    expect(syncNowRemainder({ before: null, after: null, problemStillThere: false, nowMs: NOW })).toBe('none');
+    expect(syncNowRemainder({ before: null, after: null, problemStillThere: false, nowMs: NOW })).toBeNull();
   });
 
   it('reads an attempt from the count, the last attempt or a turn to failed', () => {
@@ -140,5 +141,23 @@ describe('syncNowRemainder', () => {
     expect(wasAttempted(base, { ...base, lastAttempt: iso(-1000) })).toBe(true);
     expect(wasAttempted(base, { ...base, status: 'failed' })).toBe(true);
     expect(wasAttempted(base, { ...base, status: 'processing' })).toBe(false);
+  });
+});
+
+describe('syncNowTargetOutcomes', () => {
+  it('separates an acknowledged row, an untouched row, a dependency, a refusal and a set-aside row', () => {
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f'];
+    const before = ids.map(id => ({ id, status: 'pending', attempts: 1 } as SyncQueueItem));
+    const after = [
+      before[1],
+      { ...before[2], errorMessage: 'Waiting for parent order sync' },
+      { ...before[3], attempts: 2, status: 'conflict' },
+      { ...before[4], status: 'set_aside' },
+    ];
+    expect(syncNowTargetOutcomes(before, after, ['a'])).toEqual([
+      { id: 'a', outcome: 'sent' }, { id: 'b', outcome: 'untouched' },
+      { id: 'c', outcome: 'waiting' }, { id: 'd', outcome: 'refused' },
+      { id: 'e', outcome: 'set_aside' }, { id: 'f', outcome: 'unknown' },
+    ]);
   });
 });

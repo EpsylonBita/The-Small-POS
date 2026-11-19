@@ -4,6 +4,7 @@ pub mod health;
 pub mod logs;
 pub mod modules;
 pub mod printers;
+pub mod recovery_attempts;
 pub mod settings;
 pub mod shifts;
 pub mod sync_queue;

@@ -46,46 +46,104 @@ pub(crate) fn employee_attempt(conn: &Connection, request: &Value) -> Result<Val
 }
 
 pub(crate) fn machine_code(error: &str) -> String {
-    if matches!(error, "UNCLASSIFIED_REFUSAL" | "AWAITING_CONFIRMATION") {
-        return error.into();
+    let error = error.trim();
+    match error {
+        "UNCLASSIFIED_REFUSAL" | "AWAITING_CONFIRMATION" => return error.into(),
+        "Active session required" | "UNAUTHORIZED: Active session required" => {
+            return "AUTH_SESSION_REQUIRED".into();
+        }
+        "Active cashier or manager shift required on this terminal"
+        | "UNAUTHORIZED: Active cashier or manager shift required on this terminal" => {
+            return "AUTH_SHIFT_REQUIRED".into();
+        }
+        "Privileged action confirmation cancelled" => return "AUTH_CONFIRMATION_CANCELLED".into(),
+        _ => {}
     }
-    // Only the leading machine-code envelope, never tokens from the message
-    // or its quoted payload values. Prefer the precise code after HTTP_xxx.
-    let head: String = error
-        .trim()
-        .chars()
-        .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_' || *c == ':')
-        .take(192)
-        .collect();
-    head.split(':')
-        .rev()
-        .find(|word| {
-            word.len() <= 96
-                && word.contains('_')
-                && [
-                    "ORDER_",
-                    "PAYMENT_",
-                    "EDIT_",
-                    "AUTOMATIC_",
-                    "CONCURRENT_",
-                    "UNKNOWN_",
-                    "INVALID_",
-                    "PLATFORM_",
-                    "MISSING_",
-                    "REMOTE_",
-                    "FINANCIAL_",
-                    "PARENT_",
-                    "REMEDY_",
-                    "POS_",
-                    "HTTP_",
-                    "TABLE_",
-                    "FISCAL_",
-                ]
-                .iter()
-                .any(|prefix| word.starts_with(prefix))
-        })
-        .unwrap_or("UNCLASSIFIED_REFUSAL")
-        .to_string()
+    // Read only the first token, or one wrapped code immediately after a
+    // numeric HTTP status. A later token belongs to the diagnostic message.
+    let first = leading_machine_token(error);
+    if first.strip_prefix("HTTP_").is_some_and(|envelope| {
+        let (status, flavor) = envelope.split_once('_').unwrap_or((envelope, ""));
+        status.len() == 3
+            && status.bytes().all(|byte| byte.is_ascii_digit())
+            && matches!(
+                flavor,
+                "" | "CLIENT_ERROR" | "SERVER_ERROR" | "RATE_LIMITED"
+            )
+    }) {
+        if let Some(detail) = error[first.len()..].strip_prefix(':') {
+            let detail = leading_machine_token(detail.trim_start());
+            if known_machine_token(detail) {
+                return detail.into();
+            }
+        }
+    }
+    if known_machine_token(first) {
+        first.into()
+    } else {
+        "UNCLASSIFIED_REFUSAL".into()
+    }
+}
+
+fn leading_machine_token(value: &str) -> &str {
+    value
+        .split_once(|c: char| c == ':' || c.is_ascii_whitespace())
+        .map_or(value, |(token, _)| token)
+}
+
+fn known_machine_token(word: &str) -> bool {
+    matches!(
+        word,
+        "AUTH_SESSION_REQUIRED"
+            | "AUTH_SESSION_EXPIRED"
+            | "AUTH_SHIFT_REQUIRED"
+            | "AUTH_PIN_WRONG"
+            | "AUTH_LOCKED_OUT"
+            | "AUTH_CONFIRMATION_CANCELLED"
+            | "UNAUTHORIZED"
+            | "REAUTH_REQUIRED"
+            | "FORBIDDEN"
+            | "POLICY_REFUSED"
+            | "INSUFFICIENT_DISK"
+            | "ONSITE_TIMEOUT"
+            | "ONSITE_DECLINED"
+            | "INTERNAL_ERROR"
+            | "TIER_NOT_ALLOWED"
+            | "PREEMPTED_BY_CRITICAL_OPERATION"
+            | "SYNC_CANCELLED"
+            | "TERMINAL_AUTH_RESET"
+            | "TERMINAL_REBIND_PENDING"
+            | "TERMINAL_BINDING_UNAVAILABLE"
+    ) || (word.len() <= 64
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && [
+            "ORDER_",
+            "PAYMENT_",
+            "EDIT_",
+            "AUTOMATIC_",
+            "CONCURRENT_",
+            "UNKNOWN_",
+            "INVALID_",
+            "PLATFORM_",
+            "MISSING_",
+            "REMOTE_",
+            "FINANCIAL_",
+            "PARENT_",
+            "REMEDY_",
+            "POS_",
+            "HTTP_",
+            "TABLE_",
+            "FISCAL_",
+            "SNAPSHOT_",
+            "PAYLOAD_",
+            "SET_ASIDE_",
+            "NOTICE_",
+            "PARITY_",
+        ]
+        .iter()
+        .any(|prefix| word.starts_with(prefix) && word.len() > prefix.len()))
 }
 
 fn attempt(
@@ -342,6 +400,42 @@ mod tests {
             }
             entries.push(value);
         }
+    }
+
+    #[test]
+    fn evidence_names_confirmation_and_admission_without_copying_details() {
+        for expected in [
+            "AUTH_SESSION_REQUIRED",
+            "AUTH_SHIFT_REQUIRED",
+            "AUTH_PIN_WRONG",
+            "AUTH_LOCKED_OUT",
+            "AUTH_CONFIRMATION_CANCELLED",
+            "SNAPSHOT_FAILED",
+            "PAYLOAD_MISMATCH",
+            "SET_ASIDE_GROUP_CHANGED",
+            "NOTICE_STALE",
+            "REMEDY_ATTEMPT_CAP",
+            "TIER_NOT_ALLOWED",
+            "PREEMPTED_BY_CRITICAL_OPERATION",
+        ] {
+            assert_eq!(
+                machine_code(&format!("{expected}:ORDER_CUSTOMER_PHONE private value")),
+                expected
+            );
+        }
+        assert_eq!(
+            machine_code("HTTP_409: EDIT_CANONICAL_ORIGINAL_CHANGED: private detail"),
+            "EDIT_CANONICAL_ORIGINAL_CHANGED"
+        );
+        assert_eq!(
+            machine_code("HTTP_400_CLIENT_ERROR:INVALID_PHONE"),
+            "INVALID_PHONE"
+        );
+        assert_eq!(
+            machine_code("active shift error: PAYLOAD_MISMATCH"),
+            "UNCLASSIFIED_REFUSAL"
+        );
+        assert_eq!(machine_code("AUTH_PRIVATE_VALUE"), "UNCLASSIFIED_REFUSAL");
     }
 
     #[test]

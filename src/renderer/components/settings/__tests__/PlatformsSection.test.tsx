@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import dePlatforms from '../../../../locales/overlays/de.platforms.json';
 import elPlatforms from '../../../../locales/overlays/el.platforms.json';
@@ -8,11 +8,24 @@ import frPlatforms from '../../../../locales/overlays/fr.platforms.json';
 import itPlatforms from '../../../../locales/overlays/it.platforms.json';
 import sqPlatforms from '../../../../locales/overlays/sq.platforms.json';
 
-const { posApiGet, posApiPost } = vi.hoisted(() => ({
+const { posApiGet, posApiPost, boxDetails, fixtures } = vi.hoisted(() => ({
   posApiGet: vi.fn(),
+  boxDetails: vi.fn(),
   posApiPost: vi.fn(),
+  fixtures: { box: undefined as Platform | undefined },
 }));
-vi.mock('../../../utils/api-helpers', () => ({ posApiGet, posApiPost }));
+vi.mock('../../../utils/api-helpers', () => ({
+  posApiPost,
+  posApiGet: async (path: string) => {
+    if (path.includes('?plugin_id=box')) return boxDetails(path);
+    const response = await posApiGet(path);
+    fixtures.box = response?.data?.platforms?.find((row: Platform) => row.plugin_id === 'box' && row.reason !== 'unsupported');
+    if (!fixtures.box) return response;
+    return listResponse(...response.data.platforms.map((row: Platform) => row.plugin_id === 'box'
+      ? { ...row, open: null, controllable: false, reason: 'unsupported' }
+      : row));
+  },
+}));
 
 // A stable `t` reference: react-i18next's real useTranslation would also be
 // stable across renders, and a mock that hands back a brand-new function each
@@ -109,12 +122,27 @@ describe('PlatformsSection', () => {
     vi.clearAllMocks();
     // Also drop queued once-values so no response can leak into the next test.
     posApiGet.mockReset();
+    fixtures.box = undefined;
+    boxDetails.mockReset().mockImplementation(async () => listResponse(...(fixtures.box ? [{
+      ...fixtures.box, weekly_schedule_revision: fixtures.box.weekly_schedule_revision ?? 'a'.repeat(64),
+    }] : [])));
     posApiPost.mockReset();
     Object.defineProperty(window.navigator, 'onLine', { value: true, configurable: true });
   });
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+  });
+
+  it('keeps the efood guidance during the first load and after the first request fails', async () => {
+    const guidance = /^efood opens automatically when the first cashier checks in/;
+    let finish: (result: unknown) => void = () => {};
+    posApiGet.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    render(<PlatformsSection />);
+    expect(screen.getByText(guidance)).toBeInTheDocument();
+    await act(async () => finish({ success: false }));
+    expect(await screen.findByText('Could not load platforms')).toBeInTheDocument();
+    expect(screen.getByText(guidance)).toBeInTheDocument();
   });
 
   it.each([
@@ -204,6 +232,281 @@ describe('PlatformsSection', () => {
     expect(screen.getByRole('button', { name: /Close/ })).toBeInTheDocument();
     expect(screen.queryByRole('switch')).not.toBeInTheDocument();
     expect(screen.getByText('Unknown')).toBeInTheDocument();
+  });
+
+  it('renders the efood card while the separate BOX detail never answers', async () => {
+    const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, controllable: false, reason: 'unsupported' });
+    posApiGet.mockResolvedValue(listResponse(makePlatform(), box));
+    boxDetails.mockReturnValue(new Promise(() => {}));
+    render(<PlatformsSection />);
+    expect(await screen.findByRole('switch', { name: 'efood' })).toHaveAttribute('aria-checked', 'true');
+    expect(boxDetails).toHaveBeenCalledWith('/pos/platforms?plugin_id=box');
+  });
+
+  it('keeps the base efood list failure while a BOX action is pending', async () => {
+    const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null });
+    posApiGet.mockResolvedValueOnce(listResponse(makePlatform(), box)).mockResolvedValueOnce({ success: false });
+    posApiPost.mockReturnValue(new Promise(() => {}));
+    render(<PlatformsSection />);
+    await screen.findByRole('switch', { name: 'efood' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Open' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText('Could not load platforms');
+    expect(screen.queryByRole('switch', { name: 'efood' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open' })).toBeDisabled();
+  });
+
+  it('makes zero BOX detail requests for an efood-only list', async () => {
+    posApiGet.mockResolvedValue(listResponse(makePlatform()));
+    render(<PlatformsSection />);
+    await screen.findByRole('switch', { name: 'efood' });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled());
+    expect(boxDetails).not.toHaveBeenCalled();
+  });
+
+  it('shows a refused BOX reissue alongside the Merchant warning without refreshing efood', async () => {
+    const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, reason: 'outcome_unknown' });
+    posApiGet.mockResolvedValueOnce(listResponse(makePlatform(), box)).mockResolvedValue({ success: false });
+    posApiPost.mockResolvedValue({ success: false, error: 'provider_rejected' });
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open' }));
+    expect(await screen.findByText('BOX rejected the request.')).toBeInTheDocument();
+    expect(screen.getByText('Could not confirm the request. Check the shop in BOX Merchant.')).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'efood' })).toHaveAttribute('aria-checked', 'true');
+    expect(posApiGet).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['outcome_unknown', 'Could not confirm the request. Check the shop in BOX Merchant.'],
+    ['provider_rejected', 'BOX rejected the request.'],
+  ])('keeps the %s warning when a BOX availability action is busy', async (reason, warning) => {
+    posApiGet.mockResolvedValue(listResponse(makePlatform({ plugin_id: 'box', name: 'BOX', open: null, reason })));
+    posApiPost.mockResolvedValue({ success: false, error: 'busy (HTTP 409)' });
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open' }));
+    expect(await screen.findByText('The platform is busy. Try again shortly.')).toBeInTheDocument();
+    expect(screen.getByText(warning)).toBeInTheDocument();
+    expect(boxDetails).toHaveBeenCalledTimes(1);
+  });
+
+  it('retires omitted BOX controls and ignores a late save while keeping the hours draft', async () => {
+    const week = { monday: [{ from: '09:00', to: '14:00' }], tuesday: [], wednesday: [], thursday: [], friday: [], saturday: [], sunday: [] };
+    const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, auto_open: true,
+      weekly_schedule: week, weekly_schedule_revision: 'a'.repeat(64) });
+    let complete!: (result: unknown) => void;
+    posApiPost.mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    posApiGet.mockResolvedValueOnce(listResponse(makePlatform(), box)).mockResolvedValueOnce(listResponse(makePlatform()));
+    render(<PlatformsSection />);
+    const card = within((await screen.findByText('BOX')).closest('section')!);
+    fireEvent.click(await card.findByRole('button', { name: 'Weekly hours' }));
+    fireEvent.change(screen.getByLabelText('To'), { target: { value: '15:00' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send week to BOX' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Open' })).not.toBeInTheDocument());
+    await act(async () => complete(actionResponse({ ...box, weekly_schedule_revision: 'b'.repeat(64) })));
+    expect(screen.queryByRole('button', { name: 'Open' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Automatic BOX opening' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('To')).toHaveValue('15:00');
+    expect(screen.getByRole('button', { name: 'Send week to BOX' })).toBeDisabled();
+    expect(screen.getByRole('switch', { name: 'efood' })).toHaveAttribute('aria-checked', 'true');
+    expect(posApiGet).toHaveBeenCalledTimes(2);
+    expect(boxDetails).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows an empty BOX detail as a refresh error on the card from the list', async () => {
+    const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, controllable: false, reason: 'unsupported' });
+    posApiGet.mockResolvedValue(listResponse(makePlatform(), box));
+    render(<PlatformsSection />);
+    await screen.findByText('Could not refresh BOX. Try again.');
+    expect(screen.getByText('BOX')).toBeInTheDocument();
+    expect(screen.queryByText('This platform cannot be opened or closed from here.')).not.toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'efood' })).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('can open and close BOX manually with automation off and displays the accepted request time', async () => {
+    const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, auto_open: false });
+    const at = '2026-11-18T07:05:00Z';
+    const time = new Date(at).toLocaleString('en', { dateStyle: 'short', timeStyle: 'short' });
+    posApiGet.mockResolvedValue(listResponse(box));
+    posApiPost
+      .mockResolvedValueOnce(actionResponse({ ...box, last_requested_open: true, last_requested_at: at }))
+      .mockResolvedValueOnce(actionResponse({ ...box, last_requested_open: false, last_requested_at: at }));
+    render(<PlatformsSection />);
+    await screen.findByRole('button', { name: 'Open' });
+    expect(screen.getAllByText(/Customers only see the shop as open when it is open here and within BOX opening hours/)).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    await screen.findByText(`Last accepted POS request · Open, ${time}`);
+    expect(screen.getByRole('button', { name: 'Open' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await screen.findByText(`Last accepted POS request · Close, ${time}`);
+    expect(screen.getByRole('switch', { name: 'Automatic BOX opening' })).toHaveAttribute('aria-checked', 'false');
+    expect(posApiPost.mock.calls).toEqual([
+      ['/pos/platforms?plugin_id=box', { plugin_id: 'box', open: true }],
+      ['/pos/platforms?plugin_id=box', { plugin_id: 'box', open: false }],
+    ]);
+  });
+
+  it('changes only the BOX automatic preference and keeps all BOX actions locked while saving', async () => {
+    const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, auto_open: false });
+    posApiGet.mockResolvedValue(listResponse(box));
+    let confirm!: (value: unknown) => void;
+    posApiPost.mockImplementationOnce(() => new Promise(resolve => { confirm = resolve; }))
+      .mockResolvedValueOnce(actionResponse(box));
+    render(<PlatformsSection />);
+    const auto = await screen.findByRole('switch', { name: 'Automatic BOX opening' });
+    fireEvent.click(auto);
+    expect(auto).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Open' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
+    await act(async () => confirm(actionResponse({ ...box, auto_open: true })));
+    expect(auto).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(auto);
+    await waitFor(() => expect(auto).toHaveAttribute('aria-checked', 'false'));
+    expect(posApiPost.mock.calls).toEqual([
+      ['/pos/platforms?plugin_id=box', { plugin_id: 'box', auto_open: true }],
+      ['/pos/platforms?plugin_id=box', { plugin_id: 'box', auto_open: false }],
+    ]);
+    expect(screen.queryByText(/Last accepted POS request/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the last BOX preference on an unconfirmed write and disables offline commands', async () => {
+    posApiGet.mockResolvedValue(listResponse(makePlatform({ plugin_id: 'box', name: 'BOX', open: null, auto_open: true })));
+    posApiPost.mockRejectedValue(new Error('offline'));
+    render(<PlatformsSection />);
+    const auto = await screen.findByRole('switch');
+    fireEvent.click(auto);
+    await screen.findByText('Could not confirm the setting was saved. Refresh to check.');
+    expect(auto).toHaveAttribute('aria-checked', 'true');
+    setOnline(false);
+    expect(auto).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Open' })).toBeDisabled();
+  });
+
+  it('does not expose BOX controls on a different register', async () => {
+    posApiGet.mockResolvedValue(listResponse(makePlatform({
+      plugin_id: 'box', name: 'BOX', open: null, controllable: false, auto_open: true, reason: 'wrong_terminal',
+    })));
+    render(<PlatformsSection />);
+    await screen.findByText('Manage this platform from its assigned register.');
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open' })).not.toBeInTheDocument();
+  });
+
+  it('requires seven explicit days before sending BOX hours and supports service after midnight', async () => {
+    const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, weekly_schedule: null, weekly_schedule_at: null, weekly_schedule_revision: 'a'.repeat(64) });
+    const week = {
+      monday: [], tuesday: [], wednesday: [], thursday: [], friday: [], saturday: [],
+      sunday: [{ from: '17:00', to: '06:00' }],
+    };
+    posApiGet.mockResolvedValue(listResponse(box));
+    posApiPost.mockResolvedValue(actionResponse({ ...box, weekly_schedule: week, weekly_schedule_at: '2026-11-18T08:00:00Z' }));
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Weekly hours' }));
+    const save = screen.getByRole('button', { name: 'Send week to BOX' });
+    expect(save).toBeDisabled();
+    const noStarts = screen.getAllByRole('checkbox', { name: 'No hours start this day' });
+    expect(noStarts).toHaveLength(7);
+    noStarts.slice(0, 6).forEach(box => { expect(box).not.toBeChecked(); fireEvent.click(box); });
+    expect(save).toBeDisabled();
+    const sunday = within(screen.getByRole('group', { name: 'Sunday' }));
+    fireEvent.click(sunday.getByRole('button', { name: 'Add hours' }));
+    fireEvent.change(sunday.getByLabelText('From'), { target: { value: '17:00' } });
+    fireEvent.change(sunday.getByLabelText('To'), { target: { value: '06:00' } });
+    expect(sunday.getByText('Next day')).toBeInTheDocument();
+    const monday = within(screen.getByRole('group', { name: 'Monday' }));
+    fireEvent.click(monday.getByRole('button', { name: 'Add hours' }));
+    fireEvent.change(monday.getByLabelText('From'), { target: { value: '05:30' } });
+    fireEvent.change(monday.getByLabelText('To'), { target: { value: '10:00' } });
+    expect(save).toBeDisabled();
+    fireEvent.click(monday.getByRole('checkbox'));
+    fireEvent.click(save);
+    expect(posApiPost).toHaveBeenCalledWith('/pos/platforms?plugin_id=box', { plugin_id: 'box', weekly_schedule: week, expected_schedule_revision: box.weekly_schedule_revision });
+    await screen.findByText(/Last schedule sent from the POS/);
+    expect(save).toBeDisabled();
+  });
+
+  it('keeps a first draft tied to its shop when neither shop has submitted a week', async () => {
+    const shop = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, weekly_schedule: null, weekly_schedule_at: null, weekly_schedule_revision: 'a'.repeat(64) });
+    posApiGet.mockResolvedValueOnce(listResponse(shop)).mockResolvedValueOnce(listResponse({ ...shop, weekly_schedule_revision: 'b'.repeat(64) }));
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Weekly hours' }));
+    screen.getAllByRole('checkbox', { name: 'No hours start this day' }).forEach(day => fireEvent.click(day));
+    const save = screen.getByRole('button', { name: 'Send week to BOX' });
+    expect(save).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText(/Another register saved a newer schedule/);
+    expect(save).toBeDisabled();
+    expect(posApiPost).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['busy (HTTP 409)', 'The platform is busy. Try again shortly.'],
+    ['provider_rejected (HTTP 502)', 'BOX rejected the request.'],
+    ['outcome_unknown (HTTP 502)', 'Could not confirm the request. Check the shop in BOX Merchant.'],
+  ])('shows BOX schedule feedback for %s and keeps the draft editable', async (error, instruction) => {
+    const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, weekly_schedule: null, weekly_schedule_revision: 'a'.repeat(64) });
+    posApiGet.mockResolvedValue(listResponse(box));
+    posApiPost.mockResolvedValue({ success: false, error });
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Weekly hours' }));
+    screen.getAllByRole('checkbox', { name: 'No hours start this day' }).forEach(day => fireEvent.click(day));
+    const save = screen.getByRole('button', { name: 'Send week to BOX' });
+    fireEvent.click(save);
+    await screen.findByText(instruction);
+    expect(save).toBeEnabled();
+    expect(screen.queryByText(/Another register saved a newer schedule/)).not.toBeInTheDocument();
+  });
+
+  it('preserves unsaved BOX hours on a version conflict and reloads the last POS copy on request', async () => {
+    const week = { monday: [{ from: '09:00', to: '14:00' }], tuesday: [], wednesday: [], thursday: [], friday: [], saturday: [], sunday: [] };
+    const previous = '2026-11-18T08:00:00Z';
+    const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, weekly_schedule: week, weekly_schedule_at: previous, weekly_schedule_revision: 'a'.repeat(64) });
+    posApiGet.mockResolvedValueOnce(listResponse(box, makePlatform({ controllable: false }))).mockResolvedValueOnce({ success: false });
+    boxDetails.mockResolvedValueOnce(listResponse(box)).mockResolvedValueOnce({ success: false, status: 429 }).mockResolvedValueOnce(listResponse({
+      ...box, weekly_schedule: { ...week, monday: [{ from: '10:00', to: '18:00' }] },
+      weekly_schedule_at: '2026-11-18T09:00:00Z', weekly_schedule_revision: 'b'.repeat(64),
+    }));
+    posApiPost.mockResolvedValue({ success: false, error: 'schedule_conflict (HTTP 409): conflict' });
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Weekly hours' }));
+    fireEvent.change(screen.getByLabelText('To'), { target: { value: '15:00' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled());
+    expect(screen.getByText('Could not load platforms')).toBeInTheDocument();
+    expect(screen.queryByText('efood')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('To')).toHaveValue('15:00');
+    fireEvent.click(screen.getByRole('button', { name: 'Send week to BOX' }));
+    await screen.findByText(/Another register saved a newer schedule/);
+    expect(screen.getByLabelText('To')).toHaveValue('15:00');
+    expect(posApiPost).toHaveBeenCalledWith('/pos/platforms?plugin_id=box', expect.objectContaining({ expected_schedule_revision: box.weekly_schedule_revision }));
+    expect(screen.getByRole('button', { name: 'Send week to BOX' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Discard my changes and reload' }));
+    expect(await screen.findByText('Could not refresh BOX. Try again.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Discard my changes and reload' })).toBeEnabled());
+    expect(screen.getByLabelText('To')).toHaveValue('15:00');
+    fireEvent.click(screen.getByRole('button', { name: 'Discard my changes and reload' }));
+    await waitFor(() => expect(screen.getByLabelText('To')).toHaveValue('18:00'));
+  });
+
+  it('keeps the BOX draft mounted and disables submission during an uncontrollable detail refresh', async () => {
+    const week = { monday: [{ from: '09:00', to: '14:00' }], tuesday: [], wednesday: [], thursday: [], friday: [], saturday: [], sunday: [] };
+    const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, weekly_schedule: week, weekly_schedule_revision: 'a'.repeat(64) });
+    const failed = { ...box, controllable: false, reason: 'provider_unavailable', weekly_schedule: undefined, weekly_schedule_revision: undefined };
+    posApiGet.mockResolvedValue(listResponse(box));
+    boxDetails.mockResolvedValueOnce(listResponse(box)).mockResolvedValueOnce(listResponse(failed));
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Weekly hours' }));
+    fireEvent.change(screen.getByLabelText('To'), { target: { value: '15:00' } });
+    const save = screen.getByRole('button', { name: 'Send week to BOX' });
+    expect(save).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText('Could not refresh BOX. Try again.');
+    expect(screen.getByLabelText('To')).toHaveValue('15:00');
+    expect(save).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(save).toBeEnabled());
+    expect(screen.getByLabelText('To')).toHaveValue('15:00');
   });
 
   it('shows a Wolt-style outside-hours limitation instead of implying it is receiving orders', async () => {
@@ -847,6 +1150,12 @@ describe('platforms locale overlays', () => {
     sq: sqPlatforms,
   };
   const newCopyKeys = [
+    'settings.platforms.box.autoOpen',
+    'settings.platforms.box.autoHelp',
+    'settings.platforms.box.statusHelp',
+    'settings.platforms.box.lastAction',
+    'settings.platforms.box.automationUnconfirmed',
+    'settings.platforms.box.requestUnconfirmed',
     'settings.platforms.manualClosureNote',
     'settings.platforms.closedUntil',
     'settings.platforms.status.opening',

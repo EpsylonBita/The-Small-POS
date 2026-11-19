@@ -13,6 +13,7 @@ const listeners = new Set<() => void>();
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const publish = (next: NoticeSnapshot) => { snapshot = next; listeners.forEach(listener => listener()); };
 export const readOrderNoticeSnapshot = () => snapshot;
+export const readOrderNoticeStatus = (orderId: string) => orderStatus.get(orderId) ?? allStatus;
 
 /** A failed read retains the last evidence. Partial order reads never erase
  * another page's notices. A newer read wins over an older in-flight response. */
@@ -47,7 +48,7 @@ export function useOrderNotices(orderIds?: string[], refresh = true): NoticeSnap
   useEffect(() => { if (refresh) { void refreshOrderNotices(orderIds); } }, [key, refresh]);
   // The global shift list contains these orders too. A failed partial read
   // cannot leave that list claiming its evidence is fully refreshed.
-  const states = orderIds ? orderIds.map(id => orderStatus.get(id) ?? allStatus) : [allStatus, ...orderStatus.values()];
+  const states = orderIds ? orderIds.map(readOrderNoticeStatus) : [allStatus, ...orderStatus.values()];
   const status = (['unavailable', 'stale', 'loading', 'fresh'] as const).find(status => states.includes(status)) ?? 'fresh';
   return { ...value, status, notices: orderIds ? value.notices.filter(notice => orderIds.includes(notice.orderId)) : value.notices };
 }

@@ -48,3 +48,33 @@ impl ServerClock {
         self.anchor = None;
     }
 }
+
+/// Monotonic time for local support work budgets. This does not set server
+/// time or affect the critical-operation gate's cancellation flag.
+pub(super) fn monotonic_now() -> Instant {
+    #[cfg(test)]
+    if let Some(now) = TEST_MONOTONIC_NOW.get() {
+        return now;
+    }
+    Instant::now()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_MONOTONIC_NOW: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) struct FrozenDeadlineClock(Option<Instant>);
+
+#[cfg(test)]
+impl Drop for FrozenDeadlineClock {
+    fn drop(&mut self) {
+        TEST_MONOTONIC_NOW.set(self.0);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn freeze_deadline_clock() -> FrozenDeadlineClock {
+    FrozenDeadlineClock(TEST_MONOTONIC_NOW.replace(Some(monotonic_now())))
+}

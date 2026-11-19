@@ -137,6 +137,21 @@ fn support_client() -> Result<&'static Client, String> {
 fn client_for_admin_path(path: &str) -> Result<&'static Client, String> {
     if path.starts_with("/api/pos/support/") || path == "/api/pos/support" {
         support_client()
+    } else if path == "/api/pos/incidents/report" {
+        // After an ambiguous POST, only the report owner may decide whether
+        // the exact ZIP can be retried. Do not resubmit it in the HTTP layer.
+        static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+        CLIENT
+            .get_or_init(|| {
+                Client::builder()
+                    .connect_timeout(Duration::from_secs(10))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .retry(reqwest::retry::never())
+                    .build()
+                    .map_err(|_| "INCIDENT_TRANSPORT_UNAVAILABLE".into())
+            })
+            .as_ref()
+            .map_err(Clone::clone)
     } else {
         shared_client()
     }

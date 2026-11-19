@@ -12,6 +12,39 @@ afterEach(cleanup);
 const event = { command_id: 'your-command', session_id: 'your-session', explanation: 'Retry the row that is holding up work',
   reason: 'The earlier network request failed', at: '2026-11-13T12:00:00.000Z', state: 'waiting' };
 describe('confirmed commands in the existing pill', () => {
+  it('shows the shipped queue label alongside the confirmed explanation and in history', () => {
+    const snapshot = SupportBannerSnapshotSchema.parse({ state: 'executing', activity: 'till_confirmed_command',
+      confirmed_history: [{ ...event, state: 'started', label: { key: 'setAsideParkedGroup', values: { queue_id: 'your-row' } } }] });
+    render(<SupportBannerView snapshot={snapshot} onEnd={vi.fn()} onExtend={vi.fn()} />);
+    expect(screen.getByTestId('support-confirmed-explanation')).toHaveTextContent('support.confirmed.setAsideParkedGroup');
+    expect(screen.getByTestId('support-confirmed-explanation')).toHaveTextContent(event.explanation);
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+    expect(screen.getByTestId('support-confirmed-history')).toHaveTextContent('support.confirmed.setAsideParkedGroup');
+  });
+
+  it('shows the receipt label and approved explanation in both views', () => {
+    const snapshot = SupportBannerSnapshotSchema.parse({
+      state: 'executing',
+      activity: 'till_confirmed_command',
+      confirmed_history: [{
+        ...event,
+        state: 'started',
+        label: {
+          key: 'restorePaymentReceiptMirror',
+          values: { order_id: 'your-order', server_payment_id: 'your-payment' },
+        },
+      }],
+    });
+    render(<SupportBannerView snapshot={snapshot} onEnd={vi.fn()} onExtend={vi.fn()} />);
+    const banner = screen.getByTestId('support-confirmed-explanation');
+    expect(banner).toHaveTextContent('support.confirmed.restorePaymentReceiptMirror');
+    expect(banner).toHaveTextContent(event.explanation);
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+    const history = screen.getByTestId('support-confirmed-history');
+    expect(history).toHaveTextContent('support.confirmed.restorePaymentReceiptMirror');
+    expect(history).toHaveTextContent(event.explanation);
+  });
+
   it.each(['waiting', 'started'])('shows the actual explanation for %s and End remains immediate', state => {
     const onEnd = vi.fn();
     const snapshot = SupportBannerSnapshotSchema.parse({ state: state === 'started' ? 'executing' : 'deferred', activity: 'till_confirmed_command', confirmed_history: [{ ...event, state }], remaining_ms: 60000 });

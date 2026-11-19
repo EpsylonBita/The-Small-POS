@@ -311,8 +311,8 @@ fn query_financial_queue_items_for_order(
             },
         )
         .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     drop(stmt);
     let items: Vec<serde_json::Value> = rows
         .into_iter()
@@ -393,8 +393,8 @@ fn load_legacy_financial_parity_orphan_issues(
             ))
         })
         .map_err(|e| format!("query legacy payment parity orphans: {e}"))?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     drop(payment_stmt);
 
     for (legacy_row_id, record_id, queue_status, last_error, created_at) in payment_rows {
@@ -440,8 +440,8 @@ fn load_legacy_financial_parity_orphan_issues(
             ))
         })
         .map_err(|e| format!("query legacy adjustment parity orphans: {e}"))?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     drop(adjustment_stmt);
 
     for (legacy_row_id, record_id, queue_status, last_error, created_at) in adjustment_rows {
@@ -579,8 +579,8 @@ pub(crate) fn collect_financial_integrity(db: &db::DbState) -> Result<serde_json
             ))
         })
         .map_err(|e| format!("query waiting-parent payments: {e}"))?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     drop(payment_stmt);
 
     for (
@@ -728,8 +728,8 @@ pub(crate) fn collect_financial_integrity(db: &db::DbState) -> Result<serde_json
             ))
         })
         .map_err(|e| format!("query waiting-parent adjustments: {e}"))?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     drop(adjustment_stmt);
 
     for (
@@ -956,16 +956,9 @@ pub async fn sync_validate_pending_orders(
 #[tauri::command]
 pub async fn sync_remove_invalid_orders(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-    sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
-    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_ids = parse_remove_invalid_orders_payload(arg0)?;
-    let result = sync::remove_invalid_orders(&db, order_ids);
-    if result.is_ok() {
-        emit_sync_status_snapshot(&app, &db, &sync_state).await;
-    }
-    result
+    parse_remove_invalid_orders_payload(arg0)?;
+    Err("INVALID_ORDER_PREVIEW_REQUIRED".into())
 }
 
 #[tauri::command]

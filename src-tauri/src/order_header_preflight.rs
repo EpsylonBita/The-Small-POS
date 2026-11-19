@@ -55,11 +55,39 @@ pub(crate) fn capture_except(
     Ok(original)
 }
 
-fn item_signatures(raw: &Value) -> Result<Vec<String>, String> {
-    item_signatures_with_display(raw, true)
+// Use the POS projection for names, options and money. Raw relation rows are
+// not an alternative display shape: they may have no name until hydration.
+// Only the two pricing facts omitted by the GET hydrator are supplemented,
+// joined by the server line UUID (never position or product identity).
+fn canonical_items(canonical: &Value) -> Result<Value, String> {
+    let mut items = canonical["items"]
+        .as_array()
+        .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?
+        .clone();
+    if let Some(raw) = canonical.get("order_items") {
+        let raw = raw.as_array().ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
+        for item in &mut items {
+            let id = item["id"]
+                .as_str()
+                .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
+            let matches: Vec<_> = raw.iter().filter(|row| row["id"] == id).collect();
+            if matches.len() != 1 {
+                return Err("EDIT_CANONICAL_SNAPSHOT_INVALID".into());
+            }
+            for key in ["original_unit_price", "is_price_overridden"] {
+                if let Some(value) = matches[0].get(key).filter(|v| !v.is_null()) {
+                    item[key] = value.clone();
+                }
+            }
+        }
+        if raw.len() != items.len() {
+            return Err("EDIT_CANONICAL_SNAPSHOT_INVALID".into());
+        }
+    }
+    Ok(Value::Array(items))
 }
 
-fn item_signatures_with_display(raw: &Value, display: bool) -> Result<Vec<String>, String> {
+fn item_signatures(raw: &Value, display: bool) -> Result<Vec<Value>, String> {
     let value = if let Some(raw) = raw.as_str() {
         serde_json::from_str(raw).map_err(|_| "EDIT_CANONICAL_SNAPSHOT_INVALID")?
     } else {
@@ -71,6 +99,12 @@ fn item_signatures_with_display(raw: &Value, display: bool) -> Result<Vec<String
         let object = item
             .as_object_mut()
             .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
+        let original_known = ["original_unit_price", "originalUnitPrice"]
+            .iter()
+            .any(|key| object.get(*key).is_some_and(|v| !v.is_null()));
+        let override_known = ["is_price_overridden", "isPriceOverridden"]
+            .iter()
+            .any(|key| object.get(*key).is_some_and(Value::is_boolean));
         for key in [
             "source_order_item_id",
             "sourceOrderItemId",
@@ -80,16 +114,77 @@ fn item_signatures_with_display(raw: &Value, display: bool) -> Result<Vec<String
             object.remove(key);
         }
         object.insert("id".into(), json!("11111111-1111-4111-8111-111111111111"));
+        // The established owner already removes _meta and normalizes empty
+        // modifiers. A manual marker is not a money or product identity.
         let mut normalized = crate::edit_settlement_recovery::items(&json!([item]))?.remove(0);
         normalized.as_object_mut().unwrap().remove("id");
+        normalized["originalKnown"] = json!(original_known);
+        normalized["overrideKnown"] = json!(override_known);
         if !display {
             normalized.as_object_mut().unwrap().remove("name");
             normalized.as_object_mut().unwrap().remove("notes");
         }
-        signatures.push(normalized.to_string());
+        signatures.push(normalized);
     }
-    signatures.sort();
     Ok(signatures)
+}
+
+fn items_match(local: &Value, canonical: &Value, display: bool) -> Result<bool, String> {
+    let local = item_signatures(local, display)?;
+    let canonical = item_signatures(canonical, display)?;
+    if local.len() != canonical.len() {
+        return Ok(false);
+    }
+    // Pulls historically discarded these two facts. Missing local evidence
+    // cannot prove a change; an explicitly retained false/price still can.
+    // Other fields keep the existing comparison. One-to-one matching retains
+    // multiplicity even when an old cart id cannot name a canonical UUID.
+    let edges: Vec<Vec<usize>> = local
+        .iter()
+        .map(|left| {
+            canonical
+                .iter()
+                .enumerate()
+                .filter_map(|(index, right)| {
+                    let mut left = left.clone();
+                    let mut right = right.clone();
+                    for (known, field) in [
+                        ("originalKnown", "originalUnitCents"),
+                        ("overrideKnown", "overridden"),
+                    ] {
+                        if left[known] != true {
+                            left.as_object_mut().unwrap().remove(field);
+                            right.as_object_mut().unwrap().remove(field);
+                        }
+                        left.as_object_mut().unwrap().remove(known);
+                        right.as_object_mut().unwrap().remove(known);
+                    }
+                    (left == right).then_some(index)
+                })
+                .collect()
+        })
+        .collect();
+    fn assign(
+        left: usize,
+        edges: &[Vec<usize>],
+        seen: &mut [bool],
+        owners: &mut [Option<usize>],
+    ) -> bool {
+        for &right in &edges[left] {
+            if seen[right] {
+                continue;
+            }
+            seen[right] = true;
+            if owners[right].is_none() || assign(owners[right].unwrap(), edges, seen, owners) {
+                owners[right] = Some(left);
+                return true;
+            }
+        }
+        false
+    }
+    let mut owners = vec![None; canonical.len()];
+    Ok((0..local.len())
+        .all(|left| assign(left, &edges, &mut vec![false; canonical.len()], &mut owners)))
 }
 
 /// Reads never change the cached order. Only an exact original permits the
@@ -147,10 +242,9 @@ pub(crate) fn drift(
             drifts.push((name, *field != "order_type"));
         }
     }
-    if item_signatures(&canonical["items"])? != item_signatures(&before["items"])? {
-        if item_signatures_with_display(&canonical["items"], false)?
-            == item_signatures_with_display(&before["items"], false)?
-        {
+    let canonical_items = canonical_items(canonical)?;
+    if !items_match(&before["items"], &canonical_items, true)? {
+        if items_match(&before["items"], &canonical_items, false)? {
             drifts.push(("items.name", true));
         } else {
             drifts.push(("items", false));
@@ -300,4 +394,348 @@ pub(crate) fn remembered(
     capture(conn, order, request)?;
     verify_local(conn, order, &saved["proof"])?;
     Ok(Some(saved["proof"].clone()))
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use crate::commands::orders::driver_restore_tests as fixture;
+
+    fn answer(before: &Value, hydrated: &Value, raw: Option<&Value>) -> Value {
+        let mut canonical = before["headers"].clone();
+        for (key, value) in [
+            ("id", before["id"].clone()),
+            ("organization_id", before["organizationId"].clone()),
+            ("branch_id", before["branchId"].clone()),
+            ("version", json!(4)),
+            ("status", before["status"].clone()),
+            (
+                "total_amount",
+                json!(before["totalCents"].as_i64().unwrap() as f64 / 100.0),
+            ),
+            ("notes", before["notes"].clone()),
+            (
+                "special_instructions",
+                before["special_instructions"].clone(),
+            ),
+            ("items", hydrated.clone()),
+        ] {
+            canonical[key] = value;
+        }
+        if let Some(raw) = raw {
+            canonical["order_items"] = raw.clone();
+        }
+        json!({"success":true,"exact_order_lookup":true,"orders":[canonical]})
+    }
+
+    fn check(
+        conn: &Connection,
+        before: &Value,
+        answer: &Value,
+        edit_ok: bool,
+        notice_ok: bool,
+        label: &str,
+    ) {
+        let edit = verify_detailed(conn, fixture::ORDER, before, answer);
+        let notice = crate::order_notice_recovery::verify(before, answer);
+        assert_eq!(edit.is_ok(), edit_ok, "ordinary: {label}: {edit:?}");
+        assert_eq!(notice.is_ok(), notice_ok, "notice: {label}: {notice:?}");
+        if let Err(error) = edit {
+            assert_eq!(error.code, "EDIT_CANONICAL_ORIGINAL_CHANGED", "{label}");
+        }
+        if let Err(error) = notice {
+            assert_eq!(error, "EDIT_CANONICAL_ORIGINAL_CHANGED", "{label}");
+        }
+    }
+
+    // The checked-in JSON is generated by executing the real TS mappers, not
+    // a Rust reconstruction of their aliases/defaults. The generator also
+    // records the pre-filter database rows, including a genuinely voided row.
+    #[test]
+    fn order_header_preflight_route_line_kinds_at_create_ack_pull_and_edit() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let conn = fixture::test_conn();
+        fixture::paid_delivery_order(&conn);
+        let data: Value =
+            serde_json::from_str(include_str!("tests/fixtures/order-header-shapes.json")).unwrap();
+        let mut scenarios = 0;
+        for case in data["fixtures"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let raw = &case["raw"];
+            let hydrated = &case["hydrated"];
+            let created = &case["local"];
+            let edit_ack = &case["ackItems"];
+            // The actual create-ACK owner either projects server rows and
+            // client ids, or keeps the original when identity cannot match.
+            let ack = crate::edit_settlement_recovery::lines_with_client_ids(
+                created.as_array().unwrap(),
+                edit_ack.as_array().unwrap(),
+            );
+            let ack_projected = ack.is_some();
+            let ack = ack.map(Value::Array).unwrap_or_else(|| created.clone());
+            for (phase, local) in [
+                ("create", created),
+                ("ack", &ack),
+                ("pull", hydrated),
+                ("edit_ack", edit_ack),
+            ] {
+                conn.execute(
+                    "UPDATE orders SET items=?1 WHERE id=?2",
+                    rusqlite::params![local.to_string(), fixture::ORDER],
+                )
+                .unwrap();
+                let before = capture(&conn, fixture::ORDER, &json!({})).unwrap();
+                for view in ["exact_both", "hydrated_only", "raw_only"] {
+                    let wire = if view == "raw_only" { raw } else { hydrated };
+                    let response = answer(&before, wire, (view == "exact_both").then_some(raw));
+                    let identity_matches = case["createMatches"] == true
+                        || phase == "pull"
+                        || phase == "edit_ack"
+                        || (phase == "ack" && ack_projected);
+                    // Hydrated-only answers cannot prove a retained override:
+                    // the current route drops both original price and flag.
+                    let price_matches =
+                        !(name == "price_override" && view == "hydrated_only" && phase != "pull");
+                    let local_name_missing = false; // API ACK hydrates name from _meta.product_name.
+                    let server_name_missing = name == "hydrated_name" && view == "raw_only";
+                    let display_matches = local_name_missing == server_name_missing;
+                    check(
+                        &conn,
+                        &before,
+                        &response,
+                        identity_matches && price_matches && display_matches,
+                        identity_matches && price_matches,
+                        &format!("{name}/{phase}/{view}"),
+                    );
+                    scenarios += 1;
+                }
+            }
+            // For every kind, use a captured canonical edit snapshot to prove
+            // all established money/identity/selection and line-set guards.
+            conn.execute(
+                "UPDATE orders SET items=?1 WHERE id=?2",
+                rusqlite::params![raw.to_string(), fixture::ORDER],
+            )
+            .unwrap();
+            let before = capture(&conn, fixture::ORDER, &json!({})).unwrap();
+            let base = answer(&before, hydrated, Some(raw));
+            for (field, value) in [
+                ("unit_price", json!(99)),
+                ("total_price", json!(99)),
+                ("quantity", json!(7)),
+                ("original_unit_price", json!(98)),
+                (
+                    "is_price_overridden",
+                    json!(raw[0]["is_price_overridden"] != true),
+                ),
+                ("customizations", json!({"actual_option":true})),
+                (
+                    "menu_item_id",
+                    json!("33333333-3333-4333-8333-333333333333"),
+                ),
+                (
+                    "retail_product_id",
+                    json!("44444444-4444-4444-8444-444444444444"),
+                ),
+            ] {
+                let mut changed = base.clone();
+                changed["orders"][0]["order_items"][0][field] = value.clone();
+                // These two are the only compared fields the hydrator omits.
+                if !matches!(field, "original_unit_price" | "is_price_overridden") {
+                    changed["orders"][0]["items"][0][field] = value;
+                }
+                check(
+                    &conn,
+                    &before,
+                    &changed,
+                    false,
+                    false,
+                    &format!("{name}/changed/{field}"),
+                );
+                scenarios += 1;
+            }
+            for field in ["name", "notes"] {
+                let mut changed = base.clone();
+                changed["orders"][0]["items"][0][field] = json!("Changed display");
+                changed["orders"][0]["order_items"][0][if field == "name" {
+                    "menu_item_name"
+                } else {
+                    field
+                }] = json!("Changed display");
+                check(
+                    &conn,
+                    &before,
+                    &changed,
+                    false,
+                    true,
+                    &format!("{name}/adoptable/{field}"),
+                );
+                scenarios += 1;
+            }
+            if name == "voided_line" {
+                conn.execute(
+                    "UPDATE orders SET items=?1 WHERE id=?2",
+                    rusqlite::params![case["databaseRows"].to_string(), fixture::ORDER],
+                )
+                .unwrap();
+                let stale = capture(&conn, fixture::ORDER, &json!({})).unwrap();
+                check(
+                    &conn,
+                    &stale,
+                    &base,
+                    false,
+                    false,
+                    "stale till still contains the voided line",
+                );
+                conn.execute(
+                    "UPDATE orders SET items=?1 WHERE id=?2",
+                    rusqlite::params![raw.to_string(), fixture::ORDER],
+                )
+                .unwrap();
+            }
+            for add in [false, true] {
+                let mut changed = base.clone();
+                for field in ["items", "order_items"] {
+                    let rows = changed["orders"][0][field].as_array_mut().unwrap();
+                    if add {
+                        let mut extra = rows[0].clone();
+                        extra["id"] = json!("55555555-5555-4555-8555-555555555555");
+                        rows.push(extra);
+                    } else {
+                        rows.clear();
+                    }
+                }
+                check(
+                    &conn,
+                    &before,
+                    &changed,
+                    false,
+                    false,
+                    &format!("{name}/line_set/{add}"),
+                );
+                scenarios += 1;
+            }
+        }
+        assert_eq!(scenarios, 312); // 13 kinds x (4 stages x 3 projections + 12 mutations)
+    }
+
+    #[test]
+    fn order_header_preflight_tomikro_already_equal_without_manual_marker_or_raw_relation() {
+        let data: Value =
+            serde_json::from_str(include_str!("tests/fixtures/order-header-shapes.json")).unwrap();
+        let case = data["fixtures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "manual_tomikro")
+            .unwrap();
+        // Call the pre-existing settlement normalizer directly, removing only
+        // transport line identity exactly as the original header comparator did.
+        let signature = |rows: &Value| {
+            let mut row = rows[0].clone();
+            row["id"] = json!(fixture::ITEM);
+            crate::edit_settlement_recovery::items(&json!([row]))
+                .unwrap()
+                .remove(0)
+        };
+        let local = signature(&case["local"]);
+        let hydrated = signature(&case["hydrated"]);
+        assert_eq!(local, hydrated);
+        assert_eq!(local["customizations"], Value::Null);
+        assert_eq!(local["originalUnitCents"], 1450);
+        assert_eq!(local["overridden"], false);
+        assert!(local.get("manual").is_none());
+    }
+
+    #[test]
+    fn order_header_preflight_mixed_known_and_missing_prices_keep_multiplicity() {
+        let plain = json!({"name":"Same", "quantity":1, "unit_price":10, "total_price":10});
+        let mut known = plain.clone();
+        known["original_unit_price"] = json!(12);
+        known["is_price_overridden"] = json!(true);
+        let mut other = plain.clone();
+        other["original_unit_price"] = json!(14);
+        other["is_price_overridden"] = json!(true);
+        // Unknown first can match either; it must not steal the only match
+        // of the retained original. Reordering is not a changed sale.
+        assert!(items_match(
+            &json!([plain.clone(), known.clone()]),
+            &json!([known.clone(), other.clone()]),
+            true
+        )
+        .unwrap());
+        assert!(!items_match(
+            &json!([known.clone(), known.clone()]),
+            &json!([known.clone(), other]),
+            true
+        )
+        .unwrap());
+        assert!(!items_match(
+            &json!([plain.clone(), known.clone()]),
+            &json!([known]),
+            true
+        )
+        .unwrap());
+    }
+    #[test]
+    fn order_header_preflight_manual_flags_and_stored_combo_columns_are_not_identity() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let conn = fixture::test_conn();
+        fixture::paid_delivery_order(&conn);
+        for local in [
+            json!([{"id":"manual-old", "isManual":true, "menuItemId":null, "name":"Manual", "quantity":1, "price":14.5, "customizations":[]}]),
+            json!([{"id":"combo-old", "is_combo":true, "combo_id":"legacy-combo", "combo_items":[{"quantity":2}], "name":"Manual", "quantity":1, "price":14.5, "customizations":[]}]),
+        ] {
+            conn.execute(
+                "UPDATE orders SET items=?1 WHERE id=?2",
+                rusqlite::params![local.to_string(), fixture::ORDER],
+            )
+            .unwrap();
+            let before = capture(&conn, fixture::ORDER, &json!({})).unwrap();
+            let hydrated = json!([{"id":fixture::ITEM,"menu_item_id":null,"name":"Manual","quantity":1,"unit_price":14.5,"total_price":14.5,"customizations":null}]);
+            let mut raw = hydrated.clone();
+            raw[0]["is_combo"] = json!(true);
+            raw[0]["combo_id"] = json!("legacy-combo");
+            raw[0]["combo_items"] = json!([{"quantity":2}]);
+            let response = answer(&before, &hydrated, Some(&raw));
+            check(
+                &conn,
+                &before,
+                &response,
+                true,
+                true,
+                "markers omitted by an older projection",
+            );
+        }
+    }
+
+    #[test]
+    fn order_header_preflight_pricing_supplement_joins_uuid_not_position_and_rejects_bad_relation()
+    {
+        let one = json!({"id":"first", "name":"One", "quantity":1, "unit_price":10});
+        let two = json!({"id":"second", "name":"Two", "quantity":1, "unit_price":11});
+        let mut raw_one = one.clone();
+        raw_one["original_unit_price"] = json!(12);
+        let mut raw_two = two.clone();
+        raw_two["original_unit_price"] = json!(13);
+        let base = json!({"items":[one,two],"order_items":[raw_two,raw_one]});
+        let items = canonical_items(&base).unwrap();
+        assert_eq!(items[0]["original_unit_price"], 12);
+        assert_eq!(items[1]["original_unit_price"], 13);
+        for bad in [
+            json!(null),
+            json!([]),
+            json!([
+                base["order_items"][0].clone(),
+                base["order_items"][0].clone()
+            ]),
+        ] {
+            let mut changed = base.clone();
+            changed["order_items"] = bad;
+            assert_eq!(
+                canonical_items(&changed).unwrap_err(),
+                "EDIT_CANONICAL_SNAPSHOT_INVALID"
+            );
+        }
+    }
 }

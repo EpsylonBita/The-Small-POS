@@ -248,7 +248,7 @@ fn only_a_pin_whose_store_rights_allow_the_action_approves_it() {
 
     // Without saying what it approves, nobody approves anything off shift.
     let refused = confirm(&td, &auth, MANAGER.1, None).expect_err("which approval?");
-    assert_eq!(refused.code, "UNAUTHORIZED");
+    assert_eq!(refused.code, "AUTH_SHIFT_REQUIRED");
 }
 
 #[test]

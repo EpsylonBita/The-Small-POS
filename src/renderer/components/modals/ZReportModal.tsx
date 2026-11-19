@@ -110,7 +110,7 @@ import {
   getLocalizedPaymentMethod,
   paymentBlockerKey,
 } from '../../../lib/payment-integrity';
-import { extractPrivilegedActionError } from '../../utils/privileged-actions';
+import { isPrivilegedConfirmationCancelled, isPrivilegedShiftRequired, privilegedActionFeedback } from '../../utils/privileged-actions';
 import { formatFiscalCloseBlockedError } from '../../../lib/fiscal-closeout';
 import { KitDateField } from '../ui/KitDateField';
 
@@ -702,18 +702,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           }),
       );
     } catch (e: unknown) {
-      const privilegedError = extractPrivilegedActionError(e, 'cash_drawer_control');
-      if (
-        privilegedError?.code === 'UNAUTHORIZED'
-        && /shift/i.test(privilegedError.reason ?? '')
-      ) {
+      if (isPrivilegedShiftRequired(e)) {
         setSubmitResult(
           t('modals.zReport.setAsideShiftRequired', {
             defaultValue:
               'A cashier or manager has to be checked in on this terminal to confirm it.',
           }),
         );
-      } else if (e instanceof Error && e.message === 'Privileged action confirmation cancelled') {
+      } else if (isPrivilegedConfirmationCancelled(e)) {
         // The operator closed the PIN prompt: nothing was recorded.
       } else {
         setSubmitResult(
@@ -817,18 +813,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             }),
       );
     } catch (e: unknown) {
-      const privilegedError = extractPrivilegedActionError(e, 'cash_drawer_control');
-      if (
-        privilegedError?.code === 'UNAUTHORIZED'
-        && /shift/i.test(privilegedError.reason ?? '')
-      ) {
+      if (isPrivilegedShiftRequired(e)) {
         setSubmitResult(
           t('modals.zReport.setAsideShiftRequired', {
             defaultValue:
               'A cashier or manager has to be checked in on this terminal to confirm it.',
           }),
         );
-      } else if (e instanceof Error && e.message === 'Privileged action confirmation cancelled') {
+      } else if (isPrivilegedConfirmationCancelled(e)) {
         // The operator closed the PIN prompt: nothing was recorded.
       } else {
         setSubmitResult(
@@ -885,24 +877,20 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         }),
       );
     } catch (e: unknown) {
-      const privilegedError = extractPrivilegedActionError(e, 'cash_drawer_control');
-      if (
-        privilegedError?.code === 'UNAUTHORIZED'
-        && /shift/i.test(privilegedError.reason ?? '')
-      ) {
+      if (isPrivilegedShiftRequired(e)) {
         setSubmitResult(
           t('modals.zReport.setAsideShiftRequired', {
             defaultValue:
               'A cashier or manager has to be checked in on this terminal to confirm it.',
           }),
         );
-      } else if (e instanceof Error && e.message === 'Privileged action confirmation cancelled') {
+      } else if (isPrivilegedConfirmationCancelled(e)) {
         // The operator closed the PIN prompt: nothing was recorded.
       } else {
         setSubmitResult(
-          discard ? t(`modals.menu.${editRefusalMessageKey(String(e))}`) : t('modals.zReport.heldEditCloseFailed', {
+          privilegedActionFeedback(e, t) ?? (discard ? t(`modals.menu.${editRefusalMessageKey(String(e))}`) : t('modals.zReport.heldEditCloseFailed', {
             defaultValue: 'The correction could not be closed. It stays held; nothing was recorded.',
-          }),
+          })),
         );
       }
     } finally {
@@ -969,7 +957,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       );
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
-      if (message === 'Privileged action confirmation cancelled') {
+      if (isPrivilegedConfirmationCancelled(e)) {
         // The manager closed the PIN prompt: nothing was recorded.
       } else if (message.includes('TWINT_RETURN_MANAGER_APPROVAL_REQUIRED') || /Invalid PIN/i.test(message)) {
         setSubmitResult(t('twintPayment.returned.wrongPin', {

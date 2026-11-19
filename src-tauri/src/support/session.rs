@@ -25,9 +25,9 @@ pub struct CodePending {
 pub struct NativeSession {
     pub info: SessionInfo,
     pub admission: Admission,
+    confirmed_observation: Option<(Instant, i64)>,
 }
 pub struct Core {
-    pub command_consent: bool,
     pub verifier: super::approval_verify::Verifier,
     pub terminal_id: Option<String>,
     pub executor: Executor,
@@ -121,7 +121,6 @@ impl Core {
         let rotation = super::key_rotation::Schedule::resume(&executor.db.conn)
             .map_err(|_| "INTERNAL_ERROR")?;
         Ok(Self {
-            command_consent: false,
             verifier: super::approval_verify::Verifier::pinned(),
             terminal_id: None,
             executor,
@@ -173,7 +172,6 @@ impl Core {
                     .map_err(str::to_string)?
                     .min(clock::parse(&absolute).map_err(str::to_string)?),
             );
-            self.command_consent=self.executor.db.conn.query_row("SELECT EXISTS(SELECT 1 FROM support_confirmed_sessions WHERE session_id=? AND consent_version=? AND mode='founder_conversation')",params![id,super::confirmed::CONSENT_VERSION],|r|r.get(0)).map_err(|_|"INTERNAL_ERROR")?;
             self.adopt(info, &time)?;
             self.session
                 .as_mut()
@@ -365,13 +363,13 @@ impl Core {
             max_expires_at: info.max_expires_at.clone(),
         };
         self.executor.db.conn.execute("INSERT INTO support_session_state(session_id,status,tier_ceiling,max_expires_at,absolute_cap_at,last_server_time,updated_at) VALUES (?1,'pending_ack',?2,?3,?4,?5,?5) ON CONFLICT(session_id) DO NOTHING",params![info.session_id,info.tier_ceiling,info.max_expires_at,info.absolute_cap_at,server_time]).map_err(|_|"INTERNAL_ERROR")?;
-        if self.command_consent && info.confirmation_mode.as_deref() == Some("founder_conversation")
-        {
-            self.executor.db.conn.execute("INSERT INTO support_confirmed_sessions VALUES(?,?,?) ON CONFLICT(session_id) DO NOTHING",params![info.session_id,super::confirmed::CONSENT_VERSION,"founder_conversation"]).map_err(|_|"INTERNAL_ERROR")?;
-        }
         self.code = None;
         self.awaiting_open = false;
-        self.session = Some(NativeSession { info, admission: a });
+        self.session = Some(NativeSession {
+            info,
+            admission: a,
+            confirmed_observation: None,
+        });
         self.ended_until = None;
         self.end_reason = None;
         Ok(())
@@ -380,8 +378,10 @@ impl Core {
         let Some(s) = self.session.as_mut() else {
             return Ok(());
         };
+        let received = Instant::now();
+        let observed_at = clock::parse(&h.server_time).map_err(str::to_string)?;
         self.clock
-            .observe(&s.info.session_id, &h.server_time, Instant::now())
+            .observe(&s.info.session_id, &h.server_time, received)
             .map_err(str::to_string)?;
         let now = self
             .clock
@@ -392,7 +392,71 @@ impl Core {
                 .map_err(str::to_string)?
                 .min(clock::parse(&s.info.absolute_cap_at).map_err(str::to_string)?),
         );
+        // Adoption can overlap a sale. Pin the authenticated terminal's
+        // non-secret scope as soon as its private reader can safely open.
+        let missing_scope: bool = self
+            .executor
+            .db
+            .conn
+            .query_row(
+                "SELECT scope_json IS NULL FROM support_evidence_sessions WHERE session_id=?",
+                [&s.info.session_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "INTERNAL_ERROR")?;
+        if missing_scope && h.available {
+            let path = self.executor.db.path.with_file_name("pos.db");
+            let scope = critical_op::global()
+                .try_begin_support(false, None)
+                .ok()
+                .and_then(|permit| {
+                    let connection = super::replica::read_connection(
+                        &path,
+                        &permit,
+                        Instant::now() + Duration::from_millis(100),
+                    )
+                    .ok()?;
+                    super::identity::local(&connection).ok()
+                })
+                .filter(|scope| self.terminal_id.as_deref() == Some(scope.terminal_id.as_str()));
+            if let Some(scope) = scope {
+                let encoded = json!({"organization_id":scope.organization_id,"branch_id":scope.branch_id,"terminal_id":scope.terminal_id});
+                self.executor.db.conn.execute("UPDATE support_evidence_sessions SET scope_json=? WHERE session_id=? AND scope_json IS NULL",
+                    params![encoded.to_string(),s.info.session_id]).map_err(|_|"INTERNAL_ERROR")?;
+            }
+        }
         let tx = super::db::transaction(&self.executor.db.conn).map_err(|_| "INTERNAL_ERROR")?;
+        let fresh =
+            now.saturating_sub(observed_at) < contracts::cap("transport", "heartbeatMs") as i64;
+        let mode = s.info.confirmation_mode.as_deref() == Some("founder_conversation");
+        let allowed = mode
+            && fresh
+            && h.confirmed_commands == Some(true)
+            && h.available
+            && h.min_protocol_version <= 1
+            && h.tier_ceiling == 3
+            && s.admission.tier_ceiling == 3
+            && h.tiers_enabled.contains(&3)
+            && !h
+                .disabled_tools
+                .iter()
+                .any(|tool| tool == super::confirmed::KIND)
+            && h.consent["state"] == "valid"
+            && h.consent["text_version"] == super::confirmed::CONSENT_VERSION
+            && h.unattended.is_none()
+            && h.session_status != "ended";
+        if allowed && !s.admission.active {
+            tx.execute(
+                "INSERT INTO support_confirmed_sessions VALUES(?,?,'founder_conversation') ON CONFLICT(session_id) DO NOTHING",
+                params![s.info.session_id, super::confirmed::CONSENT_VERSION],
+            )
+            .map_err(|_| "INTERNAL_ERROR")?;
+        }
+        let confirmed = allowed && tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM support_confirmed_sessions WHERE session_id=? AND consent_version=? AND mode='founder_conversation')",
+            params![s.info.session_id, super::confirmed::CONSENT_VERSION],
+            |r| r.get::<_, bool>(0),
+        ).map_err(|_| "INTERNAL_ERROR")?;
         for id in &h.revoked_key_ids {
             tx.execute("INSERT INTO support_revoked_keys(credential_id,revoked_at,received_at) VALUES (?1,?2,?2) ON CONFLICT(credential_id) DO NOTHING",params![id,h.server_time]).map_err(|_|"INTERNAL_ERROR")?;
         }
@@ -410,15 +474,11 @@ impl Core {
         s.admission.tier_ceiling = s.admission.tier_ceiling.min(h.tier_ceiling);
         s.admission.max_expires_at = max_expires_at;
         s.admission.online = true;
-        let confirmed = self.command_consent
-            && s.info.confirmation_mode.as_deref() == Some("founder_conversation")
-            && h.consent["state"] == "valid"
-            && h.consent["text_version"] == "1.1"
-            && h.unattended.is_none();
         if s.admission.confirmed && !confirmed {
             critical_op::global().cancel_support();
         }
         s.admission.confirmed = confirmed;
+        s.confirmed_observation = confirmed.then_some((received, observed_at));
         self.schedule.success();
         let last_seq: i64 = self
             .executor
@@ -455,6 +515,23 @@ impl Core {
             }
         }
         Ok(())
+    }
+    pub fn confirmed_authority_fresh(&self, at: Instant) -> bool {
+        let budget = Duration::from_millis(contracts::cap("transport", "heartbeatMs"));
+        self.session.as_ref().is_some_and(|s| {
+            s.admission.online
+                && s.admission.confirmed
+                && s.confirmed_observation
+                    .is_some_and(|(received, observed_at)| {
+                        at.saturating_duration_since(received) < budget
+                            && self
+                                .clock
+                                .now_at(&s.info.session_id, at)
+                                .is_some_and(|now| {
+                                    now.saturating_sub(observed_at) < budget.as_millis() as i64
+                                })
+                    })
+        })
     }
     pub fn activity(&self) -> Result<Option<(String, String, String)>, String> {
         let Some(s) = &self.session else {
@@ -1219,6 +1296,15 @@ pub async fn support_banner_state(
         value["critical_op_active"] = json!(critical_op::global().active());
         value["restore_lease_held"] = json!(critical_op::global().restoring());
         value["staff"] = Value::Null;
+        if visible && rt.banner_ready.load(Ordering::Acquire) {
+            super::confirmed_payment_receipt::notice_served(&value);
+        }
+        if arg0
+            .as_ref()
+            .is_none_or(|input| input["supports_payment_receipt_label"] != true)
+        {
+            super::confirmed_payment_receipt::retain_compatible_notice(&mut value);
+        }
         Ok(value)
     })
     .await

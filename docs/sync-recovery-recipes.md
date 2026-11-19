@@ -135,3 +135,16 @@ doubling to one hour. Only the server's nine event fields are sent through the
 existing authenticated incident transport. No actor, customer, target, message,
 raw scope or snapshot path is included, and no business writer is held over
 network waits. Malformed outbox state fails closed without erasing claims.
+
+
+## Health action evidence
+
+The Windows release audit found that parity blocker IDs were being interpreted as legacy row numbers, a financial correction could commit its void before failing to record the platform settlement, and incomplete observations could look empty.
+
+- A blocker now carries its queue owner and row identifier. Generic parity sends apply to the exact eligible row. A parked refusal retains its original request. The Health model exposes a business event key and the collectors that describe that event.
+- Invalid legacy order sending records are selected by row and order ID. The till takes a recovery copy before the operation and repeats the validation under the same SQLite write transaction that archives the original request and removes it from the active list.
+- Platform drawer voids, their adjustment entries, and the settlement commit together. The native result includes changed IDs only after checking the ledger. The regression injects a settlement insert failure, opens the same database again and checks the drawer and all records before and after another attempt.
+- Health retains its last complete observation when a required reader fails. Optional order-notice observations keep their original independent availability. Signs of a send come from the acknowledged row and a fresh read. Scheduling and waiting for related work remain pending.
+- Manual reports retain any locally prepared file if upload cannot be verified. A stored incident requires an incident ID and the same bundle hash. Notification has its own result.
+
+The desktop native tests drive the Health command core with diagnostic targets and migrated SQLite. The renderer tests click the built issue, compare the request and returned row, and exercise independent read failures and partial report replies.

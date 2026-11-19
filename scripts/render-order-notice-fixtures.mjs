@@ -10,9 +10,9 @@ const root = process.cwd();
 const out = path.join(root, 'test-results/order-sync-notices');
 await fs.mkdir(out, {recursive:true});
 const stub = {
-  OrderSyncNoticeStore: `export const useOrderNotices=()=>globalThis.noticeFixture; export const refreshOrderNotices=async()=>{}; export const openOrderNotice=()=>{};`,
+  OrderSyncNoticeStore: `export const useOrderNotices=()=>globalThis.noticeFixture; export const readOrderNoticeStatus=()=>globalThis.noticeFixture.status; export const refreshOrderNotices=async()=>{}; export const openOrderNotice=()=>{};`,
   usePrivilegedActionConfirmation: `export const usePrivilegedActionConfirmation=()=>({confirmationModal:null,runWithPrivilegedConfirmation:async()=>{}});`,
-  SupportRemedyRunner: `export const acquireRecoveryAction=()=>()=>{};export const buildRecoveryActionRequest=()=>({});export const executeHealthRecoveryAction=async()=>({});`,
+  SupportRemedyRunner: `export const acquireRecoveryAction=()=>()=>{};export const buildRecoveryActionRequest=()=>({});export const executeHealthRecoveryAction=async()=>({}); export const orderRecoveryFeedback=()=> 'callSupport'; export const recoveryFailureCode=()=> 'UNCLASSIFIED_REFUSAL';`,
   lib: `export const getBridge=()=>({invoke:async()=>null});`,
   OrderNoticeRemedy: `export const readOrderNoticeRemedy=async()=>null;`,
   SyncRecoveryModal: `export const SyncRecoveryModal=()=>null;`,

@@ -337,7 +337,7 @@ fn restore_with(
     audit(&conn, &reference.id, &scope, &snapshot, Some(outcome))?;
     Ok(
         json!({"success":matches!(outcome,"resolved"|"pending"),"outcome":outcome,"requiresRefresh":true,
-        "snapshotPointId":snapshot,"verification":{"status":match outcome {"resolved"=>"passed","failed"=>"failed","unknown"=>"unknown",_=>"pending"}}}),
+         "snapshotPointId":snapshot,"changedIds":if outcome=="resolved" { vec![&reference.id] } else { Vec::new() },"verification":{"status":match outcome {"resolved"=>"passed","failed"=>"failed","unknown"=>"unknown",_=>"pending"}}}),
     )
 }
 

@@ -57,7 +57,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 109;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 110;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -913,6 +913,21 @@ where
         })?;
     }
 
+    if current < 110 {
+        run_migration_tx(conn, 110, |conn| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS support_payment_receipt_commits (
+                command_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                payload_sha256 TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                post_json TEXT NOT NULL
+            ); INSERT OR IGNORE INTO schema_version(version) VALUES(110);",
+            )
+            .map_err(|error| format!("v110 confirmed receipt commit journal: {error}"))
+        })?;
+    }
+
     Ok(())
 }
 
@@ -1457,6 +1472,35 @@ fn has_known_order_payment_method_check(sql: &str, check: &str) -> bool {
         && !sql.contains("--")
         && sql.matches(check).count() == 1
         && sql.lines().any(|line| line.trim() == declaration)
+}
+
+/// Receipts can preserve only tenders understood by this till and admitted by
+/// its installed payment schema. Unknown CHECK definitions are unverified.
+pub(crate) fn order_payments_admit_receipt_method(
+    conn: &Connection,
+    method: &str,
+) -> Result<bool, rusqlite::Error> {
+    let checks: &[&str] = match method {
+        "cash" | "card" | "other" => &[
+            ORDER_PAYMENT_METHOD_CHECK,
+            ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD,
+            ORDER_PAYMENT_METHOD_CHECK_WITH_TWINT,
+        ],
+        "gift_card" => &[
+            ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD,
+            ORDER_PAYMENT_METHOD_CHECK_WITH_TWINT,
+        ],
+        "twint" => &[ORDER_PAYMENT_METHOD_CHECK_WITH_TWINT],
+        _ => return Ok(false),
+    };
+    let sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='order_payments'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(checks
+        .iter()
+        .any(|check| has_known_order_payment_method_check(&sql, check)))
 }
 
 pub(crate) fn order_payments_support_gift_cards(conn: &Connection) -> Result<bool, String> {
@@ -2446,7 +2490,8 @@ const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[
     // v109 (store groups) only reads queue ids into separate scope sidecars and rebuilds
     // loyalty_customers; every queue row, payload, claim and index stays byte-for-byte
     // (group_scope migration tests). A till holding repair data must still upgrade.
-    109,
+    109, // v110 only creates the support receipt commit journal.
+    110,
 ];
 
 fn computed_pending_migrations(
@@ -10092,7 +10137,7 @@ mod tests {
 
         assert_eq!(
             computed_pending_migrations(102, false, false, false, false),
-            vec![103, 104, 105, 106, 107, 108, 109]
+            vec![103, 104, 105, 106, 107, 108, 109, 110]
         );
         run_migrations(&conn).expect("v102 to the current schema");
 
@@ -10256,21 +10301,21 @@ mod tests {
             computed_pending_migrations(75, true, false, false, false),
             vec![
                 56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
-                96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109
+                96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110
             ]
         );
         assert_eq!(
             computed_pending_migrations(78, false, false, false, false),
             vec![
                 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-                100, 101, 102, 103, 104, 105, 106, 107, 108, 109
+                100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110
             ]
         );
         assert_eq!(
             computed_pending_migrations(79, false, true, false, false),
             vec![
                 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-                100, 101, 102, 103, 104, 105, 106, 107, 108, 109
+                100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110
             ]
         );
         // A v81 whose columns went missing is re-run even though it is no longer
@@ -10331,7 +10376,9 @@ mod tests {
         // v109 (store groups) writes only sidecar scope tables and loyalty_customers;
         // it leaves every parity/sync queue row byte-for-byte.
         assert!(native_repair_atomic_only_allowed(108, &[109]));
-        assert!(!native_repair_atomic_only_allowed(109, &[110]));
+        // v110 creates a separate receipt journal and touches no existing rows.
+        assert!(native_repair_atomic_only_allowed(109, &[110]));
+        assert!(!native_repair_atomic_only_allowed(109, &[111]));
         assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
@@ -10375,6 +10422,42 @@ mod tests {
             &[74, 76, 77, 78, 79]
         ));
         assert!(!native_repair_atomic_only_allowed(79, &[]));
+    }
+
+    #[test]
+    fn migration_v110_upgrades_v109_with_native_repair_data() {
+        let (_tmp, conn) = current_file_fixture();
+        conn.execute_batch(
+            "DROP TABLE support_payment_receipt_commits;
+             DELETE FROM schema_version WHERE version=110;
+             INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id, module_type, status
+             ) VALUES (
+                 'repair-v109', 'repairs', 'repair-case', 'INSERT', '{}',
+                 'repair-org', 'repairs', 'pending'
+             );",
+        )
+        .unwrap();
+        assert_eq!(max_schema_version(&conn), 109);
+        assert!(crate::recovery::pre_migration_contains_native_repair_data(&conn).unwrap());
+        let repair_before = parity_row_fingerprint(&conn, "repair-v109");
+        let payment_schema = || {
+            conn.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name='order_payments'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        let payment_before = payment_schema();
+        run_migrations_with_preflight(&conn, &query_main_database_path, &|_, _| {
+            panic!("native repair data must use the atomic-only path")
+        })
+        .unwrap();
+        assert_eq!(max_schema_version(&conn), 110);
+        assert!(table_names(&conn).contains(&"support_payment_receipt_commits".to_string()));
+        assert_eq!(parity_row_fingerprint(&conn, "repair-v109"), repair_before);
+        assert_eq!(payment_schema(), payment_before);
     }
 
     #[test]
@@ -10616,7 +10699,7 @@ mod tests {
             computed_pending_migrations(85, false, false, false, false),
             vec![
                 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104,
-                105, 106, 107, 108, 109
+                105, 106, 107, 108, 109, 110
             ]
         );
         assert!(native_repair_atomic_only_allowed(85, &[86]));
@@ -10630,7 +10713,7 @@ mod tests {
             computed_pending_migrations(86, false, false, false, false),
             vec![
                 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105,
-                106, 107, 108, 109
+                106, 107, 108, 109, 110
             ]
         );
         assert!(native_repair_atomic_only_allowed(86, &[87]));
@@ -10739,7 +10822,7 @@ mod tests {
             computed_pending_migrations(87, false, false, false, false),
             vec![
                 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
-                107, 108, 109
+                107, 108, 109, 110
             ]
         );
         assert!(native_repair_atomic_only_allowed(87, &[88]));
@@ -10782,7 +10865,7 @@ mod tests {
             computed_pending_migrations(83, false, false, false, true),
             vec![
                 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102,
-                103, 104, 105, 106, 107, 108, 109
+                103, 104, 105, 106, 107, 108, 109, 110
             ]
         );
         let error = run_migrations_with_preflight(

@@ -1,3 +1,9 @@
+import enTillHealth from './overlays/en.till-health.json';
+import elTillHealth from './overlays/el.till-health.json';
+import deTillHealth from './overlays/de.till-health.json';
+import frTillHealth from './overlays/fr.till-health.json';
+import itTillHealth from './overlays/it.till-health.json';
+import sqTillHealth from './overlays/sq.till-health.json';
 import sqCheckoutRecovery from './overlays/sq.checkout-recovery.json';
 import itCheckoutRecovery from './overlays/it.checkout-recovery.json';
 import frCheckoutRecovery from './overlays/fr.checkout-recovery.json';
@@ -118,10 +124,10 @@ const mergeLocaleLayers = (...layers: unknown[]): LocaleBundle =>
   layers.reduce(mergeLocaleBundle) as LocaleBundle;
 
 export const localeBundles = {
-  en: mergeLocaleLayers(enBase, enHotfix, enTableCheck, { support: enSupport }, enSettingsWorkflow, enOnboarding, enShiftWorkflow, enRoomWorkflow, enScheduleWorkflow, enWorkflowAudit, enPlatforms, enCafeLan, enCheckoutRecovery, enOfflineCheckIn, enPhoneShiftHandover),
-  el: mergeLocaleLayers(elBase, elHotfix, elTableCheck, { support: elSupport }, elSettingsWorkflow, elOnboarding, elShiftWorkflow, elRoomWorkflow, elScheduleWorkflow, elWorkflowAudit, elPlatforms, elCafeLan, elCheckoutRecovery, elOfflineCheckIn, elPhoneShiftHandover),
-  de: mergeLocaleLayers(deBase, deHotfix, deTableCheck, { support: deSupport }, deSettingsWorkflow, deOnboarding, deShiftWorkflow, deRoomWorkflow, deScheduleWorkflow, deWorkflowAudit, dePlatforms, deCafeLan, deCheckoutRecovery, deOfflineCheckIn, dePhoneShiftHandover),
-  fr: mergeLocaleLayers(frBase, frHotfix, frTableCheck, { support: frSupport }, frSettingsWorkflow, frOnboarding, frShiftWorkflow, frRoomWorkflow, frScheduleWorkflow, frWorkflowAudit, frPlatforms, frCafeLan, frCheckoutRecovery, frOfflineCheckIn, frPhoneShiftHandover),
-  it: mergeLocaleLayers(itBase, itHotfix, itTableCheck, { support: itSupport }, itSettingsWorkflow, itOnboarding, itShiftWorkflow, itRoomWorkflow, itScheduleWorkflow, itWorkflowAudit, itPlatforms, itCafeLan, itCheckoutRecovery, itOfflineCheckIn, itPhoneShiftHandover),
-  sq: mergeLocaleLayers(sqBase, sqHotfix, sqTableCheck, { support: sqSupport }, sqSettingsWorkflow, sqOnboarding, sqShiftWorkflow, sqRoomWorkflow, sqScheduleWorkflow, sqWorkflowAudit, sqPlatforms, sqCafeLan, sqCheckoutRecovery, sqOfflineCheckIn, sqPhoneShiftHandover),
+  en: mergeLocaleLayers(enBase, enHotfix, enTableCheck, { support: enSupport }, enSettingsWorkflow, enOnboarding, enShiftWorkflow, enRoomWorkflow, enScheduleWorkflow, enWorkflowAudit, enPlatforms, enCafeLan, enCheckoutRecovery, enOfflineCheckIn, enPhoneShiftHandover, enTillHealth),
+  el: mergeLocaleLayers(elBase, elHotfix, elTableCheck, { support: elSupport }, elSettingsWorkflow, elOnboarding, elShiftWorkflow, elRoomWorkflow, elScheduleWorkflow, elWorkflowAudit, elPlatforms, elCafeLan, elCheckoutRecovery, elOfflineCheckIn, elPhoneShiftHandover, elTillHealth),
+  de: mergeLocaleLayers(deBase, deHotfix, deTableCheck, { support: deSupport }, deSettingsWorkflow, deOnboarding, deShiftWorkflow, deRoomWorkflow, deScheduleWorkflow, deWorkflowAudit, dePlatforms, deCafeLan, deCheckoutRecovery, deOfflineCheckIn, dePhoneShiftHandover, deTillHealth),
+  fr: mergeLocaleLayers(frBase, frHotfix, frTableCheck, { support: frSupport }, frSettingsWorkflow, frOnboarding, frShiftWorkflow, frRoomWorkflow, frScheduleWorkflow, frWorkflowAudit, frPlatforms, frCafeLan, frCheckoutRecovery, frOfflineCheckIn, frPhoneShiftHandover, frTillHealth),
+  it: mergeLocaleLayers(itBase, itHotfix, itTableCheck, { support: itSupport }, itSettingsWorkflow, itOnboarding, itShiftWorkflow, itRoomWorkflow, itScheduleWorkflow, itWorkflowAudit, itPlatforms, itCafeLan, itCheckoutRecovery, itOfflineCheckIn, itPhoneShiftHandover, itTillHealth),
+  sq: mergeLocaleLayers(sqBase, sqHotfix, sqTableCheck, { support: sqSupport }, sqSettingsWorkflow, sqOnboarding, sqShiftWorkflow, sqRoomWorkflow, sqScheduleWorkflow, sqWorkflowAudit, sqPlatforms, sqCafeLan, sqCheckoutRecovery, sqOfflineCheckIn, sqPhoneShiftHandover, sqTillHealth),
 } as const;

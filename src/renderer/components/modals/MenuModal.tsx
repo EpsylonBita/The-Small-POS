@@ -27,6 +27,7 @@ import { useCheckoutDraftPersistence } from '../../hooks/useCheckoutDraftPersist
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import { deriveMenuEditChanges, MENU_EDIT_MAX_LINES, RendererEditRefusal, type MenuEditHeaders, type MenuOrderEditData, type MenuEditPreflight } from '../../services/MenuOrderEdit';
 import { DiscardEditConfirmation } from './DiscardEditConfirmation';
+import { isPrivilegedConfirmationCancelled, privilegedActionFeedback } from '../../utils/privileged-actions';
 import { editRefusalMessageKey } from '../../utils/editRefusalMessage';
 import { LegacyShiftCurrencyConfirmationRequired } from '../../services/CheckoutDraftStore';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
@@ -2823,8 +2824,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       onCheckoutParked?.();
       toast.success(t('modals.menu.checkoutParked', { defaultValue: 'The checkout was set aside and new orders can be taken. Check the bank POS: if the customer was charged, do not charge again; a manager settles it. Health lists this attempt.' }), { duration: 10000 });
       onClose();
-    } catch {
-      toast.error(t('modals.menu.checkoutParkFailed', { defaultValue: 'The checkout could not be set aside. It stays protected; nothing was changed.' }));
+    } catch (error) {
+      if (isPrivilegedConfirmationCancelled(error)) return;
+      toast.error(privilegedActionFeedback(error, t) ?? t('modals.menu.checkoutParkFailed', { defaultValue: 'The checkout could not be set aside. It stays protected; nothing was changed.' }));
     } finally { draftRecoveryInFlight.current = false; setDraftRecoveryBusy(false); }
   };
 
@@ -2870,7 +2872,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       toast.success(t('modals.menu.editClosedWithoutMoney', { defaultValue: 'The unsaved correction was closed. No money was recorded; count the drawer to confirm.' }));
       onClose();
     } catch (error) {
-      toast.error(discard ? t(`modals.menu.${editRefusalMessageKey(String(error))}`) : t('modals.menu.editCloseWithoutMoneyFailed', { defaultValue: 'The correction could not be closed. It stays held; nothing was recorded.' }));
+      if (isPrivilegedConfirmationCancelled(error)) return;
+      toast.error(privilegedActionFeedback(error, t) ?? (discard ? t(`modals.menu.${editRefusalMessageKey(String(error))}`) : t('modals.menu.editCloseWithoutMoneyFailed', { defaultValue: 'The correction could not be closed. It stays held; nothing was recorded.' })));
     } finally { setDraftRecoveryBusy(false); setDiscardEditTarget(null); }
   };
 
@@ -2904,7 +2907,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setHeldEditOrderId(null);
       toast.success(t('modals.menu.editHeldClosedRetry'));
     } catch (error) {
-      toast.error(discard ? t(`modals.menu.${editRefusalMessageKey(String(error))}`) : t('modals.menu.editCloseWithoutMoneyFailed'));
+      if (isPrivilegedConfirmationCancelled(error)) return;
+      toast.error(privilegedActionFeedback(error, t) ?? (discard ? t(`modals.menu.${editRefusalMessageKey(String(error))}`) : t('modals.menu.editCloseWithoutMoneyFailed')));
     } finally { setDraftRecoveryBusy(false); setDiscardEditTarget(null); }
   };
 
@@ -3057,7 +3061,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           : !draftPersistence.isPending() && /(?:ORDER_HEADER_SYNC_REQUIRED|ORDER_VERSION_CONFLICT|EDIT_(?:CANONICAL_ORIGINAL_CHANGED|CANONICAL_QUOTE_CHANGED|CANONICAL_QUOTE_REQUIRED|SETTLEMENT_VERSION_CHANGED|ORIGINAL_ITEMS_UNAVAILABLE|CANONICAL_SNAPSHOT_INVALID))/.test(code) ? 'editCanonicalChanged'
           : /EDIT_(?:PREVIOUS_SETTLEMENT|ORIGINAL_PAYMENT)_SYNC_REQUIRED/.test(code) ? 'editSyncRequired' : editRefusalMessageKey(code);
         if (message === 'editCanonicalChanged') setStaleEdit(true);
-        toast.error(t(`modals.menu.${message}`) || 'Failed to save changes');
+        toast.error(privilegedActionFeedback(error, t) ?? (t(`modals.menu.${message}`) || 'Failed to save changes'));
       }
       return;
     }
@@ -3138,8 +3142,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setLegacyCurrency(null);
       setLegacyCurrencyPin('');
       toast.success(t('modals.menu.legacyCurrency.ready'));
-    } catch {
-      setLegacyCurrencyError(t('modals.menu.legacyCurrency.failed'));
+    } catch (error) {
+      if (isPrivilegedConfirmationCancelled(error)) return;
+      setLegacyCurrencyError(privilegedActionFeedback(error, t) ?? t('modals.menu.legacyCurrency.failed'));
     } finally { setLegacyCurrencyPin(''); setLegacyCurrencyBusy(false); }
   };
 

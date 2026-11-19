@@ -27,6 +27,7 @@ const { bridge, queueBridge, runParitySyncCycle, toast, features, endOfDay, shif
     },
     recovery: {
       listActionLog: vi.fn(),
+      executeAction: vi.fn().mockImplementation(async request => ({ success: true, routeTarget: request.routeTarget })),
       recordActionLog: vi.fn(),
     },
   },
@@ -101,7 +102,10 @@ vi.mock('../../services/ParitySyncCoordinator', () => ({
 vi.mock('../OrderSyncRouteIndicator', () => ({ OrderSyncRouteIndicator: () => null }))
 vi.mock('../FinancialSyncPanel', () => ({ FinancialSyncPanel: () => null }))
 vi.mock('../support/HealthSupportEntryPoint', () => ({ HealthSupportEntryPoint: () => null }))
-vi.mock('../recovery/RecoveryCenterPanel', () => ({ RecoveryCenterPanel: () => null }))
+
+vi.mock('../recovery/RecoveryPanel', () => ({ RecoveryPanel: () => null }))
+
+vi.mock('../support/SupportDetailsPanel', () => ({ SupportDetailsPanel: () => null }))
 
 import { SyncStatusIndicator } from '../SyncStatusIndicator'
 
@@ -197,16 +201,26 @@ const COMPLETED_SYNC = {
   queueStatus: { pending: 1, failed: 0, conflicts: 0, total: 1 },
 }
 
-const renderHealthModal = (onOpenRecovery?: () => void) =>
+const renderHealthModal = () =>
   render(
     <I18nextProvider i18n={i18n}>
-      <SyncStatusIndicator showDetails onOpenRecovery={onOpenRecovery} />
+      <SyncStatusIndicator showDetails />
     </I18nextProvider>,
   )
 
-const getDialog = () => screen.findByRole('dialog', { name: i18n.t('sync.healthModal.title') })
+const getDialog = () => screen.findByRole('dialog', { name: i18n.t('tillHealth.title') })
 
 const serviceTile = (service: string) => screen.getByTestId(`health-service-${service}`)
+const supportToggle = () => screen.getByRole('button', { name: new RegExp(i18n.t('tillHealth.support.title')) })
+const openSupport = () => { if (supportToggle().getAttribute('aria-expanded') === 'false') fireEvent.click(supportToggle()) }
+const openAdvanced = () => {
+  openSupport()
+  screen.getByText(i18n.t('sync.healthModal.actions.openAdvanced')).closest('details')!.open = true
+}
+const report = () => { openSupport(); fireEvent.click(screen.getByRole('button', { name: i18n.t('tillHealth.report.new') })) }
+const send = () => screen.getByRole('button', { name: i18n.t('tillHealth.action.send') })
+const stuckText = (count: number) => new RegExp(i18n.t('tillHealth.families.waiting.stuck', { count, duration: 'AGE' }).split('AGE')[0].replace(/[.*+?^&{}()|[\]\\]/g, '\\$&') + '4[^0-9]')
+
 
 describe('SyncStatusIndicator Health modal: day close, stuck rows and the one recommended action', () => {
   beforeEach(async () => {
@@ -223,7 +237,7 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     bridge.sync.validateFinancialIntegrity.mockResolvedValue({ valid: true, issues: [] })
     bridge.diagnostics.getSystemHealth.mockResolvedValue(HEALTHY_SYSTEM_HEALTH)
     bridge.diagnostics.export.mockResolvedValue({ success: true, path: 'C:/diagnostics/bundle.zip' })
-    bridge.diagnostics.sendRemoteIncident.mockResolvedValue({ success: true })
+    bridge.diagnostics.sendRemoteIncident.mockResolvedValue({ success: true, localPrepared: true, path: 'C:/diagnostics/bundle.zip' })
     bridge.diagnostics.openExportDir.mockResolvedValue({ success: true })
     bridge.recovery.listActionLog.mockResolvedValue([])
     bridge.recovery.recordActionLog.mockImplementation(async (entry: unknown) => entry)
@@ -247,12 +261,12 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
 
   it('shows a sixth Day close (Z) tile that defers to the Z screen when the renderer cannot check the whole Z', async () => {
     renderHealthModal()
-    await screen.findByText('Everything is working')
+    await screen.findByText(i18n.t('tillHealth.states.ok.title'))
 
     const tile = serviceTile('closeout')
     expect(tile).toHaveTextContent('Day close (Z)')
     // Neither "ready" (it saw only part of the checks) nor a fault.
-    expect(tile).toHaveTextContent('Checked on the Z screen')
+    expect(tile).toHaveTextContent('Checked at day close')
     expect(tile).not.toHaveTextContent('Ready')
     expect(tile).not.toHaveTextContent('Unavailable')
     // Six tiles, in the shared order.
@@ -263,32 +277,33 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     ).toEqual([
       'OrdersWorking',
       'InternetConnected',
-      'SyncHealthy',
+      'Sending to the officeAll sent',
       'PrinterReady',
       'SupportNot needed',
-      'Day close (Z)Checked on the Z screen',
+      'Day close (Z)Checked at day close',
     ])
     // Healthy: nothing to recommend.
-    expect(screen.queryByTestId('health-primary-action')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('till-health-card')).not.toBeInTheDocument()
   })
 
   it('shows ZIP delivery separately from a failed Telegram notification', async () => {
-    bridge.diagnostics.sendRemoteIncident.mockResolvedValue({ success: true, bundleStored: true, alertSent: false, alertStatus: 'failed', path: 'C:/diagnostics/sent.zip' })
+    bridge.diagnostics.sendRemoteIncident.mockResolvedValue({ success: true, incidentId: 'received-1', localPrepared: true, bundleStored: true, alertSent: false, alertStatus: 'failed', path: 'C:/diagnostics/sent.zip' })
     renderHealthModal()
-    await screen.findByText('Everything is working')
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('sync.healthModal.actions.sendSupport') }))
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(i18n.t('sync.healthModal.support.notificationFailed')))
+    await screen.findByText(i18n.t('tillHealth.states.ok.title'))
+    report()
+    expect(await screen.findByText(/The report reached The Small and a copy is saved here \(\d{2}:\d{2}\)\./, { selector: '[role="status"]' })).toBeInTheDocument()
     expect(toast.success).not.toHaveBeenCalled()
-    expect(await screen.findByText(i18n.t('sync.healthModal.support.notificationFailed'))).toBeInTheDocument()
+    expect(await screen.findByText(i18n.t('recovery.actionStatus.reportStored'))).toBeInTheDocument()
     expect(bridge.diagnostics.sendRemoteIncident).toHaveBeenCalledWith(expect.objectContaining({ healthView: expect.any(Object) }))
   })
 
   it('does not show success when a legacy backend accepted only the summary', async () => {
     bridge.diagnostics.sendRemoteIncident.mockResolvedValue({ success: true, alertSent: true })
     renderHealthModal()
-    await screen.findByText('Everything is working')
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('sync.healthModal.actions.sendSupport') }))
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(i18n.t('sync.healthModal.support.sendFailedToast')))
+    await screen.findByText(i18n.t('tillHealth.states.ok.title'))
+    report()
+    expect(await screen.findByText(i18n.t('tillHealth.report.failed'))).toBeInTheDocument()
+    expect(screen.queryByText(/The report reached The Small and a copy is saved here \(\d{2}:\d{2}\)\./)).not.toBeInTheDocument()
     expect(toast.success).not.toHaveBeenCalled()
   })
 
@@ -303,17 +318,12 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     })
     renderHealthModal()
 
-    expect(
-      await screen.findByText('Something needs fixing before the day can close (Z).'),
-    ).toBeInTheDocument()
-    expect(serviceTile('closeout')).toHaveTextContent('Blocked')
-    expect(screen.getByText("The day close (Z) can't finish until this is fixed.")).toBeInTheDocument()
-
-    // The desktop cannot open the Z screen from here: guidance, no button.
-    const action = screen.getByTestId('health-primary-action')
-    expect(action).toHaveTextContent('Open day close (Z)')
-    expect(action).toHaveTextContent('The Z screen lists what is left and how to fix it.')
-    expect(within(action).queryByRole('button')).not.toBeInTheDocument()
+    expect(await screen.findByText(i18n.t('tillHealth.families.balance.title'))).toBeInTheDocument()
+    expect(serviceTile('closeout')).toHaveTextContent('Needs attention')
+    const card = screen.getByTestId('till-health-card')
+    expect(card).toHaveTextContent(i18n.t('tillHealth.families.balance.detail'))
+    expect(within(card).getByRole('button', { name: i18n.t('tillHealth.action.openPayment') })).toBeEnabled()
+    expect(within(card).queryByRole('button', { name: /open day close/i })).toBeNull()
   })
 
   it('does not block the day close on a payment warning', async () => {
@@ -329,14 +339,14 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     await getDialog()
 
     await waitFor(() => expect(bridge.diagnostics.getSystemHealth).toHaveBeenCalled())
-    await waitFor(() => expect(serviceTile('closeout')).toHaveTextContent('Checked on the Z screen'))
-    expect(screen.queryByText('Something needs fixing before the day can close (Z).')).not.toBeInTheDocument()
+    await waitFor(() => expect(serviceTile('closeout')).toHaveTextContent('Checked at day close'))
+    expect(screen.queryByText(i18n.t('tillHealth.families.dayClose.title'))).not.toBeInTheDocument()
   })
 
   // Founder decision 13/10/2026: a POS day runs from its first check-in to its
   // Z, so a Z offered right after the last checkout is not overdue. Health only
   // warns (never blocks) once the open day started more than 24 hours ago.
-  const OPEN_TOO_LONG = /^The POS day has been open since .+\. Run the Z when the day ends\.$/
+  const OPEN_TOO_LONG = 'The day is still open'
 
   it('does not call a day overdue just because its Z is ready after the last checkout', async () => {
     endOfDay.status = 'pending_local_submit'
@@ -345,7 +355,7 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     renderHealthModal()
     await getDialog()
     await waitFor(() => expect(bridge.diagnostics.getSystemHealth).toHaveBeenCalled())
-    expect(serviceTile('closeout')).not.toHaveTextContent('Open over 24 h')
+    expect(serviceTile('closeout')).not.toHaveTextContent('Still open')
     expect(screen.queryByText(OPEN_TOO_LONG)).not.toBeInTheDocument()
   })
 
@@ -354,13 +364,13 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     endOfDay.dayStartAt = new Date(Date.now() - (24 * 60 + 1) * 60 * 1000).toISOString()
     const { unmount } = renderHealthModal()
     expect(await screen.findByText(OPEN_TOO_LONG)).toBeInTheDocument()
-    expect(serviceTile('closeout')).toHaveTextContent('Open over 24 h')
-    expect(screen.getByText('Nothing is blocked. Close the day (Z) when it ends.')).toBeInTheDocument()
+    expect(serviceTile('closeout')).toHaveTextContent('Still open')
+    expect(screen.getByText(i18n.t('tillHealth.closeoutHint'))).toBeInTheDocument()
     unmount()
 
     features.isMobileWaiter = true
     renderHealthModal()
-    await waitFor(() => expect(serviceTile('closeout')).toHaveTextContent('On main terminal'))
+    await waitFor(() => expect(serviceTile('closeout')).toHaveTextContent('On the main till'))
     expect(screen.queryByText(OPEN_TOO_LONG)).not.toBeInTheDocument()
   })
 
@@ -368,17 +378,12 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     queueBridge.listItems.mockResolvedValue([stuckOrderRow()])
     renderHealthModal()
 
-    expect(await screen.findByText("1 queued record hasn't synced for 4 hours.")).toBeInTheDocument()
-    expect(serviceTile('sync')).toHaveTextContent('Stuck')
-    // Orders are part of the day close, so the Z waits for this row.
-    expect(screen.getByText("The day close (Z) can't finish until they are sent.")).toBeInTheDocument()
-
-    const action = screen.getByTestId('health-primary-action')
-    expect(action).toHaveTextContent('Send the waiting records to the server now.')
-    expect(action).toHaveTextContent('The POS then checks again to confirm they were sent.')
-
-    fireEvent.click(within(action).getByRole('button', { name: 'Sync now' }))
-    await waitFor(() => expect(runParitySyncCycle).toHaveBeenCalledWith({ trigger: 'manual' }))
+    expect(await screen.findByText(stuckText(1))).toBeInTheDocument()
+    expect(serviceTile('sync')).toHaveTextContent('Needs attention')
+    expect(serviceTile('closeout')).toHaveTextContent('Checked at day close')
+    expect(send()).toBeEnabled()
+    fireEvent.click(send())
+    await waitFor(() => expect(runParitySyncCycle).toHaveBeenCalledWith({ trigger: 'manual', reportHealthTargets: true }))
   })
 
   it('counts several stuck rows and ages them by the oldest', async () => {
@@ -388,7 +393,7 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     ])
     renderHealthModal()
 
-    expect(await screen.findByText("2 queued records haven't synced for 4 hours.")).toBeInTheDocument()
+    expect(await screen.findByText(stuckText(2))).toBeInTheDocument()
   })
 
   it('escalates to Export diagnostics when Sync now did not clear the stuck row, and exports the Health view', async () => {
@@ -401,29 +406,19 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
       return COMPLETED_SYNC
     })
     renderHealthModal()
-    await screen.findByText("1 queued record hasn't synced for 4 hours.")
+    await screen.findByText(stuckText(1))
     const healthChecksBefore = bridge.diagnostics.getSystemHealth.mock.calls.length
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sync now' }))
+    fireEvent.click(send())
 
-    const exportButton = await screen.findByRole('button', { name: 'Export diagnostics' })
-    // Verified against a fresh check, not the click alone.
+    expect(await screen.findByText(i18n.t('tillHealth.states.support.title'))).toBeInTheDocument()
     expect(bridge.diagnostics.getSystemHealth.mock.calls.length).toBeGreaterThan(healthChecksBefore)
-    expect(screen.queryByRole('button', { name: 'Sync now' })).not.toBeInTheDocument()
-    const action = screen.getByTestId('health-primary-action')
-    expect(action).toHaveTextContent(
-      "Syncing didn't clear this. Export the diagnostics file and send it to support.",
-    )
-    expect(action).toHaveTextContent("The file helps support find the cause. It doesn't fix the problem by itself.")
-    // The problem is still named the same way.
-    expect(screen.getByText("1 queued record hasn't synced for 4 hours.")).toBeInTheDocument()
-
-    fireEvent.click(exportButton)
-    await waitFor(() => expect(bridge.diagnostics.export).toHaveBeenCalledTimes(1))
-    expect(bridge.diagnostics.export).toHaveBeenCalledWith(
+    expect(screen.queryByRole('button', { name: i18n.t('tillHealth.action.send') })).not.toBeInTheDocument()
+    expect(screen.getAllByTestId('till-health-card').some(card => card.textContent?.includes(i18n.t('tillHealth.action.noSafeAction')))).toBe(true)
+    report()
+    await waitFor(() => expect(bridge.diagnostics.sendRemoteIncident).toHaveBeenCalledTimes(1))
+    expect(bridge.diagnostics.sendRemoteIncident).toHaveBeenCalledWith(
       expect.objectContaining({
-        includeLogs: true,
-        redactSensitive: true,
         healthView: expect.objectContaining({
           format: 'thesmall-pos-health-view-v1',
           platform: 'windows',
@@ -441,8 +436,8 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
         }),
       }),
     )
-    // After the export the file is one tap away.
-    fireEvent.click(await within(action).findByRole('button', { name: 'Open diagnostics folder' }))
+    screen.getByText(i18n.t('tillHealth.report.previous')).closest('details')!.open = true
+    fireEvent.click(await screen.findByRole('button', { name: /open the folder for the copy/i }))
     await waitFor(() =>
       expect(bridge.diagnostics.openExportDir).toHaveBeenCalledWith('C:/diagnostics/bundle.zip'),
     )
@@ -458,11 +453,11 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
       auditId: 'audit-sync-now-1',
     })
     renderHealthModal()
-    await screen.findByText("1 queued record hasn't synced for 4 hours.")
+    await screen.findByText(stuckText(1))
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sync now' }))
+    fireEvent.click(send())
 
-    await waitFor(() => expect(runParitySyncCycle).toHaveBeenCalledWith({ trigger: 'manual' }))
+    await waitFor(() => expect(runParitySyncCycle).toHaveBeenCalledWith({ trigger: 'manual', reportHealthTargets: true }))
     expect(queueBridge.makeDue).toHaveBeenCalledWith(['queue-item-stuck'], 'sync_stuck')
     expect(queueBridge.makeDue.mock.invocationCallOrder[0]).toBeLessThan(
       runParitySyncCycle.mock.invocationCallOrder[0],
@@ -479,7 +474,7 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
         }),
       ),
     )
-    expect(screen.getByRole('button', { name: 'Sync now' })).toBeInTheDocument()
+    expect(screen.getByText(i18n.t('tillHealth.states.pending.title'), { selector: 'h3' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Export diagnostics' })).not.toBeInTheDocument()
   })
 
@@ -491,17 +486,17 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
       .mockResolvedValueOnce({ ...HEALTHY_SYSTEM_HEALTH, syncBacklog: { orders: { pending: 3 } }, syncBacklogStatus: 'ok' })
       .mockResolvedValue({ ...HEALTHY_SYSTEM_HEALTH, syncBacklog: {}, syncBacklogStatus: 'unavailable' })
     renderHealthModal()
-    await waitFor(() => expect(serviceTile('sync')).toHaveTextContent('Waiting'))
+    await waitFor(() => expect(serviceTile('sync')).toHaveTextContent('Waiting to be sent'))
     const checksBefore = bridge.diagnostics.getSystemHealth.mock.calls.length
 
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('sync.healthModal.actions.refresh') }))
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('tillHealth.action.recheck') }))
     await waitFor(() =>
       expect(bridge.diagnostics.getSystemHealth.mock.calls.length).toBeGreaterThan(checksBefore),
     )
 
     // The last known backlog still counts: the sync tile does not turn healthy.
-    await waitFor(() => expect(serviceTile('sync')).toHaveTextContent('Waiting'))
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('sync.healthModal.actions.openAdvanced') }))
+    await waitFor(() => expect(serviceTile('sync')).toHaveTextContent('Waiting to be sent'))
+    openAdvanced()
     const field = screen.getByText(i18n.t('sync.healthModal.advanced.fields.syncBacklog')).parentElement
     expect(field).toHaveTextContent(i18n.t('sync.healthModal.status.unavailable'))
     expect(field).not.toHaveTextContent('3')
@@ -514,22 +509,26 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
       syncBacklogStatus: 'unavailable',
     })
     renderHealthModal()
-    fireEvent.click(await screen.findByRole('button', { name: i18n.t('sync.healthModal.actions.openAdvanced') }))
+    await screen.findByText(i18n.t('tillHealth.states.unavailable.detail'))
+    openAdvanced()
     const field = screen.getByText(i18n.t('sync.healthModal.advanced.fields.syncBacklog')).parentElement
     expect(field).toHaveTextContent(i18n.t('sync.healthModal.status.unavailable'))
     expect(field).not.toHaveTextContent(/^Sync backlog\s*0$/)
   })
 
   it('does not escalate when a fresh check after Sync now shows the row was sent', async () => {
-    queueBridge.listItems.mockResolvedValueOnce([stuckOrderRow()]).mockResolvedValue([])
+    queueBridge.listItems.mockResolvedValue([stuckOrderRow()])
+    runParitySyncCycle.mockImplementation(async () => {
+      queueBridge.listItems.mockResolvedValue([])
+      return { ...COMPLETED_SYNC, paritySyncResult: { acknowledgedIds: ['queue-item-stuck'] } }
+    })
     renderHealthModal()
-    await screen.findByText("1 queued record hasn't synced for 4 hours.")
+    await screen.findByText(stuckText(1))
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sync now' }))
+    fireEvent.click(send())
 
-    expect(await screen.findByText('Everything is working')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Export diagnostics' })).not.toBeInTheDocument()
-    expect(screen.queryByTestId('health-primary-action')).not.toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: i18n.t('tillHealth.states.solved.title') })).toBeVisible()
+    await waitFor(() => expect(bridge.recovery.recordActionLog).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'resolved', success: true })))
   })
 
   it('recommends reviewing the issue when a payment failed to sync', async () => {
@@ -540,20 +539,14 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     queueBridge.listItems.mockResolvedValue([
       stuckOrderRow({ tableName: 'payments', moduleType: 'financial', status: 'failed', errorMessage: 'HTTP 422' }),
     ])
-    const onOpenRecovery = vi.fn()
-    renderHealthModal(onOpenRecovery)
+    renderHealthModal()
 
-    expect(
-      await screen.findByText('Some payments are waiting for support to review. The POS saved them locally.'),
-    ).toBeInTheDocument()
-    // A failed row is not "stuck": the sync tile says failed.
-    expect(serviceTile('sync')).toHaveTextContent('Failed')
-    const action = screen.getByTestId('health-primary-action')
-    expect(action).toHaveTextContent('See which records are affected and the safe next step for each.')
-
-    fireEvent.click(within(action).getByRole('button', { name: 'Review the issue' }))
-
-    expect(onOpenRecovery).toHaveBeenCalledTimes(1)
+    expect(await screen.findByText(i18n.t('tillHealth.states.support.title'))).toBeInTheDocument()
+    expect(serviceTile('sync')).toHaveTextContent('Did not complete')
+    const card = screen.getByTestId('till-health-card')
+    expect(card).toHaveTextContent(i18n.t('tillHealth.action.noSafeAction'))
+    fireEvent.click(within(card).getByRole('button', { name: i18n.t('tillHealth.action.supportDetails') }))
+    expect(supportToggle()).toHaveAttribute('aria-expanded', 'true')
   })
 
   it('sends a terminal with missing credentials to the terminal settings', async () => {
@@ -566,17 +559,11 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     window.addEventListener('pos:recovery-route', onRoute)
     try {
       renderHealthModal()
-      expect(
-        await screen.findByText(
-          "This terminal can't sign in to your store's system. Sales are saved on this device, but nothing syncs until it is connected again.",
-        ),
-      ).toBeInTheDocument()
-
-      fireEvent.click(screen.getByRole('button', { name: 'Open terminal settings' }))
-
-      expect(routes).toEqual([{ screen: 'connectionSettings' }])
+      expect(await screen.findByText(i18n.t('tillHealth.families.connection.title'))).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: i18n.t('tillHealth.action.openConnection') }))
+      await waitFor(() => expect(routes).toEqual([{ screen: 'connectionSettings' }]))
       await waitFor(() =>
-        expect(screen.queryByRole('dialog', { name: i18n.t('sync.healthModal.title') })).not.toBeInTheDocument(),
+        expect(screen.queryByRole('dialog', { name: i18n.t('tillHealth.title') })).not.toBeInTheDocument(),
       )
     } finally {
       window.removeEventListener('pos:recovery-route', onRoute)
@@ -588,15 +575,11 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     bridge.diagnostics.getSystemHealth.mockRejectedValueOnce(new Error('diagnostic transport unavailable'))
     renderHealthModal()
 
-    expect(await screen.findByText(i18n.t('sync.healthModal.states.unavailable.title'))).toBeInTheDocument()
-    const action = screen.getByTestId('health-primary-action')
-    expect(action).toHaveTextContent(
-      "The status couldn't be read. Check again; if it keeps failing, export diagnostics for support.",
-    )
+    expect(await screen.findByText(i18n.t('tillHealth.states.stale.title'))).toBeInTheDocument()
+    expect(screen.getByText(i18n.t('tillHealth.states.unavailable.detail'))).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('tillHealth.action.recheck') }))
 
-    fireEvent.click(within(action).getByRole('button', { name: 'Check again' }))
-
-    expect(await screen.findByText('Everything is working')).toBeInTheDocument()
+    expect(await screen.findByText(i18n.t('tillHealth.states.ok.title'))).toBeInTheDocument()
     expect(bridge.diagnostics.getSystemHealth).toHaveBeenCalledTimes(2)
   })
 
@@ -607,22 +590,17 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     queueBridge.listItems.mockResolvedValue([stuckOrderRow()])
     runParitySyncCycle.mockImplementation(async () => {
       queueBridge.listItems.mockResolvedValue([
-        stuckOrderRow({ attempts: 3, lastAttempt: new Date().toISOString() }),
+        stuckOrderRow({ attempts: 3, lastAttempt: new Date().toISOString(), errorMessage: 'Write refused' }),
       ])
       return COMPLETED_SYNC
     })
     renderHealthModal()
 
-    expect(
-      await screen.findByText('1 εγγραφή στην ουρά δεν έχει συγχρονιστεί εδώ και 4 ώρες.'),
-    ).toBeInTheDocument()
-    expect(screen.getByText('Το κλείσιμο ημέρας (Ζ) δεν θα ολοκληρωθεί μέχρι να σταλούν.')).toBeInTheDocument()
-    expect(serviceTile('closeout')).toHaveTextContent('Κλείσιμο ημέρας (Ζ)')
-    expect(serviceTile('closeout')).toHaveTextContent('Ελέγχεται στην οθόνη του Ζ')
-    expect(serviceTile('sync')).toHaveTextContent('Κόλλησε')
-    const action = screen.getByTestId('health-primary-action')
-    expect(within(action).getByRole('button', { name: 'Συγχρονισμός τώρα' })).toBeInTheDocument()
-    expect(action).toHaveTextContent('Στείλτε τώρα στον διακομιστή τις εγγραφές που περιμένουν.')
+    expect(await screen.findByText(stuckText(1))).toBeInTheDocument()
+    expect(serviceTile('closeout')).toHaveTextContent(i18n.t('tillHealth.services.closeout'))
+    expect(serviceTile('closeout')).toHaveTextContent(i18n.t('tillHealth.status.not_checked'))
+    expect(serviceTile('sync')).toHaveTextContent(i18n.t('tillHealth.status.stuck'))
+    expect(send()).toBeEnabled()
 
     const dialog = await getDialog()
     for (const englishFragment of [
@@ -630,7 +608,7 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
       'hours',
       'Sync now',
       'Day close',
-      'Stuck',
+      'Needs attention',
       'Unavailable',
       "can't finish",
       'Send the waiting records',
@@ -640,8 +618,10 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
       expect(dialog).not.toHaveTextContent(englishFragment)
     }
 
-    fireEvent.click(within(action).getByRole('button', { name: 'Συγχρονισμός τώρα' }))
-    expect(await screen.findByRole('button', { name: 'Εξαγωγή διαγνωστικών' })).toBeInTheDocument()
+    fireEvent.click(send())
+    await screen.findByText(i18n.t('tillHealth.states.support.title'))
+    openSupport()
+    expect(screen.getByRole('button', { name: i18n.t('tillHealth.report.new') })).toBeInTheDocument()
     expect(dialog).not.toHaveTextContent('Export diagnostics')
     expect(dialog).not.toHaveTextContent("Syncing didn't clear this")
   })
@@ -671,30 +651,16 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     try {
       renderHealthModal()
 
-      expect(
-        await screen.findByText(
-          'Receipts are waiting and not printing: 2 print jobs are waiting, the oldest for 40 minutes.',
-        ),
-      ).toBeInTheDocument()
-      expect(serviceTile('printer')).toHaveTextContent('Check')
+      expect(await screen.findByText(i18n.t('tillHealth.families.printing.title'))).toBeInTheDocument()
+      expect(serviceTile('printer')).toHaveTextContent(i18n.t('tillHealth.status.attention'))
       expect(serviceTile('printer')).not.toHaveTextContent('Ready')
-      expect(
-        screen.getByText("Receipts and kitchen tickets aren't coming out of the printer. Orders are still saved."),
-      ).toBeInTheDocument()
-
-      const action = screen.getByTestId('health-primary-action')
-      expect(action).toHaveTextContent(
-        "Open the printer settings and make sure the printer is on, has paper and is connected. If the receipts still don't print, contact support.",
-      )
-      expect(action).toHaveTextContent(
-        'The POS checks the print queue again. This warning clears once the waiting receipts have printed.',
-      )
-
-      fireEvent.click(within(action).getByRole('button', { name: 'Check the printer' }))
+      const card = screen.getByTestId('till-health-card')
+      expect(card).toHaveTextContent(i18n.t('tillHealth.families.printing.detail', { count: 2 }))
+      fireEvent.click(within(card).getByRole('button', { name: i18n.t('tillHealth.action.printer') }))
 
       expect(routes).toEqual([{ screen: 'connectionSettings', params: { section: 'printing' } }])
       await waitFor(() =>
-        expect(screen.queryByRole('dialog', { name: i18n.t('sync.healthModal.title') })).not.toBeInTheDocument(),
+        expect(screen.queryByRole('dialog', { name: i18n.t('tillHealth.title') })).not.toBeInTheDocument(),
       )
     } finally {
       window.removeEventListener('pos:recovery-route', onRoute)
@@ -726,10 +692,12 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
       bridge.diagnostics.getSystemHealth.mockResolvedValue(stalledHealth(40 * 60 * 1_000))
       renderClosed()
 
-      await waitFor(() => expect(heart()).toHaveAttribute('data-heart-tone', 'attention'))
-      expect(heart()?.querySelector('svg')).toHaveClass('text-amber-400')
-      expect(heart()).toHaveAccessibleName(/Receipts and kitchen tickets aren't coming out of the printer\./)
-      expect(screen.queryByRole('dialog', { name: i18n.t('sync.healthModal.title') })).not.toBeInTheDocument()
+      await waitFor(() => {
+        expect(heart()).toHaveAttribute('data-heart-tone', 'attention')
+        expect(heart()).toHaveAttribute('data-health-tone', 'warn')
+        expect(heart()).toHaveAccessibleName(new RegExp(i18n.t('tillHealth.states.issue.title')))
+      })
+      expect(screen.queryByRole('dialog', { name: i18n.t('tillHealth.title') })).not.toBeInTheDocument()
     })
 
     const settle = async () => {
@@ -767,9 +735,9 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     })
     renderHealthModal()
 
-    expect(await screen.findByText('Everything is working')).toBeInTheDocument()
+    expect(await screen.findByText(i18n.t('tillHealth.states.ok.title'))).toBeInTheDocument()
     expect(serviceTile('printer')).toHaveTextContent('Ready')
-    expect(screen.queryByTestId('health-primary-action')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('till-health-card')).not.toBeInTheDocument()
   })
 
   it('opens the printer settings from the printer setup action too', async () => {
@@ -782,10 +750,11 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     window.addEventListener('pos:recovery-route', onRoute)
     try {
       renderHealthModal()
-      const action = await screen.findByTestId('health-primary-action')
-      await waitFor(() => expect(action).toHaveTextContent('Check that the printer is on and set up for this POS.'))
-
-      fireEvent.click(within(action).getByRole('button', { name: 'Printer settings' }))
+      await screen.findByText(i18n.t('tillHealth.status.not_configured'))
+      expect(screen.queryByTestId('till-health-card')).toBeNull()
+      openSupport()
+      screen.getByText(i18n.t('tillHealth.support.tools')).closest('details')!.open = true
+      fireEvent.click(screen.getByRole('button', { name: i18n.t('tillHealth.action.printer') }))
 
       expect(routes).toEqual([{ screen: 'connectionSettings', params: { section: 'printing' } }])
     } finally {
@@ -802,19 +771,19 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
       },
     })
     renderHealthModal()
-    await screen.findByText('Receipts are waiting and not printing: 3 print jobs are waiting, the oldest for 2 hours.')
+    await screen.findByText(i18n.t('tillHealth.families.printing.detail', { count: 3 }))
 
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('sync.healthModal.actions.export') }))
+    report()
 
-    await waitFor(() => expect(bridge.diagnostics.export).toHaveBeenCalledTimes(1))
-    expect(bridge.diagnostics.export).toHaveBeenCalledWith(
+    await waitFor(() => expect(bridge.diagnostics.sendRemoteIncident).toHaveBeenCalledTimes(1))
+    expect(bridge.diagnostics.sendRemoteIncident).toHaveBeenCalledWith(
       expect.objectContaining({
         healthView: expect.objectContaining({
           problem: { code: 'printingStalled', params: expect.objectContaining({ count: 3 }) },
           impacts: ['printingStopped'],
           primaryAction: 'checkPrinting',
           services: expect.objectContaining({ printer: 'attention' }),
-          counts: expect.objectContaining({ printJobsWaiting: 3 }),
+          counts: expect.objectContaining({ printJobsWaiting: 3, oldestPrintJobWaitingMs: expect.any(Number) }),
         }),
       }),
     )
@@ -833,12 +802,10 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     })
     renderHealthModal()
 
-    expect(
-      await screen.findByText('Οι αποδείξεις περιμένουν και δεν τυπώνονται: 1 εκτύπωση περιμένει εδώ και 25 λεπτά.'),
-    ).toBeInTheDocument()
-    expect(serviceTile('printer')).toHaveTextContent('Χρειάζεται έλεγχο')
-    const action = screen.getByTestId('health-primary-action')
-    expect(within(action).getByRole('button', { name: 'Έλεγχος εκτυπωτή' })).toBeInTheDocument()
+    expect(await screen.findByText(i18n.t('tillHealth.families.printing.detail', { count: 1 }))).toBeInTheDocument()
+    expect(serviceTile('printer')).toHaveTextContent(i18n.t('tillHealth.status.attention'))
+    const card = screen.getByTestId('till-health-card')
+    expect(within(card).getByRole('button', { name: i18n.t('tillHealth.action.printer') })).toBeInTheDocument()
     const dialog = await getDialog()
     for (const englishFragment of ['Receipts', 'print job', 'printer', 'Check the printer']) {
       expect(dialog).not.toHaveTextContent(englishFragment)

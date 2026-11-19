@@ -1,3 +1,4 @@
+import { seedCardProviderMark } from '../../../services/__tests__/cardProviderMark.fixture';
 import React from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -114,6 +115,7 @@ describe('split batch proof through the real ordinary controller', () => {
     mocks.bridge.adminApi.fetchFromAdmin.mockReset();
     mocks.bridge.adminApi.fetchFromAdmin.mockResolvedValue(MANUAL_CARD_ADMITTED);
     updateTerminalCredentialCache({ organizationId: SCOPE.organizationId, branchId: BRANCH, terminalId: SCOPE.terminalId });
+    seedCardProviderMark();
     mocks.bridge.payments.getSettlementSnapshot.mockImplementation(async (orderId: string) => ({
       success: true, orderId, orderTotal: 20, netPaid: 0, outstandingAmount: 20,
       completedPayments: [], generation: '0'.repeat(64), unresolvedDirectSale: null,

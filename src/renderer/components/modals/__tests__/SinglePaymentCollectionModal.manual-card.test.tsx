@@ -1,3 +1,5 @@
+import { applyCardProviderSnapshot, clearCardProviderMark } from '../../../services/cardProviderMark';
+import { seedCardProviderMark } from '../../../services/__tests__/cardProviderMark.fixture';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -35,6 +37,8 @@ const { bridge, toastMock } = vi.hoisted(() => ({
       listUnsavedPayments: vi.fn(),
     },
     ecr: {
+      getDeviceAdmission: vi.fn(),
+      getDevices: vi.fn(),
       processPayment: vi.fn(),
       getDefaultTerminal: vi.fn(),
       getDeviceStatus: vi.fn(),
@@ -143,6 +147,7 @@ describe('SinglePaymentCollectionModal manual card admission', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     updateTerminalCredentialCache({ organizationId: SCOPE.organizationId, branchId: BRANCH, terminalId: SCOPE.terminalId });
+    seedCardProviderMark();
     bridge.invoke.mockResolvedValue({ success: true });
     bridge.giftCardCheckout.reconcileOrder.mockResolvedValue(CLEAR);
     bridge.payments.listUnsavedPayments.mockResolvedValue({ success: true, payments: [] });
@@ -294,5 +299,56 @@ describe('SinglePaymentCollectionModal manual card admission', () => {
       metadata: { admission_basis: 'live', admission_checked_at: expect.any(String) },
     }));
     await waitFor(() => expect(onPaymentCollected).toHaveBeenCalledTimes(1));
+  });
+  it.each(['online', 'offline', 'no snapshot', 'stale payment_terminal row', 'held lock', 'cached no provider'])('empty mark records without reads or new timers: %s', async fixture => {
+    clearCardProviderMark();
+    const at = '2026-11-06T08:00:00.000Z';
+    if (fixture === 'cached no provider') applyCardProviderSnapshot({ success: true, cardTerminal: {
+      admitted: false, fetchedAt: at, organizationId: SCOPE.organizationId, branchId: BRANCH, terminalId: SCOPE.terminalId,
+    } });
+    const network = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(fixture !== 'offline');
+    const reads = [bridge.ecr.getDeviceAdmission, bridge.ecr.getDevices, bridge.ecr.getDefaultTerminal,
+      bridge.ecr.getDeviceStatus, bridge.ecr.processPayment, bridge.adminApi.fetchFromAdmin];
+    reads.forEach(read => read.mockImplementation(() => new Promise(() => {})));
+    const onPaymentCollected = vi.fn();
+    renderSingle(nextOrderId('empty-mark'), {
+      onPaymentCollected, collectionScope: fixture === 'offline' ? undefined : SCOPE,
+    });
+    vi.useFakeTimers();
+    try {
+      await act(async () => { fireEvent.click(collectButton()); });
+      expect(screen.getByText(CONFIRM_TITLE)).toBeInTheDocument();
+      expect(bridge.payments.recordPayment).not.toHaveBeenCalled();
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm manual card' })); });
+      expect(bridge.payments.recordPayment).toHaveBeenCalledOnce();
+      expect(bridge.payments.recordPayment).toHaveBeenCalledWith(expect.objectContaining({
+        method: 'card', amount: 12.5, paymentOrigin: 'manual', terminalApproved: false,
+      }));
+      expect(bridge.payments.recordPayment.mock.calls[0][0].metadata).toEqual(fixture === 'cached no provider'
+        ? { admission_basis: 'cached', admission_checked_at: at } : undefined);
+      expect(onPaymentCollected).toHaveBeenCalledOnce();
+      reads.forEach(read => expect(read).not.toHaveBeenCalled());
+      expect(toastMock.error).not.toHaveBeenCalled();
+      expect(screen.queryByText(/Checking payment terminal/i)).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); network.mockRestore(); }
+  });
+
+
+  it.each([true, false])('records cash with an empty mark and no provider calls (online: %s)', async online => {
+    clearCardProviderMark();
+    const network = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(online);
+    const reads = [bridge.ecr.getDeviceAdmission, bridge.ecr.getDefaultTerminal,
+      bridge.ecr.getDeviceStatus, bridge.ecr.processPayment, bridge.adminApi.fetchFromAdmin];
+    try {
+      renderSingle(nextOrderId('cash'), { method: 'cash', collectionScope: online ? SCOPE : undefined });
+      fireEvent.click(screen.getByRole('button', { name: 'Collect cash payment' }));
+      await waitFor(() => expect(bridge.payments.recordPayment).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        method: 'cash', amount: 12.5, paymentOrigin: 'manual',
+      })));
+      reads.forEach(read => expect(read).not.toHaveBeenCalled());
+    } finally {
+      network.mockRestore();
+    }
   });
 });

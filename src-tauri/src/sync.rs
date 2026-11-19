@@ -856,6 +856,18 @@ impl SafeParitySyncSummary {
             || self.queue_status.quarantined > 0
             || self.queue_status.dead_lettered > 0
     }
+
+    fn only_parked_conflicts(&self) -> bool {
+        self.batch_success
+            && self.failed == 0
+            && self.conflicts == 0
+            && self.quarantined == 0
+            && self.dead_lettered == 0
+            && self.queue_status.conflicts > 0
+            && self.queue_status.failed == 0
+            && self.queue_status.quarantined == 0
+            && self.queue_status.dead_lettered == 0
+    }
 }
 
 enum ParitySyncExecutionOutcome {
@@ -3283,144 +3295,134 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
 /// Validate all pending orders in the sync queue against the local menu cache.
 /// Returns a report of valid and invalid orders with details.
 pub fn validate_pending_orders(db: &DbState) -> Result<Value, String> {
-    // Step 1: Collect pending entry IDs under the lock, then release it.
-    // We must NOT call get_order_by_id() or validate_menu_items_against_cache()
-    // while holding the lock — both re-acquire db.conn.lock() internally,
-    // which would deadlock (std::sync::Mutex is not reentrant).
-    let pending_entries: Vec<(i64, String, Option<String>)> = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, entity_id, created_at
-                 FROM sync_queue
-                 WHERE entity_type = 'order'
-                   AND status IN ('pending', 'in_progress', 'queued_remote')
-                 ORDER BY created_at ASC",
-            )
-            .map_err(|e| format!("prepare query: {e}"))?;
-
-        let result: Vec<_> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            })
-            .map_err(|e| format!("query sync_queue: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
-        result
-    }; // lock released here
-
-    // Step 2: Validate each order without holding the lock.
-    let mut valid_count = 0;
-    let mut invalid_count = 0;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, entity_id, created_at FROM sync_queue
+         WHERE entity_type = 'order' AND status IN ('pending','queued_remote')
+           AND LOWER(operation) IN ('insert','create','update')
+         ORDER BY created_at, id",
+        )
+        .map_err(|e| e.to_string())?;
+    let entries = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let menu_ids = crate::menu::recovery_menu_ids(&conn)?;
     let mut invalid_orders = Vec::new();
-
-    for (queue_id, entity_id, created_at) in pending_entries {
-        // get_order_by_id acquires its own lock internally
-        let order = get_order_by_id(db, &entity_id).unwrap_or_else(|e| {
-            warn!(order_id = %entity_id, "get_order_by_id fallback: {e}");
-            Value::Null
-        });
-
-        if order.is_null() {
-            invalid_count += 1;
-            invalid_orders.push(serde_json::json!({
-                "order_id": entity_id,
-                "queue_id": queue_id,
-                "invalid_menu_items": [],
-                "created_at": created_at,
-                "reason": "Order not found in local database"
+    for (queue_id, order_id, created_at) in &entries {
+        if let Some((reason, invalid_menu_items)) =
+            invalid_order_reason(&conn, order_id, &menu_ids)?
+        {
+            invalid_orders.push(json!({
+                "order_id":order_id, "queue_id":queue_id, "invalid_menu_items":invalid_menu_items,
+                "created_at":created_at, "reason":reason
             }));
-            continue;
-        }
-
-        // Validate menu items — also acquires its own lock internally
-        if let Some(items) = order.get("items") {
-            match validate_menu_items_against_cache(db, items) {
-                Ok(()) => {
-                    valid_count += 1;
-                }
-                Err(invalid_ids) => {
-                    invalid_count += 1;
-                    invalid_orders.push(serde_json::json!({
-                        "order_id": entity_id,
-                        "queue_id": queue_id,
-                        "invalid_menu_items": invalid_ids,
-                        "created_at": created_at,
-                        "reason": "Menu items not found in local cache"
-                    }));
-                }
-            }
-        } else {
-            // No items field, consider valid (might be a deletion or other operation)
-            valid_count += 1;
         }
     }
-
-    Ok(serde_json::json!({
-        "success": true,
-        "total_pending": valid_count + invalid_count,
-        "valid": valid_count,
-        "invalid": invalid_count,
-        "invalid_orders": invalid_orders
+    Ok(json!({
+        "success":true, "total_pending":entries.len(), "valid":entries.len() - invalid_orders.len(),
+        "invalid":invalid_orders.len(), "invalid_orders":invalid_orders
     }))
 }
 
-/// Remove specified orders from the sync queue.
-/// This is a repair operation for orders that cannot be synced (e.g., invalid menu items).
-pub fn remove_invalid_orders(db: &DbState, order_ids: Vec<String>) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
-    if order_ids.is_empty() {
-        return Ok(serde_json::json!({
-            "success": true,
-            "removed": 0,
-            "message": "No order IDs provided"
-        }));
+fn invalid_order_reason(
+    conn: &Connection,
+    order_id: &str,
+    menu_ids: &std::collections::HashSet<String>,
+) -> Result<Option<(&'static str, Vec<String>)>, String> {
+    // Never remove replay evidence for a payment, a closed Z, or a separate owner.
+    let protected: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM order_payments WHERE order_id = ?1)
+             OR EXISTS(SELECT 1 FROM payment_adjustments WHERE order_id = ?1)",
+            [order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if protected {
+        return Ok(None);
     }
-
-    for order_id in &order_ids {
-        ensure_generic_order_recovery_allowed(&conn, order_id)?;
+    let order: Option<(String, String, String)> = conn.query_row(
+        "SELECT items, COALESCE(order_context,''), COALESCE(created_at,'') FROM orders WHERE id = ?1",
+        [order_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    ).optional().map_err(|e| e.to_string())?;
+    let Some((raw, context, created_at)) = order else {
+        return Ok(Some(("Order not found in local database", Vec::new())));
+    };
+    let floor = crate::db::get_setting(conn, "system", "last_confirmed_z_cutoff");
+    let protected_day: bool = conn
+        .query_row(
+            "SELECT ?1 IS NOT NULL AND COALESCE(julianday(?2) <= julianday(?1), 1)",
+            params![floor, created_at],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if context.trim().eq_ignore_ascii_case("repair_settlement") || protected_day {
+        return Ok(None);
     }
+    let items: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    if !items.is_array() {
+        return Err("INVALID_ORDER_LINES_UNAVAILABLE".into());
+    }
+    Ok(validate_menu_ids(&items, menu_ids)
+        .err()
+        .map(|ids| ("Menu items not found in local cache", ids)))
+}
 
-    // Build placeholders for the IN clause
-    let placeholders = order_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let query = format!(
-        "DELETE FROM sync_queue
-         WHERE entity_type = 'order'
-           AND entity_id IN ({})
-           AND NOT EXISTS (
-             SELECT 1
-             FROM orders
-             WHERE orders.id = sync_queue.entity_id
-               AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
-           )",
-        placeholders
-    );
-
-    let params: Vec<&dyn rusqlite::ToSql> = order_ids
-        .iter()
-        .map(|id| id as &dyn rusqlite::ToSql)
-        .collect();
-
-    let removed = conn
-        .execute(&query, params.as_slice())
-        .map_err(|e| format!("delete from sync_queue: {e}"))?;
-
-    info!(
-        removed = removed,
-        order_ids = ?order_ids,
-        "Removed invalid orders from sync queue"
-    );
-
-    Ok(serde_json::json!({
-        "success": true,
-        "removed": removed,
-        "order_ids": order_ids
-    }))
+/// Remove only the legacy send records shown in the preview. The original
+/// request is archived in the same transaction as the removal.
+pub(crate) fn remove_exact_invalid_order_rows(
+    tx: &Connection,
+    rows: &[(i64, String)],
+    snapshot_id: &str,
+) -> Result<Vec<i64>, String> {
+    if tx.is_autocommit() {
+        return Err("INVALID_ORDER_TRANSACTION_REQUIRED".into());
+    }
+    let menu_ids = crate::menu::recovery_menu_ids(tx)?;
+    let mut removed = Vec::new();
+    for (id, order_id) in rows {
+        ensure_generic_order_recovery_allowed(tx, order_id)?;
+        if invalid_order_reason(tx, order_id, &menu_ids)?.is_none() {
+            return Err("INVALID_ORDER_PREVIEW_CHANGED".into());
+        }
+        let archived = tx.execute(
+            "INSERT INTO conflict_audit_log
+               (id, operation_type, entity_id, entity_type, local_version, server_version,
+                timestamp, discarded_payload, resolution, is_monetary, reviewed_by_operator)
+             SELECT ?3, operation, entity_id, 'legacy_order_send', 0, 0,
+                    datetime('now'), json_object(
+                        'queue_id',id, 'queue_owner','sync_queue', 'payload',payload,
+                        'operation',operation, 'status',status, 'idempotency_key',idempotency_key,
+                        'created_at',created_at, 'updated_at',updated_at, 'snapshot_point_id',?4),
+                    'invalid_order_send_removed', 0, 1
+             FROM sync_queue
+             WHERE id = ?1 AND entity_id = ?2 AND entity_type = 'order'
+               AND status IN ('pending','queued_remote') AND LOWER(operation) IN ('insert','create','update')",
+            params![id, order_id, Uuid::new_v4().to_string(), snapshot_id],
+        ).map_err(|e| e.to_string())?;
+        if archived != 1 {
+            return Err("INVALID_ORDER_PREVIEW_CHANGED".into());
+        }
+        let changed = tx.execute(
+            "DELETE FROM sync_queue WHERE id = ?1 AND entity_id = ?2 AND entity_type = 'order'
+               AND status IN ('pending','queued_remote') AND LOWER(operation) IN ('insert','create','update')",
+            params![id, order_id],
+        ).map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("INVALID_ORDER_PREVIEW_CHANGED".into());
+        }
+        removed.push(*id);
+    }
+    Ok(removed)
 }
 
 // ---------------------------------------------------------------------------
@@ -4639,7 +4641,9 @@ pub fn start_terminal_heartbeat_loop(
                         .is_none_or(|at| at.elapsed() >= crate::device_admission::REFRESH_INTERVAL)
                     {
                         last_admission_refresh = Some(std::time::Instant::now());
-                        if let Err(error) = crate::device_admission::refresh(db.as_ref()).await {
+                        if let Err(error) =
+                            crate::device_admission::refresh_and_publish(&app, db.as_ref()).await
+                        {
                             warn!(error = %error, "ECR device admission refresh failed");
                         }
                     }
@@ -4838,6 +4842,14 @@ pub fn start_sync_loop(
                         synced,
                         error = %error,
                         "Sync cycle sent queued rows while a pull failed; full-success timestamp preserved"
+                    );
+                }
+                NativeSyncTickOutcome::Partial { synced, error }
+                    if error == "PARITY_ROWS_PARKED" =>
+                {
+                    debug!(
+                        synced,
+                        "Sync cycle finished with previously parked conflicts"
                     );
                 }
                 NativeSyncTickOutcome::Partial { synced, error } => {
@@ -6072,6 +6084,12 @@ fn classify_safe_parity_summary(
         return parity_outcome_for_gate_block(summary, block);
     }
     if summary.has_unresolved_failure() {
+        if source == "sync_loop" && summary.only_parked_conflicts() {
+            return ParitySyncExecutionOutcome::Partial(summary, "PARITY_ROWS_PARKED");
+        }
+        if source == "recovery:run_parity_sync_now" && summary.only_parked_conflicts() {
+            return ParitySyncExecutionOutcome::Complete(summary);
+        }
         return ParitySyncExecutionOutcome::Partial(summary, "PARITY_SYNC_PARTIAL");
     }
     ParitySyncExecutionOutcome::Complete(summary)
@@ -6410,6 +6428,7 @@ impl<'a> RendererParityExecutionContext<'a> {
         &self,
         app: &impl TerminalEventSink,
         source: &'static str,
+        report_health_targets: bool,
     ) -> Result<sync_queue::SyncResult, String> {
         let started_at = Utc::now().to_rfc3339();
         let mut result = sync_queue::process_queue_renderer_safe_with_claim_gate(
@@ -6452,6 +6471,7 @@ impl<'a> RendererParityExecutionContext<'a> {
                     Err("REMOTE_AUTH_PAUSED".to_string())
                 }
             }
+            ParitySyncExecutionOutcome::Partial(_, _) if report_health_targets => Ok(result),
             ParitySyncExecutionOutcome::Partial(_, error) => Err(error.to_string()),
             ParitySyncExecutionOutcome::Paused(_) => Err("REMOTE_AUTH_PAUSED".to_string()),
             ParitySyncExecutionOutcome::Reset(_) => Err("TERMINAL_AUTH_RESET".to_string()),
@@ -6532,7 +6552,7 @@ pub(crate) async fn process_renderer_parity_queue_guarded(
 ) -> Result<sync_queue::SyncResult, String> {
     RendererParityExecutionContext::new(db, sync_state, cancellation)
         .await?
-        .process_queue(app, source)
+        .process_queue(app, source, false)
         .await
 }
 
@@ -7850,7 +7870,7 @@ pub(crate) async fn repair_order_update_replay_blockers(
     let malformed_admin_url_pass = if requeued_malformed_admin_url_failures > 0 {
         Some(
             context
-                .process_queue(app, "repair_order_recovery:malformed_admin_url")
+                .process_queue(app, "repair_order_recovery:malformed_admin_url", false)
                 .await?,
         )
     } else {
@@ -7864,7 +7884,7 @@ pub(crate) async fn repair_order_update_replay_blockers(
     let parent_insert_pass = if requeued_parent_order_inserts > 0 {
         Some(
             context
-                .process_queue(app, "repair_order_recovery:parent_insert")
+                .process_queue(app, "repair_order_recovery:parent_insert", false)
                 .await?,
         )
     } else {
@@ -7888,7 +7908,7 @@ pub(crate) async fn repair_order_update_replay_blockers(
         minimized_item_update_replays + requeue_order_update_replay_blockers(db)?
     };
     let first_pass = context
-        .process_queue(app, "repair_order_recovery:update")
+        .process_queue(app, "repair_order_recovery:update", false)
         .await?;
     let promoted_payments = {
         let _lease = context.acquire_step_lease()?;
@@ -7897,7 +7917,7 @@ pub(crate) async fn repair_order_update_replay_blockers(
     let second_pass = if promoted_payments > 0 {
         Some(
             context
-                .process_queue(app, "repair_order_recovery:payment")
+                .process_queue(app, "repair_order_recovery:payment", false)
                 .await?,
         )
     } else {
@@ -7911,7 +7931,7 @@ pub(crate) async fn repair_order_update_replay_blockers(
     let table_session_pass = if forced_table_session_closes > 0 {
         Some(
             context
-                .process_queue(app, "repair_order_recovery:table_session")
+                .process_queue(app, "repair_order_recovery:table_session", false)
                 .await?,
         )
     } else {
@@ -12045,7 +12065,10 @@ fn hydrate_local_payment_from_remote(
     let amount_cents = Cents::round_half_even(amount).as_i64();
     conn.execute(
         "UPDATE order_payments
-         SET method = ?1,
+         SET method = CASE
+                 WHEN method IN ('online','digital_wallet','split')
+                      AND method = ?8 AND remote_payment_id = ?9 THEN method
+                 ELSE ?1 END,
              amount = ?2,
              amount_cents = ?3,
              currency = COALESCE(NULLIF(?4, ''), currency),
@@ -12060,6 +12083,8 @@ fn hydrate_local_payment_from_remote(
             transaction_ref,
             updated_at,
             local_payment_id,
+            remote_payment["payment_method"].as_str(),
+            remote_payment_id,
         ],
     )
     .map_err(|e| format!("update remote payment mirror: {e}"))?;
@@ -16561,16 +16586,15 @@ fn claim_food_print_item_hydration(
     else {
         return Ok(None);
     };
-    let row: Option<(String, String, String, Option<String>, Option<String>)> = conn.query_row(
-        "SELECT COALESCE(plugin, ''), COALESCE(supabase_id, ''), COALESCE(items, '[]'), branch_id, organization_id
+    let row: Option<(bool, String, String, Option<String>, Option<String>)> = conn.query_row(
+        "SELECT plugin, COALESCE(supabase_id, ''), COALESCE(items, '[]'), branch_id, organization_id, order_number, ghost_metadata
          FROM orders WHERE id = ?1 AND COALESCE(order_context, '') != 'repair_settlement'",
-        [local_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        [local_id], |row| Ok((crate::print::is_food_order_for_print_items(row)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     ).optional().map_err(|error| error.to_string())?;
-    let Some((plugin, stored_remote, items, branch, org)) = row else {
+    let Some((true, stored_remote, items, branch, org)) = row else {
         return Ok(None);
     };
-    if !crate::print::is_food_delivery_plugin(&plugin)
-        || stored_remote != remote_id
+    if stored_remote != remote_id
         || uuid::Uuid::parse_str(remote_id).is_err()
         || crate::print::has_usable_food_order_items(&items)
     {
@@ -17556,6 +17580,44 @@ pub(crate) async fn fetch_order_payment_ledger_with_stored_credentials(
     AbortLedgerFetchOnDrop(task)
         .await
         .map_err(|error| format!("payment ledger fetch task: {error}"))?
+}
+
+/// Restore exactly one verified receipt through the pre-decision mirror owner.
+/// The confirmed runtime owns the transaction and proves local absence.
+pub(crate) fn restore_order_payment_mirror_before_payment_decision(
+    conn: &Connection,
+    order_id: &str,
+    remote: &Value,
+    created_at: &str,
+    now: &str,
+) -> Result<String, String> {
+    if remote_payment_intentionally_excluded(conn, remote)? {
+        return Err("PROTECTED_RECORD".into());
+    }
+    let remote_id = remote["id"].as_str().ok_or("INVALID_INPUT")?;
+    let method = remote["payment_method"].as_str().ok_or("INVALID_INPUT")?;
+    let input = payments::build_applied_canonical_payment_record_input(&serde_json::json!({
+        "orderId": order_id,
+        "method": method,
+        "amount": remote["amount"],
+        "currency": remote["currency"],
+        "tipAmount": remote["tip_amount"],
+        "transactionRef": remote["external_transaction_id"],
+        "idempotencyKey": remote["idempotency_key"].as_str().map(str::to_string)
+            .unwrap_or_else(|| format!("server-payment:{remote_id}")),
+        "paymentOrigin": "sync_reconstructed",
+        "tableSessionId": remote["table_session_id"],
+        "seatNumber": remote["seat_number"],
+        "tipRecipientRole": remote["metadata"]["tip_recipient_role"],
+        "tipRecipientStaffId": remote["metadata"]["tip_recipient_staff_id"],
+        "tipRecipientStaffShiftId": remote["metadata"]["tip_recipient_staff_shift_id"],
+    }))?;
+    let provenance = new_canonical_payment_provenance(conn, order_id, remote)?;
+    let mut options =
+        payments::PaymentInsertOptions::applied_canonical(remote_id.into(), provenance);
+    options.created_at = Some(created_at.into());
+    options.updated_at = Some(now.into());
+    payments::insert_applied_receipt_row(conn, &input, &options)
 }
 
 /// Mirror the server ledger rows of one order before an edit decides its
@@ -19208,6 +19270,13 @@ fn validate_menu_items_against_cache(db: &DbState, items: &Value) -> Result<(), 
         }
     }
 
+    validate_menu_ids(items, &valid_ids)
+}
+
+fn validate_menu_ids(
+    items: &Value,
+    valid_ids: &std::collections::HashSet<String>,
+) -> Result<(), Vec<String>> {
     // If menu cache is completely empty, allow the order through
     // (menu hasn't been synced yet, so we can't validate)
     if valid_ids.is_empty() {
@@ -21435,15 +21504,36 @@ pub(crate) fn ensure_financial_parent_shift_dependency_recovery(
     Ok(Some(dependency))
 }
 
-pub(crate) fn retry_financial_queue_item(db: &DbState, queue_id: i64) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+pub(crate) fn retry_financial_queue_item(
+    db: &DbState,
+    queue_id: i64,
+) -> Result<(i64, String), String> {
+    let mut connection = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let result = retry_financial_queue_item_in_transaction(&conn, queue_id)?;
+    conn.commit().map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+/// The confirmed caller already holds its short, guarded writer transaction.
+pub(crate) fn retry_financial_queue_item_in_transaction(
+    conn: &Connection,
+    queue_id: i64,
+) -> Result<(i64, String), String> {
+    if conn.is_autocommit() {
+        return Err("FINANCIAL_RETRY_REQUIRES_TRANSACTION".into());
+    }
     let now = Utc::now().to_rfc3339();
 
     let row: Option<(String, String, String)> = conn
         .query_row(
             "SELECT entity_type, entity_id, payload
              FROM sync_queue
-             WHERE id = ?1",
+             WHERE id = ?1
+               AND status IN ('failed','deferred','pending')
+               AND entity_type IN ('payment','payment_adjustment','shift_expense','staff_payment','driver_earning','driver_earnings')",
             params![queue_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -21455,11 +21545,11 @@ pub(crate) fn retry_financial_queue_item(db: &DbState, queue_id: i64) -> Result<
     };
 
     let dependency =
-        ensure_financial_parent_shift_dependency_recovery(&conn, &entity_type, &payload, &now)?;
+        ensure_financial_parent_shift_dependency_recovery(conn, &entity_type, &payload, &now)?;
     let payment_parent_ready = if entity_type == "payment" {
         extract_order_id_from_financial_payload(&payload)
             .as_deref()
-            .and_then(|order_id| local_order_has_remote_identity(&conn, order_id))
+            .and_then(|order_id| local_order_has_remote_identity(conn, order_id))
             .unwrap_or(false)
     } else {
         true
@@ -21474,18 +21564,22 @@ pub(crate) fn retry_financial_queue_item(db: &DbState, queue_id: i64) -> Result<
         _ => ("pending", None),
     };
 
-    conn.execute(
-        "UPDATE sync_queue
+    let changed = conn
+        .execute(
+            "UPDATE sync_queue
          SET status = ?1,
              retry_count = 0,
              last_error = ?2,
              next_retry_at = NULL,
              updated_at = ?3
          WHERE id = ?4",
-        params![status, last_error, now, queue_id],
-    )
-    .map_err(|e| format!("retry financial queue row: {e}"))?;
-    align_local_financial_sync_state(&conn, &entity_type, &entity_id, status, &now);
+            params![status, last_error, now, queue_id],
+        )
+        .map_err(|e| format!("retry financial queue row: {e}"))?;
+    if changed != 1 {
+        return Err("FINANCIAL_RETRY_TARGET_CHANGED".into());
+    }
+    align_local_financial_sync_state(conn, &entity_type, &entity_id, status, &now);
 
     if entity_type == "payment_adjustment" {
         let _ = conn.execute(
@@ -21517,7 +21611,14 @@ pub(crate) fn retry_financial_queue_item(db: &DbState, queue_id: i64) -> Result<
         );
     }
 
-    Ok(())
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM sync_queue WHERE id=?1",
+            [queue_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok((queue_id, status))
 }
 
 async fn sync_financial_batch(
@@ -30637,7 +30738,7 @@ mod tests {
         );
         let new_remote_id = uuid::Uuid::new_v4().to_string();
         conn.execute(
-            "UPDATE orders SET supabase_id = ?1, plugin = 'pos' WHERE id = 'food-claim'",
+            "UPDATE orders SET supabase_id = ?1, plugin = 'pos', order_number = 'BOX-1794948068572-2F43E65D' WHERE id = 'food-claim'",
             [&new_remote_id],
         )
         .unwrap();
@@ -30645,6 +30746,23 @@ mod tests {
             claim_food_print_item_hydration(&conn, "food-claim", &new_remote_id)
                 .unwrap()
                 .is_none()
+        );
+        conn.execute("UPDATE orders SET plugin = '' WHERE id = 'food-claim'", [])
+            .unwrap();
+        assert!(
+            claim_food_print_item_hydration(&conn, "food-claim", &new_remote_id)
+                .unwrap()
+                .is_none()
+        );
+        conn.execute(
+            "UPDATE orders SET ghost_metadata = ?1 WHERE id = 'food-claim'",
+            [r#"{"food_delivery":{"platform":"box"}}"#],
+        )
+        .unwrap();
+        assert!(
+            claim_food_print_item_hydration(&conn, "food-claim", &new_remote_id)
+                .unwrap()
+                .is_some()
         );
         conn.execute(
             "UPDATE orders SET plugin = 'efood', branch_id = 'other-branch' WHERE id = 'food-claim'",
@@ -37804,6 +37922,38 @@ mod tests {
             .find(|index| matches!(rest.as_bytes().get(index + 2), Some(b'\n' | b'\r') | None))
             .unwrap_or_else(|| panic!("unterminated `{signature}` in sync.rs"));
         &rest[..end + 2]
+    }
+
+    #[test]
+    fn order_notice_parked_only_background_is_quiet_but_new_failures_remain_partial() {
+        let db = crate::tests::harness::TestDb::open();
+        let state = SyncState::new();
+        let status = sync_queue::QueueStatus {
+            total: 1,
+            conflicts: 1,
+            pending: 0,
+            in_progress: 0,
+            failed: 0,
+            quarantined: 0,
+            dead_lettered: 0,
+            oldest_item_age: None,
+        };
+        let summary = || SafeParitySyncSummary::empty(status.clone());
+        let events = NoopTerminalEventSink;
+        assert!(matches!(
+            classify_safe_parity_summary(&db.state, &state, &events, "sync_loop", summary()),
+            ParitySyncExecutionOutcome::Partial(_, "PARITY_ROWS_PARKED")
+        ));
+        let mut new_conflict = summary();
+        new_conflict.conflicts = 1;
+        assert!(matches!(
+            classify_safe_parity_summary(&db.state, &state, &events, "sync_loop", new_conflict),
+            ParitySyncExecutionOutcome::Partial(_, "PARITY_SYNC_PARTIAL")
+        ));
+        assert!(matches!(
+            classify_safe_parity_summary(&db.state, &state, &events, "force_sync", summary()),
+            ParitySyncExecutionOutcome::Partial(_, "PARITY_SYNC_PARTIAL")
+        ));
     }
 
     #[test]

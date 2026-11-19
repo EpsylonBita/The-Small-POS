@@ -467,6 +467,13 @@
     "queueSetAside": "Mettre de côté l’élément {{queue_id}} et ceux qui l’attendent, en conservant leurs données",
     "queueReturn": "Remettre l’élément {{queue_id}} et son groupe dans la file d’envoi",
     "undoSnapshot": "Annuler avec la copie enregistrée {{snapshot_id}}",
+    "runRemedy": "Corriger les coordonnées non enregistrées pour la commande {{order_id}}",
+    "resendCustomerCorrection": "Enregistrer les nouvelles coordonnées pour la commande {{order_id}}",
+    "keepServerCustomerDetails": "Conserver les coordonnées déjà présentes sur la commande {{order_id}}",
+    "retryParkedRow": "Renvoyer la modification d’origine {{queue_id}}. Elle peut être refusée de nouveau.",
+    "setAsideParkedGroup": "Mettre de côté la modification {{queue_id}} et celles qui en dépendent. Elles resteront sans envoi.",
+    "returnParkedGroup": "Rétablir la modification {{queue_id}} et celles qui en dépendent. Elles resteront en pause.",
+    "restorePaymentReceiptMirror": "Rétablir la copie locale manquante du paiement {{server_payment_id}} pour la commande {{order_id}}",
     "outcomes": {
       "pending": "En attente de synchronisation",
       "resolved": "Résolu",

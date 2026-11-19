@@ -338,11 +338,22 @@ pub async fn sync_queue_list_conflicts(
 /// On failure, items are rescheduled with exponential backoff.
 #[tauri::command]
 pub async fn sync_queue_process(
+    report_health_targets: Option<bool>,
     db: State<'_, DbState>,
     sync_state: State<'_, std::sync::Arc<crate::sync::SyncState>>,
     cancellation: State<'_, tokio_util::sync::CancellationToken>,
     app: tauri::AppHandle,
 ) -> Result<sync_queue::SyncResult, String> {
+    if report_health_targets == Some(true) {
+        return crate::sync::RendererParityExecutionContext::new(
+            &db,
+            sync_state.inner().as_ref(),
+            cancellation.inner(),
+        )
+        .await?
+        .process_queue(&app, "sync_queue_process", true)
+        .await;
+    }
     crate::sync::process_renderer_parity_queue_guarded(
         &db,
         sync_state.inner().as_ref(),

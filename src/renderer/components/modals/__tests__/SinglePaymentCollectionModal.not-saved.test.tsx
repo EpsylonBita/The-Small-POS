@@ -1,3 +1,5 @@
+import { seedCardProviderMark } from '../../../services/__tests__/cardProviderMark.fixture';
+import { updateTerminalCredentialCache } from '../../../services/terminal-credentials';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import i18next from 'i18next';
@@ -127,6 +129,8 @@ const collectButton = (i18n: typeof i18next, method: 'cash' | 'card') =>
 
 describe('SinglePaymentCollectionModal: a card charged but not saved', () => {
   beforeEach(() => {
+    updateTerminalCredentialCache({ organizationId: 'fixture-org', branchId: 'fixture-branch', terminalId: 'fixture-till' });
+    seedCardProviderMark();
     mock.supportIpc.mockClear();
     mock.recordPayment.mockReset();
     mock.listUnsavedPayments.mockReset();

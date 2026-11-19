@@ -1730,14 +1730,22 @@ fn closeout_readiness_snapshot(
         )
     };
 
-    let (sync_snapshot, queued_closeouts) = if support {
+    let (sync_snapshot, queued_closeouts, parity_pre_drain) = if support {
         let conn = db.conn.lock().map_err(|_| "unavailable")?;
         let snapshot = crate::sync::capture_support_sync_queue_snapshot(&conn, &branch_id)?;
         // Count closeouts, not the unrelated queues included in UNSYNCED_QUEUE.
         let queued = crate::sync::support_queued_closeout_count(&conn)?;
-        (snapshot, Some(queued))
+        (
+            snapshot,
+            Some(queued),
+            Some(crate::sync_queue::closeout_blocking_row_evidence(&conn)?),
+        )
     } else {
-        (crate::sync::capture_unsynced_sync_queue_snapshot(db)?, None)
+        (
+            crate::sync::capture_unsynced_sync_queue_snapshot(db)?,
+            None,
+            None,
+        )
     };
     let lower_bound_mode = match window.lower_bound_mode {
         LowerBoundMode::Inclusive => "inclusive",
@@ -1822,6 +1830,9 @@ fn closeout_readiness_snapshot(
     });
     if let Some(count) = queued_closeouts {
         value["queuedCloseouts"] = serde_json::json!({"count":count});
+    }
+    if let Some(rows) = parity_pre_drain {
+        value["parityPreDrain"] = rows;
     }
     Ok(value)
 }

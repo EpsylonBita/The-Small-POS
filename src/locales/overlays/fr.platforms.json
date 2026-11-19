@@ -26,6 +26,30 @@
       "lastKnown": "Dernier état connu : {{status}}",
       "closedUntil": "Fermé jusqu'à {{time}}",
       "closureStatus": "Statut efood : {{status}}",
+      "box": {
+        "detailUnavailable": "Impossible d’actualiser BOX. Réessayez.",
+        "throttled": "BOX ne répond pas. Vérifiez le magasin dans BOX Merchant.",
+        "customerHoursHelp": "Les clients ne voient le magasin ouvert que s’il est ouvert ici et pendant les horaires BOX.",
+        "hours": {
+          "title": "Horaires hebdomadaires BOX",
+          "explain": "L’envoi remplace les sept jours dans BOX. Saisissez les horaires de chaque jour ou indiquez qu’aucune plage ne commence ce jour-là.",
+          "lastSent": "Dernier horaire envoyé depuis le POS · {{time}}. Les modifications faites dans BOX Merchant ne sont pas affichées ici.",
+          "noHistory": "Aucun envoi d’horaires depuis le POS n’est enregistré. BOX ne transmet pas son horaire actuel.",
+          "noStart": "Aucune plage ne commence ce jour",
+          "nextDay": "Jour suivant",
+          "invalid": "Utilisez HH:mm et vérifiez les chevauchements, y compris le lendemain. Pour une journée entière, utilisez 00:00–24:00.",
+          "failed": "La modification des horaires n’a pas pu être confirmée. Vérifiez-les dans BOX Merchant.",
+          "conflict": "Une autre caisse a enregistré un horaire plus récent. Chargez-le avant de poursuivre.",
+          "save": "Envoyer la semaine à BOX"
+        },
+        "autoOpen": "Ouverture automatique de BOX",
+        "autoHelp": "Ouvre à la première prise de poste en caisse et ferme à l’émission du rapport Z.",
+        "statusHelp": "BOX ne communique pas la disponibilité en temps réel.",
+        "lastAction": "Dernière demande du POS acceptée · {{action}}, {{time}}",
+        "automationUnconfirmed": "Le réglage automatique n’a pas pu être confirmé. Actualisez pour le vérifier.",
+        "requestUnconfirmed": "La demande n’a pas pu être confirmée. Vérifiez l’établissement dans BOX Merchant.",
+        "refused": "BOX a refusé la demande."
+      },
       "status": {
         "open": "Ouvert",
         "closed": "Fermé",

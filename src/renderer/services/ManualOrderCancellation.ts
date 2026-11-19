@@ -1,6 +1,7 @@
 import { platformCancellationFailureMessageKey } from '../../../../shared/platforms/order-cancellation';
 import type { PlatformBridge } from '../../lib';
 import { tableCancellationFields } from './TableManualCancellation';
+import { privilegedActionFeedbackKey } from '../utils/privileged-actions';
 
 export interface ManualCancellationPlan {
   orderId: string;
@@ -76,6 +77,8 @@ const errorCode = (error: unknown): string => {
 export function manualCancellationFailureKey(error: unknown): string {
   const platformKey = platformCancellationFailureMessageKey(error);
   if (platformKey) return platformKey;
+  const approvalKey = privilegedActionFeedbackKey(error);
+  if (approvalKey) return approvalKey;
   const code = errorCode(error);
   const key = code.includes('TABLE_CANCELLATION_REFUSED') ? 'refusedByServer'
     : code.includes('TABLE_CANCELLATION_RELEASE_WAIT') ? 'releaseWait'

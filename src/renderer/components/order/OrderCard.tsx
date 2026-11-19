@@ -3,7 +3,7 @@ import twintLogo from '../../../../../shared/payments/assets/twint-logo.png';
 import React, { memo, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ShieldCheck, Split } from 'lucide-react';
-import { resolvePlatformPaymentPresentation } from '../../../../../shared/platforms/payment-presentation';
+import { platformRequestedTender, resolvePlatformPaymentPresentation } from '../../../../../shared/platforms/payment-presentation';
 import { isFullyRefundedCompletedTable } from '../../../../../shared/pos/orders/returned-table-check';
 import { kioskRequestedTender } from '../../../../../shared/pos/orders/kiosk-order';
 import { useTheme } from '../../contexts/theme-context';
@@ -303,6 +303,10 @@ export const OrderCard = memo<OrderCardProps>(({
   const kioskTender = showPaymentPending && paymentStatusNormalized !== 'processing'
     ? kioskRequestedTender(order)
     : null;
+  const platformTender = showPaymentPending && paymentStatusNormalized !== 'processing'
+    ? platformRequestedTender(order)
+    : null;
+  const pendingTender = kioskTender ?? platformTender;
 
   // Normalize plugin field (could be plugin/order_plugin or legacy platform)
   const orderPlugin = order.plugin || order.order_plugin || order.platform || order.order_platform || '';
@@ -616,17 +620,22 @@ export const OrderCard = memo<OrderCardProps>(({
             <span
               data-testid="order-card-payment-pending"
               data-kiosk-tender={kioskTender ?? undefined}
+              data-platform-tender={platformTender ?? undefined}
               role="status"
-              aria-label={kioskTender === 'cash'
-                ? t('orderCard.kioskCashPendingA11y', { defaultValue: 'Cash chosen at the kiosk; payment pending' })
-                : kioskTender === 'card'
-                  ? t('orderCard.kioskCardPendingA11y', { defaultValue: 'Card chosen at the kiosk; payment pending' })
-                  : t('orderCard.paymentPendingA11y', { defaultValue: 'Payment pending' })}
+              aria-label={!kioskTender && platformTender
+                ? platformTender === 'cash'
+                  ? t('orderCard.platformCashPendingA11y', { defaultValue: 'Cash chosen on the platform; payment pending' })
+                  : t('orderCard.platformCardPendingA11y', { defaultValue: 'Card chosen on the platform; payment pending' })
+                : kioskTender === 'cash'
+                  ? t('orderCard.kioskCashPendingA11y', { defaultValue: 'Cash chosen at the kiosk; payment pending' })
+                  : kioskTender === 'card'
+                    ? t('orderCard.kioskCardPendingA11y', { defaultValue: 'Card chosen at the kiosk; payment pending' })
+                    : t('orderCard.paymentPendingA11y', { defaultValue: 'Payment pending' })}
               className={`text-[10px] sm:text-xs font-semibold tracking-wide whitespace-nowrap rounded-sm px-1.5 py-0.5 border border-(--pos-s-warn) bg-(--pos-s-warn-bg) ${resolvedTheme === 'light' ? 'text-amber-700' : 'text-amber-400'}`}
             >
-              {kioskTender === 'cash'
+              {pendingTender === 'cash'
                 ? t('orderCard.kioskCashPending', { defaultValue: 'CASH' })
-                : kioskTender === 'card'
+                : pendingTender === 'card'
                   ? t('orderCard.kioskCardPending', { defaultValue: 'CARD' })
                   : t('orderCard.paymentPending', { defaultValue: 'PAY PENDING' })}
             </span>

@@ -37,7 +37,7 @@ function SupportOpenNotice({ busy, onEnd, onClose }: { busy: boolean; onEnd(): v
 
 /** «Σύνδεση υποστήριξης» with everything it shows: the code, notices and the live session.
  * It lives in the Health view's «Ενέργειες υποστήριξης» section (founder, 04/11/2026). */
-export function SupportConnectAction() {
+export function SupportConnectAction({ hideLauncher = false }: { hideLauncher?: boolean } = {}) {
   const { t } = useTranslation();
   const reasonId = useId();
   const session = useSupportSession();
@@ -50,10 +50,10 @@ export function SupportConnectAction() {
   const live = session.snapshot && supportSessionLive(session.snapshot) ? session.snapshot : null;
   const endExisting = () => { void session.endExisting(); };
   return <div className="space-y-3" data-testid="support-connect-action">
-    <button type="button" disabled={!permitted || session.busy} aria-describedby={!permitted ? reasonId : undefined}
+    {!hideLauncher && <button type="button" disabled={!permitted || session.busy} aria-describedby={!permitted ? reasonId : undefined}
       onClick={() => { void session.start(); }} className={primaryButton}>
       {t('support.connect.action')}
-    </button>
+    </button>}
     {!permitted && <p id={reasonId} className="text-(--pos-s-fg)">{t('support.connect.permissionDisabled')}</p>}
     {live && session.view !== 'open' && <SupportLiveSession snapshot={live} busy={session.busy} onEnd={endExisting} />}
     {bannerStep ? null : session.view === 'open' ? <SupportOpenNotice busy={session.busy} onEnd={endExisting} onClose={() => { session.keepWaiting(); }} />

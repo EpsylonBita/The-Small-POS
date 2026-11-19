@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { z } from 'zod';
 import { getBridge } from '../../../lib';
 import { useSupportSession } from '../../hooks/useSupportSession';
+import { isPrivilegedConfirmationCancelled, privilegedActionFeedback } from '../../utils/privileged-actions';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import { supportButtonClass, supportSelectedClass } from './SupportOnsiteChip';
 
@@ -30,7 +31,7 @@ type RestoreSelection = { kind: 'snapshot' | 'group'; id: string };
 export function SupportDetailsPanel({ active = true }: { active?: boolean }) {
   const { t } = useTranslation(), session = useSupportSession();
   const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
-  const [failed, setFailed] = useState(false), [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null), [busy, setBusy] = useState(false);
   const expanded = active;
   const [applies, setApplies] = useState<z.infer<typeof AppliesSchema>['applies']>([]);
   const [snapshots, setSnapshots] = useState<z.infer<typeof SnapshotsSchema>['snapshots']>([]);
@@ -46,8 +47,8 @@ export function SupportDetailsPanel({ active = true }: { active?: boolean }) {
     if (!expanded || !session?.snapshot?.can_connect) { setApplies([]); return; }
     void Promise.resolve(getBridge().invoke('support_undo_device_apply', { action: 'list' })).then(value => {
       const rows = AppliesSchema.parse(value);
-      if (alive) { setApplies(rows.applies); setFailed(false); }
-    }).catch(() => { if (alive) { setFailed(true); } });
+      if (alive) { setApplies(rows.applies); setFailure(null); }
+    }).catch(() => { if (alive) { setFailure(t('support.code.retry')); } });
     return () => { alive = false; };
   }, [expanded, revision, session?.snapshot?.can_connect]);
   useEffect(() => {
@@ -64,9 +65,12 @@ export function SupportDetailsPanel({ active = true }: { active?: boolean }) {
     }).catch(() => { if (alive) { setRecoveryFailed(true); } });
     return () => { alive = false; };
   }, [expanded, revision, session?.snapshot?.can_connect]);
+  const showActionFailure = (error: unknown) => {
+    if (!isPrivilegedConfirmationCancelled(error)) setFailure(privilegedActionFeedback(error, t) ?? t('support.code.retry'));
+  };
   const restore = async (selection: RestoreSelection) => {
     if (inFlight.current || !recoveryReady || current.current?.critical_op_active || !current.current?.can_connect) { return; }
-    inFlight.current = true; setBusy(true); setFailed(false);
+    inFlight.current = true; setBusy(true); setFailure(null);
     try {
       // Native must check the same manual system-control authority as Undo.
       // The wrapper handles the store's own re-authentication after this tap.
@@ -79,7 +83,7 @@ export function SupportDetailsPanel({ active = true }: { active?: boolean }) {
         } });
       if (!result || typeof result !== 'object' || !('success' in result) || result.success !== true) { throw new Error('Restore refused'); }
       setRevision(value => value + 1);
-    } catch { setFailed(true); }
+    } catch (error) { showActionFailure(error); }
     finally { setConfirm(null); inFlight.current = false; setBusy(false); }
   };
   const undoable = applies.filter(apply => apply.undo_available);
@@ -89,7 +93,7 @@ export function SupportDetailsPanel({ active = true }: { active?: boolean }) {
   // Shown when something can be acted on, or when a list could not be read (never shown as empty).
   // Hidden, it renders nothing, not even the closed confirmation modal: the Health view must
   // render outside the app's i18n provider too. Only an action still in flight keeps the modal.
-  if (!session.snapshot?.confirmed_history?.length && undoable.length === 0 && !restorable && !quarantined && !confirm && !failed && !recoveryFailed) {
+  if (!session.snapshot?.confirmed_history?.length && undoable.length === 0 && !restorable && !quarantined && !confirm && !failure && !recoveryFailed) {
     return busy ? confirmationModal : null;
   }
   return <section data-testid="support-details-panel" className="space-y-3 text-(--pos-s-fg)">
@@ -99,7 +103,7 @@ export function SupportDetailsPanel({ active = true }: { active?: boolean }) {
       <span className="break-all">{apply.device_id}</span>
       {apply.undo_available && <button type="button" className={supportButtonClass} disabled={busy || session.snapshot?.critical_op_active} onClick={() => {
         if (inFlight.current) { return; }
-        inFlight.current = true; setBusy(true); setFailed(false);
+        inFlight.current = true; setBusy(true); setFailure(null);
         // As with manual device settings, native must check system_control before
         // writing. The existing app dialog handles REAUTH_REQUIRED; support rights
         // alone never grant or mint that authorization.
@@ -112,7 +116,7 @@ export function SupportDetailsPanel({ active = true }: { active?: boolean }) {
         }).then(result => {
           if (!result || typeof result !== 'object' || !('success' in result) || result.success !== true) { throw new Error('Undo refused'); }
           setRevision(value => value + 1);
-        }).catch(() => setFailed(true)).finally(() => { inFlight.current = false; setBusy(false); });
+        }).catch(showActionFailure).finally(() => { inFlight.current = false; setBusy(false); });
       }}>{t('support.deviceApply.undo')}</button>}
     </div>)}
     {snapshots.length > 0 && <h5 className="font-semibold">{t('support.restore.snapshots')}</h5>}
@@ -137,7 +141,7 @@ export function SupportDetailsPanel({ active = true }: { active?: boolean }) {
         <button type="button" className={supportButtonClass} disabled={busy} onClick={() => setConfirm(null)}>{t('support.onsite.decline')}</button>
       </div>
     </div>}
-    {(failed || recoveryFailed) && <p role="alert">{t('support.code.retry')}</p>}
+    {(failure || recoveryFailed) && <p role="alert">{failure ?? t('support.code.retry')}</p>}
     {confirmationModal}
   </section>;
 }

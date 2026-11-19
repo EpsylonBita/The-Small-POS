@@ -86,9 +86,16 @@ pub fn schema_version(c: &Connection) -> Result<i64, String> {
         .map_err(guards::error)
 }
 pub fn cheap_watermark(c: &Connection) -> Result<Value, String> {
+    cheap_for_tables(c, &guards::schema(c)?)
+}
+
+fn cheap_for_tables(c: &Connection, tables: &[guards::Table]) -> Result<Value, String> {
     let mut cheap = serde_json::Map::new();
-    for t in guards::schema(c)? {
-        if t.name == "support_txn_marker" {
+    for t in tables {
+        if matches!(
+            t.name.as_str(),
+            "support_txn_marker" | "support_payment_receipt_commits"
+        ) {
             continue;
         }
         let sql = format!(
@@ -106,7 +113,7 @@ pub fn cheap_watermark(c: &Connection) -> Result<Value, String> {
             replica::quote(&t.name)
         );
         cheap.insert(
-            t.name,
+            t.name.clone(),
             guards::rows(c, &sql, &[])?
                 .into_iter()
                 .next()
@@ -123,27 +130,49 @@ pub fn watermarks_for_write(
     permit: &SupportPermit,
     deadline: Instant,
 ) -> Result<Value, String> {
-    watermarks_checked(c, || {
+    full_for_write(c, &guards::schema(c)?, permit, deadline)
+}
+
+pub(super) fn full_for_write(
+    c: &Connection,
+    tables: &[guards::Table],
+    permit: &SupportPermit,
+    deadline: Instant,
+) -> Result<Value, String> {
+    full_for_tables(c, tables, || {
         if permit.is_cancelled() {
             return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
         }
-        if Instant::now() >= deadline {
+        if clock::monotonic_now() >= deadline {
             return Err("QUERY_TIMEOUT".into());
         }
         Ok(())
     })
-    .map(|(full, _)| full)
 }
+
 fn watermarks_checked(
     c: &Connection,
     check: impl Fn() -> Result<(), String>,
 ) -> Result<(Value, Value), String> {
     check()?;
-    let cheap = cheap_watermark(c)?;
+    let tables = guards::schema(c)?;
+    let cheap = cheap_for_tables(c, &tables)?;
+    let full = full_for_tables(c, &tables, check)?;
+    Ok((full, cheap))
+}
+
+fn full_for_tables(
+    c: &Connection,
+    tables: &[guards::Table],
+    check: impl Fn() -> Result<(), String>,
+) -> Result<Value, String> {
     let mut full = serde_json::Map::new();
-    for t in guards::schema(c)? {
+    for t in tables {
         check()?;
-        if t.name == "support_txn_marker" {
+        if matches!(
+            t.name.as_str(),
+            "support_txn_marker" | "support_payment_receipt_commits"
+        ) {
             continue;
         }
         let mut hashes = Vec::new();
@@ -185,10 +214,13 @@ fn watermarks_checked(
             }
             offset += 64;
         }
-        full.insert(t.name.clone(),json!({"count":cheap[&t.name]["count"],"sha256":contracts::payload_hash(&json!(hashes))}));
+        full.insert(
+            t.name.clone(),
+            json!({"count":hashes.len(),"sha256":contracts::payload_hash(&json!(hashes))}),
+        );
     }
     check()?;
-    Ok((Value::Object(full), cheap))
+    Ok(Value::Object(full))
 }
 pub fn disk_guard(live: &Path) -> Result<(), String> {
     let size = std::fs::metadata(live)
@@ -201,6 +233,16 @@ pub fn disk_guard(live: &Path) -> Result<(), String> {
         );
     check_disk(free_bytes(live.parent().ok_or("SNAPSHOT_FAILED")?)?, size)
 }
+#[cfg(test)]
+thread_local! {
+    static BEFORE_BUSINESS_COPY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn before_business_copy_for_test(hook: impl FnOnce() + 'static) {
+    BEFORE_BUSINESS_COPY.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
 pub fn take(
     store: &Connection,
     live: &Path,
@@ -226,13 +268,29 @@ pub fn take(
         .join(&id);
     std::fs::create_dir_all(&folder).map_err(|_| "SNAPSHOT_FAILED")?;
     let result = (|| {
-        let c = replica::read_connection(live, permit, Instant::now() + Duration::from_secs(30))?;
+        let c = replica::read_connection(
+            live,
+            permit,
+            clock::monotonic_now() + Duration::from_secs(30),
+        )?;
         let before = watermarks(&c)?;
         let copy = folder.join("pos.db");
+        #[cfg(test)]
+        BEFORE_BUSINESS_COPY.with(|hook| {
+            if let Some(cancel) = hook.borrow_mut().take() {
+                cancel();
+            }
+        });
+        if permit.is_cancelled() {
+            return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+        }
         c.execute("VACUUM INTO ?1", [copy.to_string_lossy().as_ref()])
             .map_err(guards::error)?;
-        let check =
-            replica::read_connection(&copy, permit, Instant::now() + Duration::from_secs(30))?;
+        let check = replica::read_connection(
+            &copy,
+            permit,
+            clock::monotonic_now() + Duration::from_secs(30),
+        )?;
         integrity(&check)?;
         let (full, cheap) = watermarks(&check)?;
         if full != before.0 || watermarks(&c)?.0 != full {
@@ -429,4 +487,48 @@ pub fn newest(store: &Connection) -> Result<Option<String>, String> {
         )
         .optional()
         .map_err(guards::error)
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn ending_during_the_snapshot_copy_publishes_no_snapshot() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _isolate = crate::support::critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        let store = super::super::db::SupportDb::open(db.dir()).unwrap();
+        let gate = crate::support::critical_op::global();
+        let permit = gate.try_begin_support(false, None).unwrap();
+        BEFORE_BUSINESS_COPY.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || gate.cancel_support()));
+        });
+        assert_eq!(
+            take(
+                &store.conn,
+                db.db_path(),
+                "end-during-snapshot",
+                None,
+                "pre_command",
+                &permit
+            )
+            .err()
+            .as_deref(),
+            Some("PREEMPTED_BY_CRITICAL_OPERATION")
+        );
+        let count: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM support_snapshots", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(
+            std::fs::read_dir(db.dir().join("support-snapshots"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
 }

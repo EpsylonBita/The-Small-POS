@@ -15,6 +15,7 @@ struct Pending {
     before: Vec<String>,
     running: bool,
     execution_at: Option<i64>,
+    correction_key: Option<String>,
 }
 fn pending() -> &'static Mutex<BTreeMap<String, Pending>> {
     static PENDING: OnceLock<Mutex<BTreeMap<String, Pending>>> = OnceLock::new();
@@ -64,7 +65,34 @@ pub fn begin(app: &tauri::AppHandle, c: &Command) -> Result<(), String> {
                 .ok_or("INVALID_INPUT")?,
         )?;
     }
-    let (before, _, _) = native_observation(app)?;
+    let correction = c.kind == "till_run_remedy"
+        && c.payload["recipe_id"]
+            .as_str()
+            .is_some_and(remedies::is_correction);
+    let correction_key = if correction {
+        let read = super::matcher::MatcherRead::open(&app.state::<crate::db::DbState>().db_path)?;
+        let conn = read.db.conn.lock().map_err(|_| "INTERNAL_ERROR")?;
+        super::identity::observed_session(&conn, &read.db.db_path, &c.session_id)?;
+        let notices = remedies::correction_notices(&conn, c.payload["target_key"].as_str())?;
+        if notices.len() != 1 {
+            return Err("REMEDY_NOT_APPLICABLE".into());
+        }
+        Some(
+            notices[0]["queueId"]
+                .as_str()
+                .ok_or("REMEDY_NOT_APPLICABLE")?
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    let before = if correction_key.is_some() {
+        vec!["customer_correction_refused".to_owned()]
+    } else if c.kind == "till_list_remedies" {
+        vec![]
+    } else {
+        native_observation(app)?.0
+    };
     pending().lock().map_err(|_| "INTERNAL_ERROR")?.insert(
         c.command_id.clone(),
         Pending {
@@ -73,6 +101,7 @@ pub fn begin(app: &tauri::AppHandle, c: &Command) -> Result<(), String> {
             before,
             running: false,
             execution_at: None,
+            correction_key,
         },
     );
     if c.kind == "till_request_physical_check" {
@@ -113,7 +142,14 @@ pub fn authorize_execution(
         .cloned()
         .filter(|p| p.running)
         .ok_or("PAYLOAD_MISMATCH")?;
-    let (_, fresh, _) = native_observation(app)?;
+    let fresh = if let Some(target) = &p.correction_key {
+        let read = super::matcher::MatcherRead::open(&app.state::<crate::db::DbState>().db_path)?;
+        let conn = read.db.conn.lock().map_err(|_| "INTERNAL_ERROR")?;
+        super::identity::observed_session(&conn, &read.db.db_path, &p.command.session_id)?;
+        remedies::correction_notices(&conn, Some(target))?.len() == 1
+    } else {
+        native_observation(app)?.1
+    };
     let audit_db = super::device_apply::private_business(app)?;
     let rt = super::session::runtime(app)?;
     let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
@@ -161,6 +197,11 @@ fn authorize_execution_in_context(
     {
         return Err("PAYLOAD_MISMATCH".into());
     }
+    if let Some(key) = &p.correction_key {
+        if request["params"]["queueId"] != key.as_str() || request["entityId"] != key.as_str() {
+            return Err("PAYLOAD_MISMATCH".into());
+        }
+    }
     if critical_op::global().active() {
         return Err("CONCURRENT_OPERATION".into());
     }
@@ -190,6 +231,9 @@ fn authorize_execution_in_context(
         let conn = audit_db.conn.lock().map_err(|_| "INTERNAL_ERROR")?;
         recovery_audit(&conn, c, r)?.1
     };
+    if p.correction_key.is_some() && request["snapshotPointId"].as_str() != snapshot.as_deref() {
+        return Err("SNAPSHOT_FAILED".into());
+    }
     if r.requires_snapshot {
         let points = crate::recovery::list_recovery_points(audit_db)?;
         if !points.iter().any(|point| {
@@ -349,11 +393,36 @@ pub async fn till_list_remedies(
         let p=pending().lock().map_err(|_|"INTERNAL_ERROR")?.get(id).cloned().ok_or("PAYLOAD_MISMATCH")?;
         if p.running {return Err("PAYLOAD_MISMATCH".into())}
         let rt=super::session::runtime(&app)?;
+        let confirmed_previews = if p.command.kind == "till_list_remedies" {
+            (|| {
+                let path = app.state::<crate::db::DbState>().db_path.clone();
+                let db = crate::db::DbState {
+                    conn: Mutex::new(crate::order_notice_recovery::observer_connection(&path,false)?),
+                    db_path:path,
+                };
+                let permit = critical_op::global().try_begin_support(false,None).map_err(str::to_string)?;
+                let read = super::replica::read_connection(&db.db_path,&permit,Instant::now()+Duration::from_secs(2))?;
+                let scope = super::identity::observed_session(&read,&db.db_path,&p.command.session_id)?;
+                drop(read);
+                super::confirmed_recovery::correction_previews(&db,&scope,&permit,|| {
+                    if permit.is_cancelled() {return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());}
+                    let core = rt.core.lock().map_err(|_|"INTERNAL_ERROR")?;
+                    let session = core.session.as_ref().ok_or("SESSION_ENDED")?;
+                    delivery::recheck(&p.command,&session.admission,&core.clock,Instant::now()).map_err(str::to_string)
+                })
+            })().unwrap_or_default()
+        } else { Vec::new() };
         let mut core=rt.core.lock().map_err(|_|"INTERNAL_ERROR")?;
         let now=core.now(); let session=core.session.as_ref().ok_or("SESSION_ENDED")?;
         delivery::recheck(&p.command,&session.admission,&core.clock,Instant::now()).map_err(str::to_string)?;
-        if let Some(error)=input["error"].as_str() {let _=error;core.executor.fail(&p.command,"REMEDY_NOT_APPLICABLE",now)?;pending().lock().map_err(|_|"INTERNAL_ERROR")?.remove(id);return Ok(json!({"accepted":true}));}
-        let matches:Vec<remedies::Match>=serde_json::from_value(input["remedies"].clone()).map_err(|_|"INVALID_INPUT")?;
+        let matches: Vec<remedies::Match> = if input["error"].is_string() {
+            if p.command.kind != "till_list_remedies" && p.correction_key.is_none() {
+                core.executor.fail(&p.command,"REMEDY_NOT_APPLICABLE",now)?;
+                pending().lock().map_err(|_|"INTERNAL_ERROR")?.remove(id);
+                return Ok(json!({"accepted":true}));
+            }
+            Vec::new()
+        } else { serde_json::from_value(input["remedies"].clone()).map_err(|_|"INVALID_INPUT")? };
         if matches.len()>64 || matches.iter().any(|m|m.title.len()>2400||m.explanation.len()>8000||m.target_count>100000||!(m.matches_now==true||m.matches_now==false||m.matches_now=="not_applicable")) {return Err("INVALID_INPUT".into())}
         let db=app.state::<crate::db::DbState>();
         let permit=critical_op::global().try_begin_support(false,None).map_err(str::to_string)?;
@@ -362,16 +431,23 @@ pub async fn till_list_remedies(
         if p.command.kind=="till_list_remedies" {
             let rows:Result<Vec<Value>,String>=remedies::shipped().iter().map(|r|{
                 let m=matches.iter().find(|m|m.id==r.id&&m.version==r.version);
-                Ok(remedies::summarize(r,m,&remedies::budget(&conn,r,None)?,now))
+                let native = remedies::is_correction(&r.id).then(||remedies::correction_match(&conn,r,None,m));
+                Ok(remedies::summarize(r,native.as_ref().or(m),&remedies::budget(&conn,r,None)?,now))
             }).collect();
-            drop(conn);drop(permit);core.executor.finish(&p.command,json!({"observation_time":super::clock::iso(now),"app_version":env!("CARGO_PKG_VERSION"),"remedies":rows?}),now)?;
+            drop(conn);drop(permit);core.executor.finish(&p.command,json!({"observation_time":super::clock::iso(now),"app_version":env!("CARGO_PKG_VERSION"),"remedies":rows?,"confirmed_previews":confirmed_previews}),now)?;
             pending().lock().map_err(|_|"INTERNAL_ERROR")?.remove(id);
         } else {
             let c=&p.command;
             let r=remedies::recipe(c.payload["recipe_id"].as_str().ok_or("INVALID_INPUT")?,c.payload["recipe_version"].as_u64().ok_or("INVALID_INPUT")?)?;
             let eligibility=(||{
-                let m=matches.iter().find(|m|m.id==r.id&&m.version==r.version).ok_or("REMEDY_NOT_APPLICABLE")?;
-                remedies::eligible(r,m,&remedies::budget(&conn,r,c.payload["target_key"].as_str())?,now,super::collectors::health::collect(&conn)?["last_observation_ok"]!=true,critical_op::global().active())?;
+                let wording=matches.iter().find(|m|m.id==r.id&&m.version==r.version);
+                let (m,stale) = if let Some(target)=p.correction_key.as_deref() {
+                    (remedies::correction_match(&conn,r,Some(target),wording),false)
+                } else {
+                    (wording.cloned().ok_or("REMEDY_NOT_APPLICABLE")?,super::collectors::health::collect(&conn)?["last_observation_ok"]!=true)
+                };
+                let target = p.correction_key.as_deref().or_else(|| c.payload["target_key"].as_str());
+                remedies::eligible(r,&m,&remedies::budget(&conn,r,target)?,now,stale,critical_op::global().active())?;
                 Ok::<_,String>(m)
             })();
             drop(conn);drop(permit);
@@ -384,7 +460,9 @@ pub async fn till_list_remedies(
             if r.mutates_data && !unattended {onsite::request(&app,id,&c.session_id,&m.title,&m.explanation,&json!({"recipe_id":r.id,"recipe_version":r.version,"target_key":c.payload["target_key"]}),r.needs_staff_pin,None,false)?;}
             pending().lock().map_err(|_|"INTERNAL_ERROR")?.get_mut(id).ok_or("PAYLOAD_MISMATCH")?.running=true;
             let mut event=json!({"request_id":id,"session_id":c.session_id,"recipe_id":r.id,"recipe_version":r.version,"unattended":unattended,"unattended_verified":unattended,"organization_id":organization_id});
-            if let Some(target)=c.payload.get("target_key"){event["target_key"]=target.clone();}
+            if let Some(target)=p.correction_key.as_deref().or_else(||c.payload["target_key"].as_str()){
+                event["target_key"]=json!(target);
+            }
             app.emit("support://run-remedy",event).map_err(|_|"INTERNAL_ERROR")?;
         }
         Ok(json!({"accepted":true}))
@@ -401,7 +479,9 @@ pub async fn support_remedy_result(
         let p=pending().lock().map_err(|_|"INTERNAL_ERROR")?.get(id).cloned().filter(|p|p.running).ok_or("PAYLOAD_MISMATCH")?;
         let c=&p.command;
         if input["session_id"]!=c.session_id {return Err("PAYLOAD_MISMATCH".into())}
-        let (after,observed,observed_at)=native_observation(&app).unwrap_or((p.before.clone(),false,None));
+        let (after,observed,observed_at)=if p.correction_key.is_some(){
+            (vec![],false,None)
+        } else {native_observation(&app).unwrap_or((p.before.clone(),false,None))};
         let fresh=observed && p.execution_at.zip(observed_at).is_some_and(|(start,at)|at > start);
         let rt=super::session::runtime(&app)?;let mut core=rt.core.lock().map_err(|_|"INTERNAL_ERROR")?;
         let session=core.session.as_ref().ok_or("SESSION_ENDED")?;
@@ -420,8 +500,14 @@ pub async fn support_remedy_result(
             let audit_db=super::device_apply::private_business(&app)?;
             let audit_conn=audit_db.conn.lock().map_err(|_|"INTERNAL_ERROR")?;
             let (recovery_id,snapshot_id)=recovery_audit(&audit_conn,c,r)?;
-            let persisted=remedies::native_outcome(&audit_conn,r,c.payload["target_key"].as_str(),p.execution_at)?;
-            let outcome=verified_native_outcome(fresh,&p.before,&after,persisted.as_deref());
+            let target=p.correction_key.as_deref().or_else(||c.payload["target_key"].as_str());
+            let persisted=remedies::native_outcome(&audit_conn,r,target,p.execution_at)?;
+            let (outcome,fresh,after)=if p.correction_key.is_some() {
+                let outcome=persisted.as_deref().unwrap_or("unknown");
+                (outcome,persisted.is_some(),if outcome=="resolved"{vec![]}else{p.before.clone()})
+            } else {
+                (verified_native_outcome(fresh,&p.before,&after,persisted.as_deref()),fresh,after)
+            };
             drop(audit_conn);
             let data=json!({"observation_time":super::clock::iso(now),"app_version":env!("CARGO_PKG_VERSION"),"recipe_id":r.id,"recipe_version":r.version,"outcome":outcome,"onsite":if unattended{"unattended_verified"}else if r.mutates_data{"confirmed"}else{"not_required"},"pin_gate":if r.needs_staff_pin{"approved"}else{"not_required"},"verification":{"method":"fresh_native_health","checked_at":super::clock::iso(now),"evidence":[{"key":"issue_count","before":p.before.len(),"after":if fresh{Some(after.len())}else{None}}]},"health_before":p.before,"health_after":after,"recovery_audit_id":recovery_id,"snapshot_id":snapshot_id,"targets_applied":input["targets_applied"].as_u64().unwrap_or(0),"app_refusal":app_refusal(&input["app_refusal"])});
             Ok(data)
@@ -520,6 +606,7 @@ pub(crate) mod tests {
             before: vec![],
             running: true,
             execution_at: None,
+            correction_key: None,
         };
         let onsite = Mutex::new(onsite::Onsite::default());
         let shown = Instant::now() - Duration::from_secs(3);
@@ -579,6 +666,7 @@ pub(crate) mod tests {
                 before: vec![],
                 running: true,
                 execution_at: None,
+                correction_key: None,
             };
             let onsite = Mutex::new(onsite::Onsite::default());
             let at = Instant::now() - Duration::from_secs(3);

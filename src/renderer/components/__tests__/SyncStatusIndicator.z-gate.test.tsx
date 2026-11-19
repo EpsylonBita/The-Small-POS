@@ -57,7 +57,6 @@ vi.mock('../../services/ParitySyncCoordinator', () => ({
 vi.mock('../OrderSyncRouteIndicator', () => ({ OrderSyncRouteIndicator: () => null }))
 vi.mock('../FinancialSyncPanel', () => ({ FinancialSyncPanel: () => null }))
 vi.mock('../support/HealthSupportEntryPoint', () => ({ HealthSupportEntryPoint: () => null }))
-vi.mock('../recovery/RecoveryCenterPanel', () => ({ RecoveryCenterPanel: () => null }))
 
 import { ZGateSetAsidePanel } from '../SyncStatusIndicator'
 
@@ -138,6 +137,17 @@ describe('ZGateSetAsidePanel', () => {
     expect(bridge.recovery.zGateSetAside).toHaveBeenCalledWith({ action: 'list' })
   })
 
+  it('reloads the Z list when the Health parent refreshes', async () => {
+    bridge.recovery.zGateSetAside.mockResolvedValueOnce(health()).mockResolvedValueOnce(
+      health({ localZs: [], unconfirmedLocalZs: 0, refused: [] }),
+    );
+    const view = await renderPanel();
+    await screen.findByTestId('z-gate-local-z-z-1');
+    view.rerender(<I18nextProvider i18n={i18n}><ZGateSetAsidePanel refreshEpoch={1} /></I18nextProvider>);
+    await waitFor(() => expect(screen.queryByTestId('z-gate-local-z-z-1')).not.toBeInTheDocument());
+    expect(bridge.recovery.zGateSetAside).toHaveBeenCalledTimes(2);
+  });
+
   it('sets a refused row aside through the void-payments approval, then shows it set aside', async () => {
     bridge.recovery.zGateSetAside
       .mockResolvedValueOnce(health())
@@ -167,6 +177,18 @@ describe('ZGateSetAsidePanel', () => {
     const updated = screen.getByTestId('z-gate-row-q-payment')
     expect(within(updated).getByText(i18n.t('sync.zGate.setAsideState'))).toBeTruthy()
     expect(within(updated).getByRole('button', { name: i18n.t('sync.zGate.undo') })).toBeTruthy()
+  })
+
+  it.each([{}, { applied: 'undo', queueId: 'wrong-row' }])('does not confirm undo without exact changed-row proof (%j)', async proof => {
+    bridge.recovery.zGateSetAside
+      .mockResolvedValueOnce(health({ refused: [{ ...refusedPayment, setAside: true }] }))
+      .mockResolvedValueOnce(health(proof))
+    await renderPanel('en')
+    const row = await screen.findByTestId('z-gate-row-q-payment')
+    fireEvent.click(within(row).getByRole('button', { name: i18n.t('sync.zGate.undo') }))
+    expect(await screen.findByText(i18n.t('sync.zGate.actionFailed'))).toBeTruthy()
+    expect(screen.queryByText(i18n.t('sync.zGate.undoDone'))).not.toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: i18n.t('sync.zGate.undo') })).toBeTruthy()
   })
 
   it('a refused set-aside says nothing changed and keeps the list', async () => {

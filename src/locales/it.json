@@ -3663,9 +3663,9 @@
     "zGate": {
       "approvalTitle": "Approva con il tuo PIN",
       "approvalSubtitle": "Mettere da parte una registrazione richiede il diritto di annullare pagamenti. Un membro del personale che lo ha inserisce il proprio PIN. Nulla viene cancellato o addebitato.",
-      "setAsideDone": "Messa da parte. La registrazione resta su questa cassa e lo Z la indica come non presente sul server.",
-      "undoDone": "La registrazione è tornata: blocca di nuovo la chiusura della giornata finché il server non la accetta.",
-      "actionFailed": "Non è stato possibile. Non è cambiato nulla.",
+      "setAsideDone": "Messa da parte per un controllo. La cassa conserva la registrazione e la riporta nello Z.",
+      "undoDone": "Questa registrazione è di nuovo in attesa di invio. Fino ad allora può ritardare la chiusura.",
+      "actionFailed": "La modifica non è stata confermata. Controlla di nuovo l’elenco.",
       "stale": "Questo elenco non è stato riletto. Mostra l'ultima lettura valida.",
       "unavailable": "Non è stato possibile leggere le giornate chiuse su questa cassa. Riprova.",
       "localTitle": "Giornate chiuse su questa cassa, non ancora sul server: {{count}}",
@@ -6663,6 +6663,8 @@
     "kioskCardPending": "CARTA",
     "kioskCashPendingA11y": "Contanti scelti al kiosk; pagamento in attesa",
     "kioskCardPendingA11y": "Carta scelta al kiosk; pagamento in attesa",
+    "platformCashPendingA11y": "Contanti scelti sulla piattaforma; pagamento in attesa",
+    "platformCardPendingA11y": "Carta scelta sulla piattaforma; pagamento in attesa",
     "platformPayment": "PAGAMENTO PIATTAFORMA",
     "platformPaymentA11y": "Pagamento regolato dalla piattaforma; il negozio non incassa"
   },
@@ -9382,6 +9384,34 @@
     "portionNotSaved": "Carta addebitata, pagamento non ancora salvato. Non addebitare di nuovo."
   },
   "recovery": {
+    "actionStatus": {
+      "signIn": "Accedi di nuovo",
+      "sendRecord": "Invia questa registrazione",
+      "sendWaiting": "Invia le registrazioni in attesa",
+      "preparePaymentUpdates": "Prepara gli aggiornamenti dei pagamenti per l’invio",
+      "exportCopy": "Esporta una copia per l’assistenza",
+      "reviewOrders": "Controlla le registrazioni degli ordini",
+      "removeLabel": "Rimuovi le registrazioni di invio non valide",
+      "removeTitle": "Rimuovere le registrazioni di invio non valide?",
+      "removeMessage": "Le registrazioni di invio selezionate saranno ricontrollate prima di essere rimosse. La cassa conserva una copia. Ordini e pagamenti restano sulla cassa.",
+      "sent": "Inviato",
+      "waiting": "In attesa di una registrazione collegata",
+      "untouched": "Ancora in attesa di invio",
+      "refused": "Impossibile inviare",
+      "set_aside": "Messo da parte per un controllo",
+      "unknown": "Invio non confermato",
+      "checked": "Controllo completato",
+      "reportNotified": "Rapporto ricevuto. L’assistenza è stata avvisata.",
+      "reportStored": "Rapporto ricevuto. La notifica non è stata confermata.",
+      "reportPrepared": "Una copia è salvata su questa cassa. La ricezione non è stata confermata.",
+      "reportFailed": "Impossibile preparare il rapporto su questa cassa.",
+      "grantExpired": "L’autorizzazione è scaduta. Inserisci di nuovo il PIN della cassa.",
+      "permissionRequired": "Chiedi l’approvazione a una persona autorizzata.",
+      "approverUnavailable": "Persona che ha approvato sconosciuta",
+      "recordTitle": "Questa registrazione richiede attenzione",
+      "recordSummary": "La cassa conserva questa registrazione per un controllo.",
+      "recordGuidance": "Apri i dettagli o invia un rapporto all’assistenza."
+    },
     "confirmations": {
       "cashDrawerControl": {
         "title": "Conferma l'azione di ripristino",
@@ -10718,6 +10748,13 @@
   }
 ,
   "orderSyncNotice": {
+    "sessionExpired": "L’accesso alla cassa è scaduto. Inserisci di nuovo il PIN della cassa.",
+    "signInAgain": "Accedi di nuovo alla cassa.",
+    "shiftRequired": "Un cassiere o un responsabile deve essere in turno su questa cassa.",
+    "pinLocked": "Troppi tentativi con un PIN errato. Aspetta qualche minuto e riprova.",
+    "cancelled": "Non è cambiato nulla.",
+    "callSupport": "Non ha funzionato. Chiama l’assistenza.",
+    "saved": "La modifica è stata salvata.",
     "checkUnavailableHealth": "La cassa non può verificare al momento se gli ordini hanno un problema da risolvere. Rimangono tra gli ordini attivi.",
     "checkUnavailableGuidance": "Riprovi tra poco. Se continua a succedere, chiami l’assistenza.",
     "checkUnavailable": "La cassa non può verificare al momento se l’ordine #{{number}} ha un problema da risolvere, quindi rimane tra gli ordini attivi. Riprovi tra poco. Se continua a succedere, chiami l’assistenza.",

@@ -343,6 +343,524 @@
               "properties": {
                 "kind": {
                   "type": "string",
+                  "const": "remedy"
+                },
+                "recipe": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "const": "order-customer-correction.resend"
+                        },
+                        "version": {
+                          "type": "number",
+                          "const": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "version"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "const": "order-customer-correction.keep-server"
+                        },
+                        "version": {
+                          "type": "number",
+                          "const": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "version"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "order_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                },
+                "source": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "queue"
+                        },
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "durable_attempt"
+                        },
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "before_fingerprint": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "after_fingerprint": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "retired_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                },
+                "replacement": {
+                  "anyOf": [
+                    {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "queue"
+                            },
+                            "id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200,
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "durable_attempt"
+                            },
+                            "id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200,
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "canonical_version": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "audit_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                },
+                "verification": {
+                  "type": "string",
+                  "enum": [
+                    "replacement_queued",
+                    "replacement_acknowledged",
+                    "canonical_header_equal"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "recipe",
+                "order_id",
+                "source",
+                "before_fingerprint",
+                "after_fingerprint",
+                "retired_id",
+                "replacement",
+                "canonical_version",
+                "audit_ref",
+                "verification"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "queue_v2"
+                },
+                "queue_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                },
+                "before_fingerprint": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "after_fingerprint": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "group_fingerprint": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "disposition": {
+                  "type": "string",
+                  "enum": [
+                    "due",
+                    "acknowledged",
+                    "set_aside",
+                    "parked"
+                  ]
+                },
+                "actor": {
+                  "type": "string",
+                  "const": "founder_confirmed"
+                },
+                "audit_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                },
+                "retry_at": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "acknowledged_at": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "members": {
+                  "minItems": 1,
+                  "maxItems": 50,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "queue_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                      },
+                      "refusal_code": {
+                        "type": "string",
+                        "enum": [
+                          "UNKNOWN_CONFLICT_REVIEW",
+                          "ORDER_EDIT_BASE_UNAVAILABLE",
+                          "REFUSED_CUSTOMER_HEADER",
+                          "HTTP_4XX_PERMANENT",
+                          "PROVEN_SET_ASIDE_PARENT",
+                          "DEPENDENCY_REFUSED",
+                          "UNKNOWN",
+                          "EDIT_CANONICAL_PREFLIGHT_REQUIRED",
+                          "EDIT_CANONICAL_ORIGINAL_CHANGED",
+                          "ORDER_HEADER_SYNC_REQUIRED",
+                          "ORDER_CORRECTION_NEWER_HEADER_EDIT",
+                          "ORDER_CORRECTION_CHANGED_DURING_READ",
+                          "ORDER_CORRECTION_PREEMPTED",
+                          "ORDER_CORRECTION_SCOPE_UNAVAILABLE",
+                          "ORDER_CORRECTION_AWAITING_CONFIRMATION",
+                          "ORDER_CORRECTION_NO_LONGER_ELIGIBLE",
+                          "ORDER_CORRECTION_SCOPE_CHANGED",
+                          "ORDER_CORRECTION_SNAPSHOT_INVALID",
+                          "ORDER_CORRECTION_STALE_SERVER",
+                          "ORDER_CORRECTION_ALREADY_ATTEMPTED",
+                          "ORDER_CORRECTION_HEADERS_UNAVAILABLE",
+                          "REPAIR_TYPED_CONFLICT_REQUIRED",
+                          "REPAIR_SETTLEMENT_ROUTE_REQUIRED",
+                          "SET_ASIDE_NOT_ELIGIBLE",
+                          "PAYMENT_RECEIPT_ALREADY_PRESENT",
+                          "PAYMENT_RECEIPT_CONFLICT",
+                          "SET_ASIDE_NOT_A_Z_GATE",
+                          "SYNC_SET_ASIDE_NOT_ELIGIBLE",
+                          "SYNC_SET_ASIDE_CLAIMED_BY_Z"
+                        ]
+                      },
+                      "before_payload_sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "after_payload_sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "set_aside": {
+                        "type": "boolean"
+                      },
+                      "record_kind": {
+                        "type": "string",
+                        "enum": [
+                          "order",
+                          "payment_sync",
+                          "refund_sync",
+                          "other"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "queue_id",
+                      "refusal_code",
+                      "before_payload_sha256",
+                      "after_payload_sha256",
+                      "set_aside",
+                      "record_kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "kind",
+                "queue_id",
+                "before_fingerprint",
+                "after_fingerprint",
+                "group_fingerprint",
+                "disposition",
+                "actor",
+                "audit_ref",
+                "retry_at",
+                "acknowledged_at",
+                "members"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "payment_receipt_mirror"
+                },
+                "local_payment_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                },
+                "local_receipt_before": {
+                  "type": "null"
+                },
+                "local_receipt_after": {
+                  "type": "object",
+                  "properties": {
+                    "order_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                    },
+                    "server_payment_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                    },
+                    "currency": {
+                      "type": "string",
+                      "pattern": "^[A-Z]{3}$"
+                    },
+                    "amount_cents": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "tip_cents": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "method": {
+                      "type": "string",
+                      "enum": [
+                        "cash",
+                        "card",
+                        "online",
+                        "digital_wallet",
+                        "twint",
+                        "split",
+                        "gift_card",
+                        "other"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "order_id",
+                    "server_payment_id",
+                    "currency",
+                    "amount_cents",
+                    "tip_cents",
+                    "method"
+                  ],
+                  "additionalProperties": false
+                },
+                "before_totals": {
+                  "type": "object",
+                  "properties": {
+                    "order_total_cents": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "other_payment_total_cents": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "other_payments_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "refunds_and_adjustments_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  },
+                  "required": [
+                    "order_total_cents",
+                    "other_payment_total_cents",
+                    "other_payments_sha256",
+                    "refunds_and_adjustments_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                "after_totals": {
+                  "type": "object",
+                  "properties": {
+                    "order_total_cents": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "other_payment_total_cents": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "other_payments_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "refunds_and_adjustments_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  },
+                  "required": [
+                    "order_total_cents",
+                    "other_payment_total_cents",
+                    "other_payments_sha256",
+                    "refunds_and_adjustments_sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                "charges_created": {
+                  "type": "number",
+                  "const": 0
+                },
+                "refunds_created": {
+                  "type": "number",
+                  "const": 0
+                },
+                "adjustments_created": {
+                  "type": "number",
+                  "const": 0
+                },
+                "audit_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+                }
+              },
+              "required": [
+                "kind",
+                "local_payment_id",
+                "local_receipt_before",
+                "local_receipt_after",
+                "before_totals",
+                "after_totals",
+                "charges_created",
+                "refunds_created",
+                "adjustments_created",
+                "audit_ref"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
                   "const": "shift_void"
                 },
                 "shift_id": {

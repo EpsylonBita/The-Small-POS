@@ -3,12 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import greekTableCheck from '../../../../locales/overlays/el.table-check.json';
 import { internalOrderReference } from '../../../../../../shared/utils/internal-order-reference';
+import { applyCardProviderSnapshot, cardProviderState, clearCardProviderMark } from '../../../services/cardProviderMark';
+import { clearTerminalCredentialCache, updateTerminalCredentialCache } from '../../../services/terminal-credentials';
 
 const mocks = vi.hoisted(() => ({
   get: vi.fn(), patch: vi.fn(), invoke: vi.fn(), emit: vi.fn(), orders: vi.fn(), payments: vi.fn(),
   updateItems: vi.fn(), toastError: vi.fn(), toastSuccess: vi.fn(), nativeFetch: vi.fn(), retained: vi.fn(), outcome: vi.fn(),
   post: vi.fn(), enqueueTransfer: vi.fn(), enqueueBatch: vi.fn(), retryable: vi.fn(),
   recordPayment: vi.fn(), enqueueUpdate: vi.fn(), enqueuePayment: vi.fn(),
+  ecr: { getDefaultTerminal: vi.fn(), getDeviceStatus: vi.fn(), getDeviceAdmission: vi.fn(), processPayment: vi.fn() },
   t: vi.fn((_key: string, options: any) => String(options?.defaultValue || _key).replace(/\{\{(\w+)\}\}/g, (_match, name) => String(options[name] ?? ''))),
   directory: vi.fn().mockResolvedValue({ staff: [] }),
 }));
@@ -19,6 +22,7 @@ vi.mock('../../../../lib', () => ({ getBridge: () => ({
   payments: { getOrderPayments: mocks.payments, getPaidItems: async () => [], recordPayment: mocks.recordPayment },
   staffAuth: { refreshDirectory: mocks.directory },
   adminApi: { fetchFromAdmin: mocks.nativeFetch },
+  ecr: mocks.ecr,
 }), emitCompatEvent: mocks.emit }));
 vi.mock('../../../utils/tableSessionOfflineQueue', () => ({
   isRetryableTableServiceError: mocks.retryable,
@@ -533,6 +537,66 @@ describe('table check workflow ownership', () => {
     fireEvent.keyDown(screen.getByText('Coffee').closest('button')!, { key: 'Enter' });
     fireEvent.click(screen.getByRole('button', { name: action }));
   };
+
+  describe.each(['unknown', 'none'])('with the %s card mark', mark => {
+    it.each(['full table', 'per seat', 'one item', 'selected items'])('records a %s card without provider reads', async target => {
+      const scope = { organizationId: 'org', branchId: 'branch', terminalId: 'terminal' };
+      updateTerminalCredentialCache(scope);
+      clearCardProviderMark();
+      if (mark === 'none') {
+        applyCardProviderSnapshot({ success: true, cardTerminal: {
+          ...scope, admitted: false, fetchedAt: '2026-11-06T08:00:00Z',
+        } });
+      }
+      expect(cardProviderState()).toBe(mark);
+      const reads = [mocks.nativeFetch, ...Object.values(mocks.ecr)];
+      reads.forEach(read => read.mockReset().mockImplementation(() => new Promise(() => {})));
+      mocks.payments.mockResolvedValue([]);
+      mocks.patch.mockReset().mockResolvedValue({ success: true, data: { success: true } });
+      const check = { ...makeSession(sourceId, 'T01', 3), guest_count: 2 };
+      mocks.get.mockResolvedValue({ success: true, data: { success: true, session: check } });
+
+      try {
+        render(<TableCheckManagerModal {...props} />);
+        const line = (await screen.findByText('Coffee')).closest('button')!;
+        if (target === 'one item') {
+          await openItemAction('Pay Item');
+        } else if (target === 'selected items') {
+          fireEvent(line, new MouseEvent('pointerdown', { button: 0, bubbles: true }));
+          await act(async () => { await new Promise(resolve => setTimeout(resolve, 460)); });
+          fireEvent.pointerUp(line);
+          fireEvent.click(screen.getByRole('button', { name: 'Pay Selected' }));
+        } else {
+          fireEvent.click(screen.getByRole('button', { name: 'Pay' }));
+        }
+        const sheet = within(screen.getAllByRole('dialog').at(-1)!);
+        if (target === 'per seat') {
+          fireEvent.click(sheet.getByRole('button', { name: 'Per Person' }));
+          fireEvent.change(sheet.getByPlaceholderText('All'), { target: { value: '2' } });
+        }
+
+        await act(async () => { fireEvent.click(sheet.getByRole('button', { name: 'Card' })); });
+
+        const amounts: Record<string, number> = { 'full table': 30, 'per seat': 15, 'one item': 10, 'selected items': 30 };
+        expect(mocks.recordPayment).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+          orderId: 'remote-order', method: 'card', paymentOrigin: 'manual', amount: amounts[target],
+        }));
+        const payment = mocks.recordPayment.mock.calls[0][0];
+        if (target === 'one item' || target === 'selected items') {
+          expect(payment.items).toEqual([expect.objectContaining({ order_item_id: 'line-1' })]);
+        }
+        if (target === 'per seat') expect(payment.seat_number).toBe(2);
+        reads.forEach(read => expect(read).not.toHaveBeenCalled());
+        expect(mocks.toastError).not.toHaveBeenCalled();
+        expect(screen.queryByText(/checking payment terminal/i)).not.toBeInTheDocument();
+      } finally {
+        cleanup();
+        reads.forEach(read => read.mockReset());
+        clearCardProviderMark();
+        clearTerminalCredentialCache();
+      }
+    });
+  });
 
   it('does not carry an abandoned table tip into a fresh item payment', async () => {
     mocks.payments.mockResolvedValue([]);

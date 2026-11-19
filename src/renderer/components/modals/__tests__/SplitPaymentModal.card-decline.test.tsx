@@ -1,3 +1,5 @@
+import { applyCardProviderSnapshot, cardProviderState, clearCardProviderMark } from '../../../services/cardProviderMark';
+import { seedCardProviderMark } from '../../../services/__tests__/cardProviderMark.fixture';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -44,6 +46,8 @@ const mocks = vi.hoisted(() => {
       settings: { get: vi.fn() },
       ecr: {
         fiscalPrint: vi.fn(),
+        getDeviceAdmission: vi.fn(),
+        getDevices: vi.fn(),
         getDefaultTerminal: vi.fn(),
         getDeviceStatus: vi.fn(),
         processPayment: vi.fn(),
@@ -52,6 +56,16 @@ const mocks = vi.hoisted(() => {
   };
 });
 
+// Animation frames are presentation work, outside the provider lookup boundary.
+vi.mock('framer-motion', () => ({
+  motion: {
+    div: ({ initial, animate, exit, transition, layout, ...props }: any) => <div {...props} />,
+    p: ({ initial, animate, exit, transition, layout, ...props }: any) => <p {...props} />,
+  },
+  useIsPresent: () => true,
+  useReducedMotion: () => true,
+  AnimatePresence: ({ children }: React.PropsWithChildren) => children,
+}));
 vi.mock('react-hot-toast', () => ({ default: mocks.toast, toast: mocks.toast }));
 
 vi.mock('../../../contexts/i18n-context', () => ({
@@ -81,6 +95,10 @@ vi.mock('../../../hooks/usePaymentPrintPrompt', () => ({
   }),
 }));
 
+// Modal focus and exit effects are outside the card-press timer boundary.
+vi.mock('../../ui/pos-glass-components', () => ({
+  LiquidGlassModal: ({ isOpen, children, footer }: { isOpen: boolean; children: React.ReactNode; footer: React.ReactNode }) => isOpen ? <div>{children}{footer}</div> : null,
+}));
 import { SplitPaymentModal } from '../SplitPaymentModal';
 import {
   clearTerminalCredentialCache,
@@ -145,6 +163,7 @@ describe('SplitPaymentModal card portions only book money the card actually move
   beforeEach(() => {
     vi.clearAllMocks();
     updateTerminalCredentialCache({ organizationId: SCOPE.organizationId, branchId: BRANCH, terminalId: SCOPE.terminalId });
+    seedCardProviderMark();
     mocks.askForPaymentPrint.mockResolvedValue(false);
     mocks.bridge.invoke.mockResolvedValue({ success: true });
     mocks.bridge.giftCardCheckout.reconcileOrder.mockResolvedValue({
@@ -345,4 +364,71 @@ describe('SplitPaymentModal card portions only book money the card actually move
       expect(confirmButton()).toBeDisabled();
     });
   });
+  it.each(['online', 'offline', 'no snapshot', 'stale payment_terminal row', 'held lock', 'cached no provider'])('empty mark records the split card with no provider reads or new timer: %s', async fixture => {
+    clearCardProviderMark();
+    const at = '2026-11-06T08:00:00.000Z';
+    if (fixture === 'cached no provider') applyCardProviderSnapshot({ success: true, cardTerminal: {
+      admitted: false, fetchedAt: at, organizationId: SCOPE.organizationId, branchId: BRANCH, terminalId: SCOPE.terminalId,
+    } });
+    const network = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(fixture !== 'offline');
+    const reads = [mocks.bridge.ecr.getDeviceAdmission, mocks.bridge.ecr.getDevices, mocks.bridge.ecr.getDefaultTerminal,
+      mocks.bridge.ecr.getDeviceStatus, mocks.bridge.ecr.processPayment, mocks.bridge.adminApi.fetchFromAdmin];
+    reads.forEach(read => read.mockImplementation(() => new Promise(() => {})));
+    renderSplit(nextOrderId('empty-mark'), SCOPE);
+    await waitFor(() => expect(confirmButton()).toBeEnabled());
+    vi.useFakeTimers();
+    try {
+      await act(async () => { fireEvent.click(methodButtons(1).card); });
+      expect(screen.getByRole('status')).toHaveTextContent("shop's own card machine");
+      await act(async () => { fireEvent.click(confirmButton()); });
+      expect(mocks.bridge.payments.recordPayment).toHaveBeenCalledTimes(2);
+      expect(mocks.bridge.payments.recordPayment).toHaveBeenCalledWith(expect.objectContaining({
+        method: 'cash', amount: 10, paymentOrigin: 'manual',
+      }));
+      expect(cardRecords()).toHaveLength(1);
+      expect(cardRecords()[0]).toEqual(expect.objectContaining({ method: 'card', amount: 10, paymentOrigin: 'manual', terminalApproved: false }));
+      expect(cardRecords()[0].metadata).toEqual(fixture === 'cached no provider'
+        ? { admission_basis: 'cached', admission_checked_at: at } : undefined);
+      reads.forEach(read => expect(read).not.toHaveBeenCalled());
+      expect(mocks.toast.error).not.toHaveBeenCalled();
+      expect(screen.queryByText(/Checking payment terminal/i)).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); network.mockRestore(); }
+  });
+
+  it.each(['unknown', 'none'])('records only the remaining split card with the %s mark and no provider reads', async mark => {
+    clearCardProviderMark();
+    if (mark === 'none') {
+      applyCardProviderSnapshot({ success: true, cardTerminal: {
+        admitted: false, fetchedAt: '2026-11-06T08:00:00Z',
+        organizationId: SCOPE.organizationId, branchId: BRANCH, terminalId: SCOPE.terminalId,
+      } });
+    }
+    expect(cardProviderState()).toBe(mark);
+    const orderId = nextOrderId('partial-manual');
+    const priorPortion = { id: 'prior-cash', orderId, method: 'cash', amount: 10, status: 'completed' };
+    mocks.bridge.payments.getOrderPayments.mockResolvedValue([priorPortion]);
+    mocks.bridge.payments.getSettlementSnapshot.mockResolvedValue({
+      success: true, orderId, orderTotal: 20, netPaid: 10, outstandingAmount: 10,
+      completedPayments: [priorPortion], generation: '0'.repeat(64), unresolvedDirectSale: null,
+    });
+    const reads = [mocks.bridge.ecr.getDeviceAdmission, mocks.bridge.ecr.getDevices, mocks.bridge.ecr.getDefaultTerminal,
+      mocks.bridge.ecr.getDeviceStatus, mocks.bridge.ecr.processPayment, mocks.bridge.adminApi.fetchFromAdmin];
+    reads.forEach(read => read.mockImplementation(() => new Promise(() => {})));
+    renderSplit(orderId, SCOPE);
+    await waitFor(() => expect(confirmButton()).toBeEnabled());
+    expect(screen.getByRole('textbox', { name: 'Person 1' })).toHaveValue('5,00');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Person 2' }), { target: { value: '0' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Person 1' }), { target: { value: '1000' } });
+    await act(async () => { fireEvent.click(methodButtons(1).card); });
+    await act(async () => { fireEvent.click(confirmButton()); });
+
+    reads.forEach(read => expect(read).not.toHaveBeenCalled());
+    expect(mocks.bridge.payments.recordPayment).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      orderId, method: 'card', amount: 10, paymentOrigin: 'manual', terminalApproved: false,
+    }));
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+    expect(screen.queryByText(/checking payment terminal/i)).not.toBeInTheDocument();
+  });
+
 });

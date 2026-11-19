@@ -3663,9 +3663,9 @@
     "zGate": {
       "approvalTitle": "Approve with your PIN",
       "approvalSubtitle": "Setting a record aside needs the right to void payments. A staff member who has it enters their own PIN. Nothing is deleted or charged.",
-      "setAsideDone": "Set aside. The record stays on this till and the Z lists it as not on the server.",
-      "undoDone": "The record is back: it holds the day close again until the server takes it.",
-      "actionFailed": "It could not be done. Nothing was changed.",
+      "setAsideDone": "Set aside for review. The till keeps the record and lists it on the Z.",
+      "undoDone": "This record is waiting to be sent again. It may hold up the Z until it is sent.",
+      "actionFailed": "The change could not be confirmed. Check the list again.",
       "stale": "This list could not be read again. It shows the last good read.",
       "unavailable": "The days closed on this till could not be read. Try again.",
       "localTitle": "Days closed on this till, not on the server yet: {{count}}",
@@ -6663,6 +6663,8 @@
     "kioskCardPending": "CARD",
     "kioskCashPendingA11y": "Cash chosen at the kiosk; payment pending",
     "kioskCardPendingA11y": "Card chosen at the kiosk; payment pending",
+    "platformCashPendingA11y": "Cash chosen on the platform; payment pending",
+    "platformCardPendingA11y": "Card chosen on the platform; payment pending",
     "platformPayment": "PLATFORM PAYMENT",
     "platformPaymentA11y": "Payment settled by platform; the store does not collect"
   },
@@ -9382,6 +9384,34 @@
     "portionNotSaved": "Card charged, payment not saved yet. Do not charge again."
   },
   "recovery": {
+    "actionStatus": {
+      "signIn": "Sign in again",
+      "sendRecord": "Send this record",
+      "sendWaiting": "Send waiting records",
+      "preparePaymentUpdates": "Prepare payment updates for sending",
+      "exportCopy": "Export a copy for support",
+      "reviewOrders": "Check order records",
+      "removeLabel": "Remove invalid sending records",
+      "removeTitle": "Remove invalid sending records?",
+      "removeMessage": "Remove the selected sending records after checking them again. The till keeps a copy. Orders and payments stay on the till.",
+      "sent": "Sent",
+      "waiting": "Waiting for a related record",
+      "untouched": "Still waiting to be sent",
+      "refused": "Could not be sent",
+      "set_aside": "Set aside for review",
+      "unknown": "Sending could not be confirmed",
+      "checked": "Check complete",
+      "reportNotified": "Report received. Support was notified.",
+      "reportStored": "Report received. A notification could not be confirmed.",
+      "reportPrepared": "A copy is saved on this till. Delivery could not be confirmed.",
+      "reportFailed": "The report could not be prepared on this till.",
+      "grantExpired": "Your approval expired. Enter the till PIN again.",
+      "permissionRequired": "Ask someone with permission to approve this change.",
+      "approverUnavailable": "Approver unavailable",
+      "recordTitle": "This record needs attention",
+      "recordSummary": "The till is keeping this record for review.",
+      "recordGuidance": "Open the details or send a report to support."
+    },
     "confirmations": {
       "cashDrawerControl": {
         "title": "Confirm recovery action",
@@ -10718,6 +10748,13 @@
   }
 ,
   "orderSyncNotice": {
+    "sessionExpired": "The till sign-in has expired. Enter the till PIN again.",
+    "signInAgain": "Sign in to the till again.",
+    "shiftRequired": "A cashier or manager must be on shift at this till.",
+    "pinLocked": "Too many wrong PIN attempts. Wait a few minutes and try again.",
+    "cancelled": "Nothing changed.",
+    "callSupport": "It did not work. Call support.",
+    "saved": "The change was saved.",
     "checkUnavailableHealth": "The till cannot check for open order issues right now. Orders stay in the active orders.",
     "checkUnavailableGuidance": "Try again in a moment. If it keeps happening, call support.",
     "checkUnavailable": "The till cannot check right now whether order #{{number}} has an open issue, so it stays in the active orders. Try again in a moment. If it keeps happening, call support.",

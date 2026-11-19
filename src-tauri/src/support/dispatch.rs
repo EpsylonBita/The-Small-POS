@@ -31,11 +31,17 @@ pub fn register_tier_one(kind: &str, handler: TierOneHandler) -> Result<(), Stri
 }
 pub fn capabilities() -> Vec<String> {
     let mut caps = vec!["support.protocol.v1".into()];
-    if handlers().lock().is_ok_and(|h| !h.is_empty()) {
-        caps.push("support.tier1.v1".into());
-    }
-    if handlers().lock().is_ok_and(|h| !h.is_empty()) {
-        caps.push("support.evidence.v1".into());
+    if let Ok(handlers) = handlers().lock() {
+        if !handlers.is_empty() {
+            caps.push("support.tier1.v1".into());
+            caps.push("support.evidence.v1".into());
+        }
+        if handlers.contains_key("till_diagnostics_bundle") {
+            caps.push(super::collectors::recovery_attempts::CAPABILITY.into());
+        }
+        if handlers.contains_key("till_sync_queue") && super::confirmed_recovery::manifest_ready() {
+            caps.push(super::confirmed_recovery::CAPABILITY.into());
+        }
     }
     if super::screenshot::available() {
         caps.push("support.screenshot.v1".into());
@@ -130,6 +136,105 @@ fn catalogue_attempt(run: impl FnOnce() -> Result<Value, String>) -> Result<Valu
         .unwrap_or_else(|_| Err("OUTCOME_UNKNOWN".into()))
 }
 
+fn run_replica_read(
+    app: &tauri::AppHandle,
+    rt: &Runtime,
+    c: &Command,
+    permit: &SupportPermit,
+    handler: &TierOneHandler,
+) -> Result<(), String> {
+    let attempt = || catalogue_attempt(|| handler(c, permit));
+    let mut result = attempt();
+    if result
+        .as_ref()
+        .is_err_and(|code| code == "REPLICA_BUILDING")
+    {
+        {
+            let mut core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
+            let now = core.now();
+            core.executor.replica_pending(c, now)?;
+        }
+        // Deliver pending promptly before the ordinary outbox entry is replaced
+        // by the final result. Network failure leaves normal delivery in charge.
+        tauri::async_runtime::block_on(super::transport::flush_results(app, rt));
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let admission = {
+                let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
+                core.session.as_ref().ok_or("SESSION_ENDED").and_then(|s| {
+                    super::delivery::recheck(
+                        c,
+                        &s.admission,
+                        &core.clock,
+                        std::time::Instant::now(),
+                    )
+                })
+            };
+            if let Err(code) = admission {
+                result = Err(code.into());
+                break;
+            }
+            if permit.is_cancelled() {
+                result = Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+                break;
+            }
+            result = attempt();
+            if !result
+                .as_ref()
+                .is_err_and(|code| code == "REPLICA_BUILDING")
+            {
+                break;
+            }
+        }
+    }
+    let mut core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
+    let now = core.now();
+    if let Some(session) = &core.session {
+        if let Err(code) = super::delivery::recheck(
+            c,
+            &session.admission,
+            &core.clock,
+            std::time::Instant::now(),
+        ) {
+            result = Err(code.into());
+        } else if !rt.banner_ready.load(Ordering::Acquire) || !window_visible(app) {
+            result = Err("TILL_PAUSED".into());
+        } else if permit.is_cancelled() {
+            result = Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+        }
+    } else {
+        result = Err("SESSION_ENDED".into());
+    }
+    match result {
+        Ok(data) => {
+            if let Err(code) = core.executor.finish(c, data, now) {
+                core.executor.fail(c, &code, now)?;
+            }
+        }
+        Err(code) => core.executor.fail(c, &code, now)?,
+    }
+    Ok(())
+}
+
+pub(super) fn settle_confirmed(
+    executor: &mut super::executor::Executor,
+    command: &Command,
+    result: Result<Value, String>,
+    now: i64,
+) {
+    match result {
+        Ok(data) if data["evidence"]["state"] == "staged_restart" => {}
+        Ok(data) => {
+            if let Err(code) = executor.finish(command, data, now) {
+                let _ = executor.fail(command, &code, now);
+            }
+        }
+        Err(code) => {
+            let _ = executor.fail(command, &code, now);
+        }
+    }
+}
+
 pub async fn drive(app: &tauri::AppHandle, rt: &Arc<Runtime>) {
     let tick_app = app.clone();
     let tick_rt = rt.clone();
@@ -216,7 +321,7 @@ pub async fn drive(app: &tauri::AppHandle, rt: &Arc<Runtime>) {
                 let path=core.executor.db.path.clone();drop(core);
                 tokio::task::spawn_blocking(move ||{
                     let result=(||{let store=rusqlite::Connection::open(path).map_err(|_|"INTERNAL_ERROR")?;store.busy_timeout(std::time::Duration::from_millis(100)).map_err(|_|"INTERNAL_ERROR")?;super::confirmed::run(&app,&rt,&store,&c)})();
-                    if let Ok(mut core)=rt.core.lock(){let now=core.now();match result{Ok(data) if data["evidence"]["state"]=="staged_restart"=>{},Ok(data)=>{if let Err(code)=core.executor.finish(&c,data,now){let _=core.executor.fail(&c,&code,now);}},Err(code)=>{let _=core.executor.fail(&c,&code,now);}}}
+                    if let Ok(mut core)=rt.core.lock(){let now=core.now();settle_confirmed(&mut core.executor,&c,result,now);}
                 });return Ok(());
             }
             let evidence_started=std::time::Instant::now();
@@ -322,6 +427,27 @@ pub async fn drive(app: &tauri::AppHandle, rt: &Arc<Runtime>) {
                 return Ok(());
             }
             drop(core);
+            if ["till_sql_schema","till_sql_query","till_sql_refresh_replica"].contains(&c.kind.as_str()) {
+                let handler = handler.ok_or("FEATURE_DISABLED")?;
+                tokio::task::spawn_blocking(move || {
+                    if c.payload["include_personal_data"] == true {
+                        if let Err(code) = super::evidence::wait_presented(&c.command_id, &permit) {
+                            if let Ok(mut core) = rt.core.lock() {
+                                let now = core.now();
+                                let _ = core.executor.fail(&c, &code, now);
+                            }
+                            return;
+                        }
+                    }
+                    if let Err(code) = run_replica_read(&app, &rt, &c, &permit, &handler) {
+                        if let Ok(mut core) = rt.core.lock() {
+                            let now = core.now();
+                            let _ = core.executor.fail(&c, &code, now);
+                        }
+                    }
+                });
+                return Ok(());
+            }
             // No runtime, support DB, gate or business DB mutex is held while
             // collector code runs. Every collector must honor the cancel flag.
             let presentation=if c.kind=="till_screenshot" || c.payload["include_personal_data"]==true {super::evidence::wait_presented(&c.command_id,&permit)}else{Ok(())};

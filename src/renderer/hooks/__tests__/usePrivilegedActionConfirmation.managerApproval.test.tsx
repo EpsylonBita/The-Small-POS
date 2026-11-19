@@ -30,7 +30,7 @@ vi.mock('react-i18next', () => ({
 }));
 
 vi.mock('../../components/auth/PINLoginModal', () => ({
-  default: ({ isOpen, subtitle, onSubmit, blockedMessage, errorMessage }: any) =>
+  default: ({ isOpen, subtitle, onClose, onSubmit, blockedMessage, errorMessage }: any) =>
     isOpen ? (
       <div role="dialog">
         <p data-testid="pin-subtitle">{subtitle}</p>
@@ -38,6 +38,7 @@ vi.mock('../../components/auth/PINLoginModal', () => ({
           Enter PIN
         </button>}
         {errorMessage && <p role="alert">{errorMessage}</p>}
+        <button type="button" onClick={onClose}>Cancel</button>
       </div>
     ) : null,
 }));
@@ -53,7 +54,7 @@ const managerApprovalRequired = {
   approval: 'void_payments',
 };
 
-function Harness({ action, onDone }: { action: () => Promise<string>; onDone: (v: string) => void }) {
+function Harness({ action, onDone, onError, onPinRefused }: { action: () => Promise<string>; onDone: (v: string) => void; onError?: (error: unknown) => void; onPinRefused?: () => void }) {
   const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
   return (
     <>
@@ -63,9 +64,10 @@ function Harness({ action, onDone }: { action: () => Promise<string>; onDone: (v
           void runWithPrivilegedConfirmation({
             scope: 'cash_drawer_control',
             action,
+            onPinRefused,
             title: 'Approve recording the payment',
             subtitle: 'Enter the cashier or manager PIN.',
-          }).then(onDone, () => undefined)
+          }).then(onDone, onError)
         }
       >
         Record
@@ -80,6 +82,90 @@ beforeEach(() => {
   mock.available.mockReset().mockResolvedValue({ available: true, permission: 'pos.refunds.process' });
 });
 afterEach(cleanup);
+
+describe('till sign-in for privileged actions', () => {
+  it('asks for the till PIN when expired, records a wrong PIN and resumes after confirmation', async () => {
+    const action = vi.fn().mockRejectedValueOnce({ code: 'AUTH_SESSION_EXPIRED' }).mockResolvedValueOnce('recorded');
+    const onDone = vi.fn();
+    const onPinRefused = vi.fn();
+    mock.confirmPrivilegedAction.mockRejectedValueOnce({ code: 'AUTH_PIN_WRONG' });
+    render(<Harness action={action} onDone={onDone} onPinRefused={onPinRefused} />);
+    await act(async () => screen.getByRole('button', { name: 'Record' }).click());
+    expect(screen.getByTestId('pin-subtitle')).toHaveTextContent('The till sign-in has expired. Enter the till PIN again.');
+    await act(async () => screen.getByRole('button', { name: 'Enter PIN' }).click());
+    expect(onPinRefused).toHaveBeenCalledOnce();
+    expect(action).toHaveBeenCalledTimes(1);
+    await act(async () => screen.getByRole('button', { name: 'Enter PIN' }).click());
+    expect(onDone).toHaveBeenCalledWith('recorded');
+    expect(action).toHaveBeenCalledTimes(2);
+  });
+
+  it('forwards a missing session without offering a misleading confirmation', async () => {
+    const error = { code: 'AUTH_SESSION_REQUIRED' };
+    const onError = vi.fn();
+    render(<Harness action={vi.fn().mockRejectedValue(error)} onDone={vi.fn()} onError={onError} />);
+    await act(async () => screen.getByRole('button', { name: 'Record' }).click());
+    expect(onError).toHaveBeenCalledWith(error);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it.each(['AUTH_SHIFT_REQUIRED', 'AUTH_PERMISSION_REQUIRED'])('does not ask for a PIN after %s', async code => {
+    const onError = vi.fn();
+    render(<Harness action={vi.fn().mockRejectedValue({ code })} onDone={vi.fn()} onError={onError} />);
+    await act(async () => screen.getByRole('button', { name: 'Record' }).click());
+    expect(onError).toHaveBeenCalledWith({ code });
+    expect(mock.confirmPrivilegedAction).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('closes confirmation on lockout and leaves the action unexecuted', async () => {
+    const action = vi.fn().mockRejectedValueOnce({ code: 'AUTH_SESSION_EXPIRED' });
+    const lockout = { code: 'AUTH_LOCKED_OUT', minutes: 15 };
+    const onError = vi.fn();
+    mock.confirmPrivilegedAction.mockRejectedValueOnce(lockout);
+    render(<Harness action={action} onDone={vi.fn()} onError={onError} />);
+    await act(async () => screen.getByRole('button', { name: 'Record' }).click());
+    await act(async () => screen.getByRole('button', { name: 'Enter PIN' }).click());
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining(lockout));
+    expect(action).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('explains that the approval expired and renews it for the original action', async () => {
+    const action = vi.fn().mockRejectedValueOnce({ code: 'AUTH_GRANT_EXPIRED' }).mockResolvedValueOnce('recorded');
+    const onDone = vi.fn();
+    render(<Harness action={action} onDone={onDone} />);
+    await act(async () => screen.getByRole('button', { name: 'Record' }).click());
+    expect(screen.getByTestId('pin-subtitle')).toHaveTextContent('recovery.actionStatus.grantExpired');
+    await act(async () => screen.getByRole('button', { name: 'Enter PIN' }).click());
+    expect(action).toHaveBeenCalledTimes(2);
+    expect(onDone).toHaveBeenCalledWith('recorded');
+  });
+
+  it('does not run the action when confirmation is cancelled', async () => {
+    const action = vi.fn().mockRejectedValueOnce({ code: 'AUTH_SESSION_EXPIRED' });
+    const onError = vi.fn();
+    render(<Harness action={action} onDone={vi.fn()} onError={onError} />);
+    await act(async () => screen.getByRole('button', { name: 'Record' }).click());
+    await act(async () => screen.getByRole('button', { name: 'Cancel' }).click());
+    expect(onError).toHaveBeenCalledWith(new Error('AUTH_CONFIRMATION_CANCELLED'));
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the PIN prompt before an accepted action can commit', async () => {
+    let finish!: (value: string) => void;
+    const executing = new Promise<string>(resolve => { finish = resolve; });
+    const action = vi.fn().mockRejectedValueOnce({ code: 'AUTH_SESSION_EXPIRED' }).mockReturnValueOnce(executing);
+    const onDone = vi.fn();
+    render(<Harness action={action} onDone={onDone} />);
+    await act(async () => screen.getByRole('button', { name: 'Record' }).click());
+    await act(async () => screen.getByRole('button', { name: 'Enter PIN' }).click());
+    expect(action).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+    await act(async () => finish('recorded'));
+    expect(onDone).toHaveBeenCalledWith('recorded');
+  });
+});
 
 describe('usePrivilegedActionConfirmation: a manager approves with nobody on shift', () => {
   it('shows the missing store right instead of collecting a PIN when nobody can approve', async () => {

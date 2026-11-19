@@ -294,6 +294,28 @@ impl Executor {
         }
         tx.commit().map_err(db_error)
     }
+    pub fn replica_pending(&mut self, c: &Command, now: i64) -> Result<(), String> {
+        let tx = super::db::transaction(&self.db.conn).map_err(db_error)?;
+        let running: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM support_accepted_commands WHERE command_id=? AND state='executing' AND finished_at IS NULL)",
+            [&c.command_id],
+            |row| row.get(0),
+        ).map_err(db_error)?;
+        if !running {
+            return Err("SESSION_ENDED".into());
+        }
+        let mut result = make_result(&tx, c, None, Some("REPLICA_BUILDING"), now)?;
+        result["status"] = json!("pending");
+        result["outcome"] = json!("pending");
+        result
+            .as_object_mut()
+            .ok_or("INTERNAL_ERROR")?
+            .remove("result_sha256");
+        result["result_sha256"] = json!(contracts::payload_hash(&result));
+        store_result(&tx, c, &result, now)?;
+        tx.commit().map_err(db_error)
+    }
+
     pub fn queued(&self) -> Result<Vec<Command>, String> {
         let mut stmt=self.db.conn.prepare("SELECT envelope_json FROM support_accepted_commands WHERE started_at IS NULL AND finished_at IS NULL ORDER BY sequence").map_err(db_error)?;
         let rows = stmt
@@ -321,6 +343,14 @@ impl Executor {
         };
         let tx = super::db::transaction(&self.db.conn).map_err(db_error)?;
         for (c, started) in unfinished {
+            if started {
+                let live = self.db.path.with_file_name("pos.db");
+                if let Some(data) = super::confirmed_payment_receipt::recover(&tx, &live, &c) {
+                    let result = make_result(&tx, &c, Some(data), None, now)?;
+                    complete_on(&tx, &c, &result, now, false)?;
+                    continue;
+                }
+            }
             let result = make_result(
                 &tx,
                 &c,
@@ -573,14 +603,26 @@ fn make_result(
     if let Some(at) = started {
         timings["started_at"] = json!(at);
     }
+    let owner_code = code
+        .and_then(|code| code.split_once('|'))
+        .filter(|(_, detail)| super::collectors::recovery_attempts::owner_refusal(detail));
+    let code = owner_code.map(|(outer, _)| outer).or(code);
     let detail = code.and_then(|code| super::evidence::split_error(code).1);
     let code = code.map(|code| super::evidence::split_error(code).0);
     let mut result = json!({"command_id":c.command_id,"session_id":c.session_id,"status":if code.is_some(){"failed"}else{"completed"},"outcome":if code==Some("OUTCOME_UNKNOWN"){"outcome_unknown"}else if code.is_some(){"failed"}else{"succeeded"},"timings":timings});
     if let Some(detail) = detail {
         result["failure_detail_code"] = json!(detail);
     }
+    if let Some((_, detail)) = owner_code {
+        result["owner_refusal_code"] = json!(detail);
+    }
+    if code == Some("TILL_OFFLINE") {
+        result["offline_detail"] = json!({"origin":"till_transport_loss"});
+    }
     if let Some(data) = data {
         result["data"] = data;
+    } else if super::confirmed_payment_receipt::handles(c) {
+        result["data"] = Value::Null;
     }
     if let Some(code) = code {
         result["error_code"] = json!(
@@ -598,14 +640,21 @@ fn make_result(
                 .ok_or("INTERNAL_ERROR")?
                 .remove("data");
             result["failure_detail_code"] = json!("SCREENSHOT_ALREADY_CONSUMED");
-        } else if !matches!(
-            c.kind.as_str(),
-            "till_run_catalogue_action" | "breakglass_propose_catalogue_action"
-        ) {
+        } else if !super::confirmed_recovery::handles(c)
+            && !super::confirmed_payment_receipt::handles(c)
+            && !matches!(
+                c.kind.as_str(),
+                "till_run_catalogue_action" | "breakglass_propose_catalogue_action"
+            )
+        {
             result["data"] = json!({"verification_guidance":"Verify the current till state and audit before proposing another action. This command will never execute again."});
         }
     }
-    result["result_sha256"] = json!(contracts::payload_hash(&result));
+    result["result_sha256"] = json!(if super::confirmed_payment_receipt::handles(c) {
+        super::confirmed_hash::hash(&result["data"])
+    } else {
+        contracts::payload_hash(&result)
+    });
     Ok(result)
 }
 fn store_result(conn: &Connection, c: &Command, result: &Value, now: i64) -> Result<(), String> {

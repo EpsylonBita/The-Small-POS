@@ -34,6 +34,7 @@ const h = vi.hoisted(() => {
     checkoutDraft: null as any,
     returnedCustomer: null as any,
     menuProps: null as any,
+    showFreshCardCheckout: false,
     menuCreateId: undefined as string | undefined,
     menuSubmission: null as any,
     restoreContext: null as any,
@@ -172,7 +173,12 @@ const h = vi.hoisted(() => {
       recordPayment: native.recordPayment,
       printReceipt: native.printReceipt,
     },
-    ecr: { fiscalPrint: native.fiscalPrint, checkoutDirectSale: vi.fn(async () => ({ success: true, directSale: state.checkoutSale })) },
+    ecr: {
+      fiscalPrint: native.fiscalPrint,
+      checkoutDirectSale: vi.fn(async () => ({ success: true, directSale: state.checkoutSale })),
+      getDefaultTerminal: vi.fn(), getDeviceStatus: vi.fn(), getDeviceAdmission: vi.fn(), processPayment: vi.fn(),
+    },
+    adminApi: { fetchFromAdmin: vi.fn() },
     settings: { get: native.settingsGet },
     sync: { getNetworkStatus: native.getNetworkStatus },
     customers: { lookupById: vi.fn(async () => null) },
@@ -389,7 +395,7 @@ vi.mock('../../services/ReservationsService', () => ({
   buildChangedReservationUpdate: vi.fn(),
 }));
 vi.mock('../../services/terminal-credentials', () => ({
-  getCachedTerminalCredentials: () => ({ branchId: 'branch-1', organizationId: 'org-1' }),
+  getCachedTerminalCredentials: () => ({ branchId: 'branch-1', organizationId: 'org-1', terminalId: 'term-1' }),
   refreshTerminalCredentialCache: async () => ({ branchId: 'branch-1', organizationId: 'org-1' }),
 }));
 vi.mock('../../services/GiftCardsApiService', async (importOriginal) => {
@@ -447,7 +453,13 @@ vi.mock('../ui/FloatingActionButton', () => ({
   ),
 }));
 vi.mock('../modals/MenuModal', () => ({
-  MenuModal: (props: any) => { if (props.isOpen) h.state.menuProps = props; const { isOpen, onOrderComplete, onEditComplete, onClose, onDraftRestore, editMode } = props; return (
+  MenuModal: (props: any) => { if (props.isOpen) h.state.menuProps = props; const { isOpen, onOrderComplete, onEditComplete, onClose, onDraftRestore, editMode } = props;
+    if (isOpen && h.state.showFreshCardCheckout) {
+      const order = h.orderData();
+      return <PaymentModal isOpen onClose={onClose} orderTotal={order.total} allowTips={false}
+        onPaymentComplete={paymentData => onOrderComplete({ ...order, clientRequestId: 'fresh-card-checkout', paymentData })} />;
+    }
+    return (
     isOpen
       ? <><button data-testid="edit-address" onClick={props.onRepickDeliveryAddress}>edit address</button><button type="button" data-testid={editMode ? 'edit-complete' : 'menu-complete'} onClick={() => {
         if (editMode) {
@@ -489,6 +501,8 @@ vi.mock('../modals/SplitPaymentModal', () => ({
 
 import OrderDashboard from '../OrderDashboard';
 import FoodDashboard from '../dashboards/FoodDashboard';
+import { PaymentModal } from '../modals/PaymentModal';
+import { applyCardProviderSnapshot, cardProviderState, clearCardProviderMark } from '../../services/cardProviderMark';
 import {
   claimOrdinaryCollectionOwner,
   releaseOrdinaryOwnerBeforeSend,
@@ -597,6 +611,7 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
       checkoutDraft: null,
       returnedCustomer: null,
       menuProps: null,
+      showFreshCardCheckout: false,
       menuCreateId: undefined,
       menuSubmission: null,
       restoreContext: null,
@@ -625,6 +640,40 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+  });
+
+  it.each(['unknown', 'none'])('creates a fresh sale with one card payment and no provider reads with the %s mark', async mark => {
+    const { ecr, adminApi } = h.bridge;
+    const reads = [adminApi.fetchFromAdmin, ecr.getDefaultTerminal, ecr.getDeviceStatus, ecr.getDeviceAdmission, ecr.processPayment];
+    reads.forEach(read => read.mockImplementation(() => new Promise(() => {})));
+    h.state.orderId = 'fresh-card-order';
+    h.state.showFreshCardCheckout = true;
+    clearCardProviderMark();
+    if (mark === 'none') {
+      applyCardProviderSnapshot({ success: true, cardTerminal: {
+        organizationId: 'org-1', branchId: 'branch-1', terminalId: 'term-1',
+        admitted: false, fetchedAt: '2026-11-06T08:00:00Z',
+      } });
+    }
+    expect(cardProviderState()).toBe(mark);
+
+    try {
+      render(<OrderDashboard />);
+      fireEvent.click(screen.getByTestId('new-order'));
+      fireEvent.click(await screen.findByRole('button', { name: 'Card' }));
+      await waitFor(() => expect(h.store.createOrder).toHaveBeenCalledOnce());
+
+      expect(h.store.createOrder).toHaveBeenCalledWith(expect.objectContaining({
+        initialPayment: expect.objectContaining({ method: 'card', amount: 12.5 }),
+      }));
+      expect(h.native.recordPayment).not.toHaveBeenCalled();
+      reads.forEach(read => expect(read).not.toHaveBeenCalled());
+      expect(h.toast.error).not.toHaveBeenCalled();
+      expect(screen.queryByText(/checking payment terminal/i)).not.toBeInTheDocument();
+    } finally {
+      reads.forEach(read => read.mockReset());
+      clearCardProviderMark();
+    }
   });
 
   it.each([false, true])('keeps the current delivery verdict only for an unchanged destination (changed=%s)', async changed => {

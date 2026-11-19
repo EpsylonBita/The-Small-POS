@@ -1896,19 +1896,31 @@ fn refuse_unadmitted_device(db: &db::DbState, device_id: &str) -> Result<Option<
 pub async fn ecr_get_device_admission(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let refresh = arg0
         .as_ref()
         .and_then(|options| options.get("refresh"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if refresh {
-        if let Err(error) = device_admission::refresh(&db).await {
-            tracing::warn!(error = %error, "ECR device admission refresh failed");
+    let refreshed = if refresh {
+        match device_admission::refresh(&db).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(error = %error, "ECR device admission refresh failed");
+                false
+            }
         }
-    }
+    } else {
+        false
+    };
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    Ok(device_admission::snapshot(&conn))
+    let view = device_admission::snapshot(&conn);
+    drop(conn);
+    if refreshed {
+        device_admission::publish_snapshot(&app, &view);
+    }
+    Ok(view)
 }
 
 #[cfg(test)]

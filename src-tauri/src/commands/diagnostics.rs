@@ -138,6 +138,9 @@ pub fn start_remote_incident_reporter(
 ) {
     let cadence = Duration::from_secs(interval_secs.clamp(30, 60));
     crate::order_notice_auto::start(db.clone(), sync_state.clone(), cancel.clone());
+    if let Ok(root) = app.path().app_data_dir() {
+        crate::diagnostics_outbox::start(app.clone(), root, db.db_path.clone(), cancel.clone());
+    }
     tauri::async_runtime::spawn(async move {
         info!(
             interval_secs = cadence.as_secs(),
@@ -791,43 +794,28 @@ pub async fn diagnostics_export(
 #[tauri::command]
 pub async fn diagnostics_send_remote_incident(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
-    sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    use tauri::Manager;
-    let health = build_system_health_payload(&db, &sync_state).await?;
-    let candidate = incident_reporting::manual_incident_candidate(&health);
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {e}"))?;
-    let zip_path = diagnostics::export_diagnostics_bundle(
-        &db,
-        &data_dir,
-        diagnostics::DiagnosticsExportOptions::default(),
-        parse_diagnostics_export_health_view(&arg0),
-    )?;
-    let response = incident_reporting::send_candidate_report_with_bundle(
-        &db,
-        &candidate,
-        &health,
-        Some(&zip_path),
-    )
-    .await?;
+    run_blocking_command("diagnostics_send_remote_incident", move || {
+        let db = app.state::<db::DbState>();
+        let root = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        crate::diagnostics_outbox::save_report(
+            &db,
+            &root,
+            parse_diagnostics_export_health_view(&arg0),
+        )
+    })
+    .await
+}
 
-    Ok(serde_json::json!({
-        "success": true,
-        "candidate": candidate,
-        "incidentId": response.get("incidentId").and_then(Value::as_str),
-        "status": response.get("status").and_then(Value::as_str).unwrap_or("open"),
-        "deduped": response.get("deduped").and_then(Value::as_bool).unwrap_or(false),
-        "alertSent": response.get("alertSent").and_then(Value::as_bool).unwrap_or(false),
-        "alertStatus": response.get("alertStatus"),
-        "bundleStored": response.get("bundleStored"),
-        "path": zip_path,
-        "lastSentAt": Utc::now().to_rfc3339(),
-    }))
+#[tauri::command]
+pub async fn diagnostics_list_reports(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("diagnostics_list_reports", move || {
+        let db = app.state::<db::DbState>();
+        let root = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        crate::diagnostics_outbox::list_reports(&root, &db.db_path)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -941,21 +929,10 @@ pub async fn recovery_z_gate_set_aside(
             &auth,
         )
         .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
-        let session = crate::auth::get_session_json(&auth);
         let staff_id = approver
             .manager_staff_id
-            .clone()
-            .or_else(|| {
-                ["databaseStaffId", "staffId"].iter().find_map(|key| {
-                    session
-                        .get(*key)
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(ToString::to_string)
-                })
-            })
-            .ok_or_else(|| "The approving staff member is unknown".to_string())?;
+            .ok_or_else(|| "AUTH_PERMISSION_REQUIRED".to_string())?;
+        let _snapshot = crate::recovery::create_health_pre_action_snapshot(&db)?;
         let conn = db
             .lock_traced("z_gate_set_aside")
             .map_err(|e| e.to_string())?;

@@ -70,8 +70,9 @@ describe('SatelliteHandoverReleasePanel', () => {
     });
   });
 
-  it('a PIN without the right releases nothing and clears the PIN', async () => {
-    mock.invoke.mockImplementation(recovery(() => { throw new Error('UNAUTHORIZED: Invalid PIN'); }, [refused]));
+  it.each([new Error('UNAUTHORIZED: Invalid PIN'), { code: 'AUTH_PIN_WRONG' }])(
+    'a PIN refusal releases nothing and clears the PIN (%s)', async refusal => {
+    mock.invoke.mockImplementation(recovery(() => { throw refusal; }, [refused]));
     const onReleased = vi.fn();
     render(<SatelliteHandoverReleasePanel cashierShiftId="cashier-shift" onReleased={onReleased} />);
     fireEvent.change(await screen.findByTestId('satellite-handover-release-pin-handover-refused'), { target: { value: '1357' } });

@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
-import { useOrderNotices, refreshOrderNotices, openOrderNotice } from '../../services/OrderSyncNoticeStore';
-import { acquireRecoveryAction, buildRecoveryActionRequest, executeHealthRecoveryAction } from '../../services/support/SupportRemedyRunner';
+import { useOrderNotices, refreshOrderNotices, openOrderNotice, readOrderNoticeStatus } from '../../services/OrderSyncNoticeStore';
+import { acquireRecoveryAction, buildRecoveryActionRequest, executeHealthRecoveryAction, orderRecoveryFeedback, recoveryFailureCode } from '../../services/support/SupportRemedyRunner';
 import { customerCorrectionIssue } from './sync-recovery-issues';
 import { getBridge } from '../../../lib';
 import { readOrderNoticeRemedy } from '../../services/OrderNoticeRemedy';
@@ -69,22 +69,27 @@ export function OrderSyncNotice({ orderId }: { orderId: string }) {
       const action = target?.action ?? issue.actions.find(action => action.id === actionId)!;
       attemptId = await getBridge().invoke('order_notice_employee_attempt', { queueId: notice.queueId });
       const result = await executeHealthRecoveryAction({ request: buildRecoveryActionRequest(issue, action), action,
-        stale: () => status !== 'fresh', authorize: runWithPrivilegedConfirmation, t,
+        stale: () => readOrderNoticeStatus(orderId) !== 'fresh', authorize: runWithPrivilegedConfirmation, t,
+        onPinRefused: async () => {
+          if (attemptId) {
+            await getBridge().invoke('order_notice_employee_attempt', { attemptId, outcome: 'failed', code: 'AUTH_PIN_WRONG' }).catch(() => {});
+          }
+        },
         beforeExecute: target ? async () => {
           const current = await readOrderNoticeRemedy(notice, t);
-          if (current?.action.recipeId !== action.recipeId || current?.action.recipeVersion !== action.recipeVersion) { throw new Error('REMEDY_NOT_APPLICABLE'); }
+          if (current?.action.recipeId !== action.recipeId || current?.action.recipeVersion !== action.recipeVersion) { throw new Error('NOTICE_REMEDY_CHANGED'); }
         } : undefined });
       await refreshOrderNotices([orderId]);
       const fresh = await getBridge().invoke('order_sync_notices', { orderIds: [orderId] }) as Notice[];
       const remaining = fresh.find(row => row.queueId === notice.queueId || row.kind === notice.kind);
       const failed = result.success !== true || result.verification?.status === 'failed' || (notice.kind !== 'customer_correction_refused' && remaining?.state === 'refused');
       const outcome = failed ? 'failed' : remaining ? 'pending' : 'resolved';
-      await getBridge().invoke('order_notice_employee_attempt', { attemptId, outcome });
-      setFeedback(failed ? notice.kind === 'customer_correction_refused' ? 'failed' : 'notSolved' : outcome === 'pending' ? 'pending' : null);
+      await getBridge().invoke('order_notice_employee_attempt', { attemptId, outcome, ...(failed ? { code: 'REMEDY_VERIFICATION_FAILED' } : {}) });
+      setFeedback(failed ? notice.kind === 'customer_correction_refused' ? 'callSupport' : 'notSolved' : outcome === 'pending' ? 'pending' : null);
     } catch (error) {
-      const code = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+      const code = recoveryFailureCode(error);
       if (attemptId) { await getBridge().invoke('order_notice_employee_attempt', { attemptId, outcome: 'failed', code }).catch(() => {}); }
-      setFeedback(notice.kind !== 'customer_correction_refused' ? 'notSolved' : code.includes('CONCURRENT_OPERATION') ? 'busy' : code.includes('EDIT_CANONICAL_PREFLIGHT_REQUIRED') ? 'offline' : code.includes('CHANGED') || code.includes('CONFLICT') || code.includes('SCOPE') ? 'changed' : 'failed');
+      setFeedback(notice.kind === 'customer_correction_refused' || code.startsWith('AUTH_') ? orderRecoveryFeedback(code) : 'notSolved');
     }
     finally { await refreshOrderNotices([orderId]); setBusy(false); release(); }
   };
@@ -107,7 +112,9 @@ export function OrderSyncNotice({ orderId }: { orderId: string }) {
     {actionable && <p>{t('orderSyncNotice.next', { defaultValue: 'Press the button to save it again.' })}</p>}
     {(!online || first?.unavailableReason === 'offline') && first && <p>{t('orderSyncNotice.offline', { defaultValue: 'There is no internet connection. Try again when it is back.' })}</p>}
     {first?.unavailableReason === 'busy' && <p>{t('orderSyncNotice.wait', { defaultValue: 'Finish the sale, the payment or the closing first, then try again.' })}</p>}
-    {feedback && !(feedback === 'pending' && notices.some(notice => notice.state === 'pending' || notice.failedAgain)) && <p role="status">{t(`orderSyncNotice.${feedback}`, { defaultValue: 'The change was not saved. Try again shortly. If it keeps happening, tell the manager.' })}</p>}
+    {feedback && !(feedback === 'pending' && notices.some(notice => notice.state === 'pending' || notice.failedAgain)) && <p role="status">{t(feedback === 'wrongPin' ? 'auth.login.error'
+      : feedback === 'grantExpired' || feedback === 'permissionRequired'
+        ? `recovery.actionStatus.${feedback}` : `orderSyncNotice.${feedback}`, { defaultValue: 'It did not work. Call support.' })}</p>}
     {first && first.state !== 'pending' && !actionable && !remedy && <p>{matching ? t('orderSyncNotice.busy', { defaultValue: 'Checking…' }) : t('orderSyncNotice.noRemedy', { defaultValue: 'This cannot be solved from here. Tell the manager.' })}</p>}
     {first && first.state !== 'pending' && (actionable || remedy) && <div className="flex flex-wrap items-center gap-3">
       <button type="button" disabled={unavailable} onClick={() => void run(first, actionable ? 'resendOrderCustomerCorrection' : remedy!.action.id)}

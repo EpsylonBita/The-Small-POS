@@ -79,7 +79,7 @@ fn cancelling_an_owing_order_needs_a_reason_and_the_money_approval() {
         "no reason, no cancellation"
     );
     let refused = authorize(&td, &auth, "The customer left").expect_err("no session");
-    assert_eq!(error_code(&refused), "UNAUTHORIZED");
+    assert_eq!(error_code(&refused), "AUTH_SESSION_REQUIRED");
     crate::auth::login(Some(json!({ "pin": "4321" })), &td.state, &auth).expect("staff login");
     let stale =
         authorize(&td, &auth, "The customer left").expect_err("a session is not the approval");

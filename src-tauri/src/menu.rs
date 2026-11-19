@@ -5,7 +5,7 @@
 //! that fetches fresh data from the admin dashboard API.
 
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -213,6 +213,50 @@ fn read_cache_rows(conn: &Connection, cache_key: &str) -> Vec<Value> {
         },
         None => vec![],
     }
+}
+
+/// A destructive order check must distinguish an unreadable cache from an empty one.
+pub(crate) fn recovery_menu_ids(
+    conn: &Connection,
+) -> Result<std::collections::HashSet<String>, String> {
+    let branch = storage::get_credential("branch_id")
+        .or_else(|| crate::db::get_setting(conn, "terminal", "branch_id"));
+    let scope = current_menu_scope_without_lock(conn, branch.as_deref());
+    let identity: Option<String> = conn
+        .query_row(
+            "SELECT data FROM menu_cache WHERE cache_key = ?1",
+            [MENU_IDENTITY_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(raw) = identity {
+        let identity: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        if identity["scope"] != scope {
+            return Err("INVALID_ORDER_MENU_SCOPE_UNAVAILABLE".into());
+        }
+    }
+    let mut ids = std::collections::HashSet::new();
+    for key in ["subcategories", "ingredients", "combos"] {
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT data FROM menu_cache WHERE cache_key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(raw) = raw {
+            let values: Vec<Value> = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            ids.extend(
+                values
+                    .iter()
+                    .filter_map(|value| value["id"].as_str())
+                    .map(str::to_owned),
+            );
+        }
+    }
+    Ok(ids)
 }
 
 /// Get cached categories.

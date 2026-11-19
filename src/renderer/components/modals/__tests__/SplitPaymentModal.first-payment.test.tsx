@@ -1,5 +1,7 @@
+import { applyCardProviderSnapshot, clearCardProviderMark } from '../../../services/cardProviderMark';
+import { seedCardProviderMark } from '../../../services/__tests__/cardProviderMark.fixture';
 import React from 'react';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Founder 01/11/2026 («Τίποτα»): a counter order that starts with Split is saved only with its first payment.
@@ -31,6 +33,8 @@ const mocks = vi.hoisted(() => {
       adminApi: { fetchFromAdmin: vi.fn() },
       ecr: {
         fiscalPrint: vi.fn(),
+        getDeviceAdmission: vi.fn(),
+        getDevices: vi.fn(),
         getDefaultTerminal: vi.fn(),
         getDeviceStatus: vi.fn(),
         processPayment: vi.fn(),
@@ -40,6 +44,18 @@ const mocks = vi.hoisted(() => {
   };
 });
 
+vi.mock('../../ui/pos-glass-components', () => ({
+  LiquidGlassModal: ({ isOpen, children, footer }: { isOpen: boolean; children: React.ReactNode; footer: React.ReactNode }) => isOpen ? <div>{children}{footer}</div> : null,
+}));
+vi.mock('framer-motion', () => ({
+  motion: {
+    div: ({ initial, animate, exit, transition, layout, ...props }: any) => <div {...props} />,
+    p: ({ initial, animate, exit, transition, layout, ...props }: any) => <p {...props} />,
+  },
+  useIsPresent: () => true,
+  useReducedMotion: () => true,
+  AnimatePresence: ({ children }: React.PropsWithChildren) => children,
+}));
 vi.mock('react-hot-toast', () => ({ default: mocks.toast, toast: mocks.toast }));
 vi.mock('../../../contexts/i18n-context', () => ({
   useI18n: () => ({ language: 'en', setLanguage: vi.fn(), t: (_key: string, fallback?: string) => fallback ?? 'Close' }),
@@ -79,6 +95,8 @@ describe('SplitPaymentModal on a cart with no order yet', () => {
   let createOrder: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    updateTerminalCredentialCache({ organizationId: 'fixture-org', branchId: 'fixture-branch', terminalId: 'fixture-till' });
+    seedCardProviderMark();
     vi.clearAllMocks();
     mocks.askForPaymentPrint.mockResolvedValue(false);
     mocks.bridge.payments.listUnsavedPayments.mockResolvedValue({ success: true, payments: [] });
@@ -99,6 +117,8 @@ describe('SplitPaymentModal on a cart with no order yet', () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     clearTerminalCredentialCache();
   });
 
@@ -169,10 +189,12 @@ describe('SplitPaymentModal on a cart with no order yet', () => {
 
   // Founder 01/11/2026: without a connected card plugin (every store today) Card is a plain record, like cash. The
   // till never calls a terminal or waits for one, and the first card portion creates the order with that card.
-  it('without a connected card plugin, a first card portion is a plain record: no terminal, no wait, the order is created with it', async () => {
-    // Native answers no admitted card terminal (no payment plugin connected), and the server says no provider.
+  it.each(['online', 'offline', 'no snapshot', 'stale payment_terminal row', 'held lock', 'cached no provider'])('without a connected card plugin, the first portion records with no reads: %s', async fixture => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(fixture !== 'offline');
     mocks.bridge.ecr.getDefaultTerminal.mockResolvedValue({ success: true, device: null });
     updateTerminalCredentialCache({ organizationId: 'org-split', branchId: 'branch-split', terminalId: 'term-split' });
+    clearCardProviderMark();
+    if (fixture === 'cached no provider') applyCardProviderSnapshot({ success: true, cardTerminal: { admitted: false, fetchedAt: '2026-11-06T08:00:00.000Z', organizationId: 'org-split', branchId: 'branch-split', terminalId: 'term-split' } });
     mocks.bridge.adminApi.fetchFromAdmin.mockResolvedValue({
       success: true, status: 200, meta: { source: 'remote' },
       data: { success: true, admission_version: 1, organization_id: 'org-split', branch_id: 'branch-split', terminal_id: 'term-split', provider_connected: false },
@@ -180,30 +202,38 @@ describe('SplitPaymentModal on a cart with no order yet', () => {
     mocks.bridge.payments.getOrderPayments.mockImplementation(async (orderId: string) => (orderId === NEW_ORDER
       ? [{ id: 'pay-card-first', orderId, method: 'card', amount: 25, status: 'completed' }]
       : []));
+    const reads = [mocks.bridge.ecr.getDeviceAdmission, mocks.bridge.ecr.getDevices, mocks.bridge.ecr.getDefaultTerminal, mocks.bridge.ecr.getDeviceStatus, mocks.bridge.ecr.processPayment, mocks.bridge.adminApi.fetchFromAdmin];
+    reads.forEach(read => read.mockImplementation(() => new Promise(() => {})));
     const onSplitComplete = vi.fn();
     renderDraft(onSplitComplete);
     await screen.findByRole('textbox', { name: 'Person 1' });
     await waitFor(() => expect(confirmButton()).not.toBeDisabled());
-    fireEvent.click(within(personCard(1)).getByRole('button', { name: /card/i }));
-    await waitFor(() => expect(within(personCard(1)).getByRole('status')).toHaveTextContent('recorded as a manual card payment'));
+    vi.useFakeTimers();
+    await act(async () => { fireEvent.click(within(personCard(1)).getByRole('button', { name: /card/i })); });
+    expect(within(personCard(1)).getByRole('status')).toHaveTextContent('recorded as a manual card payment');
+    expect(vi.getTimerCount()).toBe(0);
     expect(createOrder).not.toHaveBeenCalled();
 
-    await waitFor(() => expect(confirmButton()).not.toBeDisabled());
-    fireEvent.click(confirmButton());
-    await waitFor(() => expect(onSplitComplete).toHaveBeenCalledTimes(1));
+    expect(confirmButton()).not.toBeDisabled();
+    await act(async () => { fireEvent.click(confirmButton()); });
+    expect(onSplitComplete).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
     // The order and its card payment are created together at the first portion; the second portion records on it.
     expect(createOrder).toHaveBeenCalledTimes(1);
     expect(createOrder).toHaveBeenCalledWith(expect.objectContaining({
       method: 'card', amount: 25, paymentOrigin: 'manual',
       // The admission travels with the card for the admin's review (founder 01/11/2026).
-      metadata: { admission_basis: 'live', admission_checked_at: expect.any(String) },
     }));
+    expect(createOrder.mock.calls[0][0].metadata).toEqual(fixture === 'cached no provider'
+      ? { admission_basis: 'cached', admission_checked_at: '2026-11-06T08:00:00.000Z' } : undefined);
     expect(mocks.bridge.payments.recordPayment).toHaveBeenCalledTimes(1);
     expect(mocks.bridge.payments.recordPayment).toHaveBeenCalledWith(expect.objectContaining({ orderId: NEW_ORDER, method: 'cash', amount: 25 }));
     expect(mocks.bridge.payments.recordPayment.mock.calls[0][0].metadata).toBeUndefined();
     // No terminal anywhere: no status read, no SALE, no checkout SALE readback holding the order.
     expect(mocks.bridge.ecr.getDeviceStatus).not.toHaveBeenCalled();
     expect(mocks.bridge.ecr.processPayment).not.toHaveBeenCalled();
+    reads.forEach(read => expect(read).not.toHaveBeenCalled());
+    expect(mocks.toast.error).not.toHaveBeenCalled();
     expect(onSplitComplete).toHaveBeenCalledWith(expect.objectContaining({ paymentIds: ['pay-card-first', 'pay-1'], paymentStatus: 'paid' }));
   });
 

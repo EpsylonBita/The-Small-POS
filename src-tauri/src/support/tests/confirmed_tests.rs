@@ -345,6 +345,11 @@ fn action(
     store: &SupportDb,
     c: &contracts::Command,
 ) -> Result<Value, String> {
+    // None of these tests is about the 250 ms action budget, and on a loaded
+    // machine any of them could exceed it and end as OUTCOME_UNKNOWN (three
+    // different tests did on 18-19/11/2026). The outcome-unknown result itself is
+    // asserted in `dispatch.rs` and `executor_state_tests.rs`.
+    let _clock = crate::support::clock::freeze_deadline_clock();
     let gate = critical_op::global();
     let reader = gate
         .try_begin_support(false, None)
@@ -759,6 +764,9 @@ fn support_confirmed_sql_receipt_params_expiry_and_consumption_are_bound() {
 fn support_confirmed_counted_drawer_uses_exact_cash_and_retains_close_sync() {
     let _keyring = crate::tests::fake_keyring::install_empty();
     let _gate = critical_op::install_test_gate();
+    // The 250 ms action budget is not what this test is about: a loaded machine
+    // turned its result into OUTCOME_UNKNOWN (19/11/2026). Freeze the deadline clock.
+    let _clock = crate::support::clock::freeze_deadline_clock();
     let db = fixture();
     let store = SupportDb::open(db.state.db_path.parent().unwrap()).unwrap();
     const DRAWER: &str = "b0000000-0000-4000-a000-000000000002";
@@ -1015,6 +1023,8 @@ fn support_confirmed_snapshot_undo_stages_through_owner_and_end_revokes_startup_
 fn support_confirmed_sql_operational_delete_and_implicit_identity_insert_refusal() {
     let _keyring = crate::tests::fake_keyring::install_empty();
     let _gate = critical_op::install_test_gate();
+    // Same reason as the counted-drawer test: the action budget is not under test here.
+    let _clock = crate::support::clock::freeze_deadline_clock();
     let db = fixture();
     let store = SupportDb::open(db.state.db_path.parent().unwrap()).unwrap();
     let gate = critical_op::global();
@@ -1107,6 +1117,7 @@ fn support_confirmed_return_refuses_a_row_a_z_already_lists_and_leaves_it_set_as
 
 #[test]
 fn support_confirmed_known_operational_retry_and_shift_queue_sql_use_local_scope() {
+    let _clock = crate::support::clock::freeze_deadline_clock();
     let _keyring = crate::tests::fake_keyring::install_empty();
     let _gate = critical_op::install_test_gate();
     let db = fixture();

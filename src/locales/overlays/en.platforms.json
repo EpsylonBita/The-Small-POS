@@ -26,6 +26,30 @@
       "lastKnown": "Last known: {{status}}",
       "closedUntil": "Closed until {{time}}",
       "closureStatus": "efood status: {{status}}",
+      "box": {
+        "detailUnavailable": "Could not refresh BOX. Try again.",
+        "throttled": "BOX is not answering. Check the shop in BOX Merchant.",
+        "customerHoursHelp": "Customers only see the shop as open when it is open here and within BOX opening hours.",
+        "hours": {
+          "title": "BOX weekly hours",
+          "explain": "Saving replaces all seven days in BOX. Enter hours for each day or mark that no hours start that day.",
+          "lastSent": "Last schedule sent from the POS · {{time}}. Changes made in BOX Merchant are not shown here.",
+          "noHistory": "There are no hours on record from this POS system. BOX does not return its current schedule.",
+          "noStart": "No hours start this day",
+          "nextDay": "Next day",
+          "invalid": "Use HH:mm and check for overlapping hours, including the next day. Use 00:00–24:00 for a full day.",
+          "failed": "Could not confirm the schedule change. Check the hours in BOX Merchant.",
+          "conflict": "Another register saved a newer schedule. Load that copy before editing again.",
+          "save": "Send week to BOX"
+        },
+        "autoOpen": "Automatic BOX opening",
+        "autoHelp": "Opens at the first cashier check-in and closes with the Z report.",
+        "statusHelp": "BOX does not report live availability.",
+        "lastAction": "Last accepted POS request · {{action}}, {{time}}",
+        "automationUnconfirmed": "Could not confirm the setting was saved. Refresh to check.",
+        "requestUnconfirmed": "Could not confirm the request. Check the shop in BOX Merchant.",
+        "refused": "BOX rejected the request."
+      },
       "status": {
         "open": "Open",
         "closed": "Closed",

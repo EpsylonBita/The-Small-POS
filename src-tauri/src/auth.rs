@@ -86,7 +86,10 @@ impl StaffSession {
     /// and "expired" by the second within the same invocation. The
     /// cached `now` removes that unlikely but possible race.
     fn is_expired(&self) -> bool {
-        let now = Utc::now();
+        self.is_expired_at(Utc::now())
+    }
+
+    fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
         if now >= self.expires_at {
             return true;
         }
@@ -121,6 +124,7 @@ impl StaffSession {
             "branchId": branch_id,
             "terminalId": terminal_id,
             "sessionId": self.session_id,
+            "expiresAt": self.expires_at.to_rfc3339(),
         })
     }
 }
@@ -273,6 +277,30 @@ pub struct PrivilegedActionError {
 }
 
 impl PrivilegedActionError {
+    fn refusal(scope: PrivilegedActionScope, code: &'static str, reason: &str) -> Self {
+        let mut error = Self::unauthorized(Some(scope), reason);
+        error.code = code;
+        error
+    }
+
+    fn session_required(scope: PrivilegedActionScope) -> Self {
+        Self::refusal(scope, "AUTH_SESSION_REQUIRED", "Active session required")
+    }
+
+    fn session_expired(scope: PrivilegedActionScope) -> Self {
+        let mut error = Self::reauth_required(scope, "Till sign-in expired");
+        error.code = "AUTH_SESSION_EXPIRED";
+        error
+    }
+
+    fn shift_required(scope: PrivilegedActionScope) -> Self {
+        Self::refusal(
+            scope,
+            "AUTH_SHIFT_REQUIRED",
+            "Active cashier or manager shift required on this terminal",
+        )
+    }
+
     fn unauthorized(scope: Option<PrivilegedActionScope>, reason: impl Into<String>) -> Self {
         Self {
             code: "UNAUTHORIZED",
@@ -1693,13 +1721,15 @@ fn create_session(auth: &AuthState, role: &str, staff_id: &str) -> Value {
 
 /// Get the current active session (if it exists and is not expired).
 fn get_current_session(auth: &AuthState) -> Option<StaffSession> {
+    current_session_for_pin(auth).filter(|session| !session.is_expired())
+}
+
+/// Expired sessions are proof of the previous identity only. The terminal
+/// role PIN must be verified before one can be made active again.
+fn current_session_for_pin(auth: &AuthState) -> Option<StaffSession> {
     let current_id = auth.current_session_id.lock().ok()?.clone()?;
     let sessions = auth.sessions.lock().ok()?;
-    let session = sessions.get(&current_id)?.clone();
-    if session.is_expired() {
-        return None;
-    }
-    Some(session)
+    sessions.get(&current_id).cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -2236,18 +2266,7 @@ pub fn get_session_json(auth: &AuthState) -> Value {
 pub fn validate_session(auth: &AuthState) -> Value {
     match get_current_session(auth) {
         Some(_) => serde_json::json!({ "valid": true }),
-        None => {
-            // Clean up expired session
-            if let Ok(mut current) = auth.current_session_id.lock() {
-                if let Some(sid) = current.take() {
-                    if let Ok(mut sessions) = auth.sessions.lock() {
-                        sessions.remove(&sid);
-                    }
-                    clear_privileged_grants_for_session(auth, &sid);
-                }
-            }
-            serde_json::json!({ "valid": false, "reason": "Session expired or not found" })
-        }
+        None => serde_json::json!({ "valid": false, "reason": "Session expired or not found" }),
     }
 }
 
@@ -2344,8 +2363,12 @@ pub fn track_activity(auth: &AuthState) {
         let Ok(mut sessions) = auth.sessions.lock() else {
             return;
         };
-        if let Some(session) = sessions.get_mut(&sid) {
-            session.last_activity = Utc::now();
+        let now = Utc::now();
+        if let Some(session) = sessions
+            .get_mut(&sid)
+            .filter(|session| !session.is_expired_at(now))
+        {
+            session.last_activity = now;
         }
     }
 }
@@ -2364,6 +2387,36 @@ fn authorize_privileged_action_at(
     authorize_privileged_action_with_role_at(scope, auth, now, || {
         current_terminal_has_cash_drawer_role(db)
     })
+}
+
+/// Preserve the staff-facing distinction between a first confirmation and an
+/// expired confirmation while enforcing the same drawer authorization.
+pub(crate) fn authorize_health_drawer_action(
+    db: &db::DbState,
+    auth: &AuthState,
+) -> Result<(), PrivilegedActionError> {
+    let scope = PrivilegedActionScope::CashDrawerControl;
+    let now = Utc::now();
+    let expired = current_session_for_pin(auth).is_some_and(|session| {
+        auth.privileged_grants.lock().ok().is_some_and(|grants| {
+            grants
+                .get(&grant_key(&session.session_id, scope))
+                .is_some_and(|expiry| *expiry <= now)
+        })
+    });
+    authorize_privileged_action_at(scope, db, auth, now)
+        .map(|_| ())
+        .map_err(|error| {
+            if error.code == "REAUTH_REQUIRED" && expired {
+                PrivilegedActionError::refusal(
+                    scope,
+                    "AUTH_GRANT_EXPIRED",
+                    "Fresh PIN confirmation required",
+                )
+            } else {
+                error
+            }
+        })
 }
 
 /// Support has already bound this non-secret identity to its live session.
@@ -2388,11 +2441,8 @@ fn authorize_privileged_action_with_role_at(
     now: DateTime<Utc>,
     cash_drawer_role: impl FnOnce() -> Result<bool, String>,
 ) -> Result<StaffSession, PrivilegedActionError> {
-    let Some(session) = get_current_session(auth) else {
-        return Err(PrivilegedActionError::unauthorized(
-            Some(scope),
-            "Active session required",
-        ));
+    let Some(session) = current_session_for_pin(auth) else {
+        return Err(PrivilegedActionError::session_required(scope));
     };
 
     if scope == PrivilegedActionScope::SystemControl && session.role != "admin" {
@@ -2406,10 +2456,7 @@ fn authorize_privileged_action_with_role_at(
         match cash_drawer_role() {
             Ok(true) => {}
             Ok(false) => {
-                return Err(PrivilegedActionError::unauthorized(
-                    Some(scope),
-                    "Active cashier or manager shift required on this terminal",
-                ));
+                return Err(PrivilegedActionError::shift_required(scope));
             }
             Err(error) => {
                 return Err(PrivilegedActionError::unauthorized(Some(scope), error));
@@ -2417,6 +2464,9 @@ fn authorize_privileged_action_with_role_at(
         }
     }
 
+    if session.is_expired_at(now) {
+        return Err(PrivilegedActionError::session_expired(scope));
+    }
     if !has_fresh_privileged_grant_at(auth, &session.session_id, scope, now) {
         return Err(PrivilegedActionError::reauth_required(
             scope,
@@ -2454,12 +2504,11 @@ fn authorize_money_action_at(
             });
         }
     }
-    let Some(session) = get_current_session(auth) else {
-        return Err(PrivilegedActionError::unauthorized(
-            Some(scope),
-            "Active session required",
-        ));
-    };
+    let session = current_session_for_pin(auth)
+        .ok_or_else(|| PrivilegedActionError::session_required(scope))?;
+    if session.is_expired_at(now) {
+        return Err(PrivilegedActionError::session_expired(scope));
+    }
     match current_terminal_has_cash_drawer_role(db) {
         // A cashier or manager is on shift here: the session and a fresh PIN,
         // as before.
@@ -2567,12 +2616,11 @@ fn authorize_permitted_money_action_at(
     now: DateTime<Utc>,
 ) -> Result<MoneyApprover, PrivilegedActionError> {
     let scope = PrivilegedActionScope::CashDrawerControl;
-    let Some(session) = get_current_session(auth) else {
-        return Err(PrivilegedActionError::unauthorized(
-            Some(scope),
-            "Active session required",
-        ));
-    };
+    let session = current_session_for_pin(auth)
+        .ok_or_else(|| PrivilegedActionError::session_required(scope))?;
+    if session.is_expired_at(now) {
+        return Err(PrivilegedActionError::session_expired(scope));
+    }
     if let Some(grant) = take_manager_grant_at(auth, &session.session_id, approval, now) {
         return Ok(MoneyApprover {
             manager_staff_id: Some(grant.approver_staff_id),
@@ -2630,7 +2678,7 @@ fn confirm_privileged_action_at(
         .ok_or_else(|| PrivilegedActionError::unauthorized(None, "Invalid privileged scope"))?;
 
     let session = match scope {
-        PrivilegedActionScope::SystemControl => match get_current_session(auth) {
+        PrivilegedActionScope::SystemControl => match current_session_for_pin(auth) {
             Some(session) if session.role == "admin" => session,
             Some(_) => {
                 return Err(PrivilegedActionError::unauthorized(
@@ -2638,12 +2686,7 @@ fn confirm_privileged_action_at(
                     "Active admin session required",
                 ));
             }
-            None => {
-                return Err(PrivilegedActionError::unauthorized(
-                    Some(scope),
-                    "Active admin session required",
-                ));
-            }
+            None => return Err(PrivilegedActionError::session_required(scope)),
         },
         PrivilegedActionScope::CashDrawerControl => {
             // The approver of a cancellation is whoever's own PIN this is, so
@@ -2659,17 +2702,17 @@ fn confirm_privileged_action_at(
                     now,
                 );
             }
-            let Some(session) = get_current_session(auth) else {
-                return Err(PrivilegedActionError::unauthorized(
-                    Some(scope),
-                    "Active session required",
-                ));
+            let approval = extract_approval(&payload);
+            let Some(session) = current_session_for_pin(auth)
+                .filter(|session| approval.is_none() || !session.is_expired_at(now))
+            else {
+                return Err(PrivilegedActionError::session_required(scope));
             };
             match current_terminal_has_cash_drawer_role(db) {
                 // The till asked for an approver's own PIN although someone is
                 // on shift: they lack the right (setting a checkout aside,
                 // review 22/10/2026). Verify that staff member, not the session.
-                Ok(true) => match extract_approval(&payload) {
+                Ok(true) => match approval {
                     Some(approval) => {
                         return confirm_manager_approval_at(
                             &pin,
@@ -2685,11 +2728,8 @@ fn confirm_privileged_action_at(
                 Ok(false) => {
                     // Nobody is on shift here: a manager approves with their
                     // own PIN (fix review 30/09/2026).
-                    let Some(approval) = extract_approval(&payload) else {
-                        return Err(PrivilegedActionError::unauthorized(
-                            Some(scope),
-                            "Active cashier or manager shift required on this terminal",
-                        ));
+                    let Some(approval) = approval else {
+                        return Err(PrivilegedActionError::shift_required(scope));
                     };
                     return confirm_manager_approval_at(
                         &pin,
@@ -2707,15 +2747,54 @@ fn confirm_privileged_action_at(
         }
     };
 
-    let pin_ok = verify_privileged_pin_with_lockout(&pin, &session.role, db, auth)
-        .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
+    let pin_ok =
+        verify_privileged_pin_with_lockout(&pin, &session.role, db, auth).map_err(|error| {
+            if let Ok(lockout) = serde_json::from_str::<Value>(&error) {
+                if lockout["code"] == "AUTH_LOCKED_OUT" {
+                    let mut error = PrivilegedActionError::refusal(
+                        scope,
+                        "AUTH_LOCKED_OUT",
+                        "Too many failed PIN attempts",
+                    );
+                    error.minutes = lockout["minutes"].as_i64();
+                    return error;
+                }
+            }
+            PrivilegedActionError::unauthorized(Some(scope), error)
+        })?;
     if !pin_ok {
-        return Err(PrivilegedActionError::unauthorized(
-            Some(scope),
+        return Err(PrivilegedActionError::refusal(
+            scope,
+            "AUTH_PIN_WRONG",
             "Invalid PIN",
         ));
     }
 
+    // A logout or new login during bcrypt must win. Hold the current-session
+    // lock through renewal and grant publication, in logout's lock order.
+    let current = auth
+        .current_session_id
+        .lock()
+        .map_err(|_| PrivilegedActionError::session_required(scope))?;
+    if current.as_deref() != Some(session.session_id.as_str()) {
+        return Err(PrivilegedActionError::session_required(scope));
+    }
+    let mut sessions = auth
+        .sessions
+        .lock()
+        .map_err(|_| PrivilegedActionError::session_required(scope))?;
+    let session = sessions
+        .get_mut(&session.session_id)
+        .ok_or_else(|| PrivilegedActionError::session_required(scope))?;
+    let renewed_until = if session.is_expired_at(now) {
+        clear_privileged_grants_for_session(auth, &session.session_id);
+        session.login_time = now;
+        session.last_activity = now;
+        session.expires_at = now + Duration::hours(SESSION_MAX_DURATION_HOURS);
+        Some(session.expires_at.to_rfc3339())
+    } else {
+        None
+    };
     let expires_at = record_privileged_grant_at(auth, &session.session_id, scope, now)
         .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
 
@@ -2725,6 +2804,7 @@ fn confirm_privileged_action_at(
         "sessionId": session.session_id,
         "ttlSeconds": PRIVILEGED_ACTION_TTL_SECONDS,
         "expiresAt": expires_at.to_rfc3339(),
+        "sessionRenewedUntil": renewed_until,
     }))
 }
 
@@ -3256,7 +3336,7 @@ pub(crate) mod tests {
         login(Some(serde_json::json!({ "pin": "1234" })), db_state, auth).expect("admin login");
     }
 
-    fn login_as_staff(db_state: &db::DbState, auth: &AuthState) {
+    pub(crate) fn login_as_staff(db_state: &db::DbState, auth: &AuthState) {
         set_pin_hash(db_state, "staff_pin_hash", "4321");
         login(Some(serde_json::json!({ "pin": "4321" })), db_state, auth).expect("staff login");
     }
@@ -4454,7 +4534,7 @@ pub(crate) mod tests {
             authorize_support_cash_drawer(&db, &auth, "your-other-terminal")
                 .unwrap_err()
                 .code,
-            "UNAUTHORIZED"
+            "AUTH_SHIFT_REQUIRED"
         );
         record_privileged_grant_at(
             &auth,
@@ -4478,7 +4558,7 @@ pub(crate) mod tests {
             authorize_support_cash_drawer(&db, &auth, "your-terminal")
                 .unwrap_err()
                 .code,
-            "UNAUTHORIZED"
+            "AUTH_SHIFT_REQUIRED"
         );
     }
 
@@ -4521,7 +4601,7 @@ pub(crate) mod tests {
         )
         .expect_err("wrong pin should fail");
 
-        assert_eq!(error.code, "UNAUTHORIZED");
+        assert_eq!(error.code, "AUTH_PIN_WRONG");
         assert_eq!(error.scope, "system_control");
         assert_eq!(error.reason, "Invalid PIN");
     }
@@ -4790,9 +4870,101 @@ pub(crate) mod tests {
         )
         .expect_err("driver shift must not allow drawer control");
 
-        assert_eq!(error.code, "UNAUTHORIZED");
+        assert_eq!(error.code, "AUTH_SHIFT_REQUIRED");
         assert_eq!(error.scope, "cash_drawer_control");
         assert!(error.reason.contains("cashier or manager"));
+    }
+
+    #[test]
+    fn expired_privileged_sessions_require_the_same_role_pin_and_renew_in_place() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        for (scope, pin) in [
+            (PrivilegedActionScope::SystemControl, "1234"),
+            (PrivilegedActionScope::CashDrawerControl, "4321"),
+        ] {
+            let db = test_db_state();
+            let auth = AuthState::new();
+            set_terminal_id(&db, "terminal-cashier");
+            let confirm = |pin| {
+                confirm_privileged_action(
+                    Some(serde_json::json!({"pin":pin,"scope":scope.as_str()})),
+                    &db,
+                    &auth,
+                )
+            };
+            assert_eq!(confirm(pin).unwrap_err().code, "AUTH_SESSION_REQUIRED");
+            if scope == PrivilegedActionScope::SystemControl {
+                login_as_admin(&db, &auth);
+            } else {
+                login_as_staff(&db, &auth);
+                assert_eq!(confirm(pin).unwrap_err().code, "AUTH_SHIFT_REQUIRED");
+                insert_active_shift(&db, "terminal-cashier", "cashier");
+            }
+            let original = get_current_session(&auth).unwrap();
+            {
+                let mut sessions = auth.sessions.lock().unwrap();
+                let session = sessions.get_mut(&original.session_id).unwrap();
+                if scope == PrivilegedActionScope::SystemControl {
+                    session.expires_at = Utc::now() - Duration::seconds(1);
+                } else {
+                    session.last_activity = Utc::now() - Duration::minutes(31);
+                }
+            }
+            track_activity(&auth);
+            assert_eq!(validate_session(&auth)["valid"], false);
+            assert_eq!(
+                authorize_privileged_action(scope, &db, &auth)
+                    .unwrap_err()
+                    .code,
+                "AUTH_SESSION_EXPIRED"
+            );
+            assert_eq!(confirm("9999").unwrap_err().code, "AUTH_PIN_WRONG");
+            assert!(get_current_session(&auth).is_none());
+            assert_eq!(load_lockout_from_db(&db.conn.lock().unwrap()).attempts, 1);
+            let renewed = confirm(pin).unwrap();
+            assert!(renewed["sessionRenewedUntil"].is_string());
+            let active = get_current_session(&auth).unwrap();
+            assert_eq!(active.session_id, original.session_id);
+            assert_eq!(active.staff_id, original.staff_id);
+            assert_eq!(active.role, original.role);
+            assert_eq!(active.permissions, original.permissions);
+            assert_eq!(load_lockout_from_db(&db.conn.lock().unwrap()).attempts, 0);
+            assert_eq!(authorize_privileged_action(scope, &db, &auth), Ok(()));
+            logout(&auth);
+            assert_eq!(confirm(pin).unwrap_err().code, "AUTH_SESSION_REQUIRED");
+        }
+    }
+
+    #[test]
+    fn privileged_lockout_is_a_code_and_cannot_renew_the_session() {
+        let db = test_db_state();
+        let auth = AuthState::new();
+        login_as_admin(&db, &auth);
+        let sid = current_session_id(&auth);
+        auth.sessions
+            .lock()
+            .unwrap()
+            .get_mut(&sid)
+            .unwrap()
+            .expires_at = Utc::now();
+        let confirm = |pin| {
+            confirm_privileged_action(
+                Some(serde_json::json!({"pin":pin,"scope":"system_control"})),
+                &db,
+                &auth,
+            )
+        };
+        for _ in 0..MAX_FAILED_ATTEMPTS {
+            assert_eq!(confirm("9999").unwrap_err().code, "AUTH_PIN_WRONG");
+        }
+        let locked = confirm("1234").unwrap_err();
+        assert_eq!(locked.code, "AUTH_LOCKED_OUT");
+        assert!(locked.minutes.unwrap() > 0);
+        assert!(get_current_session(&auth).is_none());
+        assert_eq!(
+            load_lockout_from_db(&db.conn.lock().unwrap()).attempts,
+            MAX_FAILED_ATTEMPTS
+        );
     }
 
     #[test]

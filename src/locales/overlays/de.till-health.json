@@ -1,0 +1,338 @@
+{
+  "tillHealth": {
+    "title": "Kassenstatus",
+    "lastChecked": "Zuletzt geprüft um {{time}}",
+    "notChecked": "Die erste Prüfung steht aus",
+    "checkedServices": "Die Kasse um {{time}}",
+    "capacity": "Es warten immer mehr Änderungen. Öffnen Sie den Kassenstatus.",
+    "closeoutHint": "Schließen Sie den Tag nach Geschäftsschluss ab.",
+    "progress": "Fortschritt",
+    "states": {
+      "ok": {
+        "title": "Alles funktioniert normal",
+        "detail": "Sie können Bestellungen aufnehmen."
+      },
+      "noShift": {
+        "detail": "Starten Sie eine Schicht, um Bestellungen aufzunehmen."
+      },
+      "issue": {
+        "title": "Etwas braucht Ihre Aufmerksamkeit",
+        "detail": "Unten sehen Sie, was zu prüfen ist und was Sie tun können."
+      },
+      "working": {
+        "title": "Wird gerade gespeichert",
+        "detail": "Sie können weiterarbeiten, während die Kasse den Vorgang abschließt."
+      },
+      "pending": {
+        "title": "Bestätigung steht aus",
+        "detail": "Die Kasse prüft das Ergebnis noch. Sie können weiterarbeiten."
+      },
+      "solved": {
+        "title": "Behoben",
+        "detail": "Die Kasse hat das Ergebnis bestätigt."
+      },
+      "support": {
+        "title": "Unterstützung ist nötig",
+        "detail": "Unten sehen Sie, was betroffen ist. Bitten Sie The Small um Hilfe."
+      },
+      "offline": {
+        "title": "Die Kasse arbeitet ohne Internet",
+        "detail": "Bestellungen bleiben auf dieser Kasse und werden bei wiederhergestellter Verbindung gesendet."
+      },
+      "stale": {
+        "title": "Die Prüfung wurde nicht abgeschlossen",
+        "detail": "Die Angaben unten stammen von {{time}} Uhr."
+      },
+      "unavailable": {
+        "detail": "Die Kasse konnte nicht geprüft werden. Prüfen Sie sie gleich noch einmal."
+      },
+      "loading": {
+        "detail": "Die Kasse wird gerade geprüft."
+      }
+    },
+    "action": {
+      "recheck": "Erneut prüfen",
+      "saveAgain": "Erneut speichern",
+      "saveAddress": "Adresse erneut speichern",
+      "restorePrinter": "Letzte Druckereinstellung wiederherstellen",
+      "printer": "Druckereinstellungen öffnen",
+      "openPayment": "Zahlung öffnen",
+      "openConnection": "Verbindungseinstellungen öffnen",
+      "send": "Jetzt senden",
+      "signIn": "Erneut anmelden",
+      "askSupport": "Hilfe anfordern",
+      "supportDetails": "Angaben für den Support öffnen",
+      "noSafeAction": "Der Support muss das prüfen.",
+      "noLongerNeeded": "Die Änderung wird nicht mehr benötigt",
+      "keepDetails": "Angaben unverändert lassen",
+      "keepExplanation": "Die Bestellung behält die angezeigten Angaben und der Vorgang wird geschlossen.",
+      "offline": "Dafür ist eine Internetverbindung nötig.",
+      "sendFailed": "Die Änderungen konnten nicht gesendet werden.",
+      "sendChecked": "Die Versandprüfung ist abgeschlossen."
+    },
+    "phase": {
+      "working": "Wird gespeichert",
+      "pending": "Bestätigung steht aus",
+      "solved": "Behoben um {{time}}",
+      "failed": "Die Änderung konnte nicht abgeschlossen werden.",
+      "busy": "Die Kasse war mit einem anderen Vorgang beschäftigt. Tippen Sie gleich noch einmal.",
+      "signIn": "Ihre Anmeldung ist abgelaufen. Melden Sie sich erneut an.",
+      "shift": "An dieser Kasse muss eine Schicht der Kassenkraft oder Leitung laufen.",
+      "pin": "Die PIN war falsch.",
+      "permission": "Bitten Sie die Leitung, das zu prüfen.",
+      "grant": "Die Freigabe ist abgelaufen. Tippen Sie erneut zum Bestätigen.",
+      "parked": "Diese Änderung braucht Unterstützung.",
+      "checkingOld": "Aus der letzten erfolgreichen Prüfung",
+      "correctionWorking": "Die Kundendaten werden gespeichert",
+      "correctionPending": "Die Bestätigung der geänderten Kundendaten steht aus",
+      "correctionSaved": "Die Kundendaten wurden gespeichert",
+      "correctionKept": "Die Kundendaten blieben wie bisher"
+    },
+    "step": {
+      "save": "Speichern",
+      "confirm": "Bestätigung",
+      "done": "Behoben"
+    },
+    "subject": {
+      "orderNumber": "Bestellung Nr. {{number}}",
+      "order": "Bestellung",
+      "till": "Kasse",
+      "expense": "Ausgabe",
+      "staffPayment": "Personalauszahlung",
+      "driverPayment": "Fahrerauszahlung",
+      "payment": "Zahlung",
+      "printer": "Drucker",
+      "closeout": "Tagesabschluss (Z)"
+    },
+    "orderType": {
+      "delivery": "Lieferung",
+      "pickup": "Abholung",
+      "dine_in": "Vor Ort"
+    },
+    "services": {
+      "title": "Die Kasse jetzt",
+      "orders": "Bestellungen",
+      "internet": "Internet",
+      "sync": "Übermittlung ans Büro",
+      "printer": "Drucker",
+      "closeout": "Tagesabschluss (Z)",
+      "support": "Support"
+    },
+    "status": {
+      "working": "In Betrieb",
+      "limited": "Eingeschränkt",
+      "blocked": "Prüfung nötig",
+      "start_shift": "Schicht nötig",
+      "connected": "Verbunden",
+      "offline": "Ohne Verbindung",
+      "unknown": "Unbestätigt",
+      "healthy": "Alles gesendet",
+      "waiting": "Wartet auf Versand",
+      "stuck": "Prüfung nötig",
+      "failed": "Nicht abgeschlossen",
+      "ready": "Bereit",
+      "attention": "Prüfung nötig",
+      "not_configured": "Nicht eingerichtet",
+      "via_main_terminal": "An der Hauptkasse",
+      "not_needed": "Nicht nötig",
+      "notified": "Bericht angekommen",
+      "not_sent": "Kein Bericht gesendet",
+      "failed_to_notify": "Zustellung unbestätigt",
+      "open": "Offen",
+      "openSince": "Offen seit {{time}}",
+      "overdue": "Noch offen",
+      "submitted": "Bestätigung steht aus",
+      "unavailable": "Nicht verfügbar",
+      "not_checked": "Prüfung beim Tagesabschluss",
+      "not_applicable": "An der Hauptkasse"
+    },
+    "help": {
+      "title": "Brauchen Sie Hilfe?",
+      "available": "The Small kann sich mit dieser Kasse verbinden. Sie sehen einen Code, den Sie weitergeben.",
+      "unavailable": "Die Fernhilfe konnte nicht starten. Bitten Sie die Leitung, einen Besuch vom Support zu vereinbaren. Ein Bericht kann weiterhin gespeichert werden.",
+      "offline": "The Small kann sich verbinden, sobald das Internet wieder da ist. Einen Bericht können Sie jetzt speichern.",
+      "permission": "Bitten Sie die Leitung, eine Verbindung anzufordern. Sie können weiterhin einen Bericht erstellen."
+    },
+    "support": {
+      "title": "Für den Support",
+      "hint": "Nur auf Bitte des Supports",
+      "attempts": "Was versucht wurde",
+      "identifiers": "Angaben",
+      "automaticActor": "Die Kasse",
+      "unknownActor": "Person nicht ermittelt",
+      "report": "Bericht an The Small",
+      "reportTopic": "Berichtsthema",
+      "allTopics": "Gesamte Kasse",
+      "tools": "Supportwerkzeuge und Kassensicherungen"
+    },
+    "report": {
+      "new": "Neuer Bericht",
+      "preparing": "Bericht wird erstellt…",
+      "none": "Es wurde noch kein Bericht gesendet.",
+      "sent": "Der Bericht ist bei The Small angekommen. Eine Kopie ist hier gespeichert ({{time}}).",
+      "automatic": "Um {{time}} automatisch gesendet. The Small hat den Bericht erhalten.",
+      "local": "Um {{time}} nur auf dieser Kasse gespeichert. Der Bericht wurde nicht gesendet.",
+      "failed": "Der Bericht wurde nicht gesendet.",
+      "explanation": "Der Bericht wird auf dieser Kasse gespeichert. Mit Verbindung wird er auch an The Small gesendet.",
+      "previous": "Frühere Kopien",
+      "noCopies": "Es gibt noch keine gespeicherten Kopien.",
+      "openCopy": "Ordner der Kopie vom {{date}} öffnen",
+      "waiting": "Der Bericht ist auf dieser Kasse gespeichert. Er wird gesendet, sobald die Verbindung wieder da ist.",
+      "sendFailed": "Der Bericht ist hier gespeichert. Die Zustellung konnte nicht bestätigt werden.",
+      "historyUnavailable": "Die gespeicherten Berichte konnten nicht gelesen werden.",
+      "archivedLocal": "Auf dieser Kasse gespeichert.",
+      "pending": "Der Bericht ist auf der Kasse gespeichert. Er wurde noch nicht gesendet."
+    },
+    "families": {
+      "customerCorrection": {
+        "title": "Die geänderten Kundendaten wurden nicht gespeichert",
+        "detail": "Die Bestellung enthält weiter die bisherigen Angaben. Verkauf und Zahlung sind nicht betroffen."
+      },
+      "connection": {
+        "title": "Die Kasse ist nicht mehr mit dem Betrieb verbunden",
+        "detail": "Die Leitung kann die Kasse in den Verbindungseinstellungen wieder verbinden."
+      },
+      "invalidOrders": {
+        "title": "Einige Bestellungen enthalten unbekannte Artikel",
+        "detail": "Die Leitung muss diese Bestellungen prüfen."
+      },
+      "order": {
+        "title": "Eine Bestelländerung wurde nicht gespeichert",
+        "detail": "Prüfen Sie die angezeigte Bestellung, bevor Sie weitere Änderungen vornehmen."
+      },
+      "wrongMoney": {
+        "title": "Zahlung und Bestellsumme weichen voneinander ab",
+        "detail": "Kassieren Sie nicht erneut. Bitten Sie die Leitung, die Beträge zu prüfen."
+      },
+      "driver": {
+        "title": "Die Fahrerzuweisung wurde nicht gespeichert",
+        "detail": "Prüfen Sie, wer diese Bestellung ausliefert."
+      },
+      "orderPaymentWait": {
+        "title": "Eine Bestelländerung wurde nicht abgeschlossen",
+        "detail": "Die Zahlung wartet auf diese Änderung. Kassieren Sie nicht erneut."
+      },
+      "orderWaiting": {
+        "title": "Die Änderung wartet auf die ursprüngliche Bestellung",
+        "detail": "Die Kasse sucht die Bestellung, bevor sie die Änderung speichert."
+      },
+      "orderMissing": {
+        "title": "Die ursprüngliche Bestellung wurde nicht gefunden",
+        "detail": "Die Änderung muss vor dem Speichern geprüft werden."
+      },
+      "catalog": {
+        "title": "Die Artikelverfügbarkeit wurde an anderen Kassen nicht aktualisiert",
+        "detail": "Prüfen Sie die Verfügbarkeit, bevor Sie eine Bestellung für den Artikel annehmen."
+      },
+      "address": {
+        "title": "Die neue Adresse wurde nicht als Hauptadresse gespeichert",
+        "detail": "Die Bestellung ist davon nicht betroffen."
+      },
+      "customerDuplicate": {
+        "title": "Es gibt bereits einen Kunden mit dieser Telefonnummer",
+        "detail": "Prüfen Sie, ob es dieselbe Person ist."
+      },
+      "customerPhone": {
+        "title": "Die Telefonnummer des Kunden muss korrigiert werden",
+        "detail": "Bestellung und Tagesabschluss sind nicht betroffen."
+      },
+      "customerDirectory": {
+        "title": "Die neuen Kundendaten blieben auf dieser Kasse",
+        "detail": "Die Änderungen sind an anderen Kassen möglicherweise nicht sichtbar."
+      },
+      "shiftClosed": {
+        "title": "Die Schicht wurde an einer anderen Kasse beendet",
+        "detail": "Lassen Sie die Beträge von der Leitung prüfen. Wiederholen Sie keine Zahlung oder Erstattung."
+      },
+      "oldOrderCorrection": {
+        "title": "Eine ältere Bestellkorrektur wurde nicht abgeschlossen",
+        "detail": "Die Leitung vergleicht die Bestellung vor dem Tagesabschluss mit dem Beleg."
+      },
+      "phoneShifts": {
+        "title": "Der Tagesabschluss wartet auf die Schichten an den Handgeräten",
+        "detail": "Beenden Sie die Schicht am Handgerät oder unter Personal. Der Tagesabschluss wird dann automatisch gesendet."
+      },
+      "uncertainPayment": {
+        "title": "Die Kartenzahlung wurde noch nicht bestätigt",
+        "detail": "Prüfen Sie das Kartenterminal. Kassieren Sie nicht erneut."
+      },
+      "platform": {
+        "title": "Die Zahlung der Plattform muss geprüft werden",
+        "detail": "Die Plattform hat die Zahlung eingezogen. Kassieren Sie nicht erneut."
+      },
+      "balance": {
+        "title": "Für die Bestellung ist noch ein Betrag offen",
+        "detail": "Öffnen Sie die Zahlung, um den offenen Betrag zu prüfen."
+      },
+      "payment": {
+        "title": "Ein Zahlungseintrag muss geprüft werden",
+        "detail": "Wiederholen Sie keine Abbuchung oder Erstattung."
+      },
+      "paymentWaiting": {
+        "title": "Die Zahlung wartet auf die Bestellung",
+        "detail": "Die Zahlung ist hier erfasst. Kassieren Sie nicht erneut."
+      },
+      "refundWaiting": {
+        "title": "Die Erstattung wartet auf die ursprüngliche Zahlung",
+        "detail": "Erfassen Sie die Erstattung oder Stornierung nicht erneut."
+      },
+      "refundMissing": {
+        "title": "Die ursprüngliche Zahlung für diese Erstattung wurde nicht gefunden",
+        "detail": "Lassen Sie die Zahlung vor weiteren Änderungen vom Support prüfen."
+      },
+      "oldPayments": {
+        "title": "Ältere Zahlungen müssen geprüft werden",
+        "detail": "Die Leitung muss den Zahlungsverlauf prüfen."
+      },
+      "courierMoney": {
+        "title": "Barzahlung und Fahrereintrag weichen voneinander ab",
+        "detail": "Bitten Sie die Leitung, die Fahrerschicht zu prüfen."
+      },
+      "courierCheck": {
+        "title": "Das Bargeld des Fahrers konnte nicht geprüft werden",
+        "detail": "Die Leitung muss diese Schicht prüfen."
+      },
+      "printerSetting": {
+        "title": "Der Drucker hat seine Belegeinstellung nicht erkannt",
+        "detail": "Stellen Sie die letzte Einstellung wieder her und prüfen Sie einen Testbeleg."
+      },
+      "printer": {
+        "title": "Der Drucker muss geprüft werden",
+        "detail": "Bestellungen werden weiter gespeichert. Prüfen Sie Papier, Strom und Verbindung."
+      },
+      "waiting": {
+        "title": "Einige Änderungen warten auf den Versand",
+        "detail": "Die Änderungen sind auf dieser Kasse gespeichert.",
+        "stuck": "Änderungen warten auf Versand: {{count}}. Die längste Wartezeit beträgt {{duration}}."
+      },
+      "printing": {
+        "title": "Belege werden nicht gedruckt",
+        "detail": "Wartende Belege: {{count}}. Prüfen Sie Papier, Strom und Verbindung."
+      },
+      "sending": {
+        "title": "Einige Änderungen konnten nicht gesendet werden",
+        "detail": "Sie bleiben auf dieser Kasse und müssen vor dem Versand geprüft werden."
+      },
+      "orderCheck": {
+        "title": "Die Kasse konnte die Bestellung nicht prüfen",
+        "detail": "Sie bleibt bei den laufenden Bestellungen. Prüfen Sie gleich erneut."
+      },
+      "dayClose": {
+        "title": "Der Tagesabschluss muss geprüft werden",
+        "detail": "Prüfen Sie Bestellungen und Zahlungen vor dem Tagesabschluss."
+      },
+      "dayOverdue": {
+        "title": "Der Tag ist noch offen",
+        "detail": "Schließen Sie den Tag nach Geschäftsschluss ab."
+      },
+      "fiscal": {
+        "title": "Einige Belege haben den Steuerdienst noch nicht erreicht",
+        "detail": "Der Tagesabschluss wartet auf diese Belege."
+      },
+      "crash": {
+        "title": "Die Kasse wurde unerwartet geschlossen",
+        "detail": "Prüfen Sie die letzte Bestellung vor einer erneuten Eingabe."
+      }
+    }
+  }
+}

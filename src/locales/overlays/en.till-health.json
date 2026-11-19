@@ -1,0 +1,338 @@
+{
+  "tillHealth": {
+    "title": "Till health",
+    "lastChecked": "Last checked at {{time}}",
+    "notChecked": "Waiting for the first check",
+    "checkedServices": "The till at {{time}}",
+    "capacity": "Changes are building up. Open Till health.",
+    "closeoutHint": "Close the day when service ends.",
+    "progress": "Progress",
+    "states": {
+      "ok": {
+        "title": "Everything is working normally",
+        "detail": "You can take orders."
+      },
+      "noShift": {
+        "detail": "Start a shift to take orders."
+      },
+      "issue": {
+        "title": "Something needs your attention",
+        "detail": "See below what needs attention and what you can do."
+      },
+      "working": {
+        "title": "Saving now",
+        "detail": "You can carry on working while the till finishes."
+      },
+      "pending": {
+        "title": "Waiting for confirmation",
+        "detail": "The till is still checking the result. You can keep working."
+      },
+      "solved": {
+        "title": "Resolved",
+        "detail": "The till confirmed the result."
+      },
+      "support": {
+        "title": "Support is needed",
+        "detail": "See what is affected below. Ask The Small for help."
+      },
+      "offline": {
+        "title": "The till is working offline",
+        "detail": "Orders stay on this till and are sent when the connection returns."
+      },
+      "stale": {
+        "title": "The check did not complete",
+        "detail": "The information below is from {{time}}."
+      },
+      "unavailable": {
+        "detail": "We could not check this till. Check again in a moment."
+      },
+      "loading": {
+        "detail": "The till is checking now."
+      }
+    },
+    "action": {
+      "recheck": "Check again",
+      "saveAgain": "Save again",
+      "saveAddress": "Save the address again",
+      "restorePrinter": "Restore the last printer setting",
+      "printer": "Open printer settings",
+      "openPayment": "Open the payment",
+      "openConnection": "Open connection settings",
+      "send": "Send now",
+      "signIn": "Sign in again",
+      "askSupport": "Ask for support",
+      "supportDetails": "Open support details",
+      "noSafeAction": "This needs to be checked by support.",
+      "noLongerNeeded": "The change is no longer needed",
+      "keepDetails": "Keep the details as they are",
+      "keepExplanation": "The order keeps the details you see now and the case is closed.",
+      "offline": "This action needs an internet connection.",
+      "sendFailed": "The changes could not be sent.",
+      "sendChecked": "Sending check completed."
+    },
+    "phase": {
+      "working": "Saving",
+      "pending": "Waiting for confirmation",
+      "solved": "Resolved at {{time}}",
+      "failed": "The change could not be completed.",
+      "busy": "The till was busy with another task. Press again in a moment.",
+      "signIn": "Your sign-in has expired. Sign in to the till again.",
+      "shift": "A cashier or manager needs an active shift on this till.",
+      "pin": "The PIN did not match.",
+      "permission": "Ask the manager to check this.",
+      "grant": "The approval expired. Press again to confirm.",
+      "parked": "This change needs someone from support.",
+      "checkingOld": "From the last successful check",
+      "correctionWorking": "The customer details are being saved",
+      "correctionPending": "The change to the customer details is awaiting confirmation",
+      "correctionSaved": "The customer details were saved",
+      "correctionKept": "The customer details were kept as they were"
+    },
+    "step": {
+      "save": "Saving",
+      "confirm": "Confirmation",
+      "done": "Resolved"
+    },
+    "subject": {
+      "orderNumber": "Order #{{number}}",
+      "order": "Order",
+      "till": "Till",
+      "expense": "Expense",
+      "staffPayment": "Staff payment",
+      "driverPayment": "Driver payment",
+      "payment": "Payment",
+      "printer": "Printer",
+      "closeout": "Day close (Z)"
+    },
+    "orderType": {
+      "delivery": "Delivery",
+      "pickup": "Pickup",
+      "dine_in": "Dine-in"
+    },
+    "services": {
+      "title": "The till now",
+      "orders": "Orders",
+      "internet": "Internet",
+      "sync": "Sending to the office",
+      "printer": "Printer",
+      "closeout": "Day close (Z)",
+      "support": "Support"
+    },
+    "status": {
+      "working": "Working",
+      "limited": "Limited",
+      "blocked": "Needs attention",
+      "start_shift": "Shift needed",
+      "connected": "Connected",
+      "offline": "Offline",
+      "unknown": "Unconfirmed",
+      "healthy": "All sent",
+      "waiting": "Waiting to be sent",
+      "stuck": "Needs attention",
+      "failed": "Did not complete",
+      "ready": "Ready",
+      "attention": "Needs attention",
+      "not_configured": "Not set up",
+      "via_main_terminal": "On the main till",
+      "not_needed": "Not needed",
+      "notified": "Report received",
+      "not_sent": "No report sent",
+      "failed_to_notify": "Delivery unconfirmed",
+      "open": "Open",
+      "openSince": "Open since {{time}}",
+      "overdue": "Still open",
+      "submitted": "Awaiting confirmation",
+      "unavailable": "Unavailable",
+      "not_checked": "Checked at day close",
+      "not_applicable": "On the main till"
+    },
+    "help": {
+      "title": "Need help?",
+      "available": "The Small can connect to this till. You will see a code to give them.",
+      "unavailable": "Remote support could not start. Ask the manager to arrange a visit from support. A report can still be saved.",
+      "offline": "The Small can connect when the internet is back. You can save a report now.",
+      "permission": "Ask the manager to request a connection. You can still prepare a report."
+    },
+    "support": {
+      "title": "For support",
+      "hint": "Only if support asks you to open it",
+      "attempts": "What was tried",
+      "identifiers": "Details",
+      "automaticActor": "The till",
+      "unknownActor": "Staff member not identified",
+      "report": "Report to The Small",
+      "reportTopic": "Report subject",
+      "allTopics": "Whole till",
+      "tools": "Support tools and till backups"
+    },
+    "report": {
+      "new": "New report",
+      "preparing": "Preparing report…",
+      "none": "No report has been sent yet.",
+      "sent": "The report reached The Small and a copy is saved here ({{time}}).",
+      "automatic": "Sent automatically at {{time}}. The Small received the report.",
+      "local": "Saved only on this till at {{time}}. The report was not sent.",
+      "failed": "The report was not sent.",
+      "explanation": "The report is saved on this till. With a connection it is also sent to The Small.",
+      "previous": "Previous copies",
+      "noCopies": "There are no saved copies yet.",
+      "openCopy": "Open the folder for the copy from {{date}}",
+      "waiting": "The report is saved on this till. It will be sent when the connection returns.",
+      "sendFailed": "The report is saved here. Delivery couldn’t be confirmed.",
+      "historyUnavailable": "The saved reports could not be read.",
+      "archivedLocal": "Saved on this till.",
+      "pending": "The report is saved on this till. It hasn’t been sent yet."
+    },
+    "families": {
+      "customerCorrection": {
+        "title": "The change to the customer details was not saved",
+        "detail": "The order still has the previous details. The sale and payment are unaffected."
+      },
+      "connection": {
+        "title": "The till is no longer linked to the store",
+        "detail": "The manager can link the till again from the connection settings."
+      },
+      "invalidOrders": {
+        "title": "Some orders contain items the till does not recognise",
+        "detail": "The manager needs to check those orders."
+      },
+      "order": {
+        "title": "A change to the order was not saved",
+        "detail": "Check the order as it appears on this till before making any further changes."
+      },
+      "wrongMoney": {
+        "title": "The payment and the order total differ",
+        "detail": "Do not charge the customer again. Ask the manager to check the amounts."
+      },
+      "driver": {
+        "title": "The driver assignment was not saved",
+        "detail": "Check who is taking this order."
+      },
+      "orderPaymentWait": {
+        "title": "A change to the order did not complete",
+        "detail": "The payment is waiting for that change. Do not charge the customer again."
+      },
+      "orderWaiting": {
+        "title": "The change is waiting for the original order",
+        "detail": "The till is looking for the order before it saves the change."
+      },
+      "orderMissing": {
+        "title": "The original order could not be found",
+        "detail": "The change needs to be checked before it can be saved."
+      },
+      "catalog": {
+        "title": "The item’s availability did not update on other tills",
+        "detail": "Check what is still available before accepting an order for this item."
+      },
+      "address": {
+        "title": "The new address was not set as the main one",
+        "detail": "This does not affect the order."
+      },
+      "customerDuplicate": {
+        "title": "A customer with the same phone number already exists",
+        "detail": "Check whether this is the same person."
+      },
+      "customerPhone": {
+        "title": "The customer’s phone number needs correcting",
+        "detail": "The order and day close are unaffected."
+      },
+      "customerDirectory": {
+        "title": "The new customer details stayed on this till",
+        "detail": "The changes may not appear on other tills."
+      },
+      "shiftClosed": {
+        "title": "The shift closed on another till",
+        "detail": "Ask the manager to check the figures. Do not repeat a payment or refund."
+      },
+      "oldOrderCorrection": {
+        "title": "An older order correction did not complete",
+        "detail": "The manager compares the order with the receipt before closing the day."
+      },
+      "phoneShifts": {
+        "title": "Day close is waiting for phone shifts",
+        "detail": "Close the shift on the phone or in Staff. The day close will then be sent automatically."
+      },
+      "uncertainPayment": {
+        "title": "The card payment has not been confirmed",
+        "detail": "Check the bank’s card terminal. Do not charge the customer again."
+      },
+      "platform": {
+        "title": "The platform’s payment needs checking",
+        "detail": "The platform collected the payment. Do not collect it again at the till."
+      },
+      "balance": {
+        "title": "The order has an outstanding balance",
+        "detail": "Open the payment to review what is owed."
+      },
+      "payment": {
+        "title": "A payment entry needs checking",
+        "detail": "Do not repeat a charge or refund."
+      },
+      "paymentWaiting": {
+        "title": "The payment is waiting for the order",
+        "detail": "The payment is recorded here. Do not charge again."
+      },
+      "refundWaiting": {
+        "title": "The refund is waiting for the original payment",
+        "detail": "Do not enter the refund or cancellation a second time."
+      },
+      "refundMissing": {
+        "title": "The original payment for this refund could not be found",
+        "detail": "Ask support to check the payment before making another change."
+      },
+      "oldPayments": {
+        "title": "Older payments need checking",
+        "detail": "The manager needs to check the payment history."
+      },
+      "courierMoney": {
+        "title": "The cash payment and the driver’s entry differ",
+        "detail": "Ask the manager to check the driver’s shift."
+      },
+      "courierCheck": {
+        "title": "The driver’s cash could not be checked",
+        "detail": "The manager needs to check this shift."
+      },
+      "printerSetting": {
+        "title": "The printer did not recognise its receipt setting",
+        "detail": "Restore the last setting and check a test receipt."
+      },
+      "printer": {
+        "title": "The printer needs attention",
+        "detail": "Orders still save on the till. Check the paper, power and connection."
+      },
+      "waiting": {
+        "title": "Some changes are waiting to be sent",
+        "detail": "The changes are saved on this till.",
+        "stuck": "Changes waiting to be sent: {{count}}. The longest wait is {{duration}}."
+      },
+      "printing": {
+        "title": "Receipts are not printing",
+        "detail": "Receipts waiting: {{count}}. Check the paper, power and connection."
+      },
+      "sending": {
+        "title": "Some changes could not be sent",
+        "detail": "They remain on this till and need to be checked before they can be sent."
+      },
+      "orderCheck": {
+        "title": "The till could not check the order",
+        "detail": "It stays in the active orders. Check again in a moment."
+      },
+      "dayClose": {
+        "title": "The day close needs checking",
+        "detail": "Check the day’s orders and payments before closing."
+      },
+      "dayOverdue": {
+        "title": "The day is still open",
+        "detail": "Close the day when service ends."
+      },
+      "fiscal": {
+        "title": "Some receipts have not reached the tax service",
+        "detail": "The day close is waiting for those receipts."
+      },
+      "crash": {
+        "title": "The till closed unexpectedly",
+        "detail": "Check the last order before entering it again."
+      }
+    }
+  }
+}

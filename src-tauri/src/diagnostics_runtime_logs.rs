@@ -403,7 +403,7 @@ fn trusted_name(name: &str) -> bool {
     date.len() == 10 && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok()
 }
 
-fn open_trusted_file(path: &Path, root: &Path) -> Option<File> {
+pub(crate) fn open_trusted_file(path: &Path, root: &Path) -> Option<File> {
     let metadata = fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() || is_link(&metadata) || !trusted_directory(root) {
         return None;
@@ -470,6 +470,53 @@ fn open_trusted_file(path: &Path, root: &Path) -> Option<File> {
     Some(file)
 }
 
+pub(crate) struct LogFiles {
+    pub paths: Vec<std::path::PathBuf>,
+    pub found: u64,
+    pub unreadable: u64,
+}
+
+pub(crate) fn trusted_log_files(root: &Path) -> Result<LogFiles, &'static str> {
+    match fs::symlink_metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err("logs_missing"),
+        Err(_) => return Err("logs_unreadable"),
+        Ok(_) => {}
+    }
+    if !trusted_directory(root) {
+        return Err("logs_unreadable");
+    }
+    let entries = fs::read_dir(root).map_err(|_| "logs_unreadable")?;
+    let mut found = 0;
+    let mut unreadable = 0;
+    let mut files = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            unreadable += 1;
+            continue;
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str().filter(|name| trusted_name(name)) else {
+            continue;
+        };
+        found += 1;
+        let metadata = fs::symlink_metadata(entry.path());
+        match metadata {
+            Ok(metadata) if metadata.is_file() && !is_link(&metadata) => files.push((
+                metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                name.to_owned(),
+                entry.path(),
+            )),
+            _ => unreadable += 1,
+        }
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    Ok(LogFiles {
+        paths: files.into_iter().map(|(_, _, path)| path).collect(),
+        found,
+        unreadable,
+    })
+}
+
 /// Only the known log directory is passed by production. The explicit root
 /// also keeps regression tests isolated from the running POS's actual logs.
 pub(super) fn collect(root: &Path, enabled: bool) -> Value {
@@ -481,49 +528,19 @@ fn collect_at(root: &Path, enabled: bool, captured_at: DateTime<Utc>) -> Value {
     if !enabled {
         return collector.not_collected("not_collected", "disabled");
     }
-    match fs::symlink_metadata(root) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return collector.not_collected("not_collected", "logs_missing");
-        }
-        Err(_) => {
+    let files = match trusted_log_files(root) {
+        Ok(files) => files,
+        Err("logs_missing") => return collector.not_collected("not_collected", "logs_missing"),
+        Err(reason) => {
             collector.increment("filesUnreadable", 1);
-            return collector.not_collected("unavailable", "logs_unreadable");
+            return collector.not_collected("unavailable", reason);
         }
-        Ok(_) => {}
-    }
-    let entries = if trusted_directory(root) {
-        fs::read_dir(root).ok()
-    } else {
-        None
     };
-    let Some(entries) = entries else {
-        collector.increment("filesUnreadable", 1);
-        return collector.not_collected("unavailable", "logs_unreadable");
-    };
-    let mut files = Vec::new();
-    for entry in entries {
-        let Ok(entry) = entry else {
-            collector.increment("filesUnreadable", 1);
-            continue;
-        };
-        let name = entry.file_name();
-        let Some(name) = name.to_str().filter(|name| trusted_name(name)) else {
-            continue;
-        };
-        collector.increment("filesFound", 1);
-        let metadata = fs::symlink_metadata(entry.path());
-        match metadata {
-            Ok(metadata) if metadata.is_file() && !is_link(&metadata) => files.push((
-                metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
-                name.to_owned(),
-                entry.path(),
-            )),
-            _ => collector.increment("filesUnreadable", 1),
-        }
-    }
-    files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    collector.increment("filesFound", files.found);
+    collector.increment("filesUnreadable", files.unreadable);
+    let files = files.paths;
     let mut remaining = MAX_BYTES_TOTAL;
-    for (index, (_, _, path)) in files.iter().enumerate() {
+    for (index, path) in files.iter().enumerate() {
         if index >= MAX_FILES || remaining == 0 {
             collector.increment("filesOmitted", 1);
             collector.truncate();
@@ -948,9 +965,11 @@ pub(crate) const RUNTIME_ERROR_CODES: &[&str] = &[
     "PAYMENT_ORDER_NOT_FOUND",
     "PAYMENT_RECOVERY_IDENTITY_MISMATCH",
     "PAYMENT_SYNC_REQUIRED",
+    "PAYMENT_VOID_TRANSACTION_REQUIRED",
     "PERMISSION_DENIED",
     "PLATFORM_COURIER_CANCELLATION_ONLY",
     "PLATFORM_SETTLEMENT_IDENTITY_INVALID",
+    "PLATFORM_SETTLEMENT_NOT_VERIFIED",
     "POS_ORDER_EDIT_SNAPSHOT_UNAVAILABLE",
     "POS_ORDER_SETTLEMENT_UNAVAILABLE",
     "POS_TERMINAL_AUTH_REQUIRED",

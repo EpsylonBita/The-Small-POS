@@ -236,6 +236,18 @@ async fn confirm_original_with_transport(
             .conn
             .lock()
             .map_err(|_| "TABLE_CLOSE_ORIGINAL_READ_FAILED")?;
+        let is_table_close_target: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM parity_sync_queue
+               WHERE id = ?1 AND table_name = 'restaurant_table_sessions'
+                 AND module_type = 'table_service')",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "TABLE_CLOSE_ORIGINAL_READ_FAILED")?;
+        if !is_table_close_target {
+            return Ok(false);
+        }
         let scope = crate::table_session_cache::current_scope(&conn)?;
         let original = select_original(&conn, id, &scope)?;
         (scope, original)

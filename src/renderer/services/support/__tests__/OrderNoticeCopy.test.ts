@@ -5,7 +5,7 @@ import { localeBundles } from '../../../../locales/bundles';
 import { buildSyncRecoveryIssues, customerCorrectionIssue, orderRecoveryIssues } from '../../../components/recovery/sync-recovery-issues';
 import { matchHealthRemedies } from '../SupportMatcherBridge';
 const notice={orderId:'order',orderNumber:'12',queueId:'q',since:'today',kind:'customer_correction_refused' as const,state:'refused' as const,actions:['resendOrderCustomerCorrection','keepServerOrderCustomerDetails']};
-const staffKeys = ['checkUnavailableGuidance', 'checkUnavailableHealth', 'checkUnavailable', 'checkUnavailableMany', 'needsAction', 'customer_correction_refused', 'change_refused', 'payment_not_on_server', 'next', 'resend', 'guided', 'pending', 'failedAgain', 'failed', 'changed', 'offline', 'wait', 'busy', 'loading', 'stale', 'shift', 'shiftHint', 'order', 'toast', 'moveBlocked', 'movesBlocked', 'remainsActive', 'saving', 'tryAgain', 'notSolved', 'noRemedy'];
+const staffKeys = ['checkUnavailableGuidance', 'checkUnavailableHealth', 'checkUnavailable', 'checkUnavailableMany', 'needsAction', 'customer_correction_refused', 'change_refused', 'payment_not_on_server', 'next', 'resend', 'guided', 'pending', 'failedAgain', 'failed', 'changed', 'offline', 'wait', 'busy', 'loading', 'stale', 'shift', 'shiftHint', 'order', 'toast', 'moveBlocked', 'movesBlocked', 'remainsActive', 'saving', 'tryAgain', 'notSolved', 'noRemedy', 'sessionExpired', 'signInAgain', 'shiftRequired', 'pinLocked', 'cancelled', 'callSupport', 'saved'];
 // Stems cover inflected forms too; normalize accents before checking.
 const bannedWords = {
  en: /database|server|synch?|conflict|recover|queue|version|refus|correction|restor/i,

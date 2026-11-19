@@ -49,6 +49,8 @@ pub struct Heartbeat {
     pub disabled_tools: Vec<String>,
     pub kill_epoch: i64,
     pub consent: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_commands: Option<bool>,
     pub session_status: String,
     #[cfg_attr(test, serde(skip_serializing_if = "Option::is_none"))]
     pub end_reason: Option<String>,
@@ -517,9 +519,6 @@ pub trait SupportApi: Send + Sync {
                 .map_err(|_| ResultDeliveryError::transient())
         })
     }
-    fn command_authority(&self) -> bool {
-        false
-    }
     fn consent_decline<'a>(&'a self, _body: Value, _staff: &'a str) -> DeclineFuture<'a> {
         Box::pin(async { Err(DeclineError::transient()) })
     }
@@ -545,9 +544,6 @@ impl SupportApi for NativeApi {
             Some(body),
             None,
         ))
-    }
-    fn command_authority(&self) -> bool {
-        super::confirmed::availability(&self.app)
     }
     fn request<'a>(&'a self, path: &'a str, method: &'a str, body: Option<Value>) -> ApiFuture<'a> {
         Box::pin(request(&self.app, path, method, body))
@@ -696,6 +692,9 @@ fn failure(rt: &super::session::Runtime, code: &str) {
     if let Ok(mut core) = rt.core.lock() {
         core.schedule.failure(Instant::now());
         if let Some(s) = &mut core.session {
+            if s.admission.confirmed {
+                super::critical_op::global().cancel_support();
+            }
             s.admission.online = false;
         }
         if code == "TERMINAL_AUTH_REFUSED" {
@@ -712,7 +711,7 @@ async fn fetch_session(
 ) -> Result<(), String> {
     let response = api.request("/api/pos/support/session", "GET", None).await?;
     let response: SessionFetch = serde_json::from_value(response).map_err(|_| "INVALID_INPUT")?;
-    let id = {
+    let (id, needs_confirmed_authority) = {
         let mut core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
         if core.epoch != epoch {
             if let Some(s) = response.session {
@@ -740,13 +739,14 @@ async fn fetch_session(
                     if core.code.is_none() && !core.awaiting_open {
                         return Err("SESSION_ENDED".into());
                     }
-                    core.command_consent = api.command_authority();
                     core.adopt(info, &response.server_time)?;
                 }
-                core.session
-                    .as_ref()
-                    .map(|s| s.info.session_id.clone())
-                    .ok_or("SESSION_ENDED")?
+                let s = core.session.as_ref().ok_or("SESSION_ENDED")?;
+                (
+                    s.info.session_id.clone(),
+                    s.info.confirmation_mode.as_deref() == Some("founder_conversation")
+                        && !s.admission.active,
+                )
             }
             "ended" => {
                 core.end(
@@ -766,6 +766,18 @@ async fn fetch_session(
             _ => return Err("INVALID_INPUT".into()),
         }
     };
+    // Authenticate the exact session's offer before acknowledging its mode.
+    // The ordinary terminal heartbeat is independent of session admission.
+    if needs_confirmed_authority {
+        heartbeat(api, rt, epoch).await?;
+        let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
+        if core.epoch != epoch {
+            return Ok(());
+        }
+        if !core.confirmed_authority_fresh(Instant::now()) {
+            return Err("FEATURE_DISABLED".into());
+        }
+    }
     // Missing collector data is explicitly unavailable, never healthy.
     let baseline = tokio::time::timeout(REQUEST_TIMEOUT, api.baseline())
         .await
@@ -799,6 +811,19 @@ async fn fetch_session(
             && !capabilities.iter().any(|c| c == "support.tier3.v1")
         {
             capabilities.push("support.tier3.v1".into());
+        }
+        let live = core.executor.db.path.with_file_name("pos.db");
+        if capabilities
+            .iter()
+            .any(|cap| cap == super::confirmed::CAPABILITY)
+            && capabilities.iter().any(|cap| cap == "support.tier2.v1")
+            && rusqlite::Connection::open_with_flags(
+                live,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .is_ok_and(|conn| super::confirmed_payment_receipt::ready(&conn))
+        {
+            capabilities.push(super::confirmed_payment_receipt::CAPABILITY.into());
         }
         let mut body = ack(&id, baseline, capabilities);
         body["pinned_approver_key_ids"] = json!(ids);
@@ -930,11 +955,11 @@ async fn fetch_commands(
         )
         .map_err(str::to_string)?;
     core.schedule.success();
-    let Some(s) = &mut core.session else {
+    let Some(s) = &core.session else {
         return Ok(());
     };
     let mut a = s.admission.clone();
-    a.confirmed &= api.command_authority();
+    a.confirmed &= core.confirmed_authority_fresh(Instant::now());
     for value in commands {
         let command = serde_json::from_value(value.clone()).map_err(|_| "INVALID_INPUT")?;
         let super::session::Core {
@@ -953,6 +978,11 @@ pub(super) async fn deliver_notices(
 ) -> Result<(), String> {
     flush(&NativeApi { app: app.clone() }, rt).await
 }
+pub(super) async fn flush_results(app: &tauri::AppHandle, rt: &super::session::Runtime) {
+    let api = NativeApi { app: app.clone() };
+    let _ = tokio::time::timeout(REQUEST_TIMEOUT, flush(&api, rt)).await;
+}
+
 async fn flush(api: &dyn SupportApi, rt: &super::session::Runtime) -> Result<(), String> {
     // Queued notices and results are the documented exception to idle silence.
     let notices = {
@@ -1234,6 +1264,76 @@ mod tests {
         drop(rt);
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    async fn confirmed_adoption_and_later_commands_use_fresh_session_heartbeat_and_honor_kill() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _gate = super::super::critical_op::install_test_gate();
+        let (root, rt) = runtime();
+        rt.core.lock().unwrap().await_open();
+        let mut session = response(include_str!(
+            "../../../../shared/pos/support/__fixtures__/routes/pos-support-session.json"
+        ));
+        session["session"]["confirmation_mode"] = json!("founder_conversation");
+        session["session"]["tier_ceiling"] = json!(3);
+        let mut beat = response(include_str!(
+            "../../../../shared/pos/support/__fixtures__/routes/pos-support-heartbeat.json"
+        ));
+        beat["session_status"] = json!("pending_ack");
+        beat["tier_ceiling"] = json!(3);
+        beat["tiers_enabled"] = json!([1, 2, 3]);
+        beat["consent"]["text_version"] = json!("1.1");
+        beat["confirmed_commands"] = json!(true);
+        let ack = response(include_str!(
+            "../../../../shared/pos/support/__fixtures__/routes/pos-support-session-ack.json"
+        ));
+        let api = mock(vec![session, beat.clone(), ack]);
+        fetch_session(&api, &rt, 0).await.unwrap();
+        {
+            let core = rt.core.lock().unwrap();
+            assert!(core.confirmed_authority_fresh(Instant::now()));
+            assert!(!core.confirmed_authority_fresh(Instant::now() + Duration::from_secs(15)));
+            let pin: String = core
+                .executor
+                .db
+                .conn
+                .query_row(
+                    "SELECT consent_version FROM support_confirmed_sessions",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(pin, "1.1");
+        }
+        assert_eq!(api.calls.lock().unwrap()[1].0, "/api/pos/support/heartbeat");
+        assert_eq!(
+            api.calls.lock().unwrap()[2].0,
+            "/api/pos/support/session/ack"
+        );
+        beat["session_status"] = json!("active");
+        beat["server_time"] = json!("2026-11-01T12:00:30.000Z");
+        heartbeat(&mock(vec![beat.clone()]), &rt, 0).await.unwrap();
+        assert!(rt
+            .core
+            .lock()
+            .unwrap()
+            .confirmed_authority_fresh(Instant::now()));
+        let permit = super::super::critical_op::global()
+            .try_begin_support(false, None)
+            .unwrap();
+        beat["disabled_tools"] = json!([super::super::confirmed::KIND]);
+        beat["kill_epoch"] = json!(2);
+        heartbeat(&mock(vec![beat]), &rt, 0).await.unwrap();
+        assert!(!rt
+            .core
+            .lock()
+            .unwrap()
+            .confirmed_authority_fresh(Instant::now()));
+        assert!(permit.is_cancelled());
+        drop(rt);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn a_session_reported_by_a_409_is_adopted_and_acknowledged_while_staff_keep_waiting() {
         // Codex review of #416: after a restart the till knows no code. A code request met the

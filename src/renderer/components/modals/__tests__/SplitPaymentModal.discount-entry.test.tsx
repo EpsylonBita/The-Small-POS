@@ -1,3 +1,5 @@
+import { seedCardProviderMark } from '../../../services/__tests__/cardProviderMark.fixture';
+import { updateTerminalCredentialCache } from '../../../services/terminal-credentials';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -87,6 +89,8 @@ const payableOf = (person: number) => personCard(person).querySelector('.split-p
 
 describe('SplitPaymentModal portion discount survives digit entry of the amount', () => {
   beforeEach(() => {
+    updateTerminalCredentialCache({ organizationId: 'fixture-org', branchId: 'fixture-branch', terminalId: 'fixture-till' });
+    seedCardProviderMark();
     vi.clearAllMocks();
     mocks.askForPaymentPrint.mockResolvedValue(false);
     mocks.bridge.payments.listUnsavedPayments.mockResolvedValue({ success: true, payments: [] });

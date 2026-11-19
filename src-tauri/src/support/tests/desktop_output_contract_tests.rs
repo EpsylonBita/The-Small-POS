@@ -916,7 +916,11 @@ fn logs_queue_and_printer_caps_conform_with_nonempty_evidence() {
     let line="2026-11-01T00:00:00Z WARN the_small_pos_lib::sync: Parity sync failed: AUTH_LOCKED_OUT your-prose\n";
     std::fs::write(logs.join("pos.log"), line.repeat(600)).unwrap();
     for i in 1..4 {
-        std::fs::write(logs.join(format!("pos.log.{i}")), line.repeat(1500)).unwrap();
+        std::fs::write(
+            logs.join(format!("pos.2026-11-{:02}", i + 2)),
+            line.repeat(1500),
+        )
+        .unwrap();
     }
     let before = std::fs::read(db.db_path()).unwrap();
     let gate = critical_op::CriticalOpGate::new();

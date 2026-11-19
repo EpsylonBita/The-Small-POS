@@ -68,9 +68,8 @@ export interface SplitPortion {
   collectedBy?: 'cashier_drawer' | 'driver_shift';
   /**
    * A card taken on the shop's own machine, recorded by hand. Set only after
-   * the manual card admission (no terminal on this till and a fresh server
-   * "no provider connected"); Confirm asks that admission again before it
-   * records, and books no other draft card portion (06/10/2026).
+   * manual card admission. Confirm checks admission again and records only
+   * draft card portions explicitly marked for manual collection.
    */
   manualCardFallback?: boolean;
   /**
@@ -753,7 +752,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         if (lookup.kind !== 'ready') {
           // D (06/10/2026, Android parity): a configured terminal that is busy,
           // disconnected or unreadable takes no card and never turns into a
-          // manual card. With no terminal at all, only a fresh server admission
+          // manual card. With no terminal at all, manual card admission
           // offers one, and Confirm asks again before it records.
           const admission = lookup.kind === 'none' ? await admitManualCard() : null;
           if (!isCurrent()) return;
@@ -889,7 +888,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       if (!isCurrent()) return;
       let manualAdmission: ManualCardAdmission | null = null;
       if (manualCardIds.size > 0) {
-        // D (06/10/2026): the manual card admission is asked again right
+        // Manual card admission is checked again right
         // before it is recorded. A refusal records nothing at all; a definite
         // one (a terminal or a provider is now there) withdraws the offer.
         const admission = await admitManualCard();

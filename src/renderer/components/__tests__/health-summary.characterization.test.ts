@@ -5,7 +5,6 @@ import { DESKTOP_HEALTH_SUMMARY_CASES } from '../../../../../shared/pos/health/_
 vi.mock('../OrderSyncRouteIndicator', () => ({ OrderSyncRouteIndicator: () => null }))
 vi.mock('../FinancialSyncPanel', () => ({ FinancialSyncPanel: () => null }))
 vi.mock('../support/HealthSupportEntryPoint', () => ({ HealthSupportEntryPoint: () => null }))
-vi.mock('../recovery/RecoveryCenterPanel', () => ({ RecoveryCenterPanel: () => null }))
 
 import { buildSimpleHealthSummary } from '../SyncStatusIndicator'
 

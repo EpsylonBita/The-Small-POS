@@ -1,0 +1,338 @@
+{
+  "tillHealth": {
+    "title": "Stato della cassa",
+    "lastChecked": "Ultimo controllo alle {{time}}",
+    "notChecked": "In attesa del primo controllo",
+    "checkedServices": "La cassa alle {{time}}",
+    "capacity": "Si stanno accumulando modifiche. Apri lo stato della cassa.",
+    "closeoutHint": "Chiudi la giornata al termine del servizio.",
+    "progress": "Avanzamento",
+    "states": {
+      "ok": {
+        "title": "Tutto funziona normalmente",
+        "detail": "Puoi prendere ordini."
+      },
+      "noShift": {
+        "detail": "Inizia un turno per prendere ordini."
+      },
+      "issue": {
+        "title": "C’è qualcosa da verificare",
+        "detail": "Qui sotto trovi cosa controllare e come intervenire."
+      },
+      "working": {
+        "title": "Salvataggio in corso",
+        "detail": "Puoi continuare a lavorare mentre la cassa completa l’operazione."
+      },
+      "pending": {
+        "title": "In attesa di conferma",
+        "detail": "La cassa sta ancora verificando l’esito. Puoi continuare a lavorare."
+      },
+      "solved": {
+        "title": "Risolto",
+        "detail": "La cassa ha confermato l’esito."
+      },
+      "support": {
+        "title": "Serve assistenza",
+        "detail": "Qui sotto trovi cosa è interessato. Chiedi aiuto a The Small."
+      },
+      "offline": {
+        "title": "La cassa funziona senza connessione",
+        "detail": "Gli ordini restano su questa cassa e verranno inviati al ritorno della connessione."
+      },
+      "stale": {
+        "title": "Il controllo non è stato completato",
+        "detail": "Le informazioni qui sotto risalgono alle {{time}}."
+      },
+      "unavailable": {
+        "detail": "Non è stato possibile controllare la cassa. Riprova tra poco."
+      },
+      "loading": {
+        "detail": "Il controllo della cassa è in corso."
+      }
+    },
+    "action": {
+      "recheck": "Controlla di nuovo",
+      "saveAgain": "Salva di nuovo",
+      "saveAddress": "Salva di nuovo l’indirizzo",
+      "restorePrinter": "Ripristina l’ultima impostazione di stampa",
+      "printer": "Apri le impostazioni della stampante",
+      "openPayment": "Apri il pagamento",
+      "openConnection": "Apri le impostazioni di connessione",
+      "send": "Invia ora",
+      "signIn": "Accedi di nuovo",
+      "askSupport": "Chiedi assistenza",
+      "supportDetails": "Apri i dettagli per l’assistenza",
+      "noSafeAction": "Serve una verifica dell’assistenza.",
+      "noLongerNeeded": "La modifica non serve più",
+      "keepDetails": "Mantieni i dati attuali",
+      "keepExplanation": "L’ordine conserva i dati che vedi ora e la segnalazione si chiude.",
+      "offline": "Per questa azione serve una connessione a Internet.",
+      "sendFailed": "Non è stato possibile inviare le modifiche.",
+      "sendChecked": "Il controllo dell’invio è terminato."
+    },
+    "phase": {
+      "working": "Salvataggio",
+      "pending": "In attesa di conferma",
+      "solved": "Risolto alle {{time}}",
+      "failed": "La modifica non è stata completata.",
+      "busy": "La cassa era impegnata in un’altra operazione. Premi di nuovo tra poco.",
+      "signIn": "La sessione è scaduta. Accedi di nuovo alla cassa.",
+      "shift": "Su questa cassa serve un turno attivo di un cassiere o responsabile.",
+      "pin": "Il PIN non è corretto.",
+      "permission": "Chiedi al responsabile di verificare.",
+      "grant": "L’autorizzazione è scaduta. Premi di nuovo per confermare.",
+      "parked": "Questa modifica richiede assistenza.",
+      "checkingOld": "Dall’ultimo controllo riuscito",
+      "correctionWorking": "Salvataggio dei dati del cliente in corso",
+      "correctionPending": "La modifica ai dati del cliente è in attesa di conferma",
+      "correctionSaved": "I dati del cliente sono stati salvati",
+      "correctionKept": "I dati del cliente sono rimasti invariati"
+    },
+    "step": {
+      "save": "Salvataggio",
+      "confirm": "Conferma",
+      "done": "Risolto"
+    },
+    "subject": {
+      "orderNumber": "Ordine n. {{number}}",
+      "order": "Ordine",
+      "till": "Cassa",
+      "expense": "Spesa",
+      "staffPayment": "Pagamento al personale",
+      "driverPayment": "Compenso del corriere",
+      "payment": "Pagamento",
+      "printer": "Stampante",
+      "closeout": "Chiusura giornaliera (Z)"
+    },
+    "orderType": {
+      "delivery": "Consegna",
+      "pickup": "Asporto",
+      "dine_in": "Sul posto"
+    },
+    "services": {
+      "title": "La cassa adesso",
+      "orders": "Ordini",
+      "internet": "Internet",
+      "sync": "Invio all’ufficio",
+      "printer": "Stampante",
+      "closeout": "Chiusura giornaliera (Z)",
+      "support": "Assistenza"
+    },
+    "status": {
+      "working": "In funzione",
+      "limited": "Con limitazioni",
+      "blocked": "Da controllare",
+      "start_shift": "Serve un turno",
+      "connected": "Connessa",
+      "offline": "Senza connessione",
+      "unknown": "Non confermato",
+      "healthy": "Tutto inviato",
+      "waiting": "In attesa di invio",
+      "stuck": "Da controllare",
+      "failed": "Operazione non riuscita",
+      "ready": "Pronta",
+      "attention": "Da controllare",
+      "not_configured": "Non configurata",
+      "via_main_terminal": "Sulla cassa principale",
+      "not_needed": "Non necessaria",
+      "notified": "Rapporto ricevuto",
+      "not_sent": "Nessun rapporto inviato",
+      "failed_to_notify": "Invio non confermato",
+      "open": "Aperta",
+      "openSince": "Aperta dalle {{time}}",
+      "overdue": "Ancora aperta",
+      "submitted": "In attesa di conferma",
+      "unavailable": "Non disponibile",
+      "not_checked": "Verifica alla chiusura",
+      "not_applicable": "Sulla cassa principale"
+    },
+    "help": {
+      "title": "Serve aiuto?",
+      "available": "The Small può collegarsi a questa cassa. Vedrai un codice da comunicare.",
+      "unavailable": "L’assistenza da remoto non si è avviata. Chiedi al responsabile di organizzare un intervento. Puoi comunque salvare un rapporto.",
+      "offline": "The Small può collegarsi quando torna Internet. Puoi salvare un rapporto ora.",
+      "permission": "Chiedi al responsabile di richiedere una connessione. Puoi comunque preparare un rapporto."
+    },
+    "support": {
+      "title": "Per l’assistenza",
+      "hint": "Solo se richiesto dall’assistenza",
+      "attempts": "Cosa è stato tentato",
+      "identifiers": "Dati",
+      "automaticActor": "La cassa",
+      "unknownActor": "Operatore non identificato",
+      "report": "Rapporto a The Small",
+      "reportTopic": "Oggetto del rapporto",
+      "allTopics": "Tutta la cassa",
+      "tools": "Strumenti di assistenza e copie della cassa"
+    },
+    "report": {
+      "new": "Nuovo rapporto",
+      "preparing": "Preparazione del rapporto…",
+      "none": "Non è stato ancora inviato alcun rapporto.",
+      "sent": "Il rapporto è arrivato a The Small. Una copia è salvata qui ({{time}}).",
+      "automatic": "Inviato automaticamente alle {{time}}. The Small ha ricevuto il rapporto.",
+      "local": "Salvato solo su questa cassa alle {{time}}. Il rapporto non è stato inviato.",
+      "failed": "Il rapporto non è stato inviato.",
+      "explanation": "Il rapporto viene salvato su questa cassa. Con una connessione viene anche inviato a The Small.",
+      "previous": "Copie precedenti",
+      "noCopies": "Non ci sono ancora copie salvate.",
+      "openCopy": "Apri la cartella della copia del {{date}}",
+      "waiting": "Il rapporto è salvato su questa cassa. Verrà inviato al ripristino della connessione.",
+      "sendFailed": "Il rapporto è salvato qui. La consegna non è stata confermata.",
+      "historyUnavailable": "Impossibile leggere i rapporti salvati.",
+      "archivedLocal": "Salvato su questa cassa.",
+      "pending": "Il rapporto è salvato sulla cassa. Non è ancora stato inviato."
+    },
+    "families": {
+      "customerCorrection": {
+        "title": "La modifica ai dati del cliente non è stata salvata",
+        "detail": "L’ordine conserva i dati precedenti. La vendita e il pagamento non sono interessati."
+      },
+      "connection": {
+        "title": "La cassa non è più collegata al negozio",
+        "detail": "Il responsabile può ricollegare la cassa dalle impostazioni di connessione."
+      },
+      "invalidOrders": {
+        "title": "Alcuni ordini contengono articoli non riconosciuti",
+        "detail": "Il responsabile deve verificare quegli ordini."
+      },
+      "order": {
+        "title": "Una modifica all’ordine non è stata salvata",
+        "detail": "Controlla l’ordine visualizzato prima di fare altre modifiche."
+      },
+      "wrongMoney": {
+        "title": "Il pagamento e il totale dell’ordine non coincidono",
+        "detail": "Non addebitare di nuovo il cliente. Fai controllare gli importi al responsabile."
+      },
+      "driver": {
+        "title": "L’assegnazione al corriere non è stata salvata",
+        "detail": "Controlla chi consegnerà l’ordine."
+      },
+      "orderPaymentWait": {
+        "title": "Una modifica all’ordine non è stata completata",
+        "detail": "Il pagamento attende questa modifica. Non addebitare di nuovo il cliente."
+      },
+      "orderWaiting": {
+        "title": "La modifica attende l’ordine originale",
+        "detail": "La cassa cerca l’ordine prima di salvare la modifica."
+      },
+      "orderMissing": {
+        "title": "L’ordine originale non è stato trovato",
+        "detail": "La modifica va verificata prima di salvarla."
+      },
+      "catalog": {
+        "title": "La disponibilità dell’articolo non si è aggiornata sulle altre casse",
+        "detail": "Verifica la disponibilità prima di accettare un ordine per questo articolo."
+      },
+      "address": {
+        "title": "Il nuovo indirizzo non è stato impostato come principale",
+        "detail": "L’ordine non è interessato."
+      },
+      "customerDuplicate": {
+        "title": "Esiste già un cliente con lo stesso numero di telefono",
+        "detail": "Verifica se si tratta della stessa persona."
+      },
+      "customerPhone": {
+        "title": "Il numero di telefono del cliente va corretto",
+        "detail": "L’ordine e la chiusura giornaliera non sono interessati."
+      },
+      "customerDirectory": {
+        "title": "I nuovi dati del cliente sono rimasti su questa cassa",
+        "detail": "Le modifiche potrebbero non comparire sulle altre casse."
+      },
+      "shiftClosed": {
+        "title": "Il turno è stato chiuso su un’altra cassa",
+        "detail": "Fai controllare gli importi al responsabile. Non ripetere incassi o rimborsi."
+      },
+      "oldOrderCorrection": {
+        "title": "Una precedente correzione dell’ordine non è stata completata",
+        "detail": "Il responsabile confronta l’ordine con la ricevuta prima della chiusura."
+      },
+      "phoneShifts": {
+        "title": "La chiusura attende i turni sui telefoni",
+        "detail": "Chiudi il turno dal telefono o da Personale. La chiusura verrà inviata automaticamente."
+      },
+      "uncertainPayment": {
+        "title": "Il pagamento con carta non è stato confermato",
+        "detail": "Controlla il terminale della banca. Non addebitare di nuovo il cliente."
+      },
+      "platform": {
+        "title": "Il pagamento della piattaforma va verificato",
+        "detail": "La piattaforma ha riscosso il pagamento. Non incassarlo di nuovo alla cassa."
+      },
+      "balance": {
+        "title": "L’ordine ha un saldo da pagare",
+        "detail": "Apri il pagamento per verificare il saldo."
+      },
+      "payment": {
+        "title": "Una registrazione di pagamento va verificata",
+        "detail": "Non ripetere addebiti o rimborsi."
+      },
+      "paymentWaiting": {
+        "title": "Il pagamento è in attesa dell’ordine",
+        "detail": "Il pagamento è registrato qui. Non addebitare di nuovo il cliente."
+      },
+      "refundWaiting": {
+        "title": "Il rimborso è in attesa del pagamento originale",
+        "detail": "Non registrare di nuovo il rimborso o l’annullamento."
+      },
+      "refundMissing": {
+        "title": "Il pagamento originale per il rimborso non è stato trovato",
+        "detail": "Chiedi all’assistenza di verificare il pagamento prima di altre modifiche."
+      },
+      "oldPayments": {
+        "title": "Ci sono pagamenti precedenti da verificare",
+        "detail": "Il responsabile deve verificare lo storico dei pagamenti."
+      },
+      "courierMoney": {
+        "title": "Il pagamento in contanti e la registrazione del corriere non coincidono",
+        "detail": "Chiedi al responsabile di controllare il turno del corriere."
+      },
+      "courierCheck": {
+        "title": "Non è stato possibile controllare i contanti del corriere",
+        "detail": "Il responsabile deve verificare questo turno."
+      },
+      "printerSetting": {
+        "title": "La stampante non ha riconosciuto l’impostazione per le ricevute",
+        "detail": "Ripristina l’ultima impostazione e controlla una ricevuta di prova."
+      },
+      "printer": {
+        "title": "La stampante va controllata",
+        "detail": "Gli ordini vengono salvati. Controlla carta, alimentazione e collegamento."
+      },
+      "waiting": {
+        "title": "Alcune modifiche sono in attesa di invio",
+        "detail": "Le modifiche sono salvate su questa cassa.",
+        "stuck": "Modifiche in attesa di invio: {{count}}. L’attesa più lunga è di {{duration}}."
+      },
+      "printing": {
+        "title": "Le ricevute non vengono stampate",
+        "detail": "Ricevute in attesa: {{count}}. Controlla carta, alimentazione e collegamento."
+      },
+      "sending": {
+        "title": "Alcune modifiche non sono state inviate",
+        "detail": "Restano sulla cassa e vanno verificate prima dell’invio."
+      },
+      "orderCheck": {
+        "title": "La cassa non ha potuto controllare l’ordine",
+        "detail": "Resta negli ordini attivi. Controlla di nuovo tra poco."
+      },
+      "dayClose": {
+        "title": "La chiusura giornaliera va verificata",
+        "detail": "Controlla ordini e pagamenti prima della chiusura."
+      },
+      "dayOverdue": {
+        "title": "La giornata è ancora aperta",
+        "detail": "Chiudi la giornata al termine del servizio."
+      },
+      "fiscal": {
+        "title": "Alcune ricevute non sono arrivate al servizio fiscale",
+        "detail": "La chiusura è in attesa di queste ricevute."
+      },
+      "crash": {
+        "title": "La cassa si è chiusa inaspettatamente",
+        "detail": "Controlla l’ultimo ordine prima di inserirlo di nuovo."
+      }
+    }
+  }
+}

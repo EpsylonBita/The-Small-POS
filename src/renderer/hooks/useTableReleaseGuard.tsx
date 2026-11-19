@@ -12,7 +12,7 @@ import {
   type TableCancellationPlan,
 } from '../services/TableManualCancellation';
 import type { RestaurantTable } from '../types/tables';
-import { extractPrivilegedActionError } from '../utils/privileged-actions';
+import { isPrivilegedConfirmationCancelled, isPrivilegedShiftRequired, privilegedActionFeedback } from '../utils/privileged-actions';
 import { formatTableDisplayNumber } from '../utils/table-display';
 import { isRetryableTableServiceError } from '../utils/tableSessionOfflineQueue';
 import {
@@ -79,7 +79,7 @@ type Translate = (key: string, options?: Record<string, unknown>) => unknown;
 
 /** The operator closed the PIN prompt: nothing happened, nothing to say. */
 export function isOwingCancelDismissed(error: unknown): boolean {
-  return error instanceof Error && error.message === 'Privileged action confirmation cancelled';
+  return isPrivilegedConfirmationCancelled(error);
 }
 
 /**
@@ -152,19 +152,14 @@ export function owingCancelFailureMessage(error: unknown, t: Translate): string 
       }),
     );
   }
-  const privileged = extractPrivilegedActionError(error, 'cash_drawer_control');
-  const shiftRequired =
-    (privileged?.code === 'UNAUTHORIZED' && /shift/i.test(privileged.reason ?? '')) ||
-    /cashier or manager shift required/i.test(errorText(error));
-  return String(
-    shiftRequired
-      ? t('tableRelease.shiftRequired', {
-          defaultValue: 'A cashier or manager has to be checked in on this terminal to approve it.',
-        })
-      : t('tableRelease.cancelFailed', {
-          defaultValue: 'The order could not be cancelled. The table was not released.',
-        }),
-  );
+  if (isPrivilegedShiftRequired(error)) {
+    return String(t('tableRelease.shiftRequired', {
+      defaultValue: 'A cashier or manager has to be checked in on this terminal to approve it.',
+    }));
+  }
+  return privilegedActionFeedback(error, t) ?? String(t('tableRelease.cancelFailed', {
+    defaultValue: 'The order could not be cancelled. The table was not released.',
+  }));
 }
 
 /**

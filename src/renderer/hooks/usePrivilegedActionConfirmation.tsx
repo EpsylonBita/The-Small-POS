@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { getBridge } from '../../lib'
 import type { MoneyApproval, PrivilegedActionScope } from '../../lib/ipc-contracts'
@@ -17,6 +17,7 @@ interface PrivilegedActionRequest<T> {
    * while a cashier without the right is on shift).
    */
   approvalSubtitle?: string
+  onPinRefused?: () => Promise<void> | void
 }
 
 interface PendingPrivilegedAction<T> extends PrivilegedActionRequest<T> {
@@ -33,6 +34,7 @@ export function usePrivilegedActionConfirmation() {
   const bridge = getBridge()
   const { t } = useTranslation()
   const [pendingAction, setPendingAction] = useState<PendingPrivilegedAction<unknown> | null>(null)
+  const pendingRef = useRef<PendingPrivilegedAction<unknown> | null>(null)
   const [approvalState, setApprovalState] = useState<'checking' | 'ready' | 'noApprover' | 'paused'>('checking')
   const [permission, setPermission] = useState('')
   const [pinRefused, setPinRefused] = useState(false)
@@ -76,6 +78,7 @@ export function usePrivilegedActionConfirmation() {
     title,
     subtitle,
     approvalSubtitle,
+    onPinRefused,
   }: PrivilegedActionRequest<T>): Promise<T> => {
     try {
       return await action()
@@ -87,11 +90,11 @@ export function usePrivilegedActionConfirmation() {
       }
 
       if (privilegedError.code === 'UNAUTHORIZED') {
-        if (privilegedError.reason !== 'Active session required') {
-          throw new Error(privilegedError.reason || 'Unauthorized')
+        if (privilegedError.reason === 'Active session required') {
+          throw { ...privilegedError, code: 'AUTH_SESSION_REQUIRED' }
         }
-        // Session missing/expired — fall through to show PIN modal
-      } else if (privilegedError.code !== 'REAUTH_REQUIRED') {
+        throw new Error(privilegedError.reason || 'Unauthorized')
+      } else if (privilegedError.code !== 'REAUTH_REQUIRED' && privilegedError.code !== 'AUTH_SESSION_EXPIRED' && privilegedError.code !== 'AUTH_GRANT_EXPIRED') {
         throw error
       }
 
@@ -99,26 +102,34 @@ export function usePrivilegedActionConfirmation() {
         setPinRefused(false)
         setApprovalState('checking')
         setPermission(privilegedError.approval === 'void_orders' ? 'pos.orders.cancel' : 'pos.refunds.process')
-        setPendingAction({
+        const pending: PendingPrivilegedAction<unknown> = {
           scope,
           action,
           resolve: resolve as (value: unknown) => void,
           reject,
           title,
-          subtitle,
+          subtitle: privilegedError.code === 'AUTH_SESSION_EXPIRED'
+            ? t('orderSyncNotice.sessionExpired', { defaultValue: 'The till sign-in has expired. Enter the till PIN again.' })
+            : privilegedError.code === 'AUTH_GRANT_EXPIRED'
+              ? t('recovery.actionStatus.grantExpired')
+              : subtitle,
           approvalSubtitle,
+          onPinRefused,
           approval: privilegedError.approval ?? null,
-        })
+        }
+        pendingRef.current = pending
+        setPendingAction(pending)
       })
     }
   }
 
   const handleClose = () => {
-    if (!pendingAction) {
+    if (!pendingAction || pendingRef.current !== pendingAction) {
       return
     }
 
-    pendingAction.reject(new Error('Privileged action confirmation cancelled'))
+    pendingRef.current = null
+    pendingAction.reject(new Error('AUTH_CONFIRMATION_CANCELLED'))
     setPendingAction(null)
   }
 
@@ -134,6 +145,7 @@ export function usePrivilegedActionConfirmation() {
         ...(pendingAction.approval ? { approval: pendingAction.approval } : {}),
       })
     } catch (error) {
+      if (pendingRef.current !== pendingAction) return true
       const privilegedError = extractPrivilegedActionError(error, pendingAction.scope)
       if (pendingAction.approval) {
         if (privilegedError?.permission) setPermission(privilegedError.permission)
@@ -154,17 +166,23 @@ export function usePrivilegedActionConfirmation() {
           return false
         }
       }
-      if (privilegedError?.code === 'UNAUTHORIZED' && privilegedError.reason === 'Invalid PIN') {
+      if (privilegedError?.code === 'AUTH_PIN_WRONG' ||
+          (privilegedError?.code === 'UNAUTHORIZED' && privilegedError.reason === 'Invalid PIN')) {
+        await pendingAction.onPinRefused?.()
         return false
       }
 
-      pendingAction.reject(
-        new Error(privilegedError?.reason || 'Privileged action confirmation failed')
-      )
+      pendingAction.reject(privilegedError ?? error)
+      pendingRef.current = null
       setPendingAction(null)
       return true
     }
 
+    if (pendingRef.current !== pendingAction) return true
+    // Once the PIN is accepted, the action may commit. Dismiss the prompt
+    // before starting it so closing the prompt cannot report a cancellation.
+    pendingRef.current = null
+    setPendingAction(null)
     try {
       // Only the current callback receives the PIN. It is never retained in
       // pending state, storage, logs, or an offline operation payload.
@@ -172,8 +190,6 @@ export function usePrivilegedActionConfirmation() {
       pendingAction.resolve(result)
     } catch (error) {
       pendingAction.reject(error)
-    } finally {
-      setPendingAction(null)
     }
 
     return true
@@ -215,5 +231,6 @@ export function usePrivilegedActionConfirmation() {
   return {
     runWithPrivilegedConfirmation,
     confirmationModal,
+    confirmationOpen: Boolean(pendingAction),
   }
 }

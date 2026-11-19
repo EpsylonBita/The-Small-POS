@@ -9360,10 +9360,11 @@ where
                 )? {
                     return Ok(persisted);
                 }
-                let plugin: String = conn.query_row(
-                    "SELECT COALESCE(plugin, '') FROM orders WHERE id = ?1", [local_id], |row| row.get(0),
+                let is_food = conn.query_row(
+                    "SELECT plugin, order_number, ghost_metadata FROM orders WHERE id = ?1",
+                    [local_id], print::is_food_order_for_print_items,
                 ).map_err(|error| error.to_string())?;
-                if print::is_food_delivery_plugin(&plugin) {
+                if is_food {
                     return Err("Fetched food items could not be persisted under the current order identity and terminal scope".into());
                 }
             }
@@ -9418,15 +9419,15 @@ pub(crate) fn persist_fetched_food_order_items(
     remote_id: &str,
     fetched: &Value,
 ) -> Result<Option<Value>, String> {
-    let row: Option<(String, String, String, Option<String>, Option<String>)> = conn.query_row(
-        "SELECT COALESCE(plugin, ''), COALESCE(supabase_id, ''), COALESCE(items, '[]'), branch_id, organization_id
+    let row: Option<(bool, String, String, Option<String>, Option<String>)> = conn.query_row(
+        "SELECT plugin, COALESCE(supabase_id, ''), COALESCE(items, '[]'), branch_id, organization_id, order_number, ghost_metadata
          FROM orders WHERE id = ?1 AND COALESCE(order_context, '') != 'repair_settlement'",
-        [local_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        [local_id], |row| Ok((print::is_food_order_for_print_items(row)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     ).optional().map_err(|error| format!("read food item cache identity: {error}"))?;
-    let Some((plugin, stored_remote_id, stored_items, branch, org)) = row else {
+    let Some((true, stored_remote_id, stored_items, branch, org)) = row else {
         return Ok(None);
     };
-    if !print::is_food_delivery_plugin(&plugin) || stored_remote_id != remote_id {
+    if stored_remote_id != remote_id {
         return Ok(None);
     }
     let (organization_id, expected_branch, _) = food_item_fetch_scope(conn)?;
@@ -9491,17 +9492,17 @@ pub(crate) fn preserve_food_items_on_incomplete_snapshot(
     if empty_array && (incoming_total == Some(0.0) || incoming_status == Some("cancelled")) {
         return Ok(incoming);
     }
-    let row: Option<(String, String, f64)> = conn
+    let row: Option<(bool, String, f64)> = conn
         .query_row(
-            "SELECT COALESCE(plugin, ''), COALESCE(items, '[]'),
-                    COALESCE(total_amount_cents / 100.0, total_amount, 0) FROM orders WHERE id = ?1",
+            "SELECT plugin, COALESCE(items, '[]'), COALESCE(total_amount_cents / 100.0, total_amount, 0),
+                    order_number, ghost_metadata FROM orders WHERE id = ?1",
             [local_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((print::is_food_order_for_print_items(row)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(|error| format!("read food items before snapshot: {error}"))?;
-    if row.is_some_and(|(plugin, items, total)| {
-        (print::is_food_delivery_plugin(&plugin) && print::has_usable_food_order_items(&items))
+    if row.is_some_and(|(is_food, items, total)| {
+        (is_food && print::has_usable_food_order_items(&items))
             || (empty_array
                 && incoming_total.unwrap_or(total) != 0.0
                 && serde_json::from_str::<Value>(&items)

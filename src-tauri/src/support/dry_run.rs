@@ -1,6 +1,6 @@
 use super::{
     authorizer::{self, Facts, Policy},
-    contracts,
+    clock, contracts,
     critical_op::SupportPermit,
     guards::{self, Scope},
     replica, snapshot,
@@ -131,7 +131,11 @@ pub fn scratch(live: &Path, permit: &SupportPermit) -> Result<Scratch, String> {
         .join("support-replicas");
     std::fs::create_dir_all(&dir).map_err(|_| "SNAPSHOT_FAILED")?;
     let copy = Scratch(dir.join(format!("dry-{}.db", uuid::Uuid::new_v4())));
-    let c = replica::read_connection(live, permit, Instant::now() + Duration::from_secs(30))?;
+    let c = replica::read_connection(
+        live,
+        permit,
+        clock::monotonic_now() + Duration::from_secs(30),
+    )?;
     c.execute("VACUUM INTO ?1", [copy.0.to_string_lossy().as_ref()])
         .map_err(guards::error)?;
     Ok(copy)

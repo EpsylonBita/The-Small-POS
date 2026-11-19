@@ -119,6 +119,77 @@ pub fn budget(conn: &Connection, r: &Remedy, target: Option<&str>) -> Result<Bud
     Ok(budget)
 }
 
+pub(super) fn correction_key(key: &str) -> &str {
+    key.strip_prefix("customer-correction:").unwrap_or(key)
+}
+
+pub(super) fn correction_notices(
+    conn: &Connection,
+    target: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let scope = super::identity::local(conn)?;
+    let mut stmt = conn.prepare("SELECT q.id,q.record_id,COALESCE(o.order_number,o.id),COALESCE(q.last_attempt,q.created_at)
+        FROM parity_sync_queue q JOIN orders o ON o.id=q.record_id
+        WHERE q.table_name='orders' AND q.operation='UPDATE' AND q.status IN ('failed','conflict')
+          AND q.organization_id=?1 AND o.organization_id=?1 AND o.branch_id=?2 AND o.terminal_id=?3
+          AND (?4 IS NULL OR q.id=?4)
+        ORDER BY COALESCE(q.last_attempt,q.created_at),q.id").map_err(super::replica::sql_error)?;
+    let mut rows = stmt
+        .query(rusqlite::params![
+            scope.organization_id,
+            scope.branch_id,
+            scope.terminal_id,
+            target.map(correction_key)
+        ])
+        .map_err(super::replica::sql_error)?;
+    let mut notices = Vec::new();
+    while let Some(row) = rows.next().map_err(super::replica::sql_error)? {
+        let id: String = row.get(0).map_err(super::replica::sql_error)?;
+        if crate::order_notice_recovery::refused(conn, &id)?.is_none() {
+            continue;
+        }
+        notices.push(json!({
+            "queueId":id,"orderId":row.get::<_,String>(1).map_err(super::replica::sql_error)?,
+            "orderNumber":row.get::<_,String>(2).map_err(super::replica::sql_error)?,
+            "since":row.get::<_,String>(3).map_err(super::replica::sql_error)?,
+            "kind":"customer_correction_refused","state":"refused",
+            "actions":[crate::order_notice_recovery::RESEND,crate::order_notice_recovery::KEEP],
+        }));
+        if notices.len() > 50 {
+            return Err("REMEDY_NOT_APPLICABLE".into());
+        }
+    }
+    Ok(notices)
+}
+
+pub(super) fn is_correction(id: &str) -> bool {
+    crate::order_notice_recovery::CorrectionRecipe::from_id(id).is_some()
+}
+
+pub(super) fn correction_match(
+    conn: &Connection,
+    remedy: &Remedy,
+    target: Option<&str>,
+    wording: Option<&Match>,
+) -> Match {
+    let observation = correction_notices(conn, target);
+    Match {
+        id: remedy.id.clone(),
+        version: remedy.version,
+        title: wording
+            .map(|m| m.title.clone())
+            .unwrap_or_else(|| remedy.title_key.clone()),
+        explanation: wording
+            .map(|m| m.explanation.clone())
+            .unwrap_or_else(|| remedy.explanation_key.clone()),
+        matches_now: observation
+            .as_ref()
+            .map(|rows| json!(!rows.is_empty()))
+            .unwrap_or(json!("not_applicable")),
+        target_count: observation.map_or(0, |rows| rows.len() as u64),
+    }
+}
+
 /// Only the native queue owner can prove that a scheduled address retry was
 /// accepted by the server. Renderer audit claims are never verification.
 pub fn native_outcome(
@@ -127,11 +198,12 @@ pub fn native_outcome(
     target: Option<&str>,
     since: Option<i64>,
 ) -> Result<Option<String>, String> {
-    if r.id.starts_with("order-customer-correction.") {
-        let scope = crate::table_session_cache::current_scope(conn)?;
-        let target =
-            target.map(|value| value.strip_prefix("customer-correction:").unwrap_or(value));
-        let evidence:Option<(String,String)>=conn.query_row("SELECT CASE WHEN q.status IN ('conflict','failed') THEN 'failed' ELSE json_extract(a.payload_json,'$.outcome') END,COALESCE(json_extract(a.payload_json,'$.verifiedAt'),a.created_at) FROM recovery_action_log a JOIN orders o ON o.id=a.order_id LEFT JOIN parity_sync_queue q ON q.id=json_extract(a.payload_json,'$.replacementQueueId') WHERE a.recipe_id=?1 AND a.recipe_version=?2 AND json_extract(a.payload_json,'$.nativeOrderCorrection')=1 AND o.organization_id=?3 AND o.branch_id=?4 AND (?5 IS NULL OR json_extract(a.payload_json,'$.retiredQueueId')=?5) ORDER BY a.rowid DESC LIMIT 1",rusqlite::params![r.id,r.version,scope.organization,scope.branch,target],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(|_|"REMEDY_NOT_APPLICABLE")?;
+    if is_correction(&r.id) {
+        let scope = super::identity::local(conn)?;
+        let Some(target) = target.map(correction_key) else {
+            return Ok(None);
+        };
+        let evidence:Option<(String,String)>=conn.query_row("SELECT CASE WHEN q.status IN ('conflict','failed') THEN 'failed' ELSE json_extract(a.payload_json,'$.outcome') END,COALESCE(json_extract(a.payload_json,'$.verifiedAt'),a.created_at) FROM recovery_action_log a JOIN orders o ON o.id=a.order_id LEFT JOIN parity_sync_queue q ON q.id=json_extract(a.payload_json,'$.replacementQueueId') WHERE a.recipe_id=?1 AND a.recipe_version=?2 AND json_extract(a.payload_json,'$.nativeOrderCorrection')=1 AND o.organization_id=?3 AND o.branch_id=?4 AND (json_extract(a.payload_json,'$.retiredQueueId')=?5 OR json_extract(a.payload_json,'$.replacementQueueId')=?5) AND o.terminal_id=?6 ORDER BY a.rowid DESC LIMIT 1",rusqlite::params![r.id,r.version,scope.organization_id,scope.branch_id,target,scope.terminal_id],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(|_|"REMEDY_NOT_APPLICABLE")?;
         return Ok(evidence
             .filter(|(_, at)| {
                 since

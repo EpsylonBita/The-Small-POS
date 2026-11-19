@@ -96,6 +96,15 @@ impl Tools {
             return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
         }
         let input = &c.payload;
+        if c.kind == "till_diagnostics_bundle" && input["section"] == "recovery_attempts" {
+            let conn = replica::read_connection(
+                &self.live,
+                permit,
+                Instant::now() + Duration::from_secs(2),
+            )?;
+            let scope = super::identity::observed_session(&conn, &self.live, &c.session_id)?;
+            return collectors::recovery_attempts::collect(&conn, input, &scope, permit);
+        }
         let personal = super::evidence::personal(input)?;
         if personal && !super::evidence::PERSONAL_TOOLS.contains(&c.kind.as_str()) {
             return Err("INVALID_INPUT".into());
@@ -298,12 +307,24 @@ impl Tools {
                 match kind {
                     "till_health" => collectors::health::collect(&conn)?,
                     "till_settings" => collectors::settings::collect(&conn)?,
-                    "till_sync_queue" => collectors::sync_queue::collect_evidence(
-                        &conn,
-                        input,
-                        permit,
-                        evidence_policy,
-                    )?,
+                    "till_sync_queue" => {
+                        let mut result = collectors::sync_queue::collect_evidence(
+                            &conn,
+                            input,
+                            permit,
+                            evidence_policy,
+                        )?;
+                        if let Ok(scope) =
+                            super::identity::observed_session(&conn, &self.live, &c.session_id)
+                        {
+                            if let Ok(previews) =
+                                super::confirmed_recovery::queue_previews(&conn, &scope, permit)
+                            {
+                                result["confirmed_previews"] = json!(previews);
+                            }
+                        }
+                        result
+                    }
                     "till_shifts" => {
                         collectors::shifts::collect_evidence(&conn, permit, evidence_policy)?
                     }
@@ -633,8 +654,8 @@ mod tests {
         assert_eq!(count, 1);
         assert!(!include_str!("network/info.rs").contains("storage::"));
         // v106 is the commit marker; v107 adds Health indexes; v108 retains
-        // adopted status rows and the server's cancellation timestamp.
-        assert_eq!(crate::db::CURRENT_SCHEMA_VERSION, 109);
+        // adopted status rows, and v110 adds private confirmed receipt replay.
+        assert_eq!(crate::db::CURRENT_SCHEMA_VERSION, 110);
     }
 }
 

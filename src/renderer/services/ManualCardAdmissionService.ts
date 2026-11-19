@@ -2,36 +2,13 @@ import type { TFunction } from 'i18next';
 
 import { getBridge } from '../../lib';
 import { parseEcrDeviceAdmission } from '../utils/ecr-device-type';
+import { cardProviderConnected, lastNoProviderAnswerAt } from './cardProviderMark';
 import { getCachedTerminalCredentials } from './terminal-credentials';
 
 /**
- * Manual card admission (desktop parity with Android
- * `POSSystemMobile/src/services/payments/manualOrderCancellation.ts`
- * `requireNoConnectedPaymentProvider` and its PaymentScreen manual card).
- *
- * A manual card records a card the shop took on its own card machine, with no
- * terminal answer behind it. It is admitted only when this till has NO enabled
- * AND admitted ECR card terminal AND a fresh, terminal-authenticated server
- * answer for this exact organization, branch and terminal says no payment
- * provider is connected. A cached or offline answer, a scope change during the
- * read, a malformed reply or any lookup error never admits: the caller refuses
- * and records nothing. Callers ask again right before they record.
- *
- * Founder 01/11/2026 («Ναι, και offline»): when the live answer cannot be had
- * (offline, a request that fails, a cached or unavailable server reply), the
- * last known answer decides: native keeps it with its fetch time for this exact
- * terminal scope (`ecr_get_device_admission`, refreshed online every few
- * minutes). "No provider connected" there admits the card as `basis: cached`;
- * a provider connected, or no answer ever read, refuses. The basis and the time
- * of the answer travel with the admission, so a manual card recorded offline
- * can be reviewed if a provider was connected meanwhile.
- *
- * Founder rule 08/10/2026: a device whose plugin is not active, configured and
- * finished has no effect. Native `ecr_get_default_terminal` returns only an
- * enabled card terminal that is admitted (a payment plugin is licensed and
- * configured for the branch), so a disabled or non-admitted terminal (e.g. a
- * fiscal register mistakenly saved as `payment_terminal`) reads as `none` and
- * never refuses the manual card with `terminal_configured`.
+ * An empty in-memory provider mark records today's manual card without reads.
+ * A last no-provider answer supplies cached evidence; no answer supplies none.
+ * A set, in-scope mark keeps the exact-scope live/offline admission route.
  */
 export const MANUAL_CARD_ADMISSION_PATH = '/api/pos/payments/manual-admission';
 
@@ -45,6 +22,7 @@ export type ManualCardAdmissionMetadata = { admission_basis: ManualCardAdmission
 export type ManualCardAdmission =
   /** `checkedAt`: when the answer that admitted it was read (now for live, the last known answer's time for cached). */
   | { admitted: true; basis: ManualCardAdmissionBasis; checkedAt: string }
+  | { admitted: true; basis: 'none' }
   | { admitted: false; reason: ManualCardRefusal };
 
 export type CardTerminalLookup =
@@ -80,6 +58,7 @@ const trimmed = (value: unknown): string => (typeof value === 'string' ? value.t
 
 /** This till's enabled, admitted ECR card terminal and whether it can take a card now. Never throws. */
 export async function lookupCardTerminal(): Promise<CardTerminalLookup> {
+  if (!cardProviderConnected()) { return { kind: 'none' }; }
   const bridge = getBridge();
   let device: Row | null | undefined;
   try {
@@ -123,10 +102,14 @@ async function lastKnownAdmission(): Promise<ManualCardAdmission> {
 }
 
 /**
- * The manual card rule, asked fresh every time (on the tap that offers it and
- * again on the confirm that records it). Never throws; never caches.
+ * Empty marks admit synchronously from memory. Set marks ask again on the
+ * offer and confirm, retaining the existing exact-scope checks. Never throws.
  */
 export async function admitManualCard(): Promise<ManualCardAdmission> {
+  if (!cardProviderConnected()) {
+    const at = lastNoProviderAnswerAt();
+    return at ? { admitted: true, basis: 'cached', checkedAt: at } : { admitted: true, basis: 'none' };
+  }
   const terminal = await lookupCardTerminal();
   if (terminal.kind === 'unavailable') return refused('unavailable');
   if (terminal.kind !== 'none') return refused('terminal_configured');
@@ -172,7 +155,7 @@ export async function admitManualCard(): Promise<ManualCardAdmission> {
 export function manualCardAdmissionMetadata(
   admission: ManualCardAdmission | null | undefined,
 ): ManualCardAdmissionMetadata | undefined {
-  return admission?.admitted
+  return admission?.admitted && admission.basis !== 'none'
     ? { admission_basis: admission.basis, admission_checked_at: admission.checkedAt }
     : undefined;
 }

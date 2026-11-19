@@ -60,7 +60,7 @@ export interface ParitySyncSnapshot {
 export interface ParitySyncCycleResult {
   config: RuntimeConfigLike;
   queueStatus: QueueStatus | null;
-  paritySyncResult: SyncResult | null;
+  paritySyncResult: (SyncResult & { acknowledgedIds?: string[] }) | null;
   legacySyncTriggered: boolean;
   credentialState: ParitySyncCredentialState;
   paritySyncStatus: ParitySyncSnapshot;
@@ -330,6 +330,7 @@ export async function runParitySyncCycle(options?: {
   forceLegacySync?: boolean;
   syncTerminalConfig?: boolean;
   trigger?: ParitySyncTrigger;
+  reportHealthTargets?: boolean;
 }): Promise<ParitySyncCycleResult> {
   if (!inFlightSync) {
     inFlightSync = (async () => {
@@ -375,14 +376,18 @@ export async function runParitySyncCycle(options?: {
       };
       await publishParitySyncSnapshot(initialSnapshot);
 
-      let paritySyncResult: SyncResult | null = null;
+      let paritySyncResult: ParitySyncCycleResult['paritySyncResult'] = null;
       let paritySyncError: string | null = null;
       let paritySyncReason: string | null = null;
       let paritySyncStatus: ParitySyncStatus = 'completed';
 
       if (credentialState.hasAdminUrl && credentialState.hasApiKey) {
         try {
-          paritySyncResult = await syncQueue.processQueue();
+          paritySyncResult = await syncQueue.processQueue(options?.reportHealthTargets);
+          if (options?.reportHealthTargets && !paritySyncResult.success) {
+            paritySyncStatus = 'failed';
+            paritySyncError = 'PARITY_SYNC_PARTIAL';
+          }
         } catch (error) {
           paritySyncStatus = 'failed';
           paritySyncError = describeCaughtError(error, 'Unknown parity sync failure');

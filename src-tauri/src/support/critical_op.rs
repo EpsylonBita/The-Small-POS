@@ -1,3 +1,4 @@
+use super::clock;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
@@ -17,10 +18,89 @@ pub enum CriticalKind {
     Restore,
     Migration,
 }
+impl CriticalKind {
+    pub(crate) fn evidence_code(self) -> &'static str {
+        match self {
+            Self::Checkout => "CHECKOUT",
+            Self::Card => "CARD",
+            Self::Fiscal => "FISCAL",
+            Self::ZClose => "Z_CLOSE",
+            Self::ShiftClose => "SHIFT_CLOSE",
+            Self::Restore => "RESTORE",
+            Self::Migration => "MIGRATION",
+        }
+    }
+
+    pub(crate) fn preemption_error(self) -> String {
+        format!("PREEMPTED_BY_CRITICAL_OPERATION: {}", self.evidence_code())
+    }
+}
+
+pub(crate) fn attributed_refusal((code, kind): (&'static str, Option<CriticalKind>)) -> String {
+    kind.map_or_else(|| code.to_owned(), CriticalKind::preemption_error)
+}
+
+pub(crate) fn preemption_evidence(error: &str) -> Option<&'static str> {
+    let code = error.strip_prefix("PREEMPTED_BY_CRITICAL_OPERATION: ")?;
+    [
+        CriticalKind::Checkout,
+        CriticalKind::Card,
+        CriticalKind::Fiscal,
+        CriticalKind::ZClose,
+        CriticalKind::ShiftClose,
+        CriticalKind::Restore,
+        CriticalKind::Migration,
+    ]
+    .into_iter()
+    .map(CriticalKind::evidence_code)
+    .find(|kind| *kind == code)
+}
+
+#[test]
+fn critical_op_attribution_distinguishes_automatic_work_from_critical_work() {
+    let gate = CriticalOpGate::new();
+    let automatic = gate.try_begin_support(true, None).unwrap();
+    assert!(matches!(
+        gate.try_begin_support_attributed(true, None),
+        Err(("CONCURRENT_OPERATION", None))
+    ));
+    assert_eq!(automatic.preempted_by(), None);
+    drop(automatic);
+
+    for kind in [
+        CriticalKind::Checkout,
+        CriticalKind::Card,
+        CriticalKind::Fiscal,
+        CriticalKind::ShiftClose,
+        CriticalKind::ZClose,
+        CriticalKind::Restore,
+        CriticalKind::Migration,
+    ] {
+        let staff = gate.try_begin_support(true, None).unwrap();
+        let critical = gate.begin_critical(kind);
+        assert!(matches!(
+            gate.try_begin_support_attributed(true, None),
+            Err(("deferred_critical_operation", Some(active))) if active == kind
+        ));
+        drop(critical);
+        assert!(staff.is_cancelled());
+        assert_eq!(staff.preempted_by(), Some(kind));
+        assert_eq!(
+            preemption_evidence(&kind.preemption_error()),
+            Some(kind.evidence_code())
+        );
+    }
+    assert_eq!(
+        preemption_evidence("PREEMPTED_BY_CRITICAL_OPERATION: raw details"),
+        None
+    );
+}
+
 struct Work {
     write: bool,
     cancelled: Arc<AtomicBool>,
     interrupt: Option<Arc<rusqlite::InterruptHandle>>,
+    preempted_by: Option<CriticalKind>,
 }
 struct ProcessCancel {
     cancelled: Arc<AtomicBool>,
@@ -154,7 +234,8 @@ impl CriticalOpGate {
         }
         // No worker code runs under the gate lock. Registration and interrupt
         // share the lock, closing the write-admission/pre-emption race.
-        for work in state.work.values() {
+        for work in state.work.values_mut() {
+            work.preempted_by.get_or_insert(kind);
             work.cancelled.store(true, Ordering::Release);
             if let Some(handle) = &work.interrupt {
                 handle.interrupt();
@@ -187,7 +268,8 @@ impl CriticalOpGate {
             return Err("deferred_critical_operation");
         }
         state.restore = true;
-        for work in state.work.values() {
+        for work in state.work.values_mut() {
+            work.preempted_by.get_or_insert(CriticalKind::Restore);
             work.cancelled.store(true, Ordering::Release);
             if let Some(handle) = &work.interrupt {
                 handle.interrupt();
@@ -252,12 +334,26 @@ impl CriticalOpGate {
         write: bool,
         interrupt: Option<Arc<rusqlite::InterruptHandle>>,
     ) -> Result<SupportPermit, &'static str> {
+        self.try_begin_support_attributed(write, interrupt)
+            .map_err(|(code, _)| code)
+    }
+
+    pub(crate) fn try_begin_support_attributed(
+        self: &Arc<Self>,
+        write: bool,
+        interrupt: Option<Arc<rusqlite::InterruptHandle>>,
+    ) -> Result<SupportPermit, (&'static str, Option<CriticalKind>)> {
         let mut state = self.lock();
         if state.restore || !state.critical.is_empty() {
-            return Err("deferred_critical_operation");
+            let kind = if state.restore {
+                Some(CriticalKind::Restore)
+            } else {
+                state.critical.values().next().copied()
+            };
+            return Err(("deferred_critical_operation", kind));
         }
         if state.work.values().any(|w| w.write) || (write && !state.work.is_empty()) {
-            return Err("CONCURRENT_OPERATION");
+            return Err(("CONCURRENT_OPERATION", None));
         }
         state.next += 1;
         let id = state.next;
@@ -268,6 +364,7 @@ impl CriticalOpGate {
                 write,
                 cancelled: cancelled.clone(),
                 interrupt,
+                preempted_by: None,
             },
         );
         Ok(SupportPermit {
@@ -335,6 +432,13 @@ impl SupportPermit {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
+    pub(crate) fn preempted_by(&self) -> Option<CriticalKind> {
+        self.gate
+            .lock()
+            .work
+            .get(&self.id)
+            .and_then(|work| work.preempted_by)
+    }
     /// The only support business-write entry: short lock wait and a native
     /// progress deadline. Callers must keep the RAII transaction on this worker.
     // Used by task 17.10 (Phase 3 guarded writes).
@@ -378,11 +482,26 @@ impl SupportPermit {
             return Err("TIER_NOT_ALLOWED".into());
         }
         conn.busy_timeout(timeout).map_err(|_| "INTERNAL_ERROR")?;
-        self.guard_connection(conn, Instant::now() + std::time::Duration::from_millis(250));
+        self.guard_connection(
+            conn,
+            clock::monotonic_now() + std::time::Duration::from_millis(250),
+        );
         if self.is_cancelled() {
             return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
         }
-        crate::db::immediate_transaction(conn).map_err(|_| "PREEMPTED_BY_CRITICAL_OPERATION".into())
+        crate::db::immediate_transaction(conn).map_err(|error| {
+            if timeout.is_zero()
+                && !self.is_cancelled()
+                && matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                )
+            {
+                "NOTICE_DATABASE_BUSY".into()
+            } else {
+                "PREEMPTED_BY_CRITICAL_OPERATION".into()
+            }
+        })
     }
     /// Install before BEGIN and recheck cancellation before writing. This flag
     /// also closes SQLite's idle-interrupt race and caps transaction duration.
@@ -400,14 +519,14 @@ impl SupportPermit {
         };
         drop(state);
         let deadline = if write {
-            deadline.min(Instant::now() + std::time::Duration::from_millis(250))
+            deadline.min(clock::monotonic_now() + std::time::Duration::from_millis(250))
         } else {
             deadline
         };
         let cancel = self.cancelled.clone();
         conn.progress_handler(
             if write { 1 } else { 100 },
-            Some(move || cancel.load(Ordering::Acquire) || Instant::now() >= deadline),
+            Some(move || cancel.load(Ordering::Acquire) || clock::monotonic_now() >= deadline),
         );
     }
 }

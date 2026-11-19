@@ -1,3 +1,5 @@
+import { buildRecoveryActionRequest } from '../../src/renderer/services/support/SupportRemedyRunner';
+import { matchHealthRemedies } from '../../src/renderer/services/support/SupportMatcherBridge';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -38,6 +40,28 @@ const addressRow = (overrides: Partial<SyncQueueItem> = {}): SyncQueueItem => ({
   data: '{"is_default":true}', organizationId: 'org-1', createdAt: '2026-09-13T00:00:00Z',
   attempts: 1, lastAttempt: null, errorMessage: 'CUSTOMER_ADDRESS_DEFAULT_CONFLICT', nextRetryAt: null,
   retryDelayMs: 0, priority: 0, moduleType: 'customers', conflictStrategy: 'manual', version: 1, status: 'failed', ...overrides,
+});
+
+test('parked customer corrections keep their staff remedy and offer neither generic retry', () => {
+  const queueId = 'parked-correction';
+  const orderId = 'delivered-order';
+  const health = baseSystemHealth({
+    parityQueueStatus: { total: 1, conflicts: 1, pending: 0, failed: 0 },
+    syncBlockerDetails: [{queueId: 1, entityId: orderId, entityType: 'orders',
+      blockerReason: 'UNKNOWN_CONFLICT_REVIEW', queueStatus: 'conflict'}] as DiagnosticsSystemHealth['syncBlockerDetails'],
+    orderNotices: [{ queueId, orderId, orderNumber: '12', since: 'today',
+      state: 'refused', kind: 'customer_correction_refused',
+      actions: ['resendOrderCustomerCorrection', 'keepServerOrderCustomerDetails'] }],
+  });
+  const { issues } = buildSyncRecoveryIssues({
+    systemHealth: health,
+    lastParitySync: { status: 'failed', error: 'PARITY_SYNC_PARTIAL', processed: 0, remaining: 1 } as any,
+  });
+  assert.deepEqual(issues.find(issue => issue.code === 'customer_correction_refused')?.actions.map(action => action.id),
+    ['resendOrderCustomerCorrection', 'keepServerOrderCustomerDetails']);
+  const offered = issues.flatMap(issue => issue.actions.map(action => action.id));
+  assert.ok(!offered.includes('retrySync'));
+  assert.ok(!offered.includes('runParitySyncNow'));
 });
 
 test('zero courier cash is visible with empty queues and offers support, not a financial mutation', () => {
@@ -750,4 +774,40 @@ test('a Z held for open phone shifts names them in plain words', async () => {
       assert.doesNotMatch(text, /\{\{|Z_REPORT/, `${locale} ${key}`);
     }
   }
+});
+
+test('address remedy selects the queued write even when the address identifier differs', () => {
+  const systemHealth = baseSystemHealth();
+  const remedy = matchHealthRemedies({ systemHealth, parityItems: [addressRow()] }, false, key => key)
+    .find(item => item.id === 'customer-address-default.retry');
+  assert.ok(remedy);
+  const target = remedy.targets[0];
+  assert.equal(target.key, 'address-queue');
+  assert.equal(target.issue.entityId, 'address-1');
+  const request = buildRecoveryActionRequest(target.issue, target.action);
+  assert.equal(request.actionId, 'nativeCustomerAddressDefaultRetry');
+  assert.equal(request.params?.sampleItemId, 'address-queue');
+});
+
+test('exact legacy validation is reachable and missing canonical money goes to support', () => {
+  const { issues } = buildSyncRecoveryIssues({
+    systemHealth: baseSystemHealth(),
+    financialItems: [{
+      queueId: 41, entityType: 'payment_adjustment', entityId: 'legacy-adjustment',
+      operation: 'INSERT', status: 'failed',
+      lastError: 'Validation failed staff_id Invalid uuid remote_payment_id canonical_payment_id at endpoint /api/pos/payments/adjustments/sync',
+    } as any],
+    integrity: { valid: false, issues: [{
+      entityType: 'payment_adjustment', entityId: 'missing-parent-adjustment',
+      reasonCode: 'payment_adjustment_missing_canonical_remote_payment', suggestedFix: 'contact_support',
+    }] },
+  });
+  const legacy = issues.find(issue => issue.code === 'financial_adjustment_legacy_validation');
+  assert.ok(legacy);
+  const action = legacy.actions.find(action => action.id === 'requeueFailedAdjustmentLegacyValidationRows');
+  assert.ok(action);
+  assert.equal(buildRecoveryActionRequest(legacy, action).queueId, 41);
+  const orphan = issues.find(issue => issue.code === 'payment_adjustment_missing_canonical_remote_payment');
+  assert.ok(orphan);
+  assert.deepEqual(orphan.actions.map(action => action.id), ['contactDev']);
 });

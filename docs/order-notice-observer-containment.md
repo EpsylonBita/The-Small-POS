@@ -131,6 +131,26 @@ Incident reporting forwards the Health code only when it has the classifier's sh
 Every episode reaches us: a refusal that follows a successful read starts a new episode and is reported again,
 even when the very next retry gets through before Health looks.
 
+### An unreadable evidence list reaches us too
+
+Founder, 17/11/2026 («Ναι, μετά την έκδοση»): `observerFailures: ["orderIssueEvidence"]` kept order-issue
+fingerprints from clearing, but said nothing to us, so while it lasted the open order issues behind it were not
+reported at all. The failure itself is now reported, the same way on Android:
+
+- `diagnostics::get_system_health` adds `orderIssueEvidenceFailure: {code, open_notices}` while the evidence read
+  fails. `code` is `notice_failure_code` of the error; `open_notices` is the length of the notice list when that
+  list was readable, else `null`.
+- `classify_incidents` raises `<terminal>:sync.active_error:order_issue:evidence_unavailable:<code>`, severity
+  high, with evidence `{issue_kind, refusal_code, order_issue_count}` (the count only when it is known). A code
+  that is not the classifier's is replaced with `ORDER_NOTICE_OBSERVATION_FAILED`.
+- It follows the ordinary rules: sent after two observations in a row, not repeated while open (its evidence
+  signature has no entries, so it does not change), unreadable while the evidence is unreadable, and cleared
+  after two observations in which the evidence was read again.
+- The server and the super-admin console need nothing new; nothing changes for staff.
+
+Regressions: `unreadable_order_evidence_reaches_us_with_its_cause_and_clears_when_readable` and the extended
+`notice_containment_health_keeps_owner_observations_fresh_when_notice_read_fails`.
+
 ### Evening verification
 
 Commands run one at a time. Cargo uses five jobs, the shared target and its short `t` temporary directory as requested. The whole Rust suite is not run in this follow-up, as requested; the coordinator owns that run. Live incident delivery was not exercised against a store: the existing transport/admission/clearance path is covered by the native tests.
@@ -171,7 +191,44 @@ Concurrent coordinator edits outside `pos-tauri/` were observed and left untouch
 
 Worker: OpenAI Codex (GPT-6 family); no cross-provider client or delegated agent was used.
 
-## Known incident, 18/11/2026: both customer-correction buttons did nothing (desktop 1.4.153)
+## Known incident at Tomikro on 18 November 2026
+
+Desktop 1.4.153 sent the only 14.50 payment. It left a customer-only
+correction parked against a delivered, paid order. Staff could sell and
+close the shift. Both customer-correction actions failed, and routine parity
+passes continued to report a partial sync after the row stopped replaying.
+
+| Symptom | Cause and fix | Regression |
+| --- | --- | --- |
+| Save again failed after a new login. Keep the existing details could fail at the same point. | `health_action_admission` eagerly evaluated the fallback for a missing recipe ID even when the request supplied a shipped ID. That fallback refused both actions. Matching the supplied ID first leaves recipe/version, payload and budget checks in force. The historical audit rows do not count toward a correction attempt cap. | `order_notice_tomikro_manual_actions_admit_real_history_and_exact_snapshot` uses the migrated on-disk schema, the old request and audit shapes, a staff login, a cashier shift, the ordinary privileged PIN and a real pre-action snapshot. |
+| Initial D1 attribution of an items refusal to Tomikro manual metadata was incorrect. | The pre-existing settlement signature already removes all `_meta` and normalizes empty modifiers. Tomikro has no item-signature difference. The broad raw-line switch and manual flag were removed after the coordinator review; see the [shape proof](order-header-shape-proof-20261118.md). | `order_header_preflight_tomikro_already_equal_without_manual_marker_or_raw_relation` proves the original signatures equal. The admission refusal above remains independently reproduced. |
+| A PIN presented after the till sign-in expired could not continue, even during an eligible shift. | Native privileged confirmation previously looked up only active sessions. The same role PIN now renews a retained expired session, using the same durable lockout and the original session identity. Native activity does not reactivate an idle-expired session. A genuine logout still requires a new login. | `expired_privileged_sessions_require_the_same_role_pin_and_renew_in_place`, `privileged_lockout_is_a_code_and_cannot_renew_the_session` and the confirmation hook's expired, absent and cancelled cases. |
+| The automatic action appeared interrupted while the app was still running. | The final write and its failure audit both used zero-wait admission under the same permit. A competing writer could reject both, and a critical operation could cancel both. The next worker pass labelled every remaining claim interrupted. The worker now holds classified failures until a fresh non-waiting audit can record them, and interruption cleanup runs only before it begins work. | `order_notice_tomikro_automatic_retries_busy_writer_and_keeps_real_reason` holds the SQLite writer across the exact HTTP reply and both immediate attempts. It releases the writer, persists the reason, reopens the database and retries once after the persisted cooldown. |
+| Retry made no change, and each later pass repeated the same partial warning. | `retrySync` only touched legacy rows and returned success for zero updates. An already parked conflict also counted as a fresh batch failure for reporting. The generic actions no longer offer a retry on those parked-only targets. The background pass preserves partial status without the repeated warning. New failures still produce the warning. | `order_notice_tomikro_parked_rows_refuse_both_generic_retries` keeps both native results truthful and the original row parked. `order_notice_parked_only_background_is_quiet_but_new_failures_remain_partial` distinguishes a parked row from a new conflict or an explicitly forced sync. |
+
+The automatic budget is three claimed attempts with a 60-second cooldown.
+Only classified transient failures known to precede the order write are
+retryable. A busy writer before a claim defers without spending an attempt.
+Failure after the write begins, a process interruption with an unfinished
+claim, and any replacement are terminal for automatic replay. The guarded
+transaction still couples the retired request, replacement and intent. The
+manual actions remain available for an old interrupted claim. Keep verifies
+the adoption immediately. Save again stays pending until the queue owner
+verifies the exact server acknowledgement.
+
+The regression uses the on-disk schema and both projections from the exact
+order lookup. The support collector supplies the `retry_class: transport`
+label from the incident. SQLite has no `retry_class` column. The resend checks
+the outbound customer-only PATCH and its version-5 acknowledgement against
+the single original payment.
+
+The incident timeline is consistent with writer contention or critical
+preemption, but it retained no machine reason to distinguish them. The
+command fixture reproduces the deterministic admission refusal independently
+of either. The incident record contains no observation that the order
+notice's renderer read was stale at the time of the founder's action.
+
+### The same row held the Z: what hotfix 1.4.154 shipped first
 
 - **Symptom.** A delivered, paid order showed "the change to the customer's details was not saved". Both
   buttons («Αποθήκευση ξανά», «Να μείνουν τα στοιχεία όπως είναι τώρα») asked for the PIN and then answered
@@ -189,6 +246,5 @@ Worker: OpenAI Codex (GPT-6 family); no cross-provider client or delegated agent
   drives both actions through `recovery_execute_action_core` with a fixture shaped like the store's row and the
   history 1.4.153 had recorded, and asserts that nothing refused is left for the day close to count. It runs
   in the blocking `cargo test --lib` CI job.
-- **Still open, tracked for the next release.** An expired till sign-in or a missing shift still refuses before
-  the PIN can help; a refused `orders` row has no set-aside; the automatic attempt is spent after one
-  interruption.
+- **Outcome.** 1.4.154 was published at 14:34 UTC on 18/11/2026. On the store's till the first press was preempted by a critical operation (`PREEMPTED_BY_CRITICAL_OPERATION`), the second resolved the row, and the Z covering both nights was issued at 14:47 UTC.
+- **Closed by the release this document describes.** An expired till sign-in is renewed by the same role PIN; a founder-confirmed support set-aside takes a parked order correction out of the day close; the automatic attempt has three claimed attempts. The till's own «Παράκαμψη» list stays limited to money and shift rows (founder decision 18/11/2026).

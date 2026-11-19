@@ -19,6 +19,7 @@ import {
 import TableOrderIcon from '../components/icons/TableOrderIcon';
 import { DeliveryScooterIcon, PickupHandBagIcon } from '../components/icons/OrderTypeGlyphs';
 import { useTheme } from '../contexts/theme-context';
+import { RECOVERY_ORDER_PAYMENT_TARGET_KEY, OPEN_RECOVERY_ORDER_PAYMENT_EVENT } from '../services/OrderPaymentRoute';
 import { toast } from 'react-hot-toast';
 import OrderDetailsModal from '../components/modals/OrderDetailsModal';
 import { formatCurrency } from '../utils/format';
@@ -305,7 +306,6 @@ const recoverRemoteOrdersIntoLocalLedger = async (
 };
 
 const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
-const RECOVERY_ORDER_PAYMENT_TARGET_KEY = 'pos-recovery-order-payment-target';
 
 interface RecoveryOrderPaymentTarget {
   orderId: string | null;
@@ -353,9 +353,9 @@ const OrdersPage: React.FC = () => {
   const [total, setTotal] = useState(0);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [openSelectedOrderPayment, setOpenSelectedOrderPayment] = useState(false);
+  const [paymentOpenRequest, setPaymentOpenRequest] = useState(0);
   const [recoveryPaymentTarget, setRecoveryPaymentTarget] =
     useState<RecoveryOrderPaymentTarget | null>(null);
-  const recoveryPaymentAttemptKeyRef = useRef<string | null>(null);
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -497,34 +497,29 @@ const OrdersPage: React.FC = () => {
     };
 
     consumeStoredRecoveryTarget();
-    window.addEventListener('pos:open-order-payment', consumeStoredRecoveryTarget);
+    window.addEventListener(OPEN_RECOVERY_ORDER_PAYMENT_EVENT, consumeStoredRecoveryTarget);
     return () => {
-      window.removeEventListener('pos:open-order-payment', consumeStoredRecoveryTarget);
+      window.removeEventListener(OPEN_RECOVERY_ORDER_PAYMENT_EVENT, consumeStoredRecoveryTarget);
     };
   }, []);
 
+  const currentOrders = useRef(orders);
+  currentOrders.current = orders;
   useEffect(() => {
     if (!recoveryPaymentTarget) {
       return;
     }
 
-    const targetKey =
-      recoveryPaymentTarget.orderId ||
-      recoveryPaymentTarget.orderNumber ||
-      `${recoveryPaymentTarget.createdAt}`;
-    if (recoveryPaymentAttemptKeyRef.current === targetKey) {
-      return;
-    }
+    const matchesTarget = (order: Order) => recoveryPaymentTarget.orderId
+      ? [order.id, order.local_order_id, order.supabase_id].includes(recoveryPaymentTarget.orderId)
+      : !!recoveryPaymentTarget.orderNumber && order.order_number === recoveryPaymentTarget.orderNumber;
 
-    const matchesTarget = (order: Order) =>
-      (!!recoveryPaymentTarget.orderId && order.id === recoveryPaymentTarget.orderId) ||
-      (!!recoveryPaymentTarget.orderNumber && order.order_number === recoveryPaymentTarget.orderNumber);
-
-    const visibleMatch = orders.find(matchesTarget);
+    const visibleMatches = currentOrders.current.filter(matchesTarget);
+    const visibleMatch = visibleMatches.length === 1 ? visibleMatches[0] : undefined;
     if (visibleMatch) {
-      recoveryPaymentAttemptKeyRef.current = targetKey;
       setSelectedOrder(visibleMatch);
       setOpenSelectedOrderPayment(true);
+      setPaymentOpenRequest(value => value + 1);
       window.sessionStorage.removeItem(RECOVERY_ORDER_PAYMENT_TARGET_KEY);
       setRecoveryPaymentTarget(null);
       return;
@@ -535,7 +530,6 @@ const OrdersPage: React.FC = () => {
       return;
     }
 
-    recoveryPaymentAttemptKeyRef.current = targetKey;
     let cancelled = false;
     bridge.orders
       .getById(lookupId)
@@ -545,13 +539,16 @@ const OrdersPage: React.FC = () => {
         }
         const hydrated = result?.order ?? result?.data ?? result;
         const normalized = normalizeOrder(hydrated, 'local');
-        if (normalized) {
+        if (normalized && matchesTarget(normalized)) {
           setSelectedOrder(normalized);
           setOpenSelectedOrderPayment(true);
+          setPaymentOpenRequest(value => value + 1);
           window.sessionStorage.removeItem(RECOVERY_ORDER_PAYMENT_TARGET_KEY);
           setRecoveryPaymentTarget(null);
           return;
         }
+        window.sessionStorage.removeItem(RECOVERY_ORDER_PAYMENT_TARGET_KEY);
+        setRecoveryPaymentTarget(null);
         toast.error(t('recovery.messages.orderPaymentOpenFailed', {
           defaultValue: 'Could not open the blocked order payment screen.',
         }));
@@ -559,6 +556,8 @@ const OrdersPage: React.FC = () => {
       .catch((error) => {
         if (!cancelled) {
           console.warn('[OrdersPage] Failed to open recovery payment target:', error);
+          window.sessionStorage.removeItem(RECOVERY_ORDER_PAYMENT_TARGET_KEY);
+          setRecoveryPaymentTarget(null);
           toast.error(t('recovery.messages.orderPaymentOpenFailed', {
             defaultValue: 'Could not open the blocked order payment screen.',
           }));
@@ -568,7 +567,7 @@ const OrdersPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [bridge.orders, orders, recoveryPaymentTarget, t]);
+  }, [bridge.orders, recoveryPaymentTarget, t]);
 
   // Refresh from Rust-driven events instead of renderer polling.
   useEffect(() => {
@@ -1015,6 +1014,7 @@ const OrdersPage: React.FC = () => {
         orderId={selectedOrder?.local_order_id || selectedOrder?.id || selectedOrder?.order_number || ''}
         order={selectedOrder}
         openPaymentOnMount={openSelectedOrderPayment}
+        paymentOpenRequest={paymentOpenRequest}
         onRequestCancellation={returnedCancellation.requestCancellation}
         onClose={() => {
           setSelectedOrder(null);

@@ -3818,6 +3818,19 @@ fn parse_item_customizations(item: &Value) -> Vec<ReceiptCustomizationLine> {
     Vec::new()
 }
 
+fn receipt_customizations(
+    item: &Value,
+    box_without_label: Option<&str>,
+) -> Vec<ReceiptCustomizationLine> {
+    let mut lines = parse_item_customizations(item);
+    if let Some(without_label) = box_without_label {
+        for line in &mut lines {
+            crate::box_slip::format_customization(line, without_label);
+        }
+    }
+    lines
+}
+
 /// Kiosk orders persist a globally unique order number that encodes the branch
 /// and the business period — `K-d28cef2e-20260906-060000-0001`. That string is
 /// far wider than a 58/80 mm slip, so it printed truncated and ran off the
@@ -5588,13 +5601,19 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
     };
 
     // Read separately rather than widening the 32-column tuple above.
-    let customer_note: String = conn
+    let (customer_note, raw_order_number): (String, String) = conn
         .query_row(
-            "SELECT COALESCE(notes, '') FROM orders WHERE id = ?1",
+            "SELECT COALESCE(notes, ''), COALESCE(order_number, '') FROM orders WHERE id = ?1",
             params![order_id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap_or_default();
+    let is_box = crate::box_slip::is_box(&plugin, &ghost_metadata);
+    let box_without_label = is_box.then(|| {
+        let language = setting_text(&conn, "general", "language").unwrap_or_default();
+        receipt_renderer::receipt_label(&language, "Without")
+    });
+    let plugin = if is_box { "box".to_owned() } else { plugin };
     let (order_branch_id, tax_amount_cents): (Option<String>, Option<i64>) = conn
         .query_row(
             "SELECT branch_id, tax_amount_cents FROM orders WHERE id = ?1",
@@ -5638,40 +5657,48 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                 subcategory_name: category_fields.subcategory_name,
                 category_path: category_fields.category_path,
                 note: build_item_note_text(&item),
-                customizations: parse_item_customizations(&item),
+                customizations: receipt_customizations(&item, box_without_label),
                 vat_letter: None,
             }
         })
         .collect();
 
-    let mut order_notes: Vec<String> = Vec::new();
-    // The customer's own words come first — this is what they typed.
-    push_unique_trimmed_note(&mut order_notes, Some(&customer_note));
-    let kiosk_context_note = kiosk_context_note_from_metadata(&ghost_metadata);
-    // Routing bookkeeping stays off the customer receipt (it remains on the
-    // kitchen ticket, which is where it is actually useful).
-    if !is_kiosk_order {
-        push_unique_trimmed_note(&mut order_notes, kiosk_context_note.as_deref());
-    }
-    push_unique_trimmed_note(&mut order_notes, Some(&delivery_notes));
-    let special_instructions =
-        strip_platform_items_fallback(&special_instructions, !items.is_empty());
-    if !(is_kiosk_order && is_internal_kiosk_routing_note(&special_instructions)) {
-        push_unique_trimmed_note(&mut order_notes, Some(&special_instructions));
-    }
+    let mut order_notes = if is_box {
+        box_customer_notes([&customer_note, &delivery_notes, &special_instructions])
+    } else {
+        let mut notes = Vec::new();
+        push_unique_trimmed_note(&mut notes, Some(&customer_note));
+        let kiosk_context_note = kiosk_context_note_from_metadata(&ghost_metadata);
+        // Routing bookkeeping stays off the customer receipt.
+        if !is_kiosk_order {
+            push_unique_trimmed_note(&mut notes, kiosk_context_note.as_deref());
+        }
+        push_unique_trimmed_note(&mut notes, Some(&delivery_notes));
+        let instructions = strip_platform_items_fallback(&special_instructions, !items.is_empty());
+        if !(is_kiosk_order && is_internal_kiosk_routing_note(&instructions)) {
+            push_unique_trimmed_note(&mut notes, Some(&instructions));
+        }
+        notes
+    };
 
     // THE-434 faithful slip: platform orders headline the rider's short code
     // (efood's own receipt prints «#4545» as the biggest element), so the big
     // reverse banner shows the 4-digit code and the long platform order id
     // moves to its own footer line — mirroring efood's «ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ».
-    let platform_short_code = if is_food_delivery_plugin(&plugin) {
+    let platform_short_code = if is_box {
+        Some(crate::box_slip::order_label(
+            &ghost_metadata,
+            &order_number,
+            &raw_order_number,
+        ))
+    } else if is_food_delivery_plugin(&plugin) {
         food_delivery_short_code(&ghost_metadata)
     } else {
         None
     };
     // Text built here prints in the app language, as the layout does.
     let print_language = setting_text(&conn, "general", "language").unwrap_or_default();
-    if platform_short_code.is_some() {
+    if !is_box && platform_short_code.is_some() {
         let external_order_id = external_order_id.trim();
         if !external_order_id.is_empty() {
             order_notes.push(format!(
@@ -5972,11 +5999,13 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
     Ok(OrderReceiptDoc {
         currency: None,
         order_id: order_id.to_string(),
-        order_number: platform_short_code.unwrap_or(if order_number.is_empty() {
-            order_id.to_string()
-        } else {
-            compact_kiosk_order_number(&order_number)
-        }),
+        order_number: platform_short_code
+            .clone()
+            .unwrap_or(if order_number.is_empty() {
+                order_id.to_string()
+            } else {
+                compact_kiosk_order_number(&order_number)
+            }),
         order_type,
         status,
         created_at: created_at.clone(),
@@ -6025,6 +6054,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         cancellation_reason: None,
         // THE-434 v2: food-delivery orders switch the renderer to the faithful
         // platform slip (modeled on the real efood slip #4579, 27/08/2026).
+        preserve_box_customer_notes: is_box,
         platform_slip: if crate::print::is_food_delivery_plugin(&plugin) {
             let food_delivery = serde_json::from_str::<serde_json::Value>(&ghost_metadata)
                 .ok()
@@ -6042,7 +6072,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                 plugin: plugin.trim().to_ascii_lowercase(),
                 external_order_id: Some(external_order_id.trim().to_string())
                     .filter(|value| !value.is_empty()),
-                short_code: field("short_code"),
+                short_code: platform_short_code,
                 payment_method: field("payment_method"),
                 prepaid: food_delivery
                     .get("prepaid")
@@ -6144,6 +6174,9 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         items_json,
         total_amount,
         special_instructions,
+        plugin,
+        ghost_metadata,
+        raw_order_number,
     ): (
         String,
         String,
@@ -6155,12 +6188,15 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         String,
         f64,
         String,
+        String,
+        String,
+        String,
     ) = conn
         .query_row(
             "SELECT COALESCE(NULLIF(display_order_number, ''), order_number, ''), COALESCE(order_type, ''), COALESCE(status, ''),
                     COALESCE(created_at, ''), COALESCE(table_number, ''), COALESCE(customer_name, ''),
                     COALESCE(customer_phone, ''), COALESCE(items, '[]'), COALESCE(total_amount, 0),
-                    COALESCE(special_instructions, '')
+                    COALESCE(special_instructions, ''), COALESCE(plugin, ''), COALESCE(ghost_metadata, ''), COALESCE(order_number, '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -6175,11 +6211,19 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
                     row.get(7)?,
                     row.get(8)?,
                     row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
                 ))
             },
         )
         .map_err(|_| format!("Order not found for payment: {payment_id}"))?;
 
+    let is_box = crate::box_slip::is_box(&plugin, &ghost_metadata);
+    let box_without_label = is_box.then(|| {
+        let language = setting_text(&conn, "general", "language").unwrap_or_default();
+        receipt_renderer::receipt_label(&language, "Without")
+    });
     // Check for payment_items (split-by-items mode)
     let mut pi_stmt = conn
         .prepare(
@@ -6199,28 +6243,38 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
 
     let menu_lookup = build_menu_category_lookup(&conn);
 
-    // Build items list: payment_items if present, otherwise all order items
+    // The payment rows own the selected quantities and amounts. Their original
+    // order indexes supply only the BOX printing instructions.
+    let order_items = if is_box || payment_items.is_empty() {
+        serde_json::from_str::<Vec<Value>>(&items_json).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let items: Vec<ReceiptItem> = if !payment_items.is_empty() {
         payment_items
             .iter()
-            .map(|(_idx, name, qty, amt)| ReceiptItem {
-                name: name.clone(),
-                quantity: *qty as f64,
-                total: *amt,
-                category_name: None,
-                subcategory_name: None,
-                category_path: None,
-                note: None,
-                customizations: Vec::new(),
-                vat_letter: None,
+            .map(|(index, name, qty, amt)| {
+                let original = usize::try_from(*index)
+                    .ok()
+                    .and_then(|index| order_items.get(index));
+                ReceiptItem {
+                    name: name.clone(),
+                    quantity: *qty as f64,
+                    total: *amt,
+                    category_name: None,
+                    subcategory_name: None,
+                    category_path: None,
+                    note: original.and_then(build_item_note_text),
+                    customizations: original
+                        .map(|item| receipt_customizations(item, box_without_label))
+                        .unwrap_or_default(),
+                    vat_letter: None,
+                }
             })
             .collect()
     } else {
         // No payment_items — show all order items
-        serde_json::from_str::<Value>(&items_json)
-            .ok()
-            .and_then(|value| value.as_array().cloned())
-            .unwrap_or_default()
+        order_items
             .into_iter()
             .map(|item| {
                 let category_fields = resolve_item_category_fields(&item, &menu_lookup);
@@ -6239,7 +6293,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
                     subcategory_name: category_fields.subcategory_name,
                     category_path: category_fields.category_path,
                     note: build_item_note_text(&item),
-                    customizations: parse_item_customizations(&item),
+                    customizations: receipt_customizations(&item, box_without_label),
                     vat_letter: None,
                 }
             })
@@ -6307,10 +6361,21 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
     };
 
     // Add a note indicating this is a split payment receipt
-    let mut order_notes = Vec::new();
-    let special_instructions =
-        strip_platform_items_fallback(&special_instructions, !items.is_empty());
-    push_unique_trimmed_note(&mut order_notes, Some(&special_instructions));
+    let mut order_notes = if is_box {
+        let (customer_note, delivery_notes): (String, String) = conn
+            .query_row(
+                "SELECT COALESCE(notes, ''), COALESCE(delivery_notes, '') FROM orders WHERE id = ?1",
+                [&order_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        box_customer_notes([&customer_note, &delivery_notes, &special_instructions])
+    } else {
+        let mut notes = Vec::new();
+        let instructions = strip_platform_items_fallback(&special_instructions, !items.is_empty());
+        push_unique_trimmed_note(&mut notes, Some(&instructions));
+        notes
+    };
     let split_note = format!("Split Payment ({:.2} of {:.2} total)", amount, total_amount);
     order_notes.push(split_note);
     if discount_amount > 0.0 {
@@ -6321,7 +6386,9 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         vat_legend: Vec::new(),
         currency: None,
         order_id: order_id.to_string(),
-        order_number: if order_number.is_empty() {
+        order_number: if is_box {
+            crate::box_slip::order_label(&ghost_metadata, &order_number, &raw_order_number)
+        } else if order_number.is_empty() {
             order_id.to_string()
         } else {
             compact_kiosk_order_number(&order_number)
@@ -6348,6 +6415,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         order_notes,
         status_label: None,
         cancellation_reason: None,
+        preserve_box_customer_notes: is_box,
         platform_slip: None,
         // Split receipts and the settings sample are plain POS slips.
         kiosk_slip: false,
@@ -6369,6 +6437,19 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
 /// literal list here; add the slug to `platforms::EXTERNAL_DELIVERY_PLATFORMS`.
 pub(crate) fn is_food_delivery_plugin(plugin: &str) -> bool {
     crate::platforms::is_external_delivery_platform(plugin)
+}
+
+/// Use the same legacy BOX identity as the slip builder when deciding whether
+/// to wait for or hydrate structured items. A recorded plugin takes precedence.
+pub(crate) fn is_food_order_for_print_items(row: &rusqlite::Row<'_>) -> rusqlite::Result<bool> {
+    let plugin = row.get::<_, Option<String>>("plugin")?.unwrap_or_default();
+    if !plugin.trim().is_empty() {
+        return Ok(is_food_delivery_plugin(&plugin));
+    }
+    let metadata = row
+        .get::<_, Option<String>>("ghost_metadata")?
+        .unwrap_or_default();
+    Ok(crate::box_slip::is_box("", &metadata))
 }
 
 /// Only structured rows can establish food-print readiness. Notes and generated
@@ -6431,12 +6512,16 @@ fn platform_slip_banner(
         .ok()
         .and_then(|metadata| metadata.get("food_delivery").cloned())
         .unwrap_or(Value::Null);
-    let short_code = food_delivery
-        .get("short_code")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let short_code = if plugin.eq_ignore_ascii_case("box") {
+        crate::box_slip::order_code(ghost_metadata_json, "", "").unwrap_or_default()
+    } else {
+        food_delivery
+            .get("short_code")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     let prepaid = food_delivery.get("prepaid").and_then(Value::as_bool);
     let method = food_delivery
         .get("payment_method")
@@ -6489,6 +6574,31 @@ fn strip_platform_items_fallback(special_instructions: &str, has_items: bool) ->
     }
 }
 
+/// BOX fields are ordered notes, delivery notes, then special instructions.
+fn box_customer_notes(fields: [&str; 3]) -> Vec<String> {
+    let mut notes = Vec::new();
+    for field in fields {
+        let lines: Vec<_> = field
+            .lines()
+            .take_while(|line| {
+                !line
+                    .trim()
+                    .strip_prefix("---")
+                    .and_then(|line| line.strip_suffix("---"))
+                    .is_some_and(|line| {
+                        line.trim_matches([' ', '\t'])
+                            .eq_ignore_ascii_case("Order Items")
+                    })
+            })
+            .collect();
+        let note = lines.join("\n").trim().to_owned();
+        if !note.is_empty() && !notes.contains(&note) {
+            notes.push(note);
+        }
+    }
+    notes
+}
+
 fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicketDoc, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (
@@ -6508,6 +6618,8 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
         customer_name,
         customer_phone,
         ghost_metadata,
+        plugin,
+        raw_order_number,
     ) = conn
         .query_row(
             "SELECT COALESCE(NULLIF(display_order_number, ''), order_number, ''), COALESCE(order_type, ''), COALESCE(created_at, ''),
@@ -6516,7 +6628,7 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
                     COALESCE(delivery_city, ''), COALESCE(delivery_postal_code, ''),
                     COALESCE(delivery_floor, ''), COALESCE(name_on_ringer, ''),
                     COALESCE(driver_name, ''), COALESCE(customer_name, ''),
-                    COALESCE(customer_phone, ''), COALESCE(ghost_metadata, '')
+                    COALESCE(customer_phone, ''), COALESCE(ghost_metadata, ''), COALESCE(plugin, ''), COALESCE(order_number, '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -6537,12 +6649,19 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
                     row.get::<_, String>(13)?,
                     row.get::<_, String>(14)?,
                     row.get::<_, String>(15)?,
+                    row.get::<_, String>(16)?,
+                    row.get::<_, String>(17)?,
                 ))
             },
         )
         .map_err(|_| format!("Order not found: {order_id}"))?;
     let menu_lookup = build_menu_category_lookup(&conn);
 
+    let is_box = crate::box_slip::is_box(&plugin, &ghost_metadata);
+    let box_without_label = is_box.then(|| {
+        let language = setting_text(&conn, "general", "language").unwrap_or_default();
+        receipt_renderer::receipt_label(&language, "Without")
+    });
     let items: Vec<ReceiptItem> = serde_json::from_str::<Value>(&items_json)
         .ok()
         .and_then(|value| value.as_array().cloned())
@@ -6565,7 +6684,7 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
                 subcategory_name: category_fields.subcategory_name,
                 category_path: category_fields.category_path,
                 note: build_item_note_text(&item),
-                customizations: parse_item_customizations(&item),
+                customizations: receipt_customizations(&item, box_without_label),
                 vat_letter: None,
             }
         })
@@ -6575,13 +6694,15 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
         order_id: order_id.to_string(),
         // Platform orders: the kitchen matches bags to riders by the same
         // 4-digit short code the receipt and efood's own slip headline.
-        order_number: food_delivery_short_code(&ghost_metadata).unwrap_or(
-            if order_number.is_empty() {
+        order_number: if is_box {
+            crate::box_slip::order_label(&ghost_metadata, &order_number, &raw_order_number)
+        } else {
+            food_delivery_short_code(&ghost_metadata).unwrap_or(if order_number.is_empty() {
                 order_id.to_string()
             } else {
                 compact_kiosk_order_number(&order_number)
-            },
-        ),
+            })
+        },
         order_type,
         created_at,
         table_number: if table_number.is_empty() {
@@ -6594,18 +6715,31 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
         } else {
             Some(delivery_address)
         },
-        delivery_notes: if delivery_notes.is_empty() {
+        delivery_notes: if is_box || delivery_notes.is_empty() {
             None
         } else {
-            Some(delivery_notes)
+            Some(delivery_notes.clone())
         },
+        preserve_box_customer_notes: is_box,
         special_instructions: {
-            let mut notes = Vec::new();
-            let special_instructions =
-                strip_platform_items_fallback(&special_instructions, !items.is_empty());
-            push_unique_trimmed_note(&mut notes, Some(&special_instructions));
-            let kiosk_context_note = kiosk_context_note_from_metadata(&ghost_metadata);
-            push_unique_trimmed_note(&mut notes, kiosk_context_note.as_deref());
+            let notes = if is_box {
+                let customer_note: String = conn
+                    .query_row(
+                        "SELECT COALESCE(notes, '') FROM orders WHERE id = ?1",
+                        [order_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                box_customer_notes([&customer_note, &delivery_notes, &special_instructions])
+            } else {
+                let mut notes = Vec::new();
+                let instructions =
+                    strip_platform_items_fallback(&special_instructions, !items.is_empty());
+                push_unique_trimmed_note(&mut notes, Some(&instructions));
+                let kiosk_context_note = kiosk_context_note_from_metadata(&ghost_metadata);
+                push_unique_trimmed_note(&mut notes, kiosk_context_note.as_deref());
+                notes
+            };
             if notes.is_empty() {
                 None
             } else {
@@ -6987,6 +7121,7 @@ fn build_shift_checkout_doc(
                 }
 
                 lines.push(crate::receipt_renderer::DriverDeliveryLine {
+                    box_order_label: text_from_paths(d, &["/box_order_label"]),
                     order_number: d
                         .get("order_number")
                         .and_then(Value::as_str)
@@ -10260,21 +10395,18 @@ fn defer_incomplete_food_print(
         _ => return Ok(false),
     };
     let conn = lock_conn_recovering(db);
-    let row: Option<(String, String, String)> = conn
+    let row: Option<(bool, String, String)> = conn
         .query_row(
-            "SELECT COALESCE(plugin, ''), COALESCE(items, '[]'), COALESCE(supabase_id, '')
+            "SELECT plugin, COALESCE(items, '[]'), COALESCE(supabase_id, ''), order_number, ghost_metadata
          FROM orders WHERE id = ?1 AND COALESCE(order_context, '') != 'repair_settlement'",
             [entity_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((is_food_order_for_print_items(row)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(|error| format!("read food print readiness: {error}"))?;
-    let Some((plugin, raw_items, remote_id)) = row else {
+    let Some((true, raw_items, remote_id)) = row else {
         return Ok(false);
     };
-    if !is_food_delivery_plugin(&plugin) {
-        return Ok(false);
-    }
     // Compare the actual built projection too: a UI cache fill between the
     // document read and this check must not authorize an older empty/placeholder doc.
     let source = serde_json::from_str::<Value>(&raw_items).ok();
@@ -16350,6 +16482,83 @@ mod tests {
     }
 
     #[test]
+    fn food_item_readiness_legacy_box_waits_for_hydration_and_releases_the_slip() {
+        for (number, metadata) in [
+            ("B416", r#"{"food_delivery":{"platform":"box_gr"}}"#),
+            (
+                "BOX-1794948068572-2F43E65D",
+                r#"{"food_delivery":{"platform":"box"}}"#,
+            ),
+        ] {
+            let db = test_db();
+            let remote_id = Uuid::new_v4().to_string();
+            let job_id = Uuid::new_v4().to_string();
+            {
+                let conn = db.conn.lock().unwrap();
+                insert_receipt_order(&conn, "legacy-box", number, 10.0);
+                for (key, value) in [
+                    ("organization_id", "org"),
+                    ("branch_id", "branch"),
+                    ("terminal_id", "term"),
+                ] {
+                    crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+                }
+                conn.execute("UPDATE orders SET plugin = '', order_number = ?1, ghost_metadata = ?2,
+                    supabase_id = ?3, items = '[]', organization_id = 'org', branch_id = 'branch' WHERE id = 'legacy-box'",
+                    params![number, metadata, remote_id]).unwrap();
+                conn.execute("INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+                    VALUES (?1, 'delivery_slip', 'legacy-box', 'pending', datetime('now'), datetime('now'))", [&job_id]).unwrap();
+            }
+            let incomplete =
+                build_document_for_job(&db, "delivery_slip", "legacy-box", None).unwrap();
+            assert!(defer_incomplete_food_print(
+                &db,
+                &job_id,
+                "delivery_slip",
+                "legacy-box",
+                &incomplete
+            )
+            .unwrap());
+            let items =
+                serde_json::json!([{"name":"Espresso","quantity":1,"price":10,"total_price":10}]);
+            {
+                let conn = db.conn.lock().unwrap();
+                assert_eq!(
+                    crate::commands::orders::persist_fetched_food_order_items(
+                        &conn,
+                        "legacy-box",
+                        &remote_id,
+                        &items
+                    )
+                    .unwrap(),
+                    Some(items)
+                );
+                let warning: Option<String> = conn
+                    .query_row(
+                        "SELECT warning_code FROM print_jobs WHERE id = ?1",
+                        [&job_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(warning.is_none());
+            }
+            let ready = build_document_for_job(&db, "delivery_slip", "legacy-box", None).unwrap();
+            assert!(!defer_incomplete_food_print(
+                &db,
+                &job_id,
+                "delivery_slip",
+                "legacy-box",
+                &ready
+            )
+            .unwrap());
+            let ReceiptDocument::DeliverySlip(doc) = ready else {
+                unreachable!()
+            };
+            assert_eq!(doc.items[0].name, "Espresso");
+        }
+    }
+
+    #[test]
     fn food_item_readiness_notes_and_exhaustion_preserve_separate_products_and_pending_intent() {
         let db = test_db();
         let job_id = Uuid::new_v4().to_string();
@@ -21627,6 +21836,328 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn box_slip_prints_the_customers_choices_for_any_product() {
+        for (custom_product, preset_product, base, topping, removed, extra) in [
+            (
+                "Φτιάξτε τη δική σας κρέπα",
+                "Club sandwich G",
+                "Φύλλο κρέπας",
+                "Gouda",
+                "Ντομάτα",
+                "Τσένταρ",
+            ),
+            (
+                "Poke bowl",
+                "Πίτσα Μαργαρίτα",
+                "Ρύζι",
+                "Σολομός",
+                "Βασιλικός",
+                "Ελιές",
+            ),
+        ] {
+            let db = test_db();
+            let id = "box-mixed-recipes";
+            {
+                let conn = db.conn.lock().unwrap();
+                let menu = serde_json::json!([{
+                    "id": "preset-product", "name": preset_product,
+                    "ingredients": [{"name": "Τυρί", "is_default": true}, {"name": removed, "is_default": true}]
+                }]);
+                conn.execute(
+                "INSERT INTO menu_cache (cache_key, data, updated_at) VALUES ('subcategories', ?1, datetime('now'))",
+                [menu.to_string()],
+            ).unwrap();
+                let items = serde_json::json!([
+                    {"name": custom_product, "quantity": 1, "total_price": 9.3, "customizations": {"modifiers": [
+                        {"name": format!("Επιλέξτε βάση: {base}"), "price": 0},
+                        {"name": format!("Προσθέστε υλικά: {topping}"), "price": 0}]}},
+                    {"name": preset_product, "menu_item_id": "preset-product", "quantity": 1, "total_price": 8.0,
+                        "customizations": {"modifiers": []}},
+                    {"name": preset_product, "menu_item_id": "preset-product", "quantity": 1, "total_price": 8.5, "customizations": {"modifiers": [
+                        {"name": removed, "without": true, "price": 0},
+                        {"name": "Επιλογή σάλτσας: BBQ", "price": 0},
+                        {"name": format!("Προσθέστε extra: {extra}"), "price": 0.5}]}}
+                ]);
+                insert_receipt_order(&conn, id, "BOX-1794948068572-2F43E65D", 25.8);
+                conn.execute(
+                    "UPDATE orders SET plugin='box', items=?1 WHERE id=?2",
+                    params![items.to_string(), id],
+                )
+                .unwrap();
+            }
+            let receipt = build_order_receipt_doc(&db, id).unwrap();
+            let kitchen = build_kitchen_ticket_doc(&db, id).unwrap();
+            for items in [&receipt.items, &kitchen.items] {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[1].subcategory_name.as_deref(), Some(preset_product));
+                let choices: Vec<Vec<_>> = items
+                    .iter()
+                    .map(|item| {
+                        item.customizations
+                            .iter()
+                            .map(|line| (line.name.as_str(), line.is_without, line.price))
+                            .collect()
+                    })
+                    .collect();
+                assert_eq!(
+                    choices,
+                    vec![
+                        vec![(base, false, None), (topping, false, None)],
+                        vec![],
+                        vec![
+                            (removed, true, None),
+                            ("BBQ", false, None),
+                            (extra, false, Some(0.5))
+                        ],
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn box_slip_formats_saved_choices_without_changing_other_platforms() {
+        let db = test_db();
+        let id = "box-slip";
+        let item = serde_json::json!([{
+            "name": "Κρέπα", "quantity": 1, "price": 9.3,
+            "customizations": { "modifiers": [
+                {"name": "Αλμυρή κρέπα: Φύλλο κρέπας"},
+                {"name": "Προσθέστε τυριά: Gouda", "quantity": 2, "price": 0.5},
+                {"name": "Υλικά προς αφαίρεση: Ντομάτα"},
+                {"name": "Μην βάλετε: Μανιτάρια"},
+                {"name": "Χωρίς έξτρα χρέωση: Φέτα"},
+                {"name": "Υλικά: Χωρίς κρεμμύδι"},
+                {"name": "Πιπεριά", "without": true},
+                {"name": "Sugar: No"},
+                {"name": "Burger (Cheese: Gouda, Remove: Onion)"},
+                {"name": "Burger (Gouda, Χωρίς Onion)"},
+                {"name": "Σάλτσα: Σως (τύπος: κλασική)"},
+                {"name": "Έκπτωση", "price": -0.5}
+            ] }
+        }]);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "general", "language", "en").unwrap();
+            insert_receipt_order(&conn, id, "BOX-1794948068572-2F43E65D", 9.3);
+            conn.execute(
+                "UPDATE orders SET plugin='box', items=?1 WHERE id=?2",
+                params![item.to_string(), id],
+            )
+            .unwrap();
+        }
+        let receipt = build_order_receipt_doc(&db, id).unwrap();
+        let ticket = build_kitchen_ticket_doc(&db, id).unwrap();
+        for lines in [
+            &receipt.items[0].customizations,
+            &ticket.items[0].customizations,
+        ] {
+            let names: Vec<_> = lines
+                .iter()
+                .map(|m| (m.name.as_str(), m.is_without))
+                .collect();
+            assert_eq!(
+                names,
+                vec![
+                    ("Φύλλο κρέπας", false),
+                    ("Gouda", false),
+                    ("Ντομάτα", true),
+                    ("Μανιτάρια", true),
+                    ("Φέτα", false),
+                    ("κρεμμύδι", true),
+                    ("Πιπεριά", true),
+                    ("Sugar: No", false),
+                    ("Burger (Gouda, Without Onion)", false),
+                    ("Burger (Gouda, Without Onion)", false),
+                    ("Σως (τύπος: κλασική)", false),
+                    ("Έκπτωση", false)
+                ]
+            );
+            assert_eq!(lines[1].quantity, 2.0);
+            assert_eq!(lines[1].price, Some(0.5));
+        }
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE orders SET plugin='efood' WHERE id=?1", [id])
+            .unwrap();
+        let efood = build_order_receipt_doc(&db, id).unwrap();
+        assert_eq!(
+            efood.items[0].customizations[1].name,
+            "Προσθέστε τυριά: Gouda"
+        );
+        assert!(!efood.items[0].customizations[2].is_without);
+    }
+
+    #[test]
+    fn box_slip_prints_both_customer_notes_on_the_receipt_and_kitchen_ticket() {
+        let db = test_db();
+        let id = "box-customer-notes";
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, id, "BOX-1794948068572-2F43E65D", 9.3);
+            conn.execute(
+                "UPDATE orders SET plugin='box', notes=?1, special_instructions=?2, items=?3 WHERE id=?4",
+                params![
+                    "Leave at the side door",
+                    "Ring twice\n--- Order Items ---\n1x Crepe",
+                    r#"[{"name":"Crepe","quantity":1,"price":9.3}]"#,
+                    id
+                ],
+            )
+            .unwrap();
+        }
+        let receipt = build_order_receipt_doc(&db, id).unwrap();
+        for note in ["Leave at the side door", "Ring twice"] {
+            assert_eq!(
+                receipt
+                    .order_notes
+                    .iter()
+                    .filter(|line| line.as_str() == note)
+                    .count(),
+                1
+            );
+        }
+        let ticket = build_kitchen_ticket_doc(&db, id).unwrap();
+        assert_eq!(
+            ticket.special_instructions.as_deref(),
+            Some("Leave at the side door\nRing twice")
+        );
+    }
+
+    #[test]
+    fn box_slip_split_receipt_matches_normal_and_kitchen_customer_notes() {
+        let db = test_db();
+        let id = "box-split-notes";
+        let notes = ["Ring twice", "ring twice"];
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, id, "BOX-1794948068572-2F43E65D", 9.3);
+            conn.execute(
+                "UPDATE orders SET plugin='box', notes=?1, delivery_notes=?1,
+                    special_instructions=?2 WHERE id=?3",
+                params![
+                    notes[0],
+                    "ring twice\r\n--- order items ---\r\n1x Crepe",
+                    id
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status, created_at, updated_at
+                 ) VALUES ('box-payment', ?1, 'cash', 5, 500, 'completed', datetime('now'), datetime('now'))",
+                [id],
+            )
+            .unwrap();
+        }
+        let expected: Vec<String> = notes.iter().map(|note| note.to_string()).collect();
+        let normal = build_order_receipt_doc(&db, id).unwrap();
+        let split = build_split_receipt_doc(&db, "box-payment").unwrap();
+        assert!(normal.order_notes.starts_with(&expected));
+        assert!(split.order_notes.starts_with(&expected));
+        assert_eq!(split.order_notes.len(), expected.len() + 1);
+        let kitchen = build_kitchen_ticket_doc(&db, id).unwrap();
+        assert_eq!(kitchen.special_instructions, Some(notes.join("\n")));
+        let layout = LayoutConfig {
+            language: "en".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            show_logo: false,
+            ..LayoutConfig::default()
+        };
+        for document in [
+            ReceiptDocument::OrderReceipt(normal),
+            ReceiptDocument::KitchenTicket(kitchen),
+            ReceiptDocument::OrderReceipt(split),
+        ] {
+            let output = receipt_renderer::render_escpos(&document, &layout);
+            let bytes = &output.bytes;
+            for note in notes {
+                assert_eq!(
+                    bytes
+                        .windows(note.len())
+                        .filter(|part| *part == note.as_bytes())
+                        .count(),
+                    1,
+                    "{note} should appear once in the rendered notes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn box_caption_note_prints_and_split_by_item_keeps_selected_instructions() {
+        let db = test_db();
+        let id = "box-indexed-split";
+        let note = "Order Code: please leave at gate";
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, id, "BOX-1794948068572-2F43E65D", 9.3);
+            conn.execute(
+                "UPDATE orders SET plugin = 'box', notes = ?1, items = ?2, external_plugin_order_id = 'EXT-171' WHERE id = ?3",
+                params![note, r#"[{"name":"Other","notes":"Other item instruction"},{"name":"Picked","notes":"Selected item instruction","customizations":[{"name":"Extra sauce"}]}]"#, id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments
+                 (id, order_id, method, amount, amount_cents, status, created_at, updated_at)
+                 VALUES ('box-indexed-pay', ?1, 'cash', 5, 500, 'completed', datetime('now'), datetime('now'))",
+                [id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO payment_items (id, payment_id, order_id, item_index, item_name, item_quantity, item_amount)
+                 VALUES ('box-indexed-row', 'box-indexed-pay', ?1, 1, 'Picked', 2, 5)",
+                [id],
+            )
+            .unwrap();
+        }
+        let layout = LayoutConfig {
+            language: "en".into(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            show_logo: false,
+            ..LayoutConfig::default()
+        };
+        let normal = build_order_receipt_doc(&db, id).unwrap();
+        let print = |doc| {
+            receipt_renderer::render_escpos(&ReceiptDocument::OrderReceipt(doc), &layout).bytes
+        };
+        let normal_bytes = print(normal);
+        assert!(normal_bytes
+            .windows(note.len())
+            .any(|part| part == note.as_bytes()));
+        let split = build_split_receipt_doc(&db, "box-indexed-pay").unwrap();
+        assert_eq!(split.items.len(), 1);
+        assert_eq!(split.items[0].quantity, 2.0);
+        assert_eq!(split.items[0].total, 5.0);
+        let rendered = print(split);
+        for expected in ["Selected item instruction", "Extra sauce"] {
+            assert!(rendered
+                .windows(expected.len())
+                .any(|part| part == expected.as_bytes()));
+        }
+        let unselected = b"Other item instruction";
+        assert!(!rendered
+            .windows(unselected.len())
+            .any(|part| part == unselected));
+    }
+
+    #[test]
+    fn local_box_shaped_order_number_never_creates_a_box_slip() {
+        let db = test_db();
+        let number = "BOX-1794948068572-2F43E65D";
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "local-box-shaped-number", number, 9.3);
+        }
+        let order = build_order_receipt_doc(&db, "local-box-shaped-number").unwrap();
+        let kitchen = build_kitchen_ticket_doc(&db, "local-box-shaped-number").unwrap();
+        assert!(!order.preserve_box_customer_notes);
+        assert!(order.platform_slip.is_none());
+        assert!(!kitchen.preserve_box_customer_notes);
     }
 
     #[test]

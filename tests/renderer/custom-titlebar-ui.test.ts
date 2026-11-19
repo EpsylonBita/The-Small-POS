@@ -66,7 +66,7 @@ test('the native titlebar owns visible space and top shell actions stay below it
   // Founder 31/10: health, expenses and theme live in the right utility rail, centred on the right edge
   // of the framed content (below the titlebar drag surface).
   assert.match(mainLayoutSource, /<UtilityRailExpensesSlot>/);
-  assert.match(appSource, /<UtilityRail onOpenRecovery=\{openSyncRecovery\} \/>/);
+  assert.match(appSource, /<UtilityRail onHealthState=\{setTillHealthState\} \/>/);
   const utilityRailSource = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'components', 'UtilityRail.tsx'), 'utf8');
   assert.match(utilityRailSource, /className="pointer-events-none fixed right-0 top-1\/2 z-50 -translate-y-1\/2"/);
   assert.doesNotMatch(mainLayoutSource, /fixed top-28 right-24 sm:right-28/);
@@ -260,7 +260,7 @@ test('App wires updater state into the frame on login and main POS routes', () =
   assert.match(readFileSync(appRoutesPath, 'utf8'), /<PageLoadMotion animationKey="new-order" className="h-full min-h-0">/);
   assert.match(source, /if \(!user\) \{\s*setShowConnectionSettings\(false\);/);
   // Founder 31/10: the heart sits in the right utility rail (health stays reachable in cashier recovery).
-  assert.match(source, /<UtilityRail onOpenRecovery=\{openSyncRecovery\} \/>/);
+  assert.match(source, /<UtilityRail onHealthState=\{setTillHealthState\} \/>/);
   const unauthenticatedBranch = source.slice(
     source.indexOf('// Show login when no user'),
     source.indexOf('// Show main POS interface if logged in'),

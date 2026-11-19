@@ -52,7 +52,7 @@ fn normalize_required(row: &mut Value, field: &str) -> bool {
     row[field] = json!(at);
     true
 }
-pub(super) fn closeout_projection(readiness: Result<Value, String>) -> Value {
+pub(in crate::support) fn closeout_projection(readiness: Result<Value, String>) -> Value {
     match readiness {
         Ok(value) => {
             let mut blockers = Vec::new();
@@ -65,6 +65,35 @@ pub(super) fn closeout_projection(readiness: Result<Value, String>) -> Value {
                 if let Some(count) = value[field]["count"].as_u64().filter(|c| *c > 0) {
                     blockers.push(json!({"code":code,"count":count,"detail":null}));
                 }
+            }
+            let parity = &value["parityPreDrain"];
+            if let Some(count) = parity["count"].as_u64().filter(|count| *count > 0) {
+                let field = |row: &Value, key: &str, cap: usize| -> String {
+                    row[key]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .chars()
+                        .take(cap)
+                        .collect()
+                };
+                let mut lines = parity["rows"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|row| {
+                        format!(
+                            "queue_id={} table={} status={} code={} set_aside=false",
+                            field(row, "queue_id", 36),
+                            field(row, "table", 40),
+                            field(row, "status", 16),
+                            field(row, "code", 48)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(omitted) = parity["omitted"].as_u64().filter(|count| *count > 0) {
+                    lines.push(format!("{omitted} more pre-Z queue rows"));
+                }
+                blockers.push(json!({"code":"PARITY_PRE_Z","count":count,"detail":redaction::text(&lines.join("\n"))}));
             }
             let fiscal = &value["fiscalQueueBlockers"];
             let unavailable = fiscal["status"]

@@ -9,9 +9,8 @@
  * Reuses `LiquidGlassModal` — the app's one canonical modal shell/portal
  * (`document.body` portal, `z-index: 20000`, focus trap, background a11y
  * isolation, `useBlockerRegistration`) — instead of a bespoke portal, so this
- * notice is guaranteed to stack above every other dialog in the app
- * (`SyncRecoveryModal` etc. top out at `z-[10050]`) and participates in the
- * same blocker bookkeeping other surfaces already rely on.
+ * notice follows the shared modal stack and participates in the same blocker
+ * bookkeeping as the other windows.
  *
  * This never touches order status, refunds or the provider: it only shows
  * what `GET /pos/platforms/cancellations` already recorded and lets staff

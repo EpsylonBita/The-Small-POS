@@ -23,7 +23,16 @@ pub(crate) fn set_server_reachable(online: bool) {
     REACHABLE.store(i8::from(online), Ordering::Relaxed);
 }
 pub(crate) fn online() -> bool {
+    #[cfg(test)]
+    if let Some(reachable) = TEST_REACHABLE.with(|value| value.get()) {
+        return reachable == Some(true);
+    }
     REACHABLE.load(Ordering::Relaxed) == 1
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_reachable(online: bool) {
+    TEST_REACHABLE.with(|value| value.set(Some(Some(online))));
 }
 pub(crate) fn notify_queue_changed() {
     if let Some(app) = APP.get() {
@@ -224,6 +233,30 @@ pub(crate) fn refused(conn: &Connection, id: &str) -> Result<Option<Refused>, St
     }))
 }
 
+pub(crate) async fn fetch_canonical(
+    db: &crate::db::DbState,
+    before: &Value,
+) -> Result<Value, String> {
+    let remote = preflight::remote_id(before)?.ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
+    crate::admin_fetch_detailed(
+        Some(db),
+        &format!("/api/pos/orders/sync?order_id={remote}"),
+        "GET",
+        None,
+    )
+    .await
+    .map_err(|error| {
+        if error.is_transport_failure() {
+            "EDIT_CANONICAL_PREFLIGHT_UNREACHABLE".to_string()
+        } else {
+            error
+                .status()
+                .map(|status| format!("HTTP_{status}"))
+                .unwrap_or_else(|| "EDIT_CANONICAL_PREFLIGHT_REQUIRED".into())
+        }
+    })
+}
+
 pub(crate) fn capture(conn: &Connection, row: &Refused) -> Result<Value, String> {
     if sync_queue::order_write_holds_payment(conn, &row.order)? {
         return Err("ORDER_HEADER_SYNC_REQUIRED".into());
@@ -255,19 +288,85 @@ pub(crate) fn verify(before: &Value, answer: &Value) -> Result<Value, String> {
     Ok(canonical.clone())
 }
 
-/// Caller owns the immediate transaction and native critical-operation fence.
-pub(crate) fn apply(
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CorrectionRecipe {
+    Resend,
+    KeepServer,
+}
+
+impl CorrectionRecipe {
+    pub(crate) const ALL: [Self; 2] = [Self::Resend, Self::KeepServer];
+
+    pub(crate) fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|recipe| recipe.id() == id)
+    }
+
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Self::Resend => "order-customer-correction.resend",
+            Self::KeepServer => "order-customer-correction.keep-server",
+        }
+    }
+
+    pub(crate) fn action(self) -> &'static str {
+        match self {
+            Self::Resend => RESEND,
+            Self::KeepServer => KEEP,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum CorrectionSnapshot<'a> {
+    PreRecoveryAction(&'a str),
+    ConfirmedLocal(&'a crate::support::snapshot::Snapshot),
+    AutomaticIntent,
+}
+
+impl CorrectionSnapshot<'_> {
+    fn id(self) -> String {
+        match self {
+            Self::PreRecoveryAction(id) => id.to_owned(),
+            Self::ConfirmedLocal(snapshot) => snapshot.id.clone(),
+            Self::AutomaticIntent => String::new(),
+        }
+    }
+
+    fn provenance(self) -> &'static str {
+        match self {
+            Self::PreRecoveryAction(_) => "pre_recovery_action",
+            Self::ConfirmedLocal(_) => "confirmed_support",
+            Self::AutomaticIntent => "automatic_intent",
+        }
+    }
+
+    fn actor(self) -> &'static str {
+        match self {
+            Self::PreRecoveryAction(_) => "employee",
+            Self::ConfirmedLocal(_) => "founder_confirmed",
+            Self::AutomaticIntent => "automatic",
+        }
+    }
+}
+
+pub(crate) struct AppliedCorrection {
+    pub audit_id: String,
+    pub replacement_id: Option<String>,
+    pub canonical_version: i64,
+}
+
+/// Caller owns the transaction and has validated the provenance of the
+/// snapshot reference. The original queue row is rechecked before any write.
+pub(crate) fn apply_correction(
     conn: &Connection,
     row: &Refused,
     before: &Value,
     answer: &Value,
-    action: &str,
-    snapshot: &str,
-) -> Result<Value, String> {
+    recipe: CorrectionRecipe,
+    snapshot: CorrectionSnapshot<'_>,
+) -> Result<AppliedCorrection, String> {
     let Some(current) = refused(conn, &row.id)? else {
-        return Ok(
-            json!({"success":true,"requiresRefresh":true,"verification":{"status":"pending"}}),
-        );
+        return Err("ORDER_CORRECTION_NO_LONGER_ELIGIBLE".into());
     };
     if current.data != row.data
         || current.status != row.status
@@ -281,7 +380,7 @@ pub(crate) fn apply(
     let mut payload: Value = serde_json::from_str(&row.data).map_err(|e| e.to_string())?;
     let event = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let new_id = if action == RESEND {
+    let new_id = if recipe == CorrectionRecipe::Resend {
         payload["client_event_id"] = json!(event);
         payload["expected_version"] = canonical["version"].clone();
         // Status is the new request's envelope, not a customer correction.
@@ -318,7 +417,7 @@ pub(crate) fn apply(
                 version: Some(1),
             },
         )?)
-    } else if action == KEEP {
+    } else {
         let headers: Vec<(&str, Value)> = crate::edit_settlement_recovery::EDIT_HEADER_FIELDS
             .iter()
             .filter(|(_, key)| *key != "order_type")
@@ -342,21 +441,25 @@ pub(crate) fn apply(
             return Err("ORDER_VERSION_CONFLICT".into());
         }
         None
-    } else {
-        return Err("REMEDY_NOT_APPLICABLE".into());
     };
-    let recipe = if action == RESEND {
-        "order-customer-correction.resend"
-    } else {
-        "order-customer-correction.keep-server"
-    };
-    let outcome = if action == RESEND {
+    let outcome = if recipe == CorrectionRecipe::Resend {
         "pending"
     } else {
         "resolved"
     };
     let opened = opened_at(conn, &row.id)?;
-    conn.execute("INSERT INTO recovery_action_log (id,action_id,issue_code,issue_id,recipe_id,recipe_version,entity_type,entity_id,order_id,snapshot_point_id,success,created_at,payload_json) VALUES (?1,?2,'customer_correction_refused',?3,?4,1,'order',?5,?5,?6,?7,?8,?9)",params![uuid::Uuid::new_v4().to_string(),action,row.id,recipe,row.order,snapshot,action==KEEP,now,json!({"openedAt":opened,"nativeOrderCorrection":true,"outcome":outcome,"organizationId":scope.organization,"retiredQueueId":row.id,"retiredRequest":row.data,"reason":row.error,"replacementQueueId":new_id,"clientEventId":event}).to_string()]).map_err(|e|e.to_string())?;
+    let audit_id = uuid::Uuid::new_v4().to_string();
+    let evidence = json!({
+        "openedAt":opened, "nativeOrderCorrection":true, "outcome":outcome,
+        "organizationId":scope.organization, "branchId":scope.branch,
+        "retiredQueueId":row.id, "retiredRequest":row.data, "reason":row.error,
+        "replacementQueueId":new_id, "clientEventId":event,
+        "actor":snapshot.actor(), "snapshotProvenance":snapshot.provenance(),
+        "verifiedAt":(recipe == CorrectionRecipe::KeepServer).then_some(&now),
+        "canonicalVersion":canonical["version"],
+    });
+    conn.execute("INSERT INTO recovery_action_log (id,action_id,issue_code,issue_id,recipe_id,recipe_version,entity_type,entity_id,order_id,snapshot_point_id,success,created_at,payload_json) VALUES (?1,?2,'customer_correction_refused',?3,?4,1,'order',?5,?5,?6,?7,?8,?9)",
+        params![audit_id,recipe.action(),row.id,recipe.id(),row.order,snapshot.id(),recipe == CorrectionRecipe::KeepServer,now,evidence.to_string()]).map_err(|e|e.to_string())?;
     let removed = conn
         .execute(
             "DELETE FROM parity_sync_queue WHERE id=?1 AND data=?2 AND status=?3",
@@ -367,8 +470,42 @@ pub(crate) fn apply(
         return Err("ORDER_VERSION_CONFLICT".into());
     }
     conn.execute("UPDATE recovery_action_log SET success=0,payload_json=json_set(payload_json,'$.outcome','failed') WHERE json_extract(payload_json,'$.nativeOrderCorrection')=1 AND json_extract(payload_json,'$.replacementQueueId')=?1",[&row.id]).map_err(|e|e.to_string())?;
+    Ok(AppliedCorrection {
+        audit_id,
+        replacement_id: new_id,
+        canonical_version: canonical["version"]
+            .as_i64()
+            .ok_or("ORDER_CORRECTION_STALE_SERVER")?,
+    })
+}
+
+pub(crate) fn apply(
+    conn: &Connection,
+    row: &Refused,
+    before: &Value,
+    answer: &Value,
+    action: &str,
+    snapshot: &str,
+) -> Result<Value, String> {
+    let recipe = CorrectionRecipe::ALL
+        .into_iter()
+        .find(|recipe| recipe.action() == action)
+        .ok_or("REMEDY_NOT_APPLICABLE")?;
+    let provenance = if snapshot.is_empty() {
+        CorrectionSnapshot::AutomaticIntent
+    } else {
+        CorrectionSnapshot::PreRecoveryAction(snapshot)
+    };
+    if let Err(code) = apply_correction(conn, row, before, answer, recipe, provenance) {
+        if code != "ORDER_CORRECTION_NO_LONGER_ELIGIBLE" {
+            return Err(code);
+        }
+        return Ok(
+            json!({"success":true,"requiresRefresh":true,"verification":{"status":"pending"}}),
+        );
+    }
     Ok(
-        json!({"success":true,"requiresRefresh":true,"verification":{"status":if action==KEEP {"passed"}else{"pending"}},"snapshotPointId":snapshot}),
+        json!({"success":true,"requiresRefresh":true,"verification":{"status":if recipe == CorrectionRecipe::KeepServer {"passed"}else{"pending"}},"snapshotPointId":snapshot,"changedIds":[row.id]}),
     )
 }
 
@@ -894,7 +1031,18 @@ mod tests {
 
     #[test]
     fn notice_containment_health_keeps_owner_observations_fresh_when_notice_read_fails() {
+        let _keys = crate::tests::fake_keyring::install_empty();
         let fixture = crate::tests::harness::TestDb::open();
+        let seed_scope = |conn: &Connection| {
+            for (key, value) in [
+                ("organization_id", fixture::ORG),
+                ("branch_id", fixture::BRANCH),
+                ("terminal_id", fixture::TERMINAL),
+            ] {
+                crate::db::set_setting(conn, "terminal", key, value).unwrap();
+            }
+        };
+        seed_scope(&fixture.state.conn.lock().unwrap());
         fixture
             .state
             .conn
@@ -914,6 +1062,27 @@ mod tests {
             .contains(&json!("orderIssueEvidence")));
         assert!(health["orderNotices"].is_null());
         assert!(health["orderIssueEvidence"].is_null());
+        // The failure itself is named for the report that reaches us, and no
+        // count is claimed when the list of issues was unreadable as well.
+        assert_eq!(
+            health["orderIssueEvidenceFailure"],
+            json!({"code":"NOTICE_TABLE_MISSING_RECOVERY_ACTION_LOG","open_notices":null})
+        );
+        let candidates = crate::incident_reporting::classify_incidents(&health);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.fingerprint.ends_with(
+                ":order_issue:evidence_unavailable:NOTICE_TABLE_MISSING_RECOVERY_ACTION_LOG"
+            )));
+        // A till that reads its evidence raises nothing of the kind.
+        let healthy = crate::tests::harness::TestDb::open();
+        seed_scope(&healthy.state.conn.lock().unwrap());
+        let health = crate::diagnostics::get_system_health(&healthy.state).unwrap();
+        assert!(health["orderIssueEvidenceFailure"].is_null());
+        assert_eq!(health["orderIssueEvidence"], json!([]));
+        assert!(crate::incident_reporting::classify_incidents(&health)
+            .iter()
+            .all(|candidate| !candidate.fingerprint.contains(":evidence_unavailable:")));
     }
 
     #[test]

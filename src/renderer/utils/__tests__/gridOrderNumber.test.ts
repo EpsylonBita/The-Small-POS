@@ -9,6 +9,10 @@ import { describe, expect, it } from 'vitest';
 import { formatGridOrderNumber } from '../gridOrderNumber';
 
 describe('formatGridOrderNumber', () => {
+  it('keeps the complete BOX checkout label including the provider prefix', () => {
+    expect(formatGridOrderNumber({ order_number: 'BOX-1794948068572-2F43E65D', box_order_label: '#B421' })).toBe('#B421');
+    expect(formatGridOrderNumber({ order_number: '#TEST-123', box_order_label: '#TEST-123' })).toBe('#TEST-123');
+  });
   it('drops the date from the register number, as the grid does', () => {
     expect(formatGridOrderNumber({ order_number: 'ORD-31102026-00003' })).toBe('#00003');
     expect(formatGridOrderNumber({ order_number: '#ORD-31102026-00012' })).toBe('#00012');

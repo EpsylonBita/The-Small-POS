@@ -13,6 +13,7 @@
  * wasAttempted).
  */
 
+import type { HealthTargetOutcome } from '../../services/support/SupportRemedyRunner';
 import type { SyncQueueItem } from '../../../../../shared/pos/sync-queue-types';
 import type { HealthProblemCode } from '../../../../../shared/pos/health/health-contract';
 import type { SyncAttemptRemainder } from '../../../../../shared/pos/health/health-summary';
@@ -94,6 +95,28 @@ export function wasAttempted(before: SyncQueueItem, now: SyncQueueItem | undefin
   );
 }
 
+export function syncNowTargetOutcomes(
+  before: readonly SyncQueueItem[] | null,
+  after: readonly SyncQueueItem[] | null,
+  acknowledgedIds: readonly string[],
+): Array<{ id: string; outcome: HealthTargetOutcome }> {
+  const currentById = new Map(after?.map(row => [row.id, row]));
+  return (before ?? []).map(row => {
+    const current = currentById.get(row.id);
+    const status = String(current?.status ?? '');
+    let outcome: HealthTargetOutcome = 'untouched';
+    if (!after) outcome = 'unknown';
+    else if (!current) outcome = acknowledgedIds.includes(row.id) ? 'sent' : 'unknown';
+    else if (status === 'set_aside') outcome = 'set_aside';
+    else if (status === 'deferred' || /waiting for|not yet synced|parent.*pending/i.test(current.errorMessage ?? '')) {
+      outcome = 'waiting';
+    } else if (wasAttempted(row, current) && (['failed', 'conflict', 'dead_letter'].includes(status) || (status === 'pending' && !!current.errorMessage))) {
+      outcome = 'refused';
+    }
+    return { id: row.id, outcome };
+  });
+}
+
 /**
  * What is left of the rows a Sync now worked on, judged only on the rows it
  * tried: gone → none; tried and still stuck, failed or in conflict →
@@ -107,10 +130,10 @@ export function syncNowRemainder(input: {
   problemStillThere: boolean;
   nowMs: number;
 }): SyncAttemptRemainder | null {
-  if (!input.before || input.before.length === 0) {
+  if (!input.before || !input.after) return null;
+  if (input.before.length === 0) {
     return input.problemStillThere ? 'progressing' : 'none';
   }
-  if (!input.after) return null;
   const now = new Map(input.after.map((item) => [item.id, item]));
   let progressing = false;
   for (const before of input.before) {

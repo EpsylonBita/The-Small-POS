@@ -31,7 +31,11 @@ use crate::{
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::Emitter;
 
+/// Tells the renderer that a stored answer was just re-read. Publishing never
+/// reads anything and never changes when an answer is read.
+pub(crate) const UPDATED_EVENT: &str = "ecr_device_admission_updated";
 pub(crate) const CARD_TERMINAL: &str = "payment_terminal";
 pub(crate) const CASH_REGISTER: &str = "cash_register";
 /// A device whose plugin is not active, configured and finished.
@@ -121,15 +125,14 @@ pub(crate) fn device_admitted(conn: &Connection, device: &Value) -> bool {
         .is_some_and(|device_type| is_admitted(conn, device_type))
 }
 
-/// Persist one answer for `device_type`, bound to `scope`.
-pub(crate) fn record(
+fn store(
     conn: &Connection,
     device_type: &str,
     scope: &OpeningScope,
     admitted: bool,
     mode: Option<String>,
     status: Option<String>,
-) -> Result<(), String> {
+) -> Result<Admission, String> {
     let key = key_for(device_type).ok_or(TYPE_REQUIRED_CODE)?;
     let admission = Admission {
         admitted,
@@ -141,7 +144,20 @@ pub(crate) fn record(
         status,
     };
     let raw = serde_json::to_string(&admission).map_err(|error| error.to_string())?;
-    db::set_setting(conn, CATEGORY, key, &raw)
+    db::set_setting(conn, CATEGORY, key, &raw)?;
+    Ok(admission)
+}
+
+/// Persist one answer for `device_type`, bound to `scope`.
+pub(crate) fn record(
+    conn: &Connection,
+    device_type: &str,
+    scope: &OpeningScope,
+    admitted: bool,
+    mode: Option<String>,
+    status: Option<String>,
+) -> Result<(), String> {
+    store(conn, device_type, scope, admitted, mode, status).map(|_| ())
 }
 
 /// Persist a card-terminal answer read from manual-admission. Only a definite
@@ -212,24 +228,70 @@ pub(crate) fn record_fiscal_result(
 /// Re-read both answers from the server for this till's scope. Network or
 /// server failures keep the last known answers; a scope change during the
 /// read discards them. Never holds the database lock across the requests.
-pub(crate) async fn refresh(db: &db::DbState) -> Result<(), String> {
+async fn refresh_storing(db: &db::DbState) -> Result<Option<Admission>, String> {
     let scope = {
         let conn = db.conn.lock().map_err(|error| error.to_string())?;
         OpeningScope::resolve(&conn)
     };
     let Some(scope) = scope else {
-        return Ok(());
+        return Ok(None);
     };
     let card = crate::admin_fetch_detailed(Some(db), MANUAL_ADMISSION_PATH, "GET", None).await;
     let fiscal = crate::admin_fetch_detailed(Some(db), MYDATA_CONFIG_PATH, "GET", None).await;
     let conn = db.conn.lock().map_err(|error| error.to_string())?;
     if OpeningScope::resolve(&conn).as_ref() != Some(&scope) {
-        return Ok(());
+        return Ok(None);
     }
-    if let Ok(body) = &card {
-        record_card_admission(&conn, &scope, admission_from_response(&scope, body))?;
+    let card_admission = match card
+        .as_ref()
+        .ok()
+        .map(|body| admission_from_response(&scope, body))
+    {
+        Some(ProviderAdmission::Connected) => {
+            Some(store(&conn, CARD_TERMINAL, &scope, true, None, None)?)
+        }
+        Some(ProviderAdmission::NotConnected) => {
+            Some(store(&conn, CARD_TERMINAL, &scope, false, None, None)?)
+        }
+        Some(ProviderAdmission::NotChecked | ProviderAdmission::Unavailable) | None => None,
+    };
+    record_fiscal_result(&conn, &scope, &fiscal)?;
+    Ok(card_admission)
+}
+
+pub(crate) async fn refresh(db: &db::DbState) -> Result<(), String> {
+    refresh_storing(db).await.map(|_| ())
+}
+
+/// The renderer's view of the card answer just stored.
+pub(crate) fn card_event(admission: &Admission) -> Value {
+    json!({
+        "success": true,
+        "cardTerminal": {
+            "admitted": admission.admitted,
+            "fetchedAt": admission.fetched_at,
+            "organizationId": admission.organization_id,
+            "branchId": admission.branch_id,
+            "terminalId": admission.terminal_id,
+        },
+    })
+}
+
+/// Refresh both answers and dispatch the card update off the heartbeat loop.
+pub(crate) async fn refresh_and_publish(
+    app: &tauri::AppHandle,
+    db: &db::DbState,
+) -> Result<(), String> {
+    if let Some(card) = refresh_storing(db).await? {
+        let view = card_event(&card);
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = app.emit(UPDATED_EVENT, view) {
+                tracing::warn!(error = %error, "ECR device admission publish failed");
+            }
+        });
     }
-    record_fiscal_result(&conn, &scope, &fiscal)
+    Ok(())
 }
 
 /// The renderer's view of both admissions (`ecr_get_device_admission`).
@@ -241,6 +303,9 @@ pub(crate) fn snapshot(conn: &Connection) -> Value {
         "cardTerminal": {
             "admitted": card.as_ref().is_some_and(|a| a.admitted),
             "fetchedAt": card.as_ref().map(|a| a.fetched_at.clone()),
+            "organizationId": card.as_ref().map(|a| a.organization_id.as_str()),
+            "branchId": card.as_ref().map(|a| a.branch_id.as_str()),
+            "terminalId": card.as_ref().map(|a| a.terminal_id.as_str()),
         },
         "cashRegister": {
             "admitted": fiscal.as_ref().is_some_and(|a| a.admitted),
@@ -249,6 +314,13 @@ pub(crate) fn snapshot(conn: &Connection) -> Value {
             "status": fiscal.as_ref().and_then(|a| a.status.clone()),
         },
     })
+}
+
+/// Send a snapshot the caller already took to the renderer.
+pub(crate) fn publish_snapshot(app: &tauri::AppHandle, view: &Value) {
+    if let Err(error) = app.emit(UPDATED_EVENT, view.clone()) {
+        tracing::warn!(error = %error, "ECR device admission publish failed");
+    }
 }
 
 /// The refusal a till answers when a device it may not use is asked to act
@@ -332,6 +404,71 @@ mod tests {
             "terminal_id": scope.terminal_id,
             "provider_connected": provider_connected,
         })
+    }
+
+    #[test]
+    fn store_returns_the_persisted_answer() {
+        let conn = conn();
+        let scope = scope(&conn);
+        let stored = store(
+            &conn,
+            CASH_REGISTER,
+            &scope,
+            true,
+            Some("fiscal_device".to_string()),
+            Some("connected".to_string()),
+        )
+        .unwrap();
+        assert_eq!(read_stored(&conn, CASH_REGISTER), Some(stored));
+    }
+
+    #[test]
+    fn card_event_contains_only_the_stored_card_answer() {
+        let conn = conn();
+        let scope = scope(&conn);
+        record(&conn, CARD_TERMINAL, &scope, true, None, None).unwrap();
+        let stored = read_stored(&conn, CARD_TERMINAL).unwrap();
+        assert_eq!(
+            card_event(&stored),
+            json!({
+                "success": true,
+                "cardTerminal": {
+                    "admitted": true,
+                    "fetchedAt": stored.fetched_at,
+                    "organizationId": scope.organization_id,
+                    "branchId": scope.branch_id,
+                    "terminalId": scope.terminal_id,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn the_snapshot_names_the_scope_of_the_card_answer() {
+        let conn = conn();
+        let scope = scope(&conn);
+        for key in ["organizationId", "branchId", "terminalId"] {
+            assert_eq!(snapshot(&conn)["cardTerminal"][key], Value::Null);
+        }
+        record(&conn, CARD_TERMINAL, &scope, false, None, None).unwrap();
+        let view = snapshot(&conn);
+        assert_eq!(
+            view["cardTerminal"]["organizationId"],
+            scope.organization_id
+        );
+        assert_eq!(view["cardTerminal"]["branchId"], scope.branch_id);
+        assert_eq!(view["cardTerminal"]["terminalId"], scope.terminal_id);
+        // After a re-pair the stored answer is another scope's: no ids, not admitted.
+        db::set_setting(
+            &conn,
+            "terminal",
+            "branch_id",
+            "33333333-3333-4333-8333-333333333333",
+        )
+        .unwrap();
+        for key in ["organizationId", "branchId", "terminalId", "fetchedAt"] {
+            assert_eq!(snapshot(&conn)["cardTerminal"][key], Value::Null);
+        }
     }
 
     #[test]

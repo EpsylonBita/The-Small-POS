@@ -7,9 +7,9 @@ import { OrderSyncMark, OrderSyncNotice, ShiftOrderSyncNotices } from '../OrderS
 const mocks=vi.hoisted(()=>({ snapshot:{notices:[] as any[],status:'fresh'}, execute:vi.fn(), refresh:vi.fn(), open:vi.fn(), release:vi.fn(), remedy:vi.fn(), invoke:vi.fn() }));
 vi.mock('../../../../lib',()=>({getBridge:()=>({invoke:mocks.invoke})}));
 vi.mock('../../../services/OrderNoticeRemedy',()=>({readOrderNoticeRemedy:mocks.remedy}));
-vi.mock('../../../services/OrderSyncNoticeStore',()=>({useOrderNotices:(ids?:string[])=>({...mocks.snapshot,notices:ids?mocks.snapshot.notices.filter(n=>ids.includes(n.orderId)):mocks.snapshot.notices}),refreshOrderNotices:mocks.refresh,openOrderNotice:mocks.open}));
+vi.mock('../../../services/OrderSyncNoticeStore',()=>({useOrderNotices:(ids?:string[])=>({...mocks.snapshot,notices:ids?mocks.snapshot.notices.filter(n=>ids.includes(n.orderId)):mocks.snapshot.notices}),refreshOrderNotices:mocks.refresh,openOrderNotice:mocks.open,readOrderNoticeStatus:()=>mocks.snapshot.status}));
 vi.mock('../../../hooks/usePrivilegedActionConfirmation',()=>({usePrivilegedActionConfirmation:()=>({runWithPrivilegedConfirmation:vi.fn(),confirmationModal:null})}));
-vi.mock('../../../services/support/SupportRemedyRunner',()=>({acquireRecoveryAction:()=>mocks.release,buildRecoveryActionRequest:(issue:any,action:any)=>({actionId:action.id,...issue}),executeHealthRecoveryAction:mocks.execute}));
+vi.mock('../../../services/support/SupportRemedyRunner',async importOriginal=>({...await importOriginal<typeof import('../../../services/support/SupportRemedyRunner')>(),acquireRecoveryAction:()=>mocks.release,buildRecoveryActionRequest:(issue:any,action:any)=>({actionId:action.id,...issue}),executeHealthRecoveryAction:mocks.execute}));
 vi.mock('../SyncRecoveryModal',()=>({SyncRecoveryModal:({isOpen,orderId}:any)=>isOpen?<div>Guided order {orderId}</div>:null}));
 vi.mock('react-i18next',()=>({useTranslation:()=>({t:(key:string,options:any={})=>{const text=key.split('.').reduce((value:any,k)=>value?.[k],en)??options.defaultValue??key;return text.replace('{{number}}',options.number??'');}})}));
 const notice={orderId:'order-1',orderNumber:'125',queueId:'queue-1',since:'2026-11-17',kind:'customer_correction_refused',state:'refused',actions:['resendOrderCustomerCorrection','keepServerOrderCustomerDetails']};
@@ -71,7 +71,31 @@ describe('staff order sync notices',()=>{
   expect(screen.getByText(/Finish the sale, the payment/)).toBeTruthy();
   expect((screen.getByRole('button',{name:'Save again'})as HTMLButtonElement).disabled).toBe(true);
  });
- it('reports failure and retains the notice',async()=>{mocks.execute.mockRejectedValue(new Error('SECRET SERVER ERROR'));const{container}=render(<OrderSyncNotice orderId="order-1"/>);fireEvent.click(screen.getByRole('button',{name:'Save again'}));await waitFor(()=>expect(screen.getByText(/change was not saved/)).toBeTruthy());expect(screen.getByText(/sale and the payment/)).toBeTruthy();expect(container.textContent).not.toContain('SECRET');expect(screen.getAllByRole('button')).toHaveLength(1);});
+ it('reports failure and retains the notice',async()=>{mocks.execute.mockRejectedValue(new Error('SECRET SERVER ERROR'));const{container}=render(<OrderSyncNotice orderId="order-1"/>);fireEvent.click(screen.getByRole('button',{name:'Save again'}));await waitFor(()=>expect(screen.getByText('It did not work. Call support.')).toBeTruthy());expect(screen.getByText(/sale and the payment/)).toBeTruthy();expect(container.textContent).not.toContain('SECRET');expect(screen.getAllByRole('button')).toHaveLength(1);});
+ it.each([
+  ['AUTH_SESSION_REQUIRED', 'Sign in to the till again.'],
+  ['AUTH_SHIFT_REQUIRED', 'A cashier or manager must be on shift at this till.'],
+  ['AUTH_LOCKED_OUT', 'Too many wrong PIN attempts. Wait a few minutes and try again.'],
+  ['AUTH_CONFIRMATION_CANCELLED', 'Nothing changed.'],
+ ])('keeps %s in evidence and shows plain instructions',async (code,text)=>{
+  mocks.execute.mockRejectedValue({code,reason:'PRIVATE REFUSAL DETAIL'});
+  const {container}=render(<OrderSyncNotice orderId="order-1"/>);
+  fireEvent.click(screen.getByRole('button',{name:'Save again'}));
+  await waitFor(()=>expect(screen.getByText(text)).toBeTruthy());
+  expect(mocks.invoke).toHaveBeenCalledWith('order_notice_employee_attempt',{attemptId:'attempt',outcome:'failed',code});
+  expect(container.textContent).not.toContain('PRIVATE REFUSAL DETAIL');
+ });
+ it('checks the latest order-specific freshness while waiting for the PIN',async()=>{
+  mocks.execute.mockImplementation(async options=>{
+   expect(options.stale()).toBe(false);
+   mocks.snapshot.status='stale';
+   expect(options.stale()).toBe(true);
+   throw new Error('NOTICE_STALE');
+  });
+  render(<OrderSyncNotice orderId="order-1"/>);
+  fireEvent.click(screen.getByRole('button',{name:'Save again'}));
+  await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith('order_notice_employee_attempt',{attemptId:'attempt',outcome:'failed',code:'NOTICE_STALE'}));
+ });
  it.each(['change_refused','payment_not_on_server'])('shows no button or technical assistant without a safe remedy for %s',async kind=>{mocks.snapshot.notices=[{...notice,kind,actions:[]}];render(<OrderSyncNotice orderId="order-1"/>);await waitFor(()=>expect(screen.getByText('This cannot be solved from here. Tell the manager.')).toBeTruthy());expect(screen.queryByText('Press the button to save it again.')).toBeNull();expect(screen.queryByRole('button')).toBeNull();expect(screen.queryByText('Guided order order-1')).toBeNull();});
  it('shows neutral automatic saving with no action and returns to amber on failure',()=>{
   mocks.snapshot.notices=[{...notice,automatic:true,state:'pending',actions:[]}];

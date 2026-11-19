@@ -1,72 +1,25 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import test from 'node:test';
 
-// Round 340 (supervisor correction, live QA / code inspection): the sync recovery assistant
-// (RecoveryCenterPanel, used by SyncRecoveryModal + SyncStatusIndicator) showed raw technical context IDs in
-// its visible summary cards -- the "Terminal {{terminalId}}" context line and branch/organization labels that
-// fell back to the raw branchId/organizationId UUID. Cashiers must see friendly names/labels only. The raw ids
-// may still live in internal recovery logic, the persisted action log, and diagnostics export.
-const projectRoot = process.cwd();
-const panelPath = path.join(
-  projectRoot,
-  'src',
-  'renderer',
-  'components',
-  'recovery',
-  'RecoveryCenterPanel.tsx',
-);
-const source = readFileSync(panelPath, 'utf8');
+const source = (filename: string) => readFileSync(path.join(process.cwd(), 'src/renderer/components/recovery', filename), 'utf8');
+const loadLocale = (lng: string) => JSON.parse(readFileSync(path.join(process.cwd(), 'src/locales', lng + '.json'), 'utf8'));
 
-const localesDir = path.join(projectRoot, 'src', 'locales');
-const loadLocale = (lng: string): Record<string, any> =>
-  JSON.parse(readFileSync(path.join(localesDir, `${lng}.json`), 'utf8'));
-
-test('Round 340: the sync-recovery summary cards render no raw terminal/branch/organization IDs', () => {
-  // The compact staff view replaces the former three-card summary. Keep the
-  // privacy invariant across the whole rendered panel, including disclosures.
-  const summaryStart = source.indexOf('<section className="space-y-4');
-  assert.notEqual(summaryStart, -1, 'the staff panel must exist');
-  const summaryEnd = source.indexOf('</section>', summaryStart);
-  assert.notEqual(summaryEnd, -1, 'the staff panel must close');
-  const summary = source.slice(summaryStart, summaryEnd);
-
-  assert.doesNotMatch(summary, /terminalContext\?\.terminalId/, 'summary must not render the raw terminalId');
-  assert.doesNotMatch(summary, /terminalContext\?\.branchId/, 'summary must not render the raw branchId');
-  assert.doesNotMatch(summary, /terminalContext\?\.organizationId/, 'summary must not render the raw organizationId');
-  assert.doesNotMatch(summary, /terminalContextLine/, 'the raw-terminalId context-line key must be gone from the summary');
-
-  // Friendly, cashier-facing copy/labels are rendered instead.
-  assert.match(summary, /recovery\.center\.thisTerminal/, 'summary uses the friendly "This register" label');
-  assert.match(summary, /\{branchDisplayName\}/, 'summary renders the friendly branch display name');
-  assert.match(summary, /\{organizationDisplayName\}/, 'summary renders the friendly organization display name');
-
-  // The offending key is removed from the whole component, not just the summary.
-  assert.doesNotMatch(source, /terminalContextLine/, 'terminalContextLine must be fully removed from the component');
+test('Till health confines raw terminal and business identifiers to its support disclosure', () => {
+  const staff = source('TillHealthWindow.tsx');
+  const support = source('TillHealthSupport.tsx');
+  assert.doesNotMatch(staff, /terminalId|organizationId|branchId|\.entityId|\.queueId/);
+  assert.match(staff, /supportOpen && props\.support/);
+  assert.match(support, /terminal\.terminalId, terminal\.branchId, terminal\.organizationId/);
+  assert.match(support, /issue\.entityId, issue\.businessEventKey/);
 });
 
-test('Round 340: branch/organization display names never fall back to a raw id', () => {
-  // The derived display names prefer the friendly NAME, else a localized "This branch / This business" label --
-  // never the raw branchId/organizationId UUID.
-  const blockStart = source.indexOf('const branchDisplayName =');
-  assert.notEqual(blockStart, -1, 'branchDisplayName derivation must exist');
-  const block = source.slice(blockStart, source.indexOf('const runAction'));
-  assert.ok(block.length > 0, 'the display-name derivation block must exist');
-
-  assert.doesNotMatch(block, /branchId/, 'branchDisplayName must not fall back to branchId');
-  assert.doesNotMatch(block, /organizationId/, 'organizationDisplayName must not fall back to organizationId');
-  assert.match(block, /terminalContext\?\.branchName\?\.trim\(\)/, 'branchDisplayName prefers the friendly branchName');
-  assert.match(block, /recovery\.center\.branchFallback/, 'branchDisplayName uses the friendly fallback label');
-  assert.match(block, /terminalContext\?\.organizationName\?\.trim\(\)/, 'organizationDisplayName prefers the friendly organizationName');
-  assert.match(block, /recovery\.center\.organizationFallback/, 'organizationDisplayName uses the friendly fallback label');
-});
-
-test('Round 340: terminal/context IDs remain available to the internal action log (logic not broken)', () => {
-  // IDs are allowed to stay in the persisted action log / diagnostics. This guards that hiding the visible IDs
-  // did not strip them from the internal recovery action log or its persistence path.
-  assert.match(source, /staffName: terminalContext\?\.terminalId \?\? null/, 'the action log still records the terminalId internally');
-  assert.match(source, /bridge\.recovery\.recordActionLog\(/, 'the action log is still persisted via the recovery bridge');
+test('Till health audit retains terminal context and distinguishes missing approver attribution', () => {
+  const actions = source('useTillHealthActions.tsx');
+  assert.match(actions, /terminalId: terminalContext\?\.terminalId/);
+  assert.match(actions, /actorAttribution: 'unavailable'/);
+  assert.match(actions, /recordActionLog\(entry\)/);
 });
 
 test('Round 340: the raw-ID terminalContextLine locale key is removed; friendly keys exist in every POS locale', () => {
@@ -98,22 +51,14 @@ test('Round 340: the raw-ID terminalContextLine locale key is removed; friendly 
   }
 });
 
-test('Round 384: recovery center panel is touch-first and avoids old sky/orange styling', () => {
-  assert.doesNotMatch(source, /hover:/);
-  assert.doesNotMatch(source, /dark:hover:/);
-  assert.doesNotMatch(source, /group-hover:/);
-  assert.doesNotMatch(source, /\b(?:bg|text|border|from|to|ring|shadow)-(?:sky|blue|cyan|purple|violet|indigo|fuchsia|pink|orange)-/);
-  assert.doesNotMatch(source, /focus:ring-blue|focus:border-blue/);
 
-  // Error is semantic red; warning/blocker guidance is amber; informational/verification surfaces are neutral.
-  assert.match(source, /error:[\s\S]*?border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-red-700/);
-  assert.match(source, /warning:[\s\S]*?border border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-amber-700/);
-  assert.match(source, /info:[\s\S]*?border border-slate-300\/80 bg-white\/85 text-slate-700/);
-  assert.match(source, /<details className="rounded-2xl border border-slate-200/);
-  assert.match(source, /<summary className="min-h-touch(?![\w.-])/);
-
-  // Touch feedback replaces hover on recovery actions while preserving semantic action colors.
-  assert.match(source, /min-h-\[48px\][\s\S]*?disabled:opacity-50/);
-  assert.match(source, /bg-amber-400[\s\S]*?active:bg-amber-300/);
-  assert.match(source, /border-\(--pos-s-border\) bg-\(--pos-s-surface-2\) text-red-700 active:bg-red-100/);
+test('Till health uses raised controls and touch feedback', () => {
+  const window = source('TillHealthWindow.tsx');
+  const css = source('till-health.css');
+  assert.match(window, /till-health-button pos-raised/);
+  assert.match(window, /primary \? 'pos-raised--yellow'/);
+  assert.match(css, /min-height: 44px/);
+  assert.match(css, /min-height: 56px/);
+  assert.match(css, /:focus-visible/);
+  assert.doesNotMatch(window + css, /hover:|:hover|bg-(sky|orange)-\d/);
 });

@@ -3663,9 +3663,9 @@
     "zGate": {
       "approvalTitle": "Approuver avec votre PIN",
       "approvalSubtitle": "Mettre un enregistrement de côté demande le droit d'annuler des paiements. Un membre du personnel qui l'a saisit son propre PIN. Rien n'est supprimé ni débité.",
-      "setAsideDone": "Mis de côté. L'enregistrement reste sur cette caisse et le Z l'indique comme absent du serveur.",
-      "undoDone": "L'enregistrement est revenu : il bloque de nouveau la clôture de la journée jusqu'à ce que le serveur l'accepte.",
-      "actionFailed": "Cela n'a pas pu être fait. Rien n'a été modifié.",
+      "setAsideDone": "Mis de côté pour vérification. La caisse garde l’enregistrement et l’affiche dans le Z.",
+      "undoDone": "Cet enregistrement attend de nouveau d’être envoyé. Il peut retarder la clôture jusque-là.",
+      "actionFailed": "La modification n’a pas pu être confirmée. Vérifiez de nouveau la liste.",
       "stale": "Cette liste n'a pas pu être relue. Elle affiche la dernière lecture valide.",
       "unavailable": "Les journées clôturées sur cette caisse n'ont pas pu être lues. Réessayez.",
       "localTitle": "Journées clôturées sur cette caisse, pas encore sur le serveur : {{count}}",
@@ -6663,6 +6663,8 @@
     "kioskCardPending": "CARTE",
     "kioskCashPendingA11y": "Espèces choisies à la borne ; paiement en attente",
     "kioskCardPendingA11y": "Carte choisie à la borne ; paiement en attente",
+    "platformCashPendingA11y": "Espèces choisies sur la plateforme ; paiement en attente",
+    "platformCardPendingA11y": "Carte choisie sur la plateforme ; paiement en attente",
     "platformPayment": "PAIEMENT PLATEFORME",
     "platformPaymentA11y": "Paiement réglé par la plateforme ; le magasin ne l’encaisse pas"
   },
@@ -9382,6 +9384,34 @@
     "portionNotSaved": "Carte débitée, paiement pas encore enregistré. Ne débitez pas à nouveau."
   },
   "recovery": {
+    "actionStatus": {
+      "signIn": "Se reconnecter",
+      "sendRecord": "Envoyer cet enregistrement",
+      "sendWaiting": "Envoyer les enregistrements en attente",
+      "preparePaymentUpdates": "Préparer l’envoi des mises à jour de paiement",
+      "exportCopy": "Exporter une copie pour le support",
+      "reviewOrders": "Vérifier les écritures des commandes",
+      "removeLabel": "Retirer les enregistrements d’envoi non valides",
+      "removeTitle": "Retirer les enregistrements d’envoi non valides ?",
+      "removeMessage": "Les enregistrements d’envoi sélectionnés seront vérifiés de nouveau avant leur retrait. La caisse conserve une copie. Les commandes et les paiements restent sur la caisse.",
+      "sent": "Envoyé",
+      "waiting": "En attente d’un enregistrement lié",
+      "untouched": "Toujours en attente d’envoi",
+      "refused": "Impossible à envoyer",
+      "set_aside": "Mis de côté pour vérification",
+      "unknown": "Envoi non confirmé",
+      "checked": "Vérification terminée",
+      "reportNotified": "Rapport reçu. Le support a été averti.",
+      "reportStored": "Rapport reçu. La notification reste à confirmer.",
+      "reportPrepared": "Une copie est conservée sur cette caisse. La réception reste à confirmer.",
+      "reportFailed": "Impossible de préparer le rapport sur cette caisse.",
+      "grantExpired": "Votre autorisation a expiré. Saisissez de nouveau le code de la caisse.",
+      "permissionRequired": "Demandez à une personne autorisée de valider cette modification.",
+      "approverUnavailable": "Personne ayant donné l’accord inconnue",
+      "recordTitle": "Cet enregistrement demande votre attention",
+      "recordSummary": "La caisse conserve cet enregistrement pour vérification.",
+      "recordGuidance": "Ouvrez les détails ou envoyez un rapport au support."
+    },
     "confirmations": {
       "cashDrawerControl": {
         "title": "Confirmer l'action de récupération",
@@ -10718,6 +10748,13 @@
   }
 ,
   "orderSyncNotice": {
+    "sessionExpired": "La connexion à la caisse a expiré. Saisissez de nouveau le code PIN de la caisse.",
+    "signInAgain": "Reconnectez-vous à la caisse.",
+    "shiftRequired": "Une personne en caisse ou un responsable doit être en service sur cette caisse.",
+    "pinLocked": "Trop de tentatives avec un code PIN incorrect. Attendez quelques minutes et réessayez.",
+    "cancelled": "Rien n’a changé.",
+    "callSupport": "Cela n’a pas fonctionné. Appelez l’assistance.",
+    "saved": "La modification a été enregistrée.",
     "checkUnavailableHealth": "La caisse ne peut pas vérifier pour le moment si des commandes ont un problème à régler. Elles restent dans les commandes en cours.",
     "checkUnavailableGuidance": "Réessayez dans un instant. Si cela persiste, appelez l’assistance.",
     "checkUnavailable": "La caisse ne peut pas vérifier pour le moment si la commande #{{number}} a un problème à régler. Elle reste donc dans les commandes en cours. Réessayez dans un instant. Si cela persiste, appelez l’assistance.",

@@ -441,9 +441,10 @@ pub(super) fn run(
     let effects = super::confirmed_actions::Effects::install(&conn);
     let start = Instant::now();
     let tx = permit.begin_write(&conn)?;
+    let schema = guards::schema(&conn)?;
     recheck()?;
     if super::identity::local(&conn)? != *scope
-        || snapshot::watermarks_for_write(&conn, permit, start + Duration::from_millis(250))?
+        || snapshot::full_for_write(&conn, &schema, permit, start + Duration::from_millis(250))?
             != snap.full
     {
         return Err("PAYLOAD_DRIFT".into());
@@ -502,7 +503,7 @@ pub(super) fn run(
     };
     let post = std::cell::RefCell::new(None);
     super::confirmed_actions::finish_tx(
-        &conn, tx, c, now, permit, start, &recheck, &effects, cap, &post,
+        &conn, tx, c, now, permit, start, &recheck, &effects, cap, &post, &schema,
     )?;
     conn.progress_handler(0, None::<fn() -> bool>);
     // A separate read after COMMIT proves the final local result.

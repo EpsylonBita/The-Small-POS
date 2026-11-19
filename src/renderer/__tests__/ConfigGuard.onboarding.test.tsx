@@ -52,7 +52,6 @@ vi.mock('../components/CaptureNotificationManager', () => ({}));
 vi.mock('../components/SyncStatusIndicator', () => ({}));
 vi.mock('../components/callerid/CallerIdCustomerSearchModalHost', () => ({}));
 vi.mock('../components/ui/DeferredModal', () => ({}));
-vi.mock('../components/recovery/SyncRecoveryModal', () => ({}));
 vi.mock('../components/PortaledToaster', () => ({}));
 vi.mock('../services/ActivityTracker', () => ({}));
 vi.mock('../components/AnimatedBackground', () => ({}));
@@ -74,6 +73,7 @@ vi.mock('../hooks/useOrderStore', () => ({}));
 
 import { ConfigGuard } from '../App';
 import { clearTerminalCredentialCache } from '../services/terminal-credentials';
+import { cardProviderState, clearCardProviderMark } from '../services/cardProviderMark';
 
 const emit = (name: string, data: unknown) => mocks.listeners.get(name)?.forEach((listener) => listener(data));
 const identity = { terminal_id: 'TEST-TERMINAL', branch_id: 'fixture-branch', organization_id: 'fixture-org' };
@@ -156,4 +156,34 @@ it('preserves auth-pause recovery for a configured POS and stops promoting state
   expect(screen.getByRole('button', { name: 'English' })).toBeInTheDocument();
   expect(localStorage.getItem('pos-terminal-configured')).toBeNull();
   expect(mocks.toast.custom).toHaveBeenCalledTimes(1);
+});
+
+// The stored card answer loads on its own. A till must open, for cash and card
+// alike, while that read is still held; until it arrives the mark is unknown.
+it('opens a configured POS while the stored card mark read is held, then applies the answer', async () => {
+  clearCardProviderMark();
+  let answer!: (value: unknown) => void;
+  const getDeviceAdmission = vi.fn(() => new Promise(resolve => { answer = resolve; }));
+  const bridge = mocks.bridge as typeof mocks.bridge & { ecr?: unknown };
+  bridge.ecr = { getDeviceAdmission };
+  mocks.bridge.settings.isConfigured.mockResolvedValue({ configured: true });
+  try {
+    render(<ConfigGuard><div>Operational POS</div></ConfigGuard>);
+    await screen.findByText('Operational POS');
+    expect(getDeviceAdmission).toHaveBeenCalledTimes(1);
+    expect(getDeviceAdmission).toHaveBeenCalledWith();
+    expect(cardProviderState()).toBe('unknown');
+
+    await waitFor(() => expect(mocks.bridge.terminalConfig.getFullConfig).toHaveBeenCalled());
+    await act(async () => {
+      answer({ success: true, cardTerminal: {
+        admitted: true, fetchedAt: '2026-11-19T10:00:00Z',
+        organizationId: identity.organization_id, branchId: identity.branch_id, terminalId: identity.terminal_id,
+      } });
+    });
+    await waitFor(() => expect(cardProviderState()).toBe('connected'));
+  } finally {
+    delete bridge.ecr;
+    clearCardProviderMark();
+  }
 });

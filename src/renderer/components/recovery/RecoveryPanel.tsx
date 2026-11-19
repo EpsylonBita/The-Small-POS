@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { solidButton } from '../settings/SettingsKit';
 
 import { getBridge, type RecoveryPoint } from '../../../lib';
+import { isPrivilegedConfirmationCancelled, privilegedActionFeedback } from '../../utils/privileged-actions';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 
 interface RecoveryPanelProps {
@@ -152,9 +153,10 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
         t('settings.recovery.exportCreated', 'Recovery export created'),
       );
     } catch (error) {
+      if (isPrivilegedConfirmationCancelled(error)) return;
       console.error('Failed to export current recovery bundle:', error);
       toast.error(
-        t('settings.recovery.exportFailed', 'Failed to export recovery bundle'),
+        privilegedActionFeedback(error, t) ?? t('settings.recovery.exportFailed', 'Failed to export recovery bundle'),
       );
     } finally {
       setBusyAction(null);
@@ -181,9 +183,10 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
         t('settings.recovery.exportPointCreated', 'Recovery point export created'),
       );
     } catch (error) {
+      if (isPrivilegedConfirmationCancelled(error)) return;
       console.error('Failed to export recovery point:', error);
       toast.error(
-        t('settings.recovery.exportPointFailed', 'Failed to export recovery point'),
+        privilegedActionFeedback(error, t) ?? t('settings.recovery.exportPointFailed', 'Failed to export recovery point'),
       );
     } finally {
       setBusyAction(null);
@@ -208,9 +211,10 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
         ),
       });
     } catch (error) {
+      if (isPrivilegedConfirmationCancelled(error)) return;
       console.error('Failed to stage recovery restore:', error);
       toast.error(
-        t('settings.recovery.restoreFailed', 'Failed to stage recovery restore'),
+        privilegedActionFeedback(error, t) ?? t('settings.recovery.restoreFailed', 'Failed to stage recovery restore'),
       );
     } finally {
       setBusyAction(null);

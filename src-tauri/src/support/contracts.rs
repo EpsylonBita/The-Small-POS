@@ -118,7 +118,32 @@ mod tests {
                 .len(),
             2
         );
-        assert_eq!(c.caps.as_object().unwrap().len(), 14);
+        assert_eq!(c.caps.as_object().unwrap().len(), 15);
+        assert_eq!(cap("recoveryAttempts", "maxRows"), 50);
+        assert_eq!(
+            c.protocol["capabilities"]["confirmedActionsV2"],
+            "support.confirmed-actions.v2"
+        );
+        assert_eq!(
+            c.protocol["capabilities"]["recoveryAttempts"],
+            "support.recovery-attempts.v1"
+        );
+        assert_eq!(
+            c.protocol["capabilities"]["paymentReceiptMirror"],
+            super::super::confirmed_payment_receipt::CAPABILITY
+        );
+        for name in [
+            "ConfirmedPaymentReceiptInputSchema",
+            "ConfirmedPaymentReceiptBindingSchema",
+            "ConfirmedPaymentReceiptEvidenceSchema",
+            "ConfirmedRemedyInputSchema",
+            "ConfirmedQueueV2InputSchema",
+            "ConfirmedRemedyEvidenceSchema",
+            "ConfirmedQueueV2EvidenceSchema",
+            "RecoveryAttemptsResultSchema",
+        ] {
+            assert!(c.other["schemas"].get(name).is_some(), "{name} drifted");
+        }
         assert_eq!(c.write_policy["default"], "protected");
         assert_eq!(cap("transport", "tillCommandsPerMinute"), 120);
         assert_eq!(cap("onsite", "writeTransactionMs"), 250);

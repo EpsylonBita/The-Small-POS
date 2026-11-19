@@ -2784,6 +2784,87 @@ pub(crate) fn prepare_local_payment_currency(
     Ok(())
 }
 
+fn insert_payment_row(conn: &Connection, values: impl rusqlite::Params) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO order_payments (
+            id, order_id, method, amount, amount_cents, currency, status,
+            cash_received, cash_received_cents, change_given, change_given_cents,
+            transaction_ref, discount_amount, discount_amount_cents,
+            tip_amount, tip_amount_cents, tip_recipient_role,
+            tip_recipient_staff_id, tip_recipient_staff_shift_id,
+            payment_origin, terminal_device_id,
+            remote_payment_id, idempotency_key, staff_id, staff_shift_id, sync_status,
+            sync_state, created_at, updated_at, table_session_id, seat_number, metadata
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?31, ?7, ?8, ?9, ?10,
+            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
+            ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?32
+        )",
+        values,
+    )
+    .map(|_| ())
+    .map_err(crate::edit_settlement_recovery::storage_error)
+}
+
+/// Insert the canonical receipt without recording a collection or changing order state.
+pub(crate) fn insert_applied_receipt_row(
+    conn: &Connection,
+    input: &PaymentRecordInput,
+    options: &PaymentInsertOptions,
+) -> Result<String, String> {
+    // Contract guards for the one caller (the ledger-mirror restore): it must
+    // hold a transaction and pass the server provenance. Never reached by a sale.
+    if conn.is_autocommit() {
+        return Err("PAYMENT_INVALID_REQUEST".into());
+    }
+    let provenance = options
+        .applied_canonical_provenance
+        .as_ref()
+        .ok_or("PAYMENT_INVALID_REQUEST")?;
+    let payment_id = options
+        .payment_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    insert_payment_row(
+        conn,
+        params![
+            payment_id,
+            input.order_id,
+            input.method,
+            input.amount,
+            Cents::round_half_even(input.amount).as_i64(),
+            input.currency,
+            None::<f64>,
+            None::<i64>,
+            None::<f64>,
+            None::<i64>,
+            input.transaction_ref,
+            0.0,
+            0i64,
+            input.tip_amount,
+            Cents::round_half_even(input.tip_amount).as_i64(),
+            input.requested_tip_recipient_role,
+            input.requested_tip_recipient_staff_id,
+            input.requested_tip_recipient_staff_shift_id,
+            "sync_reconstructed",
+            None::<String>,
+            options.remote_payment_id,
+            input.idempotency_key,
+            provenance.staff_id,
+            provenance.staff_shift_id,
+            "synced",
+            "applied",
+            options.created_at,
+            options.updated_at,
+            input.table_session_id,
+            input.seat_number,
+            "completed",
+            provenance.metadata.as_ref().map(Value::to_string),
+        ],
+    )?;
+    Ok(payment_id)
+}
+
 pub(crate) fn record_payment_in_connection(
     conn: &Connection,
     input: &PaymentRecordInput,
@@ -3254,21 +3335,8 @@ pub(crate) fn record_payment_in_connection(
             },
         ),
     };
-    conn.execute(
-        "INSERT INTO order_payments (
-            id, order_id, method, amount, amount_cents, currency, status,
-            cash_received, cash_received_cents, change_given, change_given_cents,
-            transaction_ref, discount_amount, discount_amount_cents,
-            tip_amount, tip_amount_cents, tip_recipient_role,
-            tip_recipient_staff_id, tip_recipient_staff_shift_id,
-            payment_origin, terminal_device_id,
-            remote_payment_id, idempotency_key, staff_id, staff_shift_id, sync_status,
-            sync_state, created_at, updated_at, table_session_id, seat_number, metadata
-        ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?31, ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-            ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?32
-        )",
+    insert_payment_row(
+        conn,
         params![
             payment_id,
             input.order_id,
@@ -3303,8 +3371,7 @@ pub(crate) fn record_payment_in_connection(
             payment_status,
             payment_metadata,
         ],
-    )
-    .map_err(crate::edit_settlement_recovery::storage_error)?;
+    )?;
 
     for item in &input.items {
         let item_id = Uuid::new_v4().to_string();
@@ -3852,6 +3919,38 @@ pub(crate) fn auto_settle_platform_order(
             Err(error)
         }
     }
+}
+
+/// Verify the platform payment and the remaining balance using the ledger.
+pub(crate) fn verified_platform_settlement_ids(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<Vec<String>, String> {
+    if Cents::round_half_even(
+        load_order_payment_balance_snapshot(conn, order_id)?.outstanding_amount,
+    )
+    .as_i64()
+        > 0
+    {
+        return Err("PLATFORM_SETTLEMENT_NOT_VERIFIED".into());
+    }
+    let settlement = platform_settlement_row_sql("p");
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT p.id FROM order_payments p
+         WHERE p.order_id = ?1 AND p.status = 'completed' AND {settlement}
+         ORDER BY p.id"
+        ))
+        .map_err(|e| e.to_string())?;
+    let ids = statement
+        .query_map([order_id], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    if ids.is_empty() {
+        return Err("PLATFORM_SETTLEMENT_NOT_VERIFIED".into());
+    }
+    Ok(ids)
 }
 
 /// The tender a kiosk customer chose (`ghost_metadata.kiosk.paymentMethod`)

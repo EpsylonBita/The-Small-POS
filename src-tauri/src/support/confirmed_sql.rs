@@ -553,13 +553,16 @@ fn connect(path: &Path) -> Result<(Connection, std::sync::Arc<authorizer::Policy
     let policy = authorizer::install_confirmed(&c, tables, accessors);
     Ok((c, policy))
 }
-fn no_implicit_effects(c: &Connection, facts: &authorizer::Facts) -> Result<(), String> {
-    let schema = guards::schema(c)?;
+fn no_implicit_effects(
+    c: &Connection,
+    facts: &authorizer::Facts,
+    schema: &[guards::Table],
+) -> Result<(), String> {
     for (table, columns) in &facts.writes {
         // SQLite preparation invokes the authorizer for active trigger bodies.
         // install_confirmed refuses every persistent accessor. Dormant guards
         // (for example UPDATE OF currency) cannot create an implicit effect.
-        for child in &schema {
+        for child in schema {
             for fk in guards::rows(
                 c,
                 &format!(
@@ -606,6 +609,7 @@ fn perform(
     policy: &authorizer::Policy,
     p: &Value,
     scope: &Scope,
+    schema: &[guards::Table],
 ) -> Result<(Vec<Target>, authorizer::Facts), String> {
     let sql = p["sql"].as_str().ok_or("INVALID_INPUT")?;
     screen(sql)?;
@@ -629,7 +633,7 @@ fn perform(
     if facts.writes.len() != 1 || facts.reads.keys().any(|t| !facts.writes.contains_key(t)) {
         return Err("POLICY_REFUSED".into());
     }
-    no_implicit_effects(c, &facts)?;
+    no_implicit_effects(c, &facts, schema)?;
     let before = dry_run::capture(c, facts.writes.keys().cloned())?;
     let n = authorizer::payload_bound(c, policy, sql, &bindings)?;
     let targets = dry_run::changed(c, &before)?;
@@ -656,17 +660,18 @@ pub fn dry(
     let scratch = dry_run::scratch(live, permit)?;
     let (db, policy) = connect(&scratch.0)?;
     let _native = authorizer::native_scope(&policy);
-    let start = Instant::now();
+    let start = clock::monotonic_now();
     permit.guard_connection(&db, start + Duration::from_millis(100));
     let tx = crate::db::immediate_transaction(&db).map_err(guards::error)?;
-    let (targets, facts) = perform(&db, &policy, p, scope)?;
+    let schema = guards::schema(&db)?;
+    let (targets, facts) = perform(&db, &policy, p, scope, &schema)?;
     let mut record = dry_run::result(
         p,
         targets,
         &c.session_id,
         now,
         p["rows_cap"].as_u64().ok_or("INVALID_INPUT")?,
-        start.elapsed().as_millis(),
+        clock::monotonic_now().duration_since(start).as_millis(),
         Some(&facts),
     )?;
     record.result["payload_sha256"] = json!(super::confirmed_hash::hash(p));
@@ -770,11 +775,13 @@ pub fn execute(
     recheck()?;
     let (db, policy) = connect(live)?;
     let _native = authorizer::native_scope(&policy);
-    let start = Instant::now();
+    let start = clock::monotonic_now();
     permit.guard_connection(&db, start + Duration::from_millis(250));
     let tx = permit.begin_write(&db)?;
-    if snapshot::watermarks_for_write(&db, permit, start + Duration::from_millis(250))? != snap.full
-    {
+    // The write transaction pins the schema and the proposal authorizer rejects DDL.
+    let schema = guards::schema(&db)?;
+    let deadline = start + Duration::from_millis(250);
+    if snapshot::full_for_write(&db, &schema, permit, deadline)? != snap.full {
         return Err("PAYLOAD_DRIFT".into());
     }
     for t in &record.targets {
@@ -783,7 +790,7 @@ pub fn execute(
             return Err("PAYLOAD_DRIFT".into());
         }
     }
-    let (targets, facts) = perform(&db, &policy, p, scope)?;
+    let (targets, facts) = perform(&db, &policy, p, scope, &schema)?;
     if serde_json::to_value(&targets).map_err(|_| "INTERNAL_ERROR")?
         != serde_json::to_value(&record.targets).map_err(|_| "INTERNAL_ERROR")?
     {
@@ -800,7 +807,7 @@ pub fn execute(
     {
         return Err("COMMAND_EXPIRED".into());
     }
-    let post = snapshot::watermarks_for_write(&db, permit, start + Duration::from_millis(250))?;
+    let post = snapshot::full_for_write(&db, &schema, permit, deadline)?;
     recheck()?;
     if clock::parse(
         record.result["expires_at"]

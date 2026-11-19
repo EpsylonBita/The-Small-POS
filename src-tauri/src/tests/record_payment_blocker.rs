@@ -94,7 +94,7 @@ fn recording_a_blocker_payment_needs_the_money_approval_is_audited_and_keyed_onc
     };
 
     let refused = record(&td, &auth, 1300).expect_err("no session, no record");
-    assert_eq!(error_code(&refused), "UNAUTHORIZED");
+    assert_eq!(error_code(&refused), "AUTH_SESSION_REQUIRED");
     crate::auth::login(Some(json!({ "pin": "4321" })), &td.state, &auth).expect("staff login");
     let stale = record(&td, &auth, 1300).expect_err("a session alone is not the approval");
     assert_eq!(error_code(&stale), "REAUTH_REQUIRED");

@@ -26,6 +26,30 @@
       "lastKnown": "Statusi i fundit i njohur: {{status}}",
       "closedUntil": "Mbyllur deri në {{time}}",
       "closureStatus": "Statusi i efood: {{status}}",
+      "box": {
+        "detailUnavailable": "BOX nuk u rifreskua dot. Provo përsëri.",
+        "throttled": "BOX nuk po përgjigjet. Kontrollo dyqanin në BOX Merchant.",
+        "customerHoursHelp": "Klientët e shohin dyqanin të hapur vetëm kur është i hapur këtu dhe brenda orarit të BOX.",
+        "hours": {
+          "title": "Orari javor i BOX",
+          "explain": "Dërgimi zëvendëson orarin e të shtatë ditëve në BOX. Vendos orarin për çdo ditë ose shëno se atë ditë nuk fillon asnjë interval.",
+          "lastSent": "Orari i fundit i dërguar nga POS-i · {{time}}. Ndryshimet e bëra në BOX Merchant nuk shfaqen këtu.",
+          "noHistory": "Nuk ka orar të dërguar të regjistruar nga POS-i. BOX nuk e kthen orarin aktual.",
+          "noStart": "Nuk fillon asnjë interval këtë ditë",
+          "nextDay": "Ditën tjetër",
+          "invalid": "Përdor HH:mm dhe kontrollo nëse intervalet mbivendosen, edhe ditën tjetër. Për gjithë ditën përdor 00:00–24:00.",
+          "failed": "Ndryshimi i orarit nuk u konfirmua. Kontrollo orarin në BOX Merchant.",
+          "conflict": "Një arkë tjetër ka ruajtur një orar më të ri. Ngarkoje përpara se të vazhdosh.",
+          "save": "Dërgo orarin javor te BOX"
+        },
+        "autoOpen": "Hapja automatike e BOX",
+        "autoHelp": "Hapet kur arkëtari i parë nis turnin dhe mbyllet me raportin Z.",
+        "statusHelp": "BOX nuk raporton disponueshmërinë në kohë reale.",
+        "lastAction": "Kërkesa e fundit e pranuar nga POS-i · {{action}}, {{time}}",
+        "automationUnconfirmed": "Cilësimi automatik nuk u konfirmua. Rifresko për ta kontrolluar.",
+        "requestUnconfirmed": "Kërkesa nuk u konfirmua. Kontrollo dyqanin në BOX Merchant.",
+        "refused": "BOX e refuzoi kërkesën."
+      },
       "status": {
         "open": "Hapur",
         "closed": "Mbyllur",

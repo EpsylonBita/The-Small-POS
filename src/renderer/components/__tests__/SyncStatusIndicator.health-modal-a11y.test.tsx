@@ -72,7 +72,6 @@ vi.mock('../../services/ParitySyncCoordinator', () => ({
 vi.mock('../OrderSyncRouteIndicator', () => ({ OrderSyncRouteIndicator: () => null }))
 vi.mock('../FinancialSyncPanel', () => ({ FinancialSyncPanel: () => null }))
 vi.mock('../support/HealthSupportEntryPoint', () => ({ HealthSupportEntryPoint: () => null }))
-vi.mock('../recovery/RecoveryCenterPanel', () => ({ RecoveryCenterPanel: () => null }))
 
 import { SyncStatusIndicator } from '../SyncStatusIndicator'
 
@@ -124,7 +123,7 @@ const renderHealthIndicator = (showDetails = true) =>
   )
 
 const getHealthDialog = () =>
-  screen.findByRole('dialog', { name: i18n.t('sync.healthModal.title') })
+  screen.findByRole('dialog', { name: i18n.t('tillHealth.title') })
 
 const expectValidDescription = (
   dialog: HTMLElement,
@@ -172,9 +171,9 @@ describe('SyncStatusIndicator Health Status modal keyboard and description contr
     renderHealthIndicator()
 
     const dialog = await getHealthDialog()
-    await screen.findByText(i18n.t('sync.healthModal.loading.message'))
+    await screen.findByText(i18n.t('tillHealth.states.loading.detail'))
 
-    expectValidDescription(dialog, i18n.t('sync.healthModal.loading.message'))
+    expectValidDescription(dialog, i18n.t('tillHealth.states.loading.detail'))
   })
 
   it('gives the unavailable dialog a valid accessible description', async () => {
@@ -185,30 +184,24 @@ describe('SyncStatusIndicator Health Status modal keyboard and description contr
     renderHealthIndicator()
 
     const dialog = await getHealthDialog()
-    await screen.findByText(i18n.t('sync.healthModal.states.unavailable.message'))
+    await screen.findByText(i18n.t('tillHealth.states.unavailable.detail'))
 
     expectValidDescription(
       dialog,
-      i18n.t('sync.healthModal.states.unavailable.message'),
+      i18n.t('tillHealth.states.unavailable.detail'),
     )
   })
 
   it('closes on Escape and restores focus to the launcher', async () => {
     renderHealthIndicator(false)
     const launcher = await screen.findByRole('button', {
-      name: 'Online | Sync health: Healthy',
+      name: `${i18n.t('tillHealth.title')} · ${i18n.t('tillHealth.states.ok.title')}`,
     })
     launcher.focus()
     fireEvent.click(launcher)
 
     const dialog = await getHealthDialog()
-    await waitFor(() =>
-      expect(
-        within(dialog).getByRole('button', {
-          name: i18n.t('sync.healthModal.close'),
-        }),
-      ).toHaveFocus(),
-    )
+    await waitFor(() => expect(dialog).toHaveFocus())
 
     await act(async () => {
       fireEvent.keyDown(document, { key: 'Escape' })
@@ -250,19 +243,13 @@ describe('SyncStatusIndicator Health Status modal keyboard and description contr
     })
 
     const capacityOpener = await screen.findByRole('button', {
-      name: i18n.t('sync.capacity.title'),
+      name: i18n.t('tillHealth.capacity'),
     })
     capacityOpener.focus()
     fireEvent.click(capacityOpener)
 
     const dialog = await getHealthDialog()
-    await waitFor(() =>
-      expect(
-        within(dialog).getByRole('button', {
-          name: i18n.t('sync.healthModal.close'),
-        }),
-      ).toHaveFocus(),
-    )
+    await waitFor(() => expect(dialog).toHaveFocus())
 
     fireEvent.keyDown(document, { key: 'Escape' })
 
@@ -274,19 +261,19 @@ describe('SyncStatusIndicator Health Status modal keyboard and description contr
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
     renderHealthIndicator()
     const dialog = await getHealthDialog()
-    await screen.findByText(i18n.t('sync.healthModal.states.healthy.title'))
+    await screen.findByText(i18n.t('tillHealth.states.ok.title'))
 
     bridge.diagnostics.getSystemHealth.mockRejectedValueOnce(
       new Error('diagnostic refresh unavailable'),
     )
     fireEvent.click(
       within(dialog).getByRole('button', {
-        name: i18n.t('sync.healthModal.actions.refresh'),
+        name: i18n.t('tillHealth.action.recheck'),
       }),
     )
 
-    const staleMessage = i18n.t('sync.healthModal.stale.message')
-    await screen.findByText(staleMessage)
+    const detailed = await screen.findByText(/information below is from/i)
+    const staleMessage = detailed.textContent!
     const descriptionIds =
       dialog.getAttribute('aria-describedby')?.trim().split(/\s+/) ?? []
     const accessibleDescription = descriptionIds
@@ -328,7 +315,7 @@ describe('SyncStatusIndicator Health Status modal keyboard and description contr
 
       fireEvent.click(
         within(dialog).getByRole('button', {
-          name: i18n.t('sync.healthModal.close'),
+          name: i18n.t('common.actions.close'),
         }),
       )
 
@@ -354,7 +341,7 @@ describe('SyncStatusIndicator Health Status modal keyboard and description contr
   it('wraps forward Tab focus from the last control to the first control', async () => {
     renderHealthIndicator()
     const dialog = await getHealthDialog()
-    await screen.findByText(i18n.t('sync.healthModal.states.healthy.title'))
+    await screen.findByText(i18n.t('tillHealth.states.ok.title'))
     const buttons = within(dialog).getAllByRole('button')
     const first = buttons[0]
     const last = buttons[buttons.length - 1]
@@ -365,10 +352,22 @@ describe('SyncStatusIndicator Health Status modal keyboard and description contr
     expect(first).toHaveFocus()
   })
 
+  it('enters the trap in both directions from the initially focused dialog', async () => {
+    renderHealthIndicator()
+    const dialog = await getHealthDialog()
+    await waitFor(() => expect(dialog).toHaveFocus())
+    const buttons = within(dialog).getAllByRole('button')
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(buttons[0]).toHaveFocus()
+    dialog.focus()
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(buttons.at(-1)).toHaveFocus()
+  })
+
   it('wraps reverse Tab focus from the first control to the last control', async () => {
     renderHealthIndicator()
     const dialog = await getHealthDialog()
-    await screen.findByText(i18n.t('sync.healthModal.states.healthy.title'))
+    await screen.findByText(i18n.t('tillHealth.states.ok.title'))
     const buttons = within(dialog).getAllByRole('button')
     const first = buttons[0]
     const last = buttons[buttons.length - 1]

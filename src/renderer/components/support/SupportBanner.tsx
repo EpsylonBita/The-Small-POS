@@ -71,7 +71,7 @@ export function SupportBannerView({ snapshot, onEnd, onExtend }: {
         <span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${stateDots[snapshot.state]}`} />
         <span className="min-w-0">
           <span role="status" className="block font-semibold leading-tight">{t(`support.banner.${snapshot.state}`)}</span>
-          {confirmed && <span data-testid="support-confirmed-explanation" className="block break-words text-xs leading-tight">{t(`support.confirmed.${confirmed.state === 'started' ? 'running' : confirmed.state}`)}: {confirmed.explanation}<span className="block text-(--pos-s-muted)">{confirmed.reason}</span></span>}
+          {confirmed && <span data-testid="support-confirmed-explanation" className="block break-words text-xs leading-tight">{t(`support.confirmed.${confirmed.state === 'started' ? 'running' : confirmed.state}`)}: {confirmed.label ? t(`support.confirmed.${confirmed.label.key}`, confirmed.label.values) : confirmed.explanation}<span className="block text-(--pos-s-muted)">{confirmed.label ? confirmed.explanation : confirmed.reason}</span></span>}
           {/* One small line under the state: what support is doing right now, else who is connected. */}
           {snapshot.evidence_reason && (activity === 'till_screenshot' || snapshot.personal_data_open) && <span data-testid="support-evidence-reason" className="block break-words text-xs leading-tight">{t(activity === 'till_screenshot' ? 'support.evidence.screenshot' : 'support.evidence.personalData', { reason: snapshot.evidence_reason })}</span>}
           {(activity || snapshot.operator_name) && !confirmed && !(snapshot.evidence_reason && (activity === 'till_screenshot' || snapshot.personal_data_open)) && <span className="block break-words text-xs leading-tight text-(--pos-s-muted)">{activity ? activityLabel : snapshot.operator_name}</span>}
@@ -162,5 +162,5 @@ export function SupportConfirmedHistory({rows=[]}:{rows?:SupportBannerSnapshot['
   const {t,i18n}=useTranslation();
   if(!rows.length)return null;
   const latest=[...new Map([...rows].reverse().map(row=>[row.command_id,row])).values()].reverse();
-  return <div data-testid="support-confirmed-history" className="space-y-2"><p>{t('support.confirmed.snapshot')}</p>{latest.map(row=><div key={row.command_id} className="break-words"><p>{row.explanation}</p><p>{row.reason}</p><p><time dateTime={row.at}>{supportRecordTime(row.at, i18n?.language)}</time> · {t(`support.confirmed.${row.state==='started'?'running':row.state}`)}{row.outcome?` · ${t(`support.confirmed.outcomes.${row.outcome}`)}`:''}</p></div>)}</div>;
+  return <div data-testid="support-confirmed-history" className="space-y-2"><p>{t('support.confirmed.snapshot')}</p>{latest.map(row=><div key={row.command_id} className="break-words">{row.label && <p>{t(`support.confirmed.${row.label.key}`, row.label.values)}</p>}<p>{row.explanation}</p><p>{row.reason}</p><p><time dateTime={row.at}>{supportRecordTime(row.at, i18n?.language)}</time> · {t(`support.confirmed.${row.state==='started'?'running':row.state}`)}{row.outcome?` · ${t(`support.confirmed.outcomes.${row.outcome}`)}`:''}</p></div>)}</div>;
 }

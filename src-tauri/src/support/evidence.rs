@@ -721,7 +721,7 @@ impl Policy {
                             && !value.is_boolean()
                         {
                             json!(MARKER)
-                        } else if lower.ends_with("sha256")
+                        } else if (lower.ends_with("sha256") || lower.ends_with("_fingerprint"))
                             && value.as_str().is_some_and(|s| {
                                 s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit())
                             })
@@ -803,10 +803,11 @@ impl Policy {
                         && ["rows", "bytes", "cell", "lines", "results", "deadline"]
                             .contains(&text.as_str())
                     || parent == "section"
-                        && super::contracts::shared().payload_schemas["till_diagnostics_bundle"]
-                            ["properties"]["section"]["enum"]
-                            .as_array()
-                            .is_some_and(|v| v.contains(&json!(text)));
+                        && (text == "recovery_attempts"
+                            || super::contracts::shared().other["schemas"]
+                                ["LegacyDiagnosticsSectionSchema"]["enum"]
+                                .as_array()
+                                .is_some_and(|values| values.iter().any(|value| value == &text)));
                 json!(if protocol {
                     secrets(&text)
                 } else {

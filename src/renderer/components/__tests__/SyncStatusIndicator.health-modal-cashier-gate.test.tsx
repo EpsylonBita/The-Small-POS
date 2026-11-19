@@ -101,7 +101,6 @@ vi.mock('../../services/ParitySyncCoordinator', () => ({
 vi.mock('../OrderSyncRouteIndicator', () => ({ OrderSyncRouteIndicator: () => null }))
 vi.mock('../FinancialSyncPanel', () => ({ FinancialSyncPanel: () => null }))
 vi.mock('../support/HealthSupportEntryPoint', () => ({ HealthSupportEntryPoint: () => null }))
-vi.mock('../recovery/RecoveryCenterPanel', () => ({ RecoveryCenterPanel: () => null }))
 
 import { SyncStatusIndicator } from '../SyncStatusIndicator'
 import { CashierOperationalBoundary, CASHIER_GATE_SAFE_SELECTOR, GlobalCashierGate } from '../GlobalCashierGate'
@@ -180,8 +179,8 @@ describe('Health stays usable while the cashier day is locked', () => {
 
   it('marks the Health dialog as a recovery surface the gate leaves interactive', async () => {
     renderLockedApp()
-    const dialog = await screen.findByRole('dialog', { name: i18n.t('sync.healthModal.title') })
-    const close = screen.getByRole('button', { name: i18n.t('sync.healthModal.close') })
+    const dialog = await screen.findByRole('dialog', { name: i18n.t('tillHealth.title') })
+    const close = screen.getByRole('button', { name: i18n.t('common.actions.close') })
 
     expect(dialog.closest(CASHIER_GATE_SAFE_SELECTOR)).not.toBeNull()
     expect(close.closest(CASHIER_GATE_SAFE_SELECTOR)).not.toBeNull()
@@ -189,29 +188,29 @@ describe('Health stays usable while the cashier day is locked', () => {
 
   it('closes Health with the Close button while no cashier shift is open', async () => {
     renderLockedApp()
-    await screen.findByRole('dialog', { name: i18n.t('sync.healthModal.title') })
+    await screen.findByRole('dialog', { name: i18n.t('tillHealth.title') })
 
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('sync.healthModal.close') }))
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('common.actions.close') }))
 
     await waitFor(() =>
-      expect(screen.queryByRole('dialog', { name: i18n.t('sync.healthModal.title') })).toBeNull(),
+      expect(screen.queryByRole('dialog', { name: i18n.t('tillHealth.title') })).toBeNull(),
     )
   })
 
   it('closes Health with Escape while no cashier shift is open', async () => {
     renderLockedApp()
-    const dialog = await screen.findByRole('dialog', { name: i18n.t('sync.healthModal.title') })
+    const dialog = await screen.findByRole('dialog', { name: i18n.t('tillHealth.title') })
 
     fireEvent.keyDown(dialog, { key: 'Escape' })
 
     await waitFor(() =>
-      expect(screen.queryByRole('dialog', { name: i18n.t('sync.healthModal.title') })).toBeNull(),
+      expect(screen.queryByRole('dialog', { name: i18n.t('tillHealth.title') })).toBeNull(),
     )
   })
 
   it('still fences operational content behind the locked day', async () => {
     renderLockedApp()
-    await screen.findByRole('dialog', { name: i18n.t('sync.healthModal.title') })
+    await screen.findByRole('dialog', { name: i18n.t('tillHealth.title') })
 
     const sale = document.querySelector('[data-cashier-operational="true"] button') as HTMLButtonElement
     expect(sale.closest(CASHIER_GATE_SAFE_SELECTOR)).toBeNull()

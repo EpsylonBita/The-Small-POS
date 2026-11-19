@@ -33,6 +33,7 @@ const MENU_WARMUP_THROTTLE_MS: u64 = 15_000;
 
 mod api;
 mod auth;
+mod box_slip;
 mod business_day;
 mod callerid;
 /// Invoice capture (scanner/MFP) subsystem â€” see
@@ -48,6 +49,7 @@ mod database_lock;
 mod db;
 mod device_admission;
 mod diagnostics;
+mod diagnostics_outbox;
 mod drawer;
 mod ecr;
 mod edit_settlement_recovery;
@@ -2095,6 +2097,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::diagnostics::diagnostics_export,
             commands::diagnostics::diagnostics_open_export_dir,
             commands::diagnostics::diagnostics_send_remote_incident,
+            commands::diagnostics::diagnostics_list_reports,
             commands::diagnostics::recovery_z_gate_set_aside,
             // Recovery
             commands::recovery::recovery_list_points,

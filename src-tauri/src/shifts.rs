@@ -2788,7 +2788,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                     CAST(ROUND(op.tip_amount * 100) AS INTEGER),
                     0
                 ),
-                op.tip_recipient_role, op.created_at
+                op.tip_recipient_role, op.created_at, o.plugin, o.ghost_metadata, o.order_number
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
          WHERE op.tip_recipient_staff_shift_id = ?1
@@ -2804,14 +2804,25 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         .map_err(|e| format!("prepare shift tip allocations: {e}"))?;
     let tip_allocations: Vec<Value> = tip_stmt
         .query_map(params![shift_id, check_in_time, shift_end_param], |row| {
-            Ok(serde_json::json!({
+            let number: Option<String> = row.get(2)?;
+            let box_label = crate::box_slip::checkout_number(
+                row.get::<_, Option<String>>(6)?.as_deref(),
+                number.as_deref(),
+                row.get::<_, Option<String>>(7)?.as_deref(),
+                row.get::<_, Option<String>>(8)?.as_deref(),
+            );
+            let mut detail = serde_json::json!({
                 "paymentId": row.get::<_, String>(0)?,
                 "orderId": row.get::<_, String>(1)?,
-                "orderNumber": row.get::<_, Option<String>>(2)?,
+                "orderNumber": box_label.as_ref().or(number.as_ref()),
                 "amount": Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
                 "recipientRole": row.get::<_, Option<String>>(4)?,
                 "createdAt": row.get::<_, String>(5)?,
-            }))
+            });
+            if let Some(label) = box_label {
+                detail["box_order_label"] = Value::String(label);
+            }
+            Ok(detail)
         })
         .map_err(|e| format!("query shift tip allocations: {e}"))?
         .filter_map(Result::ok)
@@ -3018,7 +3029,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                         ),
                         o.delivery_address,
                         COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER)),
-                        o.status, o.customer_name, o.customer_phone
+                        o.status, o.customer_name, o.customer_phone, o.plugin, o.ghost_metadata, o.order_number
                  FROM driver_earnings de
                  LEFT JOIN orders o ON de.order_id = o.id
                  WHERE de.staff_shift_id = ?1
@@ -3031,7 +3042,14 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         driver_deliveries = de_stmt
             .query_map(params![shift_id], |row| {
                 let status: String = row.get::<_, Option<String>>(12)?.unwrap_or_default();
-                Ok(serde_json::json!({
+                let number: Option<String> = row.get(9)?;
+                let box_label = crate::box_slip::checkout_number(
+                    row.get::<_, Option<String>>(15)?.as_deref(),
+                    number.as_deref(),
+                    row.get::<_, Option<String>>(16)?.as_deref(),
+                    row.get::<_, Option<String>>(17)?.as_deref(),
+                );
+                let mut detail = serde_json::json!({
                     "id": row.get::<_, String>(0)?,
                     "order_id": row.get::<_, String>(1)?,
                     "delivery_fee": Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
@@ -3041,7 +3059,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                     "cash_collected": Cents::new(row.get::<_, i64>(6)?).to_f64_dp2(),
                     "card_amount": Cents::new(row.get::<_, i64>(7)?).to_f64_dp2(),
                     "cash_to_return": Cents::new(row.get::<_, i64>(8)?).to_f64_dp2(),
-                    "order_number": row.get::<_, Option<String>>(9)?,
+                    "order_number": box_label.as_ref().or(number.as_ref()),
                     "delivery_address": row.get::<_, Option<String>>(10)?,
                     "total_amount": row.get::<_, Option<i64>>(11)?
                         .map(|c| Cents::new(c).to_f64_dp2()),
@@ -3049,7 +3067,11 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                     "order_status": &status,
                     "customer_name": row.get::<_, Option<String>>(13)?,
                     "customer_phone": row.get::<_, Option<String>>(14)?,
-                }))
+                });
+                if let Some(label) = box_label {
+                    detail["box_order_label"] = Value::String(label);
+                }
+                Ok(detail)
             })
             .map_err(|e| format!("query driver earnings: {e}"))?
             .filter_map(|r| r.ok())
@@ -10090,6 +10112,34 @@ mod tests {
     }
 
     #[test]
+    fn box_slip_driver_checkout_uses_recorded_rider_number() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = driver_backfill_db();
+        let id = crate::commands::orders::driver_restore_tests::ORDER;
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(r#"UPDATE orders SET plugin='box', order_number='BOX-1794948068572-2F43E65D',
+                    external_plugin_order_id='A1EA2F43E65D', ghost_metadata='{"food_delivery":{"short_code":"B421"}}'
+                    WHERE id=?1"#, [id]).unwrap();
+        }
+        let summary = get_shift_summary(&db, "driver-shift").unwrap();
+        let delivery = &summary["driverDeliveries"][0];
+        assert_eq!(delivery["order_number"], "#B421");
+        assert_eq!(delivery["order_id"], id);
+        assert_eq!(delivery["card_amount"], 10.75);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE orders SET ghost_metadata=NULL, display_order_number='B420' WHERE id=?1",
+                [id],
+            )
+            .unwrap();
+        let old = get_shift_summary(&db, "driver-shift").unwrap();
+        assert_eq!(old["driverDeliveries"][0]["order_number"], "#B420");
+    }
+
+    #[test]
     fn driver_backfill_queues_canonical_payload_once() {
         let _keyring = crate::tests::fake_keyring::install_empty();
         let db = driver_backfill_db();
@@ -10380,6 +10430,11 @@ mod tests {
             params![now],
         )
         .unwrap();
+        conn.execute(
+            "UPDATE orders SET plugin = 'efood' WHERE id = 'order-delivery'",
+            [],
+        )
+        .unwrap();
         drop(conn);
 
         let summary = get_shift_summary(&db, "driver-shift").unwrap();
@@ -10395,6 +10450,9 @@ mod tests {
                 .unwrap_or_default(),
             1
         );
+        assert!(summary["driverDeliveries"][0]
+            .get("box_order_label")
+            .is_none());
         assert_eq!(summary["driverDeliveries"][0]["order_number"], "00005");
         assert_eq!(summary["driverDeliveries"][0]["tip_amount"], 1.5);
         assert_eq!(summary["driverDeliveries"][0]["total_earning"], 1.5);

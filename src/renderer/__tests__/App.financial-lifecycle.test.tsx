@@ -95,7 +95,6 @@ vi.mock('../components/SyncStatusIndicator', () => ({ SyncStatusIndicator: () =>
 vi.mock('../components/UtilityRail', () => ({ UtilityRail: () => null }));
 vi.mock('../components/callerid/CallerIdCustomerSearchModalHost', () => ({ CallerIdCustomerSearchModalHost: () => null }));
 vi.mock('../components/ui/DeferredModal', () => ({ DeferredModal: () => null }));
-vi.mock('../components/recovery/SyncRecoveryModal', () => ({ default: () => null }));
 vi.mock('../components/ui/PageLoadMotion', () => ({ default: ({ children }: Kids) => <>{children}</> }));
 vi.mock('../components/PortaledToaster', () => ({ default: () => null }));
 vi.mock('../components/AnimatedBackground', () => ({ default: () => null }));

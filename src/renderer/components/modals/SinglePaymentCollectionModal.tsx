@@ -181,13 +181,8 @@ export const SinglePaymentCollectionModal: React.FC<
   const unsaved = useUnsavedChargedPayments(orderId, isOpen, t, formatCurrency, onUnsavedSaved);
   const unsavedLocked = unsaved.payments.length > 0;
 
-  // D (06/10/2026, Android parity): a manual card (taken on the shop's own
-  // card machine) is offered only when this till has no card terminal and a
-  // fresh server admission says no payment provider is connected. The cashier
-  // then confirms it here, and that confirm asks the admission again before
-  // anything is recorded. Nothing is held while the cashier decides: the
-  // offering collect ends its claim (nothing was sent), and the confirm is a
-  // fresh collect with its own claim and every preflight.
+  // An empty provider mark offers a manual card without provider reads.
+  // Confirm starts a new collection claim and checks admission again.
   const [manualCardPrompt, setManualCardPrompt] = useState<{ amount: number } | null>(null);
   const manualCardPromptId = useId();
   useEffect(() => {

@@ -23,7 +23,11 @@ export const SupportBannerSnapshotSchema = z.object({
   confirmed_command_id: z.string().nullable().optional(),
   evidence_reason: z.string().nullable().optional(), personal_data_open: z.boolean().optional(),
   current_activity_key: z.string().nullable().optional(), activity: z.string().nullable().optional(),
-  confirmed_history: z.array(z.object({command_id:z.string(),session_id:z.string(),explanation:z.string(),reason:z.string(),at:z.string(),state:z.enum(['waiting','started','finished','refused','undone']),outcome:z.enum(['pending','resolved','failed','unknown','rolled_back']).nullish()})).optional(),
+  confirmed_history: z.array(z.object({command_id:z.string(),session_id:z.string(),explanation:z.string(),reason:z.string(),at:z.string(),state:z.enum(['waiting','started','finished','refused','undone']),outcome:z.enum(['pending','resolved','failed','unknown','rolled_back']).nullish(), label:z.union([
+    z.object({ key:z.enum(['resendCustomerCorrection','keepServerCustomerDetails']), values:z.object({ order_id:z.string() }) }),
+    z.object({ key:z.enum(['retryParkedRow','setAsideParkedGroup','returnParkedGroup']), values:z.object({ queue_id:z.string() }) }),
+    z.object({ key:z.literal('restorePaymentReceiptMirror'), values:z.object({ order_id:z.string(), server_payment_id:z.string() }) }),
+  ]).optional()})).optional(),
   can_connect: z.boolean().default(false),
   // Kept for older natives only. Who acts comes from `support_actors`, never from here.
   staff: z.object({ staff_id: z.string(), base_role: z.string() }).nullable().default(null),
@@ -163,7 +167,9 @@ export function SupportSessionProvider({ children }: { children: React.ReactNode
 
   const refresh = useCallback(async () => {
     const requestGeneration = generation.current;
-    const parsed = SupportBannerSnapshotSchema.parse(await supportIpc('support_banner_state'));
+    const parsed = SupportBannerSnapshotSchema.parse(
+      await supportIpc('support_banner_state', { supports_payment_receipt_label: true }),
+    );
     if (alive.current && requestGeneration === generation.current) {
       current.current = parsed;
       setSnapshot(parsed);

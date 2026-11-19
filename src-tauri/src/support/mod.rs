@@ -8,6 +8,8 @@ pub mod clock;
 pub mod confirmed;
 pub mod confirmed_actions;
 pub mod confirmed_hash;
+mod confirmed_payment_receipt;
+mod confirmed_recovery;
 pub mod confirmed_restore;
 pub mod confirmed_sql;
 mod confirmed_state_actions;

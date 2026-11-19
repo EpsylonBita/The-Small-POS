@@ -467,6 +467,13 @@
     "queueSetAside": "Lër mënjanë rreshtin {{queue_id}} dhe rreshtat që e presin, duke ruajtur të dhënat e tyre",
     "queueReturn": "Kthe në radhë rreshtin {{queue_id}} dhe grupin e tij",
     "undoSnapshot": "Zhbëj me kopjen e ruajtur {{snapshot_id}}",
+    "runRemedy": "Rregullo të dhënat e paruajtura të klientit për porosinë {{order_id}}",
+    "resendCustomerCorrection": "Ruaj të dhënat e reja të klientit për porosinë {{order_id}}",
+    "keepServerCustomerDetails": "Mbaj të dhënat e klientit që porosia {{order_id}} ka tashmë",
+    "retryParkedRow": "Dërgo përsëri ndryshimin fillestar {{queue_id}}. Mund të refuzohet përsëri.",
+    "setAsideParkedGroup": "Lër mënjanë ndryshimin {{queue_id}} dhe ndryshimet që varen prej tij. Do të mbeten pa u dërguar.",
+    "returnParkedGroup": "Rikthe ndryshimin {{queue_id}} dhe ndryshimet që varen prej tij. Do të mbeten pezull.",
+    "restorePaymentReceiptMirror": "Rikthe kopjen lokale që mungon të pagesës {{server_payment_id}} për porosinë {{order_id}}",
     "outcomes": {
       "pending": "Në pritje të sinkronizimit",
       "resolved": "U zgjidh",

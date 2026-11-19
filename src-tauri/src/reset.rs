@@ -810,47 +810,35 @@ fn emit_failed(app: &AppHandle, manifest: &ResetManifest, error_code: &str, erro
     let _ = app.emit("reset_failed", payload);
 }
 
-fn collect_wipe_paths(app_data_dir: &Path, local_state_dir: Option<&Path>) -> Vec<PathBuf> {
-    let mut unique = BTreeSet::new();
-    let mut paths = Vec::new();
-    let recovery_root = crate::recovery::recovery_root_for_app_data(app_data_dir);
-
-    let mut push_path = |path: &Path| {
-        let encoded = path.to_string_lossy().to_string();
-        if encoded.trim().is_empty() {
-            return;
-        }
-        if unique.insert(encoded) {
-            paths.push(path.to_path_buf());
-        }
+fn reset_directory_entries(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
+    entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect()
+}
 
-    if app_data_dir.exists() {
-        match fs::read_dir(app_data_dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path == recovery_root {
-                        continue;
-                    }
-                    push_path(&path);
-                }
-            }
-            Err(error) => {
-                warn!(
-                    path = %app_data_dir.display(),
-                    error = %error,
-                    "Reset manifest could not enumerate app data dir"
-                );
-            }
-        }
-    }
-
+fn collect_wipe_paths_with(
+    app_data_dir: &Path,
+    local_state_dir: Option<&Path>,
+    mut list: impl FnMut(&Path) -> std::io::Result<Vec<PathBuf>>,
+) -> Result<Vec<PathBuf>, (PathBuf, std::io::Error)> {
+    let recovery_root = crate::recovery::recovery_root_for_app_data(app_data_dir);
+    let mut paths: BTreeSet<_> = list(app_data_dir)
+        .map_err(|error| (app_data_dir.to_path_buf(), error))?
+        .into_iter()
+        .filter(|path| path != &recovery_root)
+        .collect();
     if let Some(local_state_dir) = local_state_dir {
-        push_path(local_state_dir);
+        if local_state_dir != app_data_dir {
+            list(local_state_dir).map_err(|error| (local_state_dir.to_path_buf(), error))?;
+        }
+        paths.insert(local_state_dir.to_path_buf());
     }
-
-    paths
+    Ok(paths.into_iter().collect())
 }
 
 fn manifest_binding_for_bytes(
@@ -894,7 +882,14 @@ fn build_manifest_for_paths(
     let operation_id = uuid::Uuid::new_v4().to_string();
     let status_path = reset_status_path();
     let manifest_path = reset_manifest_path_for_operation(&operation_id);
-    let wipe_paths = collect_wipe_paths(&paths.app_data_dir, paths.local_state_dir.as_deref());
+    let wipe_paths = collect_wipe_paths_with(
+        &paths.app_data_dir,
+        paths.local_state_dir.as_deref(),
+        reset_directory_entries,
+    )
+    .map_err(|(path, error)| {
+        format!("RESET_FILESYSTEM_LIST_FAILED: {}: {error}", path.display())
+    })?;
 
     Ok(ResetManifest {
         operation_id,
@@ -1566,14 +1561,29 @@ fn run_keyring_delete_with_timeout(
 }
 
 fn remove_path_once(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    if path.is_dir() {
-        fs::remove_dir_all(path).map_err(|e| e.to_string())
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let directory = metadata.is_dir() || {
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::FileTypeExt::is_symlink_dir(&metadata.file_type())
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    };
+    let removed = if directory {
+        fs::remove_dir_all(path)
     } else {
-        fs::remove_file(path).map_err(|e| e.to_string())
+        fs::remove_file(path)
+    };
+    match removed {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+        _ => Ok(()),
     }
 }
 
@@ -1584,7 +1594,9 @@ fn remove_path_with_retries(path: &Path) -> Result<(), String> {
     while Instant::now() <= deadline {
         match remove_path_once(path) {
             Ok(()) => {
-                if !path.exists() {
+                if fs::symlink_metadata(path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                {
                     return Ok(());
                 }
                 last_error = Some("path still exists after delete".to_string());
@@ -1606,8 +1618,30 @@ fn verify_reset(manifest: &ResetManifest) -> Result<(), (String, Option<String>,
         }
     }
 
-    for path in &manifest.wipe_paths {
-        if path.exists() {
+    verify_reset_paths(manifest, reset_directory_entries)
+}
+
+fn verify_reset_paths(
+    manifest: &ResetManifest,
+    list: impl FnMut(&Path) -> std::io::Result<Vec<PathBuf>>,
+) -> Result<(), (String, Option<String>, Option<String>)> {
+    let remaining = collect_wipe_paths_with(
+        &manifest.app_data_dir,
+        manifest.local_state_dir.as_deref(),
+        list,
+    )
+    .map_err(|(path, error)| {
+        warn!(path = %path.display(), %error, "Reset verification could not enumerate data");
+        (
+            "filesystem_list_failed".into(),
+            None,
+            Some(path.to_string_lossy().into_owned()),
+        )
+    })?;
+    for path in remaining.iter().chain(&manifest.wipe_paths) {
+        if !fs::symlink_metadata(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
             return Err((
                 "filesystem_delete_failed".to_string(),
                 None,
@@ -1828,6 +1862,9 @@ where
     if let Err((error_code, failing_key, failing_path)) = verify(&manifest) {
         let error_message = match (&failing_key, &failing_path) {
             (Some(key), _) => format!("Credential '{key}' is still present after reset"),
+            (_, Some(path)) if error_code == "filesystem_list_failed" => {
+                format!("Could not list '{path}' after reset")
+            }
             (_, Some(path)) => format!("Path '{path}' still exists after reset"),
             _ => "Reset verification failed".to_string(),
         };
@@ -3606,7 +3643,8 @@ mod tests {
     #[test]
     fn collect_wipe_paths_deduplicates_entries() {
         let path = PathBuf::from(r"C:\tmp\one");
-        let paths = collect_wipe_paths(&path, Some(&path));
+        let paths =
+            collect_wipe_paths_with(&path, Some(&path), |_| Ok(vec![path.clone()])).unwrap();
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0], path);
     }
@@ -3625,12 +3663,84 @@ mod tests {
         fs::create_dir_all(&receipts).unwrap();
         fs::write(app_data.join("pos.db"), b"db").unwrap();
 
-        let paths = collect_wipe_paths(&app_data, None);
+        let paths = collect_wipe_paths_with(&app_data, None, reset_directory_entries).unwrap();
         assert!(paths.contains(&app_data.join("pos.db")));
         assert!(paths.contains(&receipts));
         assert!(!paths.contains(&recovery));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reset_listing_refusal_at_each_root_fails_planning_and_verification() {
+        let root = crate::tests::harness::TempDir::new();
+        let manifest = reset_fixture_manifest_for_listing(root.path());
+        let app = &manifest.app_data_dir;
+        let local = manifest.local_state_dir.as_deref().unwrap();
+        for denied in [app.as_path(), local] {
+            let list = |path: &Path| {
+                if path == denied {
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                } else {
+                    reset_directory_entries(path)
+                }
+            };
+            assert_eq!(
+                collect_wipe_paths_with(app, Some(local), list)
+                    .unwrap_err()
+                    .0,
+                denied
+            );
+            assert_eq!(
+                verify_reset_paths(&manifest, list).unwrap_err(),
+                (
+                    "filesystem_list_failed".into(),
+                    None,
+                    Some(denied.to_string_lossy().into_owned())
+                )
+            );
+        }
+    }
+
+    fn reset_fixture_manifest_for_listing(root: &Path) -> ResetManifest {
+        let app_data_dir = root.join("app");
+        let local_state_dir = root.join("local");
+        fs::create_dir_all(&app_data_dir).unwrap();
+        fs::create_dir_all(&local_state_dir).unwrap();
+        build_manifest_for_paths(
+            ResetMode::FactoryReset,
+            TrustedResetPaths {
+                app_executable: root.join("till.exe"),
+                app_data_dir,
+                local_state_dir: Some(local_state_dir),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reset_verification_finds_new_support_files_absent_from_the_manifest() {
+        let root = crate::tests::harness::TempDir::new();
+        let manifest = reset_fixture_manifest_for_listing(root.path());
+        let local = manifest.local_state_dir.as_ref().unwrap();
+        fs::remove_dir(local).unwrap();
+        let replica = manifest.app_data_dir.join("support-replica.db");
+        fs::write(&replica, b"created after planning").unwrap();
+        assert!(!manifest.wipe_paths.contains(&replica));
+        assert_eq!(
+            verify_reset_paths(&manifest, reset_directory_entries).unwrap_err(),
+            (
+                "filesystem_delete_failed".into(),
+                None,
+                Some(replica.to_string_lossy().into_owned())
+            )
+        );
+        fs::remove_file(replica).unwrap();
+        fs::create_dir_all(crate::recovery::recovery_root_for_app_data(
+            &manifest.app_data_dir,
+        ))
+        .unwrap();
+        verify_reset_paths(&manifest, reset_directory_entries).unwrap();
     }
 
     #[test]

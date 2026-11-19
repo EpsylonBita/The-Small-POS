@@ -467,6 +467,13 @@
     "queueSetAside": "Set aside row {{queue_id}} and the rows waiting for it, keeping their records",
     "queueReturn": "Return set-aside row {{queue_id}} and its group to the queue",
     "undoSnapshot": "Undo using saved copy {{snapshot_id}}",
+    "runRemedy": "Resolve the unsaved customer details for order {{order_id}}",
+    "resendCustomerCorrection": "Save the new customer details for order {{order_id}}",
+    "keepServerCustomerDetails": "Keep the customer details already on order {{order_id}}",
+    "retryParkedRow": "Send the original change {{queue_id}} again. It may be refused again.",
+    "setAsideParkedGroup": "Set aside change {{queue_id}} and the changes waiting for it. They will stay unsent.",
+    "returnParkedGroup": "Return change {{queue_id}} and the changes waiting for it. They will stay paused.",
+    "restorePaymentReceiptMirror": "Restore the missing local copy of server payment {{server_payment_id}} for order {{order_id}}",
     "outcomes": {
       "pending": "Waiting for sync",
       "resolved": "Resolved",

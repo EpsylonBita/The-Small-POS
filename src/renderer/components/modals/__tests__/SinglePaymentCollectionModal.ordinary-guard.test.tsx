@@ -1,3 +1,5 @@
+import { seedCardProviderMark } from '../../../services/__tests__/cardProviderMark.fixture';
+import { updateTerminalCredentialCache } from '../../../services/terminal-credentials';
 import React from 'react';
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -142,6 +144,8 @@ const renderSingle = (orderId: string, overrides: Partial<SingleProps> = {}) =>
 
 describe('SinglePaymentCollectionModal existing-order ordinary guard', () => {
   beforeEach(() => {
+    updateTerminalCredentialCache({ organizationId: 'fixture-org', branchId: 'fixture-branch', terminalId: 'fixture-till' });
+    seedCardProviderMark();
     bridge.invoke.mockImplementation(async () => ({ success: true }));
     bridge.giftCardCheckout.reconcileOrder.mockImplementation(async () => CLEAR);
     bridge.payments.recordPayment.mockReset();

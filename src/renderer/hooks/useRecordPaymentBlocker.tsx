@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import type { UnsettledPaymentBlocker } from '../../lib/ipc-contracts';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { formatCurrency } from '../utils/format';
-import { extractPrivilegedActionError } from '../utils/privileged-actions';
+import { isPrivilegedConfirmationCancelled, isPrivilegedShiftRequired } from '../utils/privileged-actions';
 
 export type RecordBlockerMethod = 'cash' | 'card';
 
@@ -63,14 +63,6 @@ export function recordBlockerBusyKey(
   method: RecordBlockerMethod,
 ): string {
   return `${blocker.orderId}:${method}`;
-}
-
-function isShiftRequired(error: unknown): boolean {
-  const privileged = extractPrivilegedActionError(error, 'cash_drawer_control');
-  if (privileged?.code === 'UNAUTHORIZED' && /shift/i.test(privileged.reason ?? '')) {
-    return true;
-  }
-  return error instanceof Error && /cashier or manager shift required/i.test(error.message);
 }
 
 /**
@@ -138,9 +130,9 @@ export function useRecordPaymentBlocker({
         outcome = { kind: 'recorded', result };
       }
     } catch (error) {
-      if (error instanceof Error && error.message === 'Privileged action confirmation cancelled') {
+      if (isPrivilegedConfirmationCancelled(error)) {
         outcome = { kind: 'cancelled' };
-      } else if (isShiftRequired(error)) {
+      } else if (isPrivilegedShiftRequired(error)) {
         outcome = { kind: 'shift_required' };
       } else {
         outcome = { kind: 'failed', error };

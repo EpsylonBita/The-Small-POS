@@ -12,7 +12,7 @@ export const UTILITY_RAIL_EXPENSES_SLOT_ID = 'pos-utility-rail-expenses';
 // θέματος· έτσι η υγεία και τα έξοδα έχουν συγκεκριμένες θέσεις και δεν αιωρούνται»): a second small rail
 // on the right, dressed like the navigation rail, with three fixed places -- expenses, health (in the middle), theme.
 // Health stays reachable during cashier recovery (data-cashier-recovery), as it was.
-export const UtilityRail = ({ onOpenRecovery }: { onOpenRecovery?: React.ComponentProps<typeof SyncStatusIndicator>['onOpenRecovery'] }) => {
+export const UtilityRail = ({ onHealthState }: { onHealthState?: React.ComponentProps<typeof SyncStatusIndicator>['onHealthState'] }) => {
   const { t } = useTranslation();
   const { resolvedTheme, setTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
@@ -31,7 +31,7 @@ export const UtilityRail = ({ onOpenRecovery }: { onOpenRecovery?: React.Compone
         {/* Founder 31/10: expenses on top, the heart in the middle, the theme below. The expenses
             button comes from the main layout, which owns the expenses window. */}
         <div id={UTILITY_RAIL_EXPENSES_SLOT_ID} className="contents" />
-        <SyncStatusIndicator layout="rail" onOpenRecovery={onOpenRecovery} />
+        <SyncStatusIndicator layout="rail" onHealthState={onHealthState} />
         <button
           type="button"
           data-utility-rail-theme

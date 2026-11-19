@@ -267,6 +267,8 @@ pub struct OrderReceiptDoc {
     pub masked_card: Option<String>,
     #[serde(default)]
     pub order_notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "box_notes_disabled")]
+    pub preserve_box_customer_notes: bool,
     /// Set by order_completed_receipt / order_canceled_receipt entity types.
     /// When Some, a status banner is rendered at the top of the receipt.
     #[serde(default)]
@@ -331,6 +333,8 @@ pub struct KitchenTicketDoc {
     pub delivery_notes: Option<String>,
     #[serde(default)]
     pub special_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "box_notes_disabled")]
+    pub preserve_box_customer_notes: bool,
     #[serde(default)]
     pub delivery_city: Option<String>,
     #[serde(default)]
@@ -650,6 +654,8 @@ fn repair_barcode_svg(repair_id: &str) -> Result<String, String> {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DriverDeliveryLine {
     pub order_number: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_order_label: Option<String>,
     #[serde(default)]
     pub delivery_address: Option<String>,
     pub total_amount: f64,
@@ -2600,7 +2606,11 @@ fn driver_delivery_label(line: &DriverDeliveryLine) -> String {
         .map(str::trim)
         .filter(|address| !address.is_empty())
         .unwrap_or("—");
-    format!("{} {address}", driver_day_order_number(&line.order_number))
+    let label = line
+        .box_order_label
+        .clone()
+        .unwrap_or_else(|| driver_day_order_number(&line.order_number));
+    format!("{label} {address}")
 }
 
 fn driver_payment_marker(lang: &str, payment_method: &str) -> String {
@@ -4001,7 +4011,14 @@ fn push_unique_line(lines: &mut Vec<String>, raw: Option<&str>) {
     lines.push(trimmed);
 }
 
+fn box_notes_disabled(enabled: &bool) -> bool {
+    !*enabled
+}
+
 fn order_note_lines(doc: &OrderReceiptDoc) -> Vec<String> {
+    if doc.preserve_box_customer_notes {
+        return doc.order_notes.clone();
+    }
     let mut lines: Vec<String> = Vec::new();
     for raw in &doc.order_notes {
         push_unique_line(&mut lines, Some(raw.as_str()));
@@ -9896,6 +9913,16 @@ fn render_classic_non_customer_raster_exact_ttf(
                     preset.meta_style,
                 );
             }
+            if doc.preserve_box_customer_notes {
+                for line in doc
+                    .special_instructions
+                    .as_deref()
+                    .unwrap_or_default()
+                    .lines()
+                {
+                    canvas.draw_wrapped(line, BitmapAlign::Left, preset.meta_style);
+                }
+            }
             canvas.draw_rule();
             canvas.draw_text_line(
                 &receipt_label(lang, "ITEMS").to_uppercase(),
@@ -10917,6 +10944,21 @@ fn platform_item_note_display(note: &str, last_prefix: &mut Option<String>) -> O
     }
 }
 
+fn platform_slip_item_note(
+    info: &PlatformSlipInfo,
+    item: &ReceiptItem,
+    last_prefix: &mut Option<String>,
+) -> Option<String> {
+    let note = item.note.as_deref()?;
+    if note.trim().is_empty() {
+        return None;
+    }
+    if info.plugin.eq_ignore_ascii_case("box") {
+        return Some(note.to_owned());
+    }
+    platform_item_note_display(note.trim(), last_prefix).map(|note| platform_uppercase(&note))
+}
+
 fn platform_short_code(info: &PlatformSlipInfo, doc: &OrderReceiptDoc) -> String {
     info.short_code
         .as_deref()
@@ -10968,6 +11010,21 @@ pub(crate) fn platform_uppercase(text: &str) -> String {
             'Ύ' => 'Υ',
             'Ώ' => 'Ω',
             _ => ch,
+        })
+        .collect()
+}
+
+fn platform_order_level_notes<'a>(doc: &'a OrderReceiptDoc, lang: &str) -> Vec<&'a str> {
+    doc.order_notes
+        .iter()
+        .map(|note| note.trim())
+        // The long platform code prints at the foot; its note (written in the
+        // app language, or Greek on older documents) is not repeated here.
+        .filter(|note| {
+            !note.is_empty()
+                && (doc.preserve_box_customer_notes
+                    || (!note.starts_with("ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ")
+                        && !note.starts_with(&format!("{}:", receipt_label(lang, "Order Code")))))
         })
         .collect()
 }
@@ -11119,18 +11176,7 @@ fn draw_platform_slip_ttf(
     canvas.draw_rule();
     // The customer's order-level note gets its own block above the items,
     // exactly where efood prints it (slip #4583).
-    let order_level_notes: Vec<&str> = doc
-        .order_notes
-        .iter()
-        .map(|note| note.trim())
-        // The long platform code prints at the foot; its note (written in the
-        // app language, or Greek on older documents) is not repeated here.
-        .filter(|note| {
-            !note.is_empty()
-                && !note.starts_with("ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ")
-                && !note.starts_with(&format!("{}:", receipt_label(lang, "Order Code")))
-        })
-        .collect();
+    let order_level_notes = platform_order_level_notes(doc, lang);
     if !order_level_notes.is_empty() {
         for note in &order_level_notes {
             canvas.draw_wrapped(&platform_uppercase(note), BitmapAlign::Left, bold_of(body));
@@ -11156,20 +11202,10 @@ fn draw_platform_slip_ttf(
             BitmapAlign::Left,
             bold_of(body),
         );
-        if let Some(note) = item
-            .note
-            .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .and_then(|note| platform_item_note_display(note, &mut last_note_prefix))
-        {
+        if let Some(note) = platform_slip_item_note(info, item, &mut last_note_prefix) {
             // «***» and regular weight — the real slip keeps item comments
             // lighter than the bold names so they never read as materials.
-            canvas.draw_wrapped(
-                &format!("*** {}", platform_uppercase(&note)),
-                BitmapAlign::Left,
-                small,
-            );
+            canvas.draw_wrapped(&format!("*** {note}"), BitmapAlign::Left, small);
         }
         // Materials: smaller and lighter than the item name, pushed clearly
         // to the right so they read as ingredients, and wrapped inside the
@@ -11289,6 +11325,26 @@ fn draw_platform_slip_ttf(
 /// Faithful platform slip, ESC/POS text path (store header already emitted by
 /// the shared emit_header above the document body).
 #[allow(clippy::too_many_arguments)]
+fn emit_box_platform_order_notes(
+    builder: &mut EscPosBuilder,
+    doc: &OrderReceiptDoc,
+    info: &PlatformSlipInfo,
+    lang: &str,
+    width: usize,
+) {
+    if info.plugin.eq_ignore_ascii_case("box") {
+        let order_notes = platform_order_level_notes(doc, lang);
+        for note in &order_notes {
+            for line in note.lines() {
+                emit_wrapped(builder, line, width);
+            }
+        }
+        if !order_notes.is_empty() {
+            emit_rule(builder, width, '-');
+        }
+    }
+}
+
 fn emit_platform_slip_escpos(
     builder: &mut EscPosBuilder,
     doc: &OrderReceiptDoc,
@@ -11420,6 +11476,7 @@ fn emit_platform_slip_escpos(
         &format!("#{}", platform_short_code(info, doc)),
     );
     emit_rule(builder, width, '-');
+    emit_box_platform_order_notes(builder, doc, info, lang, width);
     let delivery_lines = platform_delivery_lines(doc, lang);
     if !delivery_lines.is_empty() {
         for (label, value) in &delivery_lines {
@@ -11436,15 +11493,9 @@ fn emit_platform_slip_escpos(
             &format!("{} {}", qty(item.quantity), item.name.trim()),
             width,
         );
-        if let Some(note) = item
-            .note
-            .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .and_then(|note| platform_item_note_display(note, &mut last_note_prefix))
-        {
+        if let Some(note) = platform_slip_item_note(info, item, &mut last_note_prefix) {
             builder.bold(true);
-            emit_wrapped(builder, &format!("** {}", platform_uppercase(&note)), width);
+            emit_wrapped(builder, &format!("** {note}"), width);
             builder.bold(false);
         }
         let (with_items, without_items) = split_customizations(item);
@@ -12422,6 +12473,16 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         name_on_ringer,
                         width,
                     );
+                }
+            }
+            if doc.preserve_box_customer_notes {
+                for line in doc
+                    .special_instructions
+                    .as_deref()
+                    .unwrap_or_default()
+                    .lines()
+                {
+                    emit_wrapped(&mut builder, line, width);
                 }
             }
             emit_section_header(&mut builder, receipt_label(lang, "ITEMS"), style, width);
@@ -15036,6 +15097,64 @@ mod tests {
     }
 
     #[test]
+    fn box_platform_receipt_prints_the_same_verbatim_note_for_each_item() {
+        let mut doc = box_platform_receipt_fixture();
+        doc.items[0].note = Some("Please Keep This Case".into());
+        let mut other = doc.items[0].clone();
+        other.name = "Tea".into();
+        doc.items.push(other);
+        let cfg = LayoutConfig {
+            language: "en".into(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            show_logo: false,
+            ..LayoutConfig::default()
+        };
+        let output = render_escpos(&ReceiptDocument::OrderReceipt(doc), &cfg);
+        let expected = b"** Please Keep This Case\n";
+        assert_eq!(
+            output
+                .bytes
+                .windows(expected.len())
+                .filter(|bytes| *bytes == expected)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn non_box_platform_note_section_matches_base_golden() {
+        // The base pickup slip goes straight from the order-code separator to the first item.
+        const BASE_ORDER_NOTES: &[u8] = b"------------------------------------------\n1 Espresso\n";
+        let cfg = LayoutConfig::default();
+        for provider in ["efood", "wolt"] {
+            let mut doc = box_platform_receipt_fixture();
+            doc.platform_slip.as_mut().unwrap().plugin = provider.to_string();
+            doc.order_type = "pickup".to_string();
+            doc.customer_name = None;
+            doc.delivery_address = None;
+            doc.preserve_box_customer_notes = true;
+            doc.order_notes = vec!["Ring twice".into(), "ring twice".into()];
+            let mut builder = EscPosBuilder::new();
+            emit_platform_slip_escpos(
+                &mut builder,
+                &doc,
+                doc.platform_slip.as_ref().unwrap(),
+                "en",
+                "",
+                42,
+                false,
+                false,
+                None,
+                &cfg,
+            );
+            assert!(builder
+                .build()
+                .windows(BASE_ORDER_NOTES.len())
+                .any(|bytes| bytes == BASE_ORDER_NOTES));
+        }
+    }
+
+    #[test]
     fn box_platform_logo_keeps_other_platform_text_headers_unchanged() {
         let cfg = LayoutConfig {
             classic_customer_render_mode: ClassicCustomerRenderMode::Text,
@@ -15482,6 +15601,7 @@ mod tests {
         let deliveries_driver_doc = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
             driver_deliveries: vec![DriverDeliveryLine {
                 order_number: "00077".to_string(),
+                box_order_label: None,
                 delivery_address: Some("Test Street 7".to_string()),
                 total_amount: 24.0,
                 payment_method: "cash".to_string(),
@@ -16417,6 +16537,31 @@ mod tests {
             .amount;
 
         assert_eq!(variance, 0.0);
+    }
+
+    #[test]
+    fn box_slip_driver_number_is_visible_on_both_renderers() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            ..LayoutConfig::default()
+        };
+        let mut checkout = sample_driver_shift_checkout_doc();
+        checkout.driver_deliveries.push(DriverDeliveryLine {
+            order_number: "#TEST-123".into(),
+            box_order_label: Some("#TEST-123".into()),
+            delivery_address: Some("Test 19".into()),
+            total_amount: 15.7,
+            payment_method: "cash".into(),
+            cash_collected: 15.7,
+            delivery_fee: 0.0,
+            tip_amount: 0.0,
+            status: "completed".into(),
+        });
+        let doc = ReceiptDocument::ShiftCheckout(checkout);
+        assert!(render_html(&doc, &cfg).contains("#TEST-123"));
+        assert!(String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).contains("#TEST-123"));
     }
 
     #[test]

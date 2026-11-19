@@ -467,6 +467,13 @@
     "queueSetAside": "Eintrag {{queue_id}} und die darauf wartenden Einträge zurückstellen und ihre Daten behalten",
     "queueReturn": "Zurückgestellten Eintrag {{queue_id}} und seine Gruppe wieder in die Warteschlange stellen",
     "undoSnapshot": "Mit gespeicherter Kopie {{snapshot_id}} rückgängig machen",
+    "runRemedy": "Nicht gespeicherte Kundendaten für Bestellung {{order_id}} klären",
+    "resendCustomerCorrection": "Neue Kundendaten für Bestellung {{order_id}} speichern",
+    "keepServerCustomerDetails": "Vorhandene Kundendaten für Bestellung {{order_id}} behalten",
+    "retryParkedRow": "Ursprüngliche Änderung {{queue_id}} erneut senden. Sie kann wieder abgelehnt werden.",
+    "setAsideParkedGroup": "Änderung {{queue_id}} und davon abhängige Änderungen zurückstellen. Sie bleiben ungesendet.",
+    "returnParkedGroup": "Änderung {{queue_id}} und davon abhängige Änderungen zurückholen. Sie bleiben angehalten.",
+    "restorePaymentReceiptMirror": "Fehlende lokale Kopie der Serverzahlung {{server_payment_id}} für Bestellung {{order_id}} wiederherstellen",
     "outcomes": {
       "pending": "Wartet auf die Übertragung",
       "resolved": "Behoben",

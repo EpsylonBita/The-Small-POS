@@ -35,8 +35,13 @@ interface BuildSyncRecoveryIssuesInput {
   localizePaymentBlocker?: PaymentBlockerLocalizer;
 }
 
+export type DesktopRecoveryIssue = RecoveryIssue & {
+  businessEventKey?: string;
+  collectorIssueIds?: string[];
+};
+
 export interface BuildSyncRecoveryIssuesResult {
-  issues: RecoveryIssue[];
+  issues: DesktopRecoveryIssue[];
   counts: {
     blocking: number;
     recovering: number;
@@ -257,7 +262,7 @@ const createAction = (
   recommended: options.recommended ?? false,
   safetyLevel: options.safetyLevel ?? 'safe',
   requiresOnline: options.requiresOnline ?? false,
-  requiresSnapshot: options.requiresSnapshot ?? false,
+  requiresSnapshot: options.requiresSnapshot ?? !['openConnectionSettings', 'openOrderPaymentFix', 'contactDev', 'validatePendingOrders', 'runParitySyncNow', 'restoreLastKnownPrinterBrand'].includes(id),
   recipeId: options.recipeId,
   recipeVersion: options.recipeVersion,
   confirmationRequired: options.confirmationRequired ?? false,
@@ -268,7 +273,7 @@ const createAction = (
 });
 
 const createContactDevAction = (): RecoveryActionDescriptor =>
-  createAction('contactDev', 'recovery.actions.contactDev.label', {
+  createAction('contactDev', 'sync.healthModal.actions.sendSupport', {
     descriptionKey: 'recovery.actions.contactDev.description',
   });
 
@@ -278,12 +283,12 @@ const createOpenConnectionSettingsAction = (): RecoveryActionDescriptor =>
   });
 
 const createRunParitySyncAction = (): RecoveryActionDescriptor =>
-  createAction('runParitySyncNow', 'recovery.actions.runParitySyncNow.label', {
+  createAction('runParitySyncNow', 'recovery.actionStatus.sendWaiting', {
     requiresOnline: true,
   });
 
 const createRetryParityItemAction = (): RecoveryActionDescriptor =>
-  createAction('retryParityItem', 'recovery.actions.retryParityItem.label');
+  createAction('retryParityItem', 'recovery.actionStatus.sendRecord', { requiresOnline: true, requiresSnapshot: true });
 
 const createRetryCustomerAddressDefaultAction = (): RecoveryActionDescriptor =>
   withRecipe(
@@ -370,7 +375,7 @@ const createRetryCatalogAvailabilityAction = (): RecoveryActionDescriptor =>
   });
 
 const createRetryParityModuleAction = (): RecoveryActionDescriptor =>
-  createAction('retryParityModule', 'recovery.actions.retryParityModule.label');
+  createAction('retryParityModule', 'recovery.actions.retryParityModule.label', { requiresSnapshot: true, requiresOnline: true });
 
 const createRepairPaymentTotalConflictAction = (): RecoveryActionDescriptor =>
   withRecipe(
@@ -421,21 +426,22 @@ const createRepairOrderUpdateReplayBlockersAction = (): RecoveryActionDescriptor
   );
 
 const createRetrySyncAction = (): RecoveryActionDescriptor =>
-  createAction('retrySync', 'recovery.actions.retrySync.label');
+  createAction('retrySync', 'recovery.actionStatus.sendRecord', { requiresSnapshot: true });
 
 const createValidatePendingOrdersAction = (): RecoveryActionDescriptor =>
   createAction('validatePendingOrders', 'recovery.actions.validatePendingOrders.label');
 
 const createRemoveInvalidOrdersAction = (): RecoveryActionDescriptor =>
-  createAction('removeInvalidOrders', 'recovery.actions.removeInvalidOrders.label', {
+  createAction('removeInvalidOrders', 'recovery.actionStatus.removeLabel', {
+    requiresSnapshot: true,
     safetyLevel: 'destructive_local',
     confirmationRequired: true,
-    confirmTitleKey: 'recovery.actions.removeInvalidOrders.confirmTitle',
-    confirmMessageKey: 'recovery.actions.removeInvalidOrders.confirmMessage',
+    confirmTitleKey: 'recovery.actionStatus.removeTitle',
+    confirmMessageKey: 'recovery.actionStatus.removeMessage',
   });
 
 const createRetryFinancialItemAction = (): RecoveryActionDescriptor =>
-  createAction('retryFinancialItem', 'recovery.actions.retryFinancialItem.label');
+  createAction('retryFinancialItem', 'recovery.actions.retryFinancialItem.label', { requiresSnapshot: true });
 
 const createRetryAllFailedFinancialAction = (): RecoveryActionDescriptor =>
   createAction('retryAllFailedFinancial', 'recovery.actions.retryAllFailedFinancial.label');
@@ -465,11 +471,6 @@ const createOpenOrderPaymentFixAction = (
     ),
     RECOVERY_RECIPES.checkoutPaymentOpenPayment,
   );
-
-const createRepairOrphanedFinancialAction = (): RecoveryActionDescriptor =>
-  createAction('repairOrphanedFinancial', 'recovery.actions.repairOrphanedFinancial.label', {
-    requiresOnline: true,
-  });
 
 const createRepairWaitingParentPaymentsAction = (): RecoveryActionDescriptor =>
   createAction(
@@ -532,7 +533,7 @@ const createRequeueFailedAdjustmentLegacyValidationRowsAction =
   (): RecoveryActionDescriptor =>
     createAction(
       'requeueFailedAdjustmentLegacyValidationRows',
-      'recovery.actions.requeueFailedAdjustmentLegacyValidationRows.label',
+      'recovery.actionStatus.preparePaymentUpdates',
     );
 
 const actionableSyncBacklogTotal = (
@@ -641,46 +642,53 @@ const buildInvalidOrdersIssue = (
     ],
     params: {
       count: invalidOrders.length,
-      orderIds: invalidOrders.map((order) => order.order_id),
+      invalidRows: invalidOrders.map((order) => [order.queue_id, order.order_id]),
     },
   };
 };
 
 const buildSyncBlockerIssues = (
   systemHealth: DiagnosticsSystemHealth,
-): RecoveryIssue[] => {
-  return (systemHealth.syncBlockerDetails ?? []).map((blocker) => {
+): DesktopRecoveryIssue[] => {
+  return (systemHealth.syncBlockerDetails ?? []).flatMap((blocker): DesktopRecoveryIssue[] => {
+    const owner = blocker.queue ?? (blocker.queueItemId ? 'parity_sync_queue' : 'sync_queue');
+    const rowId = owner === 'parity_sync_queue' ? blocker.queueItemId : blocker.queueId;
+    if (rowId == null) return [];
+    const businessEventKey = `${owner}:${rowId}`;
+    const id = `sync-blocker-${businessEventKey}`;
     const heldZNames = unitShiftsQueueReasonNames(blocker.blockerReason)
       ?? unitShiftsQueueReasonNames(blocker.lastError);
-    if (heldZNames !== null) {
-      return {
-        ...zReportHeldForPhoneShiftsIssue(`sync-blocker-${blocker.queueId}`, heldZNames, blocker.entityId),
-        queueId: blocker.queueId,
-      };
-    }
-    return ({
-    id: `sync-blocker-${blocker.queueId}`,
-    code: blocker.blockerReason || 'sync_blocker',
-    severity: 'error',
-    status: 'blocking',
-    entityType: blocker.entityType,
-    entityId: blocker.entityId,
-    titleKey: 'recovery.issues.syncBlocker.title',
-    summaryKey: 'recovery.issues.syncBlocker.summary',
-    guidanceKey: 'recovery.issues.syncBlocker.guidance',
-    actions: [createRetrySyncAction(), createContactDevAction()],
-    params: {
-      blockerReason: blocker.blockerReason,
+    const target = {
+      queueOwner: owner,
+      sampleItemId: owner === 'parity_sync_queue' ? rowId : null,
       queueStatus: blocker.queueStatus,
-      lastError: blocker.lastError,
-      entityType: blocker.entityType,
-    },
-    orderId: blocker.orderId ?? null,
-    orderNumber: blocker.orderNumber ?? null,
-    paymentId: blocker.paymentId ?? null,
-    adjustmentId: blocker.adjustmentId ?? null,
-    queueId: blocker.queueId,
-  });
+    };
+    if (heldZNames !== null) {
+      const issue = zReportHeldForPhoneShiftsIssue(id, heldZNames, blocker.entityId);
+      return [{
+        ...issue, businessEventKey, queueId: blocker.queueId,
+        params: { ...issue.params, ...target },
+        actions: [createContactDevAction()],
+      }];
+    }
+    const retry = blocker.queueStatus === 'failed' &&
+      !/UNKNOWN_CONFLICT_REVIEW/i.test(blocker.blockerReason ?? '')
+      ? owner === 'parity_sync_queue' ? createRetryParityItemAction()
+        : ['order', 'z_report'].includes(blocker.entityType) ? createRetrySyncAction()
+        : null
+      : null;
+    return [{
+      id, businessEventKey, code: blocker.blockerReason || 'sync_blocker',
+      severity: 'error', status: 'blocking', entityType: blocker.entityType, entityId: blocker.entityId,
+      titleKey: 'recovery.actionStatus.recordTitle',
+      summaryKey: 'recovery.actionStatus.recordSummary',
+      guidanceKey: 'recovery.actionStatus.recordGuidance',
+      actions: [...(retry ? [retry] : []), createContactDevAction()],
+      params: { ...target, blockerReason: blocker.blockerReason, lastError: blocker.lastError, entityType: blocker.entityType },
+      orderId: blocker.orderId ?? null, orderNumber: blocker.orderNumber ?? null,
+      paymentId: blocker.paymentId ?? null, adjustmentId: blocker.adjustmentId ?? null,
+      queueId: blocker.queueId,
+    }];
   });
 };
 
@@ -822,7 +830,7 @@ const buildCheckoutPaymentBlockerIssues = (
               createContactDevAction(),
             ]
           : platformHeldRestoreOnly
-            ? [createRetrySyncAction(), createContactDevAction()]
+            ? [createContactDevAction()]
             : [
                 createOpenOrderPaymentFixAction(blocker, preferredMethod),
                 createContactDevAction(),
@@ -886,6 +894,8 @@ const buildParityProcessorIssue = (
   }
 
   const representativeReason = getRepresentativeParityFailureReason(lastParitySync, parityItems);
+  const queueRowIds = parityItems.filter(item => item.status === 'pending' || item.status === 'processing')
+    .slice(0, 50).map(item => item.id);
   const effectiveReason = representativeReason ?? 'Unknown parity failure';
 
   return {
@@ -898,8 +908,11 @@ const buildParityProcessorIssue = (
     titleKey: 'recovery.issues.parityProcessorStalled.title',
     summaryKey: 'recovery.issues.parityProcessorStalled.summary',
     guidanceKey: 'recovery.issues.parityProcessorStalled.guidance',
-    actions: [createRunParitySyncAction(), createContactDevAction()],
+    actions: queueRowIds.length === 0
+      ? [createContactDevAction()]
+      : [createRunParitySyncAction(), createContactDevAction()],
     params: {
+      queueRowIds,
       processed: lastParitySync?.processed ?? 0,
       remaining: lastParitySync?.remaining ?? total,
       failed: parityQueueStatus?.failed ?? 0,
@@ -1663,7 +1676,7 @@ const zReportHeldForPhoneShiftsIssue = (
     ? 'recovery.issues.zReportHeldForPhoneShifts.summary'
     : 'recovery.issues.zReportHeldForPhoneShifts.summaryUnnamed',
   guidanceKey: 'recovery.issues.zReportHeldForPhoneShifts.guidance',
-  actions: [createRetrySyncAction()],
+  actions: [createContactDevAction()],
   params: { shifts: names },
 });
 
@@ -1829,11 +1842,8 @@ const buildParityModuleIssues = (
         titleKey: 'recovery.issues.parityModuleFailed.title',
         summaryKey: 'recovery.issues.parityModuleFailed.summary',
         guidanceKey: 'recovery.issues.parityModuleFailed.guidance',
-        actions: [
-          createRetryParityItemAction(),
-          createRetryParityModuleAction(),
-          createRunParitySyncAction(),
-        ],
+        actions: /UNKNOWN_CONFLICT_REVIEW/i.test(sample.errorMessage ?? '')
+          ? [createContactDevAction()] : [createRetryParityItemAction(), createContactDevAction()],
         params: {
           moduleType,
           moduleLabel,
@@ -1858,7 +1868,7 @@ const buildParityModuleIssues = (
         titleKey: 'recovery.issues.parityModuleConflict.title',
         summaryKey: 'recovery.issues.parityModuleConflict.summary',
         guidanceKey: 'recovery.issues.parityModuleConflict.guidance',
-        actions: [createRetryParityItemAction(), createRetryParityModuleAction()],
+        actions: [createContactDevAction()],
         params: {
           moduleType,
           moduleLabel,
@@ -1886,8 +1896,9 @@ const buildParityModuleIssues = (
         titleKey: 'recovery.issues.parityModulePending.title',
         summaryKey: 'recovery.issues.parityModulePending.summary',
         guidanceKey: 'recovery.issues.parityModulePending.guidance',
-        actions: [createRunParitySyncAction(), createRetryParityModuleAction()],
+        actions: [createRunParitySyncAction()],
         params: {
+          queueRowIds: bucket.pending.slice(0, 50).map(item => item.id),
           moduleType,
           moduleLabel,
           count: bucket.pending.length,
@@ -1992,7 +2003,7 @@ const buildIntegrityIssue = (
         titleKey: 'recovery.issues.orderPaymentWaitingParent.title',
         summaryKey: 'recovery.issues.orderPaymentWaitingParent.summary',
         guidanceKey: 'recovery.issues.orderPaymentWaitingParent.guidance',
-        actions: [createRepairWaitingParentPaymentsAction(), createRunParitySyncAction()],
+        actions: [createRepairWaitingParentPaymentsAction()],
         ...common,
       };
     case 'payment_adjustment_waiting_parent':
@@ -2006,7 +2017,7 @@ const buildIntegrityIssue = (
         titleKey: 'recovery.issues.paymentAdjustmentWaitingParent.title',
         summaryKey: 'recovery.issues.paymentAdjustmentWaitingParent.summary',
         guidanceKey: 'recovery.issues.paymentAdjustmentWaitingParent.guidance',
-        actions: [createRepairWaitingParentAdjustmentsAction(), createRunParitySyncAction()],
+        actions: [createRepairWaitingParentAdjustmentsAction()],
         ...common,
       };
     case 'legacy_financial_parity_orphan':
@@ -2030,7 +2041,7 @@ const buildIntegrityIssue = (
         titleKey: 'recovery.issues.paymentAdjustmentMissingCanonicalRemotePayment.title',
         summaryKey: 'recovery.issues.paymentAdjustmentMissingCanonicalRemotePayment.summary',
         guidanceKey: 'recovery.issues.paymentAdjustmentMissingCanonicalRemotePayment.guidance',
-        actions: [createRepairOrphanedFinancialAction(), createContactDevAction()],
+        actions: [createContactDevAction()],
         ...common,
       };
     default:
@@ -2092,20 +2103,7 @@ const buildFinancialQueueIssues = (
       createContactDevAction(),
     ];
 
-    if (normalizedError.includes('validation')) {
-      code = 'financial_validation_failed';
-    } else if (
-      normalizedError.includes('/api/pos/payments/adjustments/sync') &&
-      (normalizedError.includes('404') ||
-        normalizedError.includes('not found') ||
-        normalizedError.includes('endpoint'))
-    ) {
-      code = 'financial_adjustment_missing_endpoint';
-      actions = [
-        createRequeueFailedAdjustmentMissingEndpointRowsAction(),
-        createRetryFinancialItemAction(),
-      ];
-    } else if (
+    if (
       item.entityType === 'payment_adjustment' &&
       normalizedError.includes('validation failed') &&
       normalizedError.includes('staff_id') &&
@@ -2118,6 +2116,20 @@ const buildFinancialQueueIssues = (
         createRequeueFailedAdjustmentLegacyValidationRowsAction(),
         createRetryFinancialItemAction(),
       ];
+    } else if (
+      normalizedError.includes('/api/pos/payments/adjustments/sync') &&
+      (normalizedError.includes('404') ||
+        normalizedError.includes('not found') ||
+        normalizedError.includes('endpoint'))
+    ) {
+      code = 'financial_adjustment_missing_endpoint';
+      actions = [
+        createRequeueFailedAdjustmentMissingEndpointRowsAction(),
+        createRetryFinancialItemAction(),
+      ];
+    } else if (normalizedError.includes('validation')) {
+      code = 'financial_validation_failed';
+      actions = [createContactDevAction()];
     } else if (
       (item.entityType === 'shift_expense' || item.entityType === 'staff_payment') &&
       (
@@ -2360,9 +2372,7 @@ export function buildSyncRecoveryIssues({
     pushIssue(issues, buildParityProcessorIssue(systemHealth, parityItems, lastParitySync));
   }
 
-  for (const issue of buildSyncBlockerIssues(systemHealth)) {
-    pushIssue(issues, issue);
-  }
+  const diagnosticBlockers = buildSyncBlockerIssues(systemHealth);
   for (const issue of paymentTotalConflictResult.issues) {
     pushIssue(issues, issue);
   }
@@ -2404,7 +2414,49 @@ export function buildSyncRecoveryIssues({
   for (const issue of customerDirectoryFailureResult.issues) {
     pushIssue(issues, issue);
   }
-  for (const issue of buildParityModuleIssues(parityItems, suppressedLegacyFinancialRows)) {
+  const exactParityRows = new Map<string, DesktopRecoveryIssue>();
+  for (const issue of issues) {
+    const row = issue.params?.sampleItemId ?? issue.params?.queueId;
+    if (typeof row === 'string' && issue.entityType !== 'parity_module') {
+      const grouped: DesktopRecoveryIssue = issue;
+      grouped.businessEventKey = `parity_sync_queue:${row}`;
+      exactParityRows.set(row, grouped);
+    }
+  }
+  for (const issue of diagnosticBlockers) {
+    const row = issue.params?.sampleItemId;
+    const specific = typeof row === 'string' ? exactParityRows.get(row) : undefined;
+    if (specific) {
+      specific.collectorIssueIds = [...(specific.collectorIssueIds ?? []), issue.id];
+    } else {
+      pushIssue(issues, issue);
+      if (typeof row === 'string') exactParityRows.set(row, issue);
+    }
+  }
+  // The parity list can extend beyond the shorter diagnostic sample.
+  for (const item of parityItems) {
+    if (item.status !== 'conflict' || exactParityRows.has(item.id)) continue;
+    const [issue] = buildSyncBlockerIssues({ ...systemHealth, syncBlockerDetails: [{
+      queue: 'parity_sync_queue', queueItemId: item.id, entityId: item.recordId,
+      entityType: item.tableName, operation: item.operation, queueStatus: item.status,
+      blockerReason: item.errorMessage ?? 'sync_blocker',
+    }] });
+    pushIssue(issues, issue);
+    exactParityRows.set(item.id, issue);
+  }
+  const aggregateCollectors = buildParityModuleIssues(parityItems, suppressedLegacyFinancialRows);
+  for (const issue of aggregateCollectors) {
+    const sameModule = parityItems.filter(item => (item.moduleType || 'orders') === issue.params?.moduleType);
+    const grouped = sameModule.filter(item => exactParityRows.has(item.id));
+    if (grouped.length && (issue.code === 'parity_module_conflict_items' ||
+      (issue.code === 'parity_module_failed_items' &&
+        sameModule.filter(item => item.status === 'failed').every(item => exactParityRows.has(item.id))))) {
+      for (const item of grouped) {
+        const exact = exactParityRows.get(item.id)!;
+        exact.collectorIssueIds = [...(exact.collectorIssueIds ?? []), issue.id];
+      }
+      continue;
+    }
     pushIssue(issues, issue);
   }
   const legacyFinancialOrphans = integrityIssues.filter(
@@ -2428,15 +2480,44 @@ export function buildSyncRecoveryIssues({
 
   pushIssue(issues, buildFallbackIssue(systemHealth, issues));
 
-  const blocking = issues.filter((issue) => issue.status === 'blocking').length;
-  const recovering = issues.filter((issue) => issue.status === 'recovering').length;
+  const processor = issues.find(issue => issue.code === 'parity_processor_stalled_zero_progress');
+  if (processor && exactParityRows.size && parityItems.every(row => exactParityRows.has(row.id)) &&
+      (systemHealth.parityQueueStatus?.total ?? parityItems.length) <= exactParityRows.size) {
+    issues.splice(issues.indexOf(processor), 1);
+    for (const exact of exactParityRows.values()) {
+      exact.collectorIssueIds = [...(exact.collectorIssueIds ?? []), processor.id];
+    }
+  }
+  const legacyEvents = new Map<string, DesktopRecoveryIssue>();
+  const groupedIssues: DesktopRecoveryIssue[] = [];
+  for (const issue of issues as DesktopRecoveryIssue[]) {
+    const key = issue.businessEventKey ?? (issue.queueId == null ? undefined : `sync_queue:${issue.queueId}`);
+    if (!key?.startsWith('sync_queue:')) {
+      groupedIssues.push(issue);
+      continue;
+    }
+    issue.businessEventKey = key;
+    const earlier = legacyEvents.get(key);
+    if (earlier && earlier.id.startsWith('sync-blocker-')) {
+      issue.collectorIssueIds = [...(earlier.collectorIssueIds ?? []), earlier.id];
+      groupedIssues[groupedIssues.indexOf(earlier)] = issue;
+      legacyEvents.set(key, issue);
+    } else if (earlier) {
+      earlier.collectorIssueIds = [...(earlier.collectorIssueIds ?? []), issue.id];
+    } else {
+      groupedIssues.push(issue);
+      legacyEvents.set(key, issue);
+    }
+  }
+  const blocking = groupedIssues.filter((issue) => issue.status === 'blocking').length;
+  const recovering = groupedIssues.filter((issue) => issue.status === 'recovering').length;
 
   return {
-    issues,
+    issues: groupedIssues,
     counts: {
       blocking,
       recovering,
-      total: issues.length,
+      total: groupedIssues.length,
     },
   };
 }

@@ -40,6 +40,7 @@ import { isExternalDeliveryPlatform } from '../../../../../shared/platforms/orde
 import { isFullyRefundedCompletedTable } from '../../../../../shared/pos/orders/returned-table-check';
 import { CashHandIcon } from '../icons/PaymentMethodIcons';
 import { OrderSyncNotice } from '../recovery/OrderSyncNotice';
+import { TillHealthOrderEntry } from '../recovery/TillHealthOrderEntry';
 import { listenSupportEvent } from '../../services/support/SupportRemedyRunner';
 
 interface OrderDetailsModalProps {
@@ -50,6 +51,7 @@ interface OrderDetailsModalProps {
   onPrintReceipt?: () => void;
   onShowCustomerHistory?: (customerPhone: string) => void;
   openPaymentOnMount?: boolean;
+  paymentOpenRequest?: number;
   onRequestCancellation?: (orderId: string) => Promise<boolean>;
 }
 
@@ -320,6 +322,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   onPrintReceipt,
   onRequestCancellation,
   openPaymentOnMount = false,
+  paymentOpenRequest,
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
@@ -1364,7 +1367,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
     paymentAutoOpenKeyRef.current = autoOpenKey;
     setShowSplitPaymentModal(true);
-  }, [canSplitPayment, isOpen, openPaymentOnMount, orderId, paymentStatus]);
+  }, [canSplitPayment, isOpen, openPaymentOnMount, orderId, paymentStatus, paymentOpenRequest]);
 
   // Compute footer grid columns based on visible buttons
   const footerButtonCount =
@@ -1545,6 +1548,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     >
       <div className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 pt-16 pb-24 scroll-pb-24 scrollbar-hide">
         <OrderSyncNotice orderId={orderId} />
+        <TillHealthOrderEntry orderId={orderId} />
         <button
           onClick={onClose}
           className="liquid-glass-modal-close absolute right-4 top-3 z-20 shrink-0"

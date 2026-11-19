@@ -259,7 +259,7 @@ const SWEPT_AREAS: Record<string, string[]> = {
     'components/integrations/MyDataCashierDiscovery.tsx',
   ],
   'ΣΤ6 back-office and printing': [
-    'pages/SuppliersPage.tsx', 'components/modals/ExpenseModal.tsx', 'components/recovery/RecoveryCenterPanel.tsx',
+    'pages/SuppliersPage.tsx', 'components/modals/ExpenseModal.tsx', 'components/recovery/TillHealthSupport.tsx',
     'pages/verticals/salon/AppointmentsView.tsx', 'pages/verticals/hotel/HousekeepingView.tsx',
     'components/FinancialSyncPanel.tsx', 'pages/verticals/restaurant/ReservationsView.tsx',
     'components/modals/EditOptionsModal.tsx', 'pages/IntegrationsPage.tsx', 'pages/InventoryPage.tsx',
@@ -272,7 +272,7 @@ const SWEPT_AREAS: Record<string, string[]> = {
     'components/modules/TrialModulePrompt.tsx', 'pages/AnalyticsPage.tsx',
     'pages/verticals/hotel/GuestBillingView.tsx', 'components/DashboardCard.tsx',
     'components/callerid/CallerIdMinimizedPanel.tsx', 'components/modules/LockedFeatureScreen.tsx',
-    'components/modules/ModuleUpsellCard.tsx', 'components/recovery/SyncRecoveryModal.tsx',
+    'components/modules/ModuleUpsellCard.tsx', 'components/recovery/TillHealthWindow.tsx',
     'features/repairs/RepairsView.tsx', 'features/repairs/RepairWorkspaceActions.tsx', 'types/tables.ts',
     'components/pricing/SimplePricingModal.tsx', 'components/suppliers/CaptureScanSettingsModal.tsx',
     'components/updates/UpdateReadyModal.tsx', 'components/updates/UpdateToast.tsx', 'utils/guest-billing.ts',

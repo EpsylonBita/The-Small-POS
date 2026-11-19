@@ -21,9 +21,13 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 it('mounts inside the rendered Health support details instead of an unused legacy section', () => {
-  const source = readFileSync('src/renderer/components/SyncStatusIndicator.tsx', 'utf8');
-  const [legacy, rendered] = source.split('const renderDetailModal =');
-  expect(legacy).not.toContain('<SupportDetailsPanel'); expect(rendered).toContain('<SupportDetailsPanel active={supportActionsOpen} />');
+  const indicator = readFileSync('src/renderer/components/SyncStatusIndicator.tsx', 'utf8');
+  const window = readFileSync('src/renderer/components/recovery/TillHealthWindow.tsx', 'utf8');
+  const support = readFileSync('src/renderer/components/recovery/TillHealthSupport.tsx', 'utf8');
+  expect(indicator).toContain('support={<TillHealthSupport');
+  expect(indicator).not.toContain('<SupportDetailsPanel');
+  expect(window).toContain('supportOpen && props.support');
+  expect(support).toMatch(/toolsOpen && [\s\S]*?<SupportDetailsPanel active/);
 });
 // Founder, 04/11/2026: «δεν καταλαβαίνω γιατί υπάρχει αυτή η μπάρα». The list shows only what can be
 // undone or restored, under a title that says so, read as the support section opens.

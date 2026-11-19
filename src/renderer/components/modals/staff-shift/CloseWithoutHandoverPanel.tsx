@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { getBridge } from '../../../../lib';
+import { extractPrivilegedActionError, privilegedActionFeedback } from '../../../utils/privileged-actions';
 
 /** Longest reason the native command and the server accept. */
 export const CLOSE_WITHOUT_HANDOVER_REASON_MAX = 500;
@@ -51,10 +52,10 @@ export function closeWithoutHandoverErrorText(raw: unknown, t: TFunction): strin
   if (text.includes('PHONE_SHIFT_CLOSE_OFFLINE')) {
     return say('offline', 'No connection. The shift closes only online: check the connection and try again.');
   }
-  if (/Invalid PIN|UNAUTHORIZED|MANAGER_APPROVAL/.test(text)) {
+  if (extractPrivilegedActionError(raw)?.code === 'AUTH_PIN_WRONG' || /Invalid PIN|UNAUTHORIZED|MANAGER_APPROVAL/.test(text)) {
     return say('wrongPin', "That PIN can't approve it. A manager with the right to cancel orders enters their own PIN.");
   }
-  return say('failed', "The shift couldn't be closed. Nothing changed; try again.");
+  return privilegedActionFeedback(raw, t) ?? say('failed', "The shift couldn't be closed. Nothing changed; try again.");
 }
 
 /**

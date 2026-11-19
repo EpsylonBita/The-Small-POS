@@ -42,7 +42,7 @@ vi.mock('../OrderStatusControls', () => ({
 }));
 
 import OrderCard from '../OrderCard';
-import { resolvePlatformPaymentPresentation } from '../../../../../../shared/platforms/payment-presentation';
+import { platformRequestedTender, resolvePlatformPaymentPresentation } from '../../../../../../shared/platforms/payment-presentation';
 
 function makeOrder(overrides: Record<string, unknown> = {}) {
   return {
@@ -64,6 +64,53 @@ function renderCard(order: Record<string, unknown>) {
 
 afterEach(() => {
   cleanup();
+});
+
+describe('OrderCard store-collected platform tender while unpaid', () => {
+  const platformOrder = (overrides: Record<string, unknown> = {}) => makeOrder({
+    plugin: 'box', order_type: 'delivery', payment_status: 'pending', payment_method: null,
+    ghost_metadata: { food_delivery: { payment_method: 'cash', prepaid: false, delivery_provider: 'vendor_delivery', box_daas: false } },
+    ...overrides,
+  });
+
+  it.each(['box', 'efood', 'wolt'])('%s names the shared cash tender in the existing pending chip', plugin => {
+    const order = platformOrder({ plugin });
+    expect(platformRequestedTender(order)).toBe('cash');
+    renderCard(order);
+    const chip = screen.getByTestId('order-card-payment-pending');
+    expect(chip.textContent).toBe('CASH');
+    expect(chip.getAttribute('aria-label')).toBe('Cash chosen on the platform; payment pending');
+    expect(chip.getAttribute('data-platform-tender')).toBe('cash');
+    expect(chip.hasAttribute('data-kiosk-tender')).toBe(false);
+    expect(chip.className).toContain('text-amber-400');
+    expect(order.payment_status).toBe('pending');
+    expect(order.payment_method).toBeNull();
+  });
+
+  it.each([
+    { prepaid: false, payment_method: 'cash', delivery_provider: 'platform_delivery' },
+    { prepaid: true, payment_method: 'cash', delivery_provider: 'vendor_delivery' },
+    { prepaid: true, payment_method: 'online', delivery_provider: 'vendor_delivery' },
+    { prepaid: false, payment_method: 'card', delivery_provider: 'vendor_delivery' },
+    { payment_type: 'cash' }, null,
+  ])('keeps PAY PENDING for platform-held or unknown tender: %j', food_delivery => {
+    renderCard(platformOrder({ ghost_metadata: { food_delivery } }));
+    expect(screen.getByTestId('order-card-payment-pending').textContent).toBe('PAY PENDING');
+  });
+
+  it('keeps processing generic, paid cash settled and cancelled/zero totals hidden', () => {
+    renderCard(platformOrder({ payment_status: 'processing' }));
+    expect(screen.getByTestId('order-card-payment-pending').textContent).toBe('PAY PENDING');
+    cleanup();
+    renderCard(platformOrder({ payment_status: 'paid', payment_method: 'cash' }));
+    expect(screen.queryByTestId('order-card-payment-pending')).toBeNull();
+    expect(screen.getByRole('img', { name: 'Cash' })).toBeTruthy();
+    for (const overrides of [{ status: 'cancelled' }, { total_amount_cents: 0 }]) {
+      cleanup();
+      renderCard(platformOrder(overrides));
+      expect(screen.queryByTestId('order-card-payment-pending')).toBeNull();
+    }
+  });
 });
 
 describe('OrderCard payment state', () => {

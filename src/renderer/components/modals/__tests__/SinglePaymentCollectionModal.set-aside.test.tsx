@@ -1,3 +1,5 @@
+import { seedCardProviderMark } from '../../../services/__tests__/cardProviderMark.fixture';
+import { updateTerminalCredentialCache } from '../../../services/terminal-credentials';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import i18next from 'i18next';
@@ -62,6 +64,8 @@ const NATIVE_ENGLISH =
 
 describe('SinglePaymentCollectionModal: an approved card that found the order paid', () => {
   beforeEach(() => {
+    updateTerminalCredentialCache({ organizationId: 'fixture-org', branchId: 'fixture-branch', terminalId: 'fixture-till' });
+    seedCardProviderMark();
     mock.recordPayment.mockReset();
     mock.processPayment.mockReset();
     mock.toast.mockReset();

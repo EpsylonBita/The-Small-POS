@@ -19,7 +19,7 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useHardwareManager } from '../../hooks/useHardwareManager';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import { useFeatures } from '../../hooks/useFeatures';
-import RecoveryPanel from '../recovery/RecoveryPanel';
+import { tillHealthTone, type TillHealthState } from '../recovery/till-health-model';
 import PrintQueuePanel from '../printing/PrintQueuePanel';
 import { DirtyFooter, SegmentedControl, SettingsDirtyProvider, SettingsGroup, SettingsRow, StatusLine, TechDisclosure, solidButton, useSettingsDirtyRegistry, type StatusTone } from '../settings/SettingsKit';
 import { buildSettingsNavGroups, resolveSettingsDeepLink, type SettingsDeepLink, type SettingsNavGroupId, type SettingsSectionId } from '../settings/settings-sections';
@@ -60,6 +60,8 @@ interface Props {
   onClose: () => void
   initialSection?: SettingsDeepLink
   onCheckForUpdates?: () => void
+  tillHealthState?: TillHealthState
+  onOpenTillHealth?: () => void
 }
 
 const parseBooleanSetting = (value: unknown): boolean => {
@@ -104,7 +106,7 @@ const getNestedSetting = (
   return source?.[`${category}.${key}`]
 }
 
-const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSection = null, onCheckForUpdates }) => {
+const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSection = null, onCheckForUpdates, tillHealthState, onOpenTillHealth }) => {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
   const { language: currentLanguage, setLanguage } = useI18n()
@@ -196,6 +198,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const connectionDirty = connectionCode.trim() !== '' && connectionCode !== savedConnectionCode
   const pinDirty = editingPin && (pin !== '' || confirmPin !== '')
   const otherDirty = connectionDirty || pinDirty || dirtyRegistry.anyDirty
+  const openHealthAfterDiscard = useRef(false)
   const [pendingSection, setPendingSection] = useState<SettingsSectionId | null>(null)
 
   const discardDrafts = () => {
@@ -207,12 +210,25 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   }
 
   const handleClose = () => {
+    openHealthAfterDiscard.current = false
     if (hardwareAction || savingLanguage) return
     if (hardwareDirty || otherDirty) {
       setPendingSection(null)
       setShowDiscardChanges(true)
     }
     else onClose()
+  }
+
+  const handleOpenTillHealth = () => {
+    if (hardwareAction || savingLanguage) return
+    if (hardwareDirty || otherDirty) {
+      openHealthAfterDiscard.current = true
+      setPendingSection(null)
+      setShowDiscardChanges(true)
+      return
+    }
+    onClose()
+    onOpenTillHealth?.()
   }
 
   const runHardwareAction = async (action: string, operation: () => Promise<unknown>) => {
@@ -223,7 +239,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       requireSettingsSuccess(await operation())
     } catch (error) {
       console.warn('[ConnectionSettings] Hardware action failed:', error)
-      setHardwareActionError(getErrorMessage(error, t('settings.peripherals.actionFailed', 'Action failed')))
+      setHardwareActionError(getErrorMessage(error, t('settings.peripherals.actionFailed', 'Action failed'), t))
       toast.error(t('settings.peripherals.actionFailed', 'Action failed'))
     } finally {
       await refreshHardware()
@@ -297,7 +313,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       return true
     } catch (e) {
       console.error('Failed to save hardware settings:', e)
-      setHardwareActionError(getErrorMessage(e, t('settings.peripherals.saveFailed', 'Failed to save peripheral settings')))
+      setHardwareActionError(getErrorMessage(e, t('settings.peripherals.saveFailed', 'Failed to save peripheral settings'), t))
       toast.error(t('settings.peripherals.saveFailed', 'Failed to save peripheral settings'))
       return false
     } finally {
@@ -921,7 +937,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     } catch (e) {
       console.error('Failed to perform factory reset', e)
       toast.error(
-        getErrorMessage(e, t('settings.database.clearFailed'))
+        getErrorMessage(e, t('settings.database.clearFailed'), t)
       )
     } finally {
       if (!resetStarted) {
@@ -1090,6 +1106,14 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         <div id="settings-section-status" data-settings-status className="space-y-4">
           <SettingsGroup id="settings-status-register" title={t('settings.settingsHub.status.register', 'This register')}>
             <SettingsRow title={resolvedTerminalTypeLabel} help={terminalOwnerLabel ?? undefined} />
+            {onOpenTillHealth && tillHealthState && <SettingsRow
+              title={t('tillHealth.title')}
+              control={<button type="button" className={solidButton('secondary', 'sm')} onClick={handleOpenTillHealth}>
+                <span className="till-health-launcher" data-health-tone={tillHealthTone(tillHealthState)}>
+                  {t(`tillHealth.states.${tillHealthState}.title`)}
+                </span>
+              </button>}
+            />}
             <div data-register-status-card className="pos-row">
               <div className="pos-row__label">
                 <span className="pos-row__title">{syncStatusTitle}</span>
@@ -1426,7 +1450,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         {activeSettingsSection === 'database' && (
         <div id="settings-section-database" className="space-y-4">
           <div className="flex flex-col gap-4 pb-24">
-                <RecoveryPanel />
+                {onOpenTillHealth && <button type="button" className={solidButton('secondary', 'sm')} onClick={handleOpenTillHealth}>{t('tillHealth.title')}</button>}
 
                 {/* Zone 2 — Safe fixes: maintenance that keeps the operator's data (kit rows, neutral). */}
                 <section data-database-safe-fixes className="pos-group">
@@ -1459,7 +1483,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                           }
                         } catch (e) {
                           console.error('Failed to clear sync queue:', e)
-                          toast.error(getErrorMessage(e, t('settings.database.syncQueueClearFailed')))
+                          toast.error(getErrorMessage(e, t('settings.database.syncQueueClearFailed'), t))
                         }
                       }}
                       className={DB_REPAIR_BTN_MD}
@@ -1562,7 +1586,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                           }
                         } catch (e) {
                           console.error('Failed to clear all orders:', e)
-                          toast.error(getErrorMessage(e, t('settings.database.allOrdersClearFailed', 'Failed to clear all orders')))
+                          toast.error(getErrorMessage(e, t('settings.database.allOrdersClearFailed', 'Failed to clear all orders'), t))
                         }
                       }}
                       className={DB_DANGER_BTN_MD}
@@ -1876,7 +1900,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
 
     <ConfirmDialog
       isOpen={showDiscardChanges}
-      onClose={() => { setShowDiscardChanges(false); setPendingSection(null) }}
+      onClose={() => { setShowDiscardChanges(false); setPendingSection(null); openHealthAfterDiscard.current = false }}
       onConfirm={() => {
         setShowDiscardChanges(false)
         if (pendingSection) {
@@ -1888,6 +1912,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         }
         discardDrafts()
         onClose()
+        if (openHealthAfterDiscard.current) {
+          openHealthAfterDiscard.current = false
+          onOpenTillHealth?.()
+        }
       }}
       title={hardwareDirty && !otherDirty && !pendingSection
         ? t('settings.workflow.pendingChanges', { defaultValue: 'Unsaved device changes' })
@@ -1924,7 +1952,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           }
         } catch (e) {
           console.error('Failed to clear operational data:', e)
-          toast.error(getErrorMessage(e, t('settings.database.operationalClearFailed', 'Failed to clear operational data')))
+          toast.error(getErrorMessage(e, t('settings.database.operationalClearFailed', 'Failed to clear operational data'), t))
         } finally {
           setIsClearingOperational(false)
         }

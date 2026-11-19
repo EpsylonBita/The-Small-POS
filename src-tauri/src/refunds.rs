@@ -954,8 +954,31 @@ pub fn void_payment_with_adjustment(
     staff_id: Option<&str>,
     staff_shift_id: Option<&str>,
 ) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin void: {e}"))?;
+    let result = void_payment_with_adjustment_in_transaction(
+        &tx,
+        payment_id,
+        reason,
+        staff_id,
+        staff_shift_id,
+    )?;
+    tx.commit().map_err(|e| format!("commit void: {e}"))?;
+    Ok(result)
+}
 
+pub(crate) fn void_payment_with_adjustment_in_transaction(
+    conn: &Connection,
+    payment_id: &str,
+    reason: &str,
+    staff_id: Option<&str>,
+    staff_shift_id: Option<&str>,
+) -> Result<Value, String> {
+    if conn.is_autocommit() {
+        return Err("PAYMENT_VOID_TRANSACTION_REQUIRED".into());
+    }
     // Fetch the payment in any state so we can return a precise, typed error
     // rather than a misleading "not found". A completed payment is the only
     // voidable state; other states each surface their own error message.
@@ -988,8 +1011,8 @@ pub fn void_payment_with_adjustment(
 
     // Shared rule R1 (round 3 review): the platform's settlement row is never
     // voided at the till (see `refund_payment_in_connection`).
-    crate::payments::ensure_ecommerce_payment_reversal_allowed(&conn, payment_id)?;
-    if crate::payments::payment_is_platform_settlement(&conn, payment_id)? {
+    crate::payments::ensure_ecommerce_payment_reversal_allowed(conn, payment_id)?;
+    if crate::payments::payment_is_platform_settlement(conn, payment_id)? {
         return Err(crate::payments::PLATFORM_SETTLEMENT_NOT_REVERSIBLE.into());
     }
     if pay_method
@@ -1001,7 +1024,7 @@ pub fn void_payment_with_adjustment(
     if pay_method.trim().eq_ignore_ascii_case("twint") {
         return Err("TWINT_ORIGINAL_PROVIDER_REFUND_REQUIRED: Return TWINT money through the original provider; no cash or card refund was performed".into());
     }
-    let pay_status = payments::canonical_return_status(&conn, payment_id)?.unwrap_or(pay_status);
+    let pay_status = payments::canonical_return_status(conn, payment_id)?.unwrap_or(pay_status);
     match pay_status.as_str() {
         "completed" => {}
         "voided" => return Err(format!("Payment {payment_id} is already voided")),
@@ -1018,11 +1041,11 @@ pub fn void_payment_with_adjustment(
     }
     // Only a still-completed receipt reaches fresh void admission. Preserve
     // the precise already-voided/refunded result above for original recovery.
-    let _ = crate::payments::ecommerce_disposition(&conn, &order_id)?;
+    let _ = crate::payments::ecommerce_disposition(conn, &order_id)?;
 
     // A 1.4.119 placeholder records no money (item D3, round 2 review): a
     // void would take money out of an order that never counted it in.
-    if crate::payments::payment_is_placeholder(&conn, payment_id)? {
+    if crate::payments::payment_is_placeholder(conn, payment_id)? {
         return Err(crate::payments::PLACEHOLDER_PAYMENT_NOT_MONEY_ERROR.into());
     }
 
@@ -1041,7 +1064,7 @@ pub fn void_payment_with_adjustment(
             // existing f64-typed local var.
             |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
-        .unwrap_or(0.0);
+        .map_err(|e| format!("read prior refunds before void: {e}"))?;
     // W4e: integer-cent positive check.
     if Cents::round_half_even(prior_refunds).as_i64() > 0 {
         return Err(format!(
@@ -1059,211 +1082,139 @@ pub fn void_payment_with_adjustment(
         .ok()
         .flatten();
     let (resolved_staff_id, resolved_staff_shift_id) = resolve_adjustment_staff_context(
-        &conn,
+        conn,
         staff_id,
         staff_shift_id.or(order_shift_id.as_deref()),
     );
-    let remote_order_id = load_adjustment_remote_order_id(&conn, &order_id);
+    let remote_order_id = load_adjustment_remote_order_id(conn, &order_id);
 
     let now = Utc::now().to_rfc3339();
     let adjustment_id = Uuid::new_v4().to_string();
 
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|e| format!("begin transaction: {e}"))?;
-
-    let result = (|| -> Result<(), String> {
-        // Wave 6 H17: re-read `status` and recompute `prior_refunds` INSIDE
-        // the transaction. The outer reads at lines ~670 and ~697 happened
-        // before BEGIN IMMEDIATE, so a concurrent refund landing in the
-        // gap could flip `status` to 'refunded' or bump `prior_refunds`
-        // above zero between the guard check and the void INSERT. With
-        // the re-check under the IMMEDIATE lock, the guards are truly
-        // serialising — either this void observes a fresh `completed`
-        // payment with zero refunds and proceeds, or it observes the
-        // concurrent change and aborts without double-spending.
-        let tx_pay_status: String = conn
-            .query_row(
-                "SELECT status FROM order_payments WHERE id = ?1",
-                params![payment_id],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| pay_status.clone());
-        let tx_pay_status =
-            payments::canonical_return_status(&conn, payment_id)?.unwrap_or(tx_pay_status);
-        match tx_pay_status.as_str() {
-            "completed" => {}
-            "voided" => return Err(format!("Payment {payment_id} is already voided")),
-            "refunded" => {
-                return Err(format!(
-                    "Payment {payment_id} has been refunded and cannot be voided"
-                ))
-            }
-            other => {
-                return Err(format!(
-                    "Payment {payment_id} has status '{other}' and cannot be voided"
-                ))
-            }
-        }
-        let tx_prior_refunds: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(amount_cents), 0) FROM payment_adjustments
-                 WHERE payment_id = ?1 AND adjustment_type = 'refund'",
-                params![payment_id],
-                // W4b: SUM returns INTEGER cents; expose as f64.
-                |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
-            )
-            .unwrap_or(0.0);
-        // W4e: integer-cent positive check.
-        if Cents::round_half_even(tx_prior_refunds).as_i64() > 0 {
-            return Err(format!(
-                "Payment {payment_id} has {tx_prior_refunds:.2} in prior refunds; \
-                 complete the remaining balance as a refund instead of voiding"
-            ));
-        }
-
-        // Read pay_sync_state INSIDE the transaction. Previously this ran
-        // outside BEGIN IMMEDIATE, so a payment that transitioned from a
-        // non-applied state to 'applied' in the gap would still cause the
-        // void adjustment to be routed to `waiting_parent` and then stall
-        // indefinitely waiting for a parent that had already synced.
-        let pay_sync_state: String = conn
-            .query_row(
-                "SELECT sync_state FROM order_payments WHERE id = ?1",
-                params![payment_id],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "pending".to_string());
-        let initial_sync_state = if pay_sync_state == "applied" {
-            "pending"
-        } else {
-            "waiting_parent"
-        };
-
-        // Mark payment as voided
-        conn.execute(
-            "UPDATE order_payments SET
-                status = 'voided', voided_at = ?1, voided_by = ?2,
-                void_reason = ?3, sync_status = 'pending', updated_at = ?1
-             WHERE id = ?4",
-            params![now, resolved_staff_id, reason, payment_id],
+    let pay_sync_state: String = conn
+        .query_row(
+            "SELECT sync_state FROM order_payments WHERE id = ?1",
+            params![payment_id],
+            |row| row.get(0),
         )
-        .map_err(|e| format!("void payment: {e}"))?;
+        .unwrap_or_else(|_| "pending".to_string());
+    let initial_sync_state = if pay_sync_state == "applied" {
+        "pending"
+    } else {
+        "waiting_parent"
+    };
 
-        payments::recompute_order_payment_state(&conn, &order_id, &now, payment_id)?;
-        // A voided payment is money the courier no longer holds (founder,
-        // 30/09/2026): a delivery's earning drops it now.
-        crate::order_ownership::release_driver_earning_money_for_payment(&conn, payment_id, &now)?;
+    // Mark payment as voided
+    conn.execute(
+        "UPDATE order_payments SET
+            status = 'voided', voided_at = ?1, voided_by = ?2,
+            void_reason = ?3, sync_status = 'pending', updated_at = ?1
+         WHERE id = ?4",
+        params![now, resolved_staff_id, reason, payment_id],
+    )
+    .map_err(|e| format!("void payment: {e}"))?;
 
-        // Insert adjustment audit record (W4c dual-write).
-        let void_amount_cents = Cents::round_half_even(amount).as_i64();
-        conn.execute(
-            "INSERT INTO payment_adjustments (
-                id, payment_id, order_id, adjustment_type, amount, amount_cents,
-                reason, staff_id, staff_shift_id, sync_state, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, 'void', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
-            params![
-                adjustment_id,
-                payment_id,
-                order_id,
-                amount,
-                void_amount_cents,
-                reason,
-                resolved_staff_id,
-                resolved_staff_shift_id,
-                initial_sync_state,
-                now,
-            ],
-        )
-        .map_err(|e| format!("insert void adjustment: {e}"))?;
+    payments::recompute_order_payment_state(conn, &order_id, &now, payment_id)?;
+    // A voided payment is money the courier no longer holds (founder,
+    // 30/09/2026): a delivery's earning drops it now.
+    crate::order_ownership::release_driver_earning_money_for_payment(conn, payment_id, &now)?;
 
-        // Reverse the original payment's drawer entry.
-        // Voids reverse the sale (not add to refunds).
-        //
-        // Wave 6 H18: the subtraction is guarded with a `MAX(…, 0)` floor.
-        // The driver-earnings refund path at lines ~502–511 already clamps
-        // this way, but the void path here used to subtract unconditionally.
-        // If concurrent voids or a pre-existing drawer-counter drift produced
-        // `total_cash_sales < 0`, the cashier's expected-cash formula in
-        // `shifts.rs:877` would emit a negative expected total and close-out
-        // variance would be corrupted. Clamping at zero keeps the counter
-        // non-negative at the cost of one arithmetic op per void.
-        if let Some(ref sid) = order_shift_id {
-            if pay_method == "cash" {
-                // W4c dual-write: clamp the cents sibling alongside REAL.
-                conn.execute(
-                    "UPDATE cash_drawer_sessions SET
-                        total_cash_sales = MAX(COALESCE(total_cash_sales, 0) - ?1, 0),
-                        total_cash_sales_cents = MAX(COALESCE(total_cash_sales_cents, 0) - ?2, 0),
-                        updated_at = ?3
-                     WHERE staff_shift_id = ?4",
-                    params![amount, void_amount_cents, now, sid],
-                )
-                .map_err(|e| format!("reverse drawer cash_sales: {e}"))?;
-            } else if pay_method == "card" {
-                // Wave 6 H18: same `MAX(…, 0)` floor for card sales as cash.
-                // W4c dual-write: clamp the cents sibling alongside REAL.
-                conn.execute(
-                    "UPDATE cash_drawer_sessions SET
-                        total_card_sales = MAX(COALESCE(total_card_sales, 0) - ?1, 0),
-                        total_card_sales_cents = MAX(COALESCE(total_card_sales_cents, 0) - ?2, 0),
-                        updated_at = ?3
-                     WHERE staff_shift_id = ?4",
-                    params![amount, void_amount_cents, now, sid],
-                )
-                .map_err(|e| format!("reverse drawer card_sales: {e}"))?;
-            }
-        }
-
-        // Enqueue adjustment sync
-        let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
-        let branch_id = storage::get_credential("branch_id").unwrap_or_default();
-        let adj_payload = build_adjustment_queue_payload(
-            &adjustment_id,
+    // Insert adjustment audit record (W4c dual-write).
+    let void_amount_cents = Cents::round_half_even(amount).as_i64();
+    conn.execute(
+        "INSERT INTO payment_adjustments (
+            id, payment_id, order_id, adjustment_type, amount, amount_cents,
+            reason, staff_id, staff_shift_id, sync_state, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, 'void', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+        params![
+            adjustment_id,
             payment_id,
-            &order_id,
-            remote_order_id.as_deref(),
-            "void",
+            order_id,
             amount,
+            void_amount_cents,
             reason,
-            resolved_staff_id.as_deref(),
-            resolved_staff_shift_id.as_deref(),
-            &terminal_id,
-            &branch_id,
-            None,
-            None,
-            None,
-            None,
-        );
+            resolved_staff_id,
+            resolved_staff_shift_id,
+            initial_sync_state,
+            now,
+        ],
+    )
+    .map_err(|e| format!("insert void adjustment: {e}"))?;
 
-        let mut adj_payload_value = serde_json::from_str::<Value>(&adj_payload)
-            .map_err(|e| format!("parse void adjustment payload: {e}"))?;
-        stamp_canonical_payment_id(&mut adj_payload_value, remote_payment_id.as_deref());
-        crate::sync_queue::enqueue_payload_item(
-            &conn,
-            "payment_adjustments",
-            &adjustment_id,
-            "INSERT",
-            &adj_payload_value,
-            Some(1),
-            Some("financial"),
-            Some("manual"),
-            Some(1),
-        )
-        .map_err(|e| format!("enqueue void adjustment parity sync: {e}"))?;
-
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| format!("commit: {e}"))?;
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            return Err(e);
+    // Reverse the original payment's drawer entry.
+    // Voids reverse the sale (not add to refunds).
+    //
+    // Wave 6 H18: the subtraction is guarded with a `MAX(…, 0)` floor.
+    // The driver-earnings refund path at lines ~502–511 already clamps
+    // this way, but the void path here used to subtract unconditionally.
+    // If concurrent voids or a pre-existing drawer-counter drift produced
+    // `total_cash_sales < 0`, the cashier's expected-cash formula in
+    // `shifts.rs:877` would emit a negative expected total and close-out
+    // variance would be corrupted. Clamping at zero keeps the counter
+    // non-negative at the cost of one arithmetic op per void.
+    if let Some(ref sid) = order_shift_id {
+        if pay_method == "cash" {
+            // W4c dual-write: clamp the cents sibling alongside REAL.
+            conn.execute(
+                "UPDATE cash_drawer_sessions SET
+                    total_cash_sales = MAX(COALESCE(total_cash_sales, 0) - ?1, 0),
+                    total_cash_sales_cents = MAX(COALESCE(total_cash_sales_cents, 0) - ?2, 0),
+                    updated_at = ?3
+                 WHERE staff_shift_id = ?4",
+                params![amount, void_amount_cents, now, sid],
+            )
+            .map_err(|e| format!("reverse drawer cash_sales: {e}"))?;
+        } else if pay_method == "card" {
+            // Wave 6 H18: same `MAX(…, 0)` floor for card sales as cash.
+            // W4c dual-write: clamp the cents sibling alongside REAL.
+            conn.execute(
+                "UPDATE cash_drawer_sessions SET
+                    total_card_sales = MAX(COALESCE(total_card_sales, 0) - ?1, 0),
+                    total_card_sales_cents = MAX(COALESCE(total_card_sales_cents, 0) - ?2, 0),
+                    updated_at = ?3
+                 WHERE staff_shift_id = ?4",
+                params![amount, void_amount_cents, now, sid],
+            )
+            .map_err(|e| format!("reverse drawer card_sales: {e}"))?;
         }
     }
+
+    // Enqueue adjustment sync
+    let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
+    let branch_id = storage::get_credential("branch_id").unwrap_or_default();
+    let adj_payload = build_adjustment_queue_payload(
+        &adjustment_id,
+        payment_id,
+        &order_id,
+        remote_order_id.as_deref(),
+        "void",
+        amount,
+        reason,
+        resolved_staff_id.as_deref(),
+        resolved_staff_shift_id.as_deref(),
+        &terminal_id,
+        &branch_id,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    let mut adj_payload_value = serde_json::from_str::<Value>(&adj_payload)
+        .map_err(|e| format!("parse void adjustment payload: {e}"))?;
+    stamp_canonical_payment_id(&mut adj_payload_value, remote_payment_id.as_deref());
+    crate::sync_queue::enqueue_payload_item(
+        conn,
+        "payment_adjustments",
+        &adjustment_id,
+        "INSERT",
+        &adj_payload_value,
+        Some(1),
+        Some("financial"),
+        Some("manual"),
+        Some(1),
+    )
+    .map_err(|e| format!("enqueue void adjustment parity sync: {e}"))?;
 
     info!(
         payment_id = %payment_id,

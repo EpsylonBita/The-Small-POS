@@ -103,22 +103,20 @@ vi.mock('../../services/ParitySyncCoordinator', () => ({
 vi.mock('../OrderSyncRouteIndicator', () => ({ OrderSyncRouteIndicator: () => null }))
 vi.mock('../FinancialSyncPanel', () => ({ FinancialSyncPanel: () => null }))
 vi.mock('../support/HealthSupportEntryPoint', () => ({ HealthSupportEntryPoint: () => null }))
-vi.mock('../recovery/RecoveryCenterPanel', () => ({ RecoveryCenterPanel: () => null }))
+import { SyncStatusIndicator } from '../SyncStatusIndicator';
 
-import { SyncStatusIndicator } from '../SyncStatusIndicator'
+describe('Till health staff and support actions', () => {
+  afterEach(cleanup);
 
-describe('SyncStatusIndicator staff health modal', () => {
-  afterEach(cleanup)
-
-  it('opens the recovery center directly from Support actions', async () => {
-    const onOpenRecovery = vi.fn()
-    render(<SyncStatusIndicator showDetails onOpenRecovery={onOpenRecovery} />)
-
-    const recoveryButton = await screen.findByRole('button', {
-      name: 'Open Recovery Center',
-    })
-    fireEvent.click(recoveryButton)
-
-    expect(onOpenRecovery).toHaveBeenCalledTimes(1)
-  })
-})
+  it('shows a known action in the same window and keeps its original control in support', async () => {
+    render(<SyncStatusIndicator showDetails />);
+    expect(await screen.findByRole('button', { name: 'tillHealth.action.saveAddress' })).toBeVisible();
+    const support = screen.getByRole('button', { name: /tillHealth.support.title/ });
+    expect(support).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(support);
+    const details = document.querySelector<HTMLDetailsElement>('.till-health-support-content section:nth-of-type(2) details')!;
+    details.open = true;
+    expect(screen.getByRole('button', { name: 'retryParityItem' })).toBeEnabled();
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+  });
+});

@@ -5,6 +5,7 @@ const KIOSK_ORDER_NUMBER_PATTERN = /^#?[A-Za-z]+-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-\
 const KIOSK_SHORT_ORDER_NUMBER_PATTERN = /^#?K[A-Za-z]*-\d+$/i;
 
 export type GridOrderNumberSource = {
+  box_order_label?: string | null;
   id?: string | null;
   order_id?: string | null;
   created_at?: string | null;
@@ -23,6 +24,7 @@ export type GridOrderNumberSource = {
  */
 export function formatGridOrderNumber(order: GridOrderNumberSource | null | undefined): string {
   if (!order) return '';
+  if (order.box_order_label) return order.box_order_label;
   // Platform orders headline the rider-facing 4-digit short code (efood's
   // «#4545»), never the long external order id embedded in order_number.
   const platformShortCode = resolveFoodDeliveryShortCode(order);

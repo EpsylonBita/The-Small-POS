@@ -26,6 +26,30 @@
       "lastKnown": "Ultimo stato noto: {{status}}",
       "closedUntil": "Chiuso fino a {{time}}",
       "closureStatus": "Stato efood: {{status}}",
+      "box": {
+        "detailUnavailable": "Impossibile aggiornare BOX. Riprova.",
+        "throttled": "BOX non risponde. Controlla il negozio in BOX Merchant.",
+        "customerHoursHelp": "I clienti vedono il negozio aperto solo se è aperto qui e negli orari di BOX.",
+        "hours": {
+          "title": "Orari settimanali BOX",
+          "explain": "L’invio sostituisce tutti e sette i giorni in BOX. Inserisci gli orari di ogni giorno o indica che non inizia alcuna fascia quel giorno.",
+          "lastSent": "Ultimo orario inviato dal POS · {{time}}. Le modifiche effettuate in BOX Merchant non sono visualizzate qui.",
+          "noHistory": "Non risultano orari inviati dal POS. BOX non restituisce l’orario attuale.",
+          "noStart": "Nessuna fascia inizia questo giorno",
+          "nextDay": "Giorno successivo",
+          "invalid": "Usa HH:mm e controlla che le fasce non si sovrappongano, anche il giorno successivo. Per l’intera giornata usa 00:00–24:00.",
+          "failed": "Modifica degli orari non confermata. Controllali in BOX Merchant.",
+          "conflict": "Un’altra cassa ha salvato orari più recenti. Caricali prima di proseguire.",
+          "save": "Invia la settimana a BOX"
+        },
+        "autoOpen": "Apertura automatica di BOX",
+        "autoHelp": "Apre al primo accesso di un cassiere e chiude con il rapporto Z.",
+        "statusHelp": "BOX non comunica la disponibilità in tempo reale.",
+        "lastAction": "Ultima richiesta del POS accettata · {{action}}, {{time}}",
+        "automationUnconfirmed": "Impossibile confermare l’impostazione automatica. Aggiorna per verificarla.",
+        "requestUnconfirmed": "Impossibile confermare la richiesta. Controlla il negozio in BOX Merchant.",
+        "refused": "BOX ha rifiutato la richiesta."
+      },
       "status": {
         "open": "Aperto",
         "closed": "Chiuso",

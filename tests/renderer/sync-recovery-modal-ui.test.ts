@@ -1,47 +1,28 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import path from 'node:path';
+import test from 'node:test';
 
-const source = readFileSync(
-  path.join(
-    process.cwd(),
-    'src',
-    'renderer',
-    'components',
-    'recovery',
-    'SyncRecoveryModal.tsx',
-  ),
-  'utf8',
-);
+const read = (file: string) => readFileSync('src/renderer/components/' + file, 'utf8');
 
-test('SyncRecoveryModal shell is amber/neutral, touch-first, and hides native scrollbars', () => {
-  assert.doesNotMatch(source, /hover:/);
-  assert.doesNotMatch(source, /group-hover:/);
-  assert.doesNotMatch(source, /\b(?:bg|text|border|from|to|ring|shadow)-(?:blue|cyan|sky|purple|violet|indigo|fuchsia|pink|orange)-/);
-  assert.doesNotMatch(source, /focus:ring-blue|focus:border-blue/);
-  assert.doesNotMatch(source, /rounded-lg/);
-
-  assert.match(source, /liquid-glass-modal-shell/);
-  assert.match(source, /overflow-y-auto scrollbar-hide/);
-  assert.match(source, /border-\(--pos-s-warn\) bg-\(--pos-s-warn-bg\)/);
-  // Wave ΣΤ6: the warn notice keeps its tint in dark (no zinc dark halves over it).
-  assert.match(source, /role="status"[\s\S]*?animate-spin/);
-  assert.match(source, /<summary className="min-h-touch(?![\w.-])/);
-  assert.match(source, /className="liquid-glass-modal-close[^"]*"/);
+test('Till health uses a single neutral scrolling glass window without a footer', () => {
+  const window = read('recovery/TillHealthWindow.tsx');
+  const css = read('recovery/till-health.css');
+  assert.match(window, /liquid-glass-modal-shell till-health-window/);
+  assert.equal((window.match(/liquid-glass-modal-close/g) ?? []).length, 1);
+  assert.match(css, /\.till-health-body\s*\{[^}]*overflow: auto/);
+  assert.doesNotMatch(window, /<footer|hover:/);
+  const elements = ['till-health-headline', 'props.cards.map', 'till-health-now', 'till-health-help', 'till-health-support-toggle'];
+  const positions = elements.map(element => window.indexOf(element));
+  assert.ok(positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1])));
 });
 
-test('SyncRecoveryModal keeps recovery loading, navigation, and panel wiring unchanged', () => {
-  assert.match(source, /void loadRecoveryState\(\)/);
-  assert.match(source, /disabled=\{loading\}/);
-  assert.match(source, /onClick=\{handleOpenSnapshots\}/);
-  assert.match(source, /onClick=\{onClose\}/);
-  assert.match(source, /aria-label=\{t\('common\.actions\.close'/);
-  assert.match(source, /<RecoveryCenterPanel/);
-  assert.match(source, /issues=\{issueResult\.issues\}/);
-  assert.match(source, /recentActions=\{recentActions\}/);
-  assert.match(source, /terminalContext=\{systemHealth\?\.terminalContext \?\? null\}/);
-  assert.match(source, /onRefresh=\{loadRecoveryState\}/);
-  assert.match(source, /onNavigate=\{onClose\}/);
-  assert.match(source, /setRecentActions\(\(current\) => \[entry, \.\.\.current\]\.slice\(0, 8\)\)/);
+test('Till health keeps scoped observation, order navigation and one persisted history entry per attempt', () => {
+  const indicator = read('SyncStatusIndicator.tsx');
+  const actions = read('recovery/useTillHealthActions.tsx');
+  assert.match(indicator, /readId !== healthReadId\.current/);
+  assert.match(indicator, /setHealthAvailability\(systemLoaded\.current \? 'stale' : 'unavailable'\)/);
+  assert.match(indicator, /OPEN_TILL_HEALTH, open/);
+  assert.match(actions, /const attemptId = /);
+  assert.match(actions, /recordActionLog\(entry\)/);
+  assert.match(actions, /if \(verifiedChange && routeTarget\)/);
 });

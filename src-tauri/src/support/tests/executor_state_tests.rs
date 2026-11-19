@@ -514,3 +514,46 @@ fn interrupted_screenshot_restart_uses_data_free_consumed_transport() {
     drop(executor);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn replica_pending_and_final_results_keep_the_original_command() {
+    let (root, mut executor) = fixture();
+    let mut c = command();
+    c.kind = "till_sql_query".into();
+    c.payload = json!({"sql":"SELECT 1","database":"main"});
+    c.payload_sha256 = crate::support::contracts::payload_hash(&c.payload);
+    assert!(executor.accept(&c, &admission(), &clock()).unwrap());
+    executor.start(&c, &admission(), &clock()).unwrap();
+    executor.replica_pending(&c, now()).unwrap();
+    let pending = executor.pending_results(now()).unwrap().remove(0);
+    assert_eq!(pending["status"], "pending");
+    assert_eq!(pending["error_code"], "REPLICA_BUILDING");
+    assert!(pending.get("data").is_none());
+    assert!(executor.queued().unwrap().is_empty());
+    executor
+        .finish(&c, json!({"rows":[[1]]}), now() + 1)
+        .unwrap();
+    let final_result = executor.pending_results(now() + 1).unwrap().remove(0);
+    assert_eq!(final_result["command_id"], pending["command_id"]);
+    assert_eq!(final_result["session_id"], pending["session_id"]);
+    assert_eq!(final_result["status"], "completed");
+    assert_ne!(final_result["result_sha256"], pending["result_sha256"]);
+    drop(executor);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn terminal_transport_loss_carries_the_closed_offline_origin() {
+    let (root, mut executor) = fixture();
+    let mut a = admission();
+    a.online = false;
+    assert!(!executor.accept(&command(), &a, &clock()).unwrap());
+    let data = executor.pending_results(now()).unwrap().remove(0);
+    assert_eq!(data["error_code"], "TILL_OFFLINE");
+    assert_eq!(
+        data["offline_detail"],
+        json!({"origin":"till_transport_loss"})
+    );
+    drop(executor);
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -1,0 +1,338 @@
+{
+  "tillHealth": {
+    "title": "Gjendja e arkës",
+    "lastChecked": "Kontrolli i fundit në {{time}}",
+    "notChecked": "Në pritje të kontrollit të parë",
+    "checkedServices": "Arka në {{time}}",
+    "capacity": "Po grumbullohen ndryshime. Hapni gjendjen e arkës.",
+    "closeoutHint": "Mbylleni ditën në përfundim të shërbimit.",
+    "progress": "Ecuria",
+    "states": {
+      "ok": {
+        "title": "Gjithçka funksionon normalisht",
+        "detail": "Mund të merrni porosi."
+      },
+      "noShift": {
+        "detail": "Filloni një turn për të marrë porosi."
+      },
+      "issue": {
+        "title": "Një çështje kërkon vëmendjen tuaj",
+        "detail": "Shihni më poshtë çfarë kërkon vëmendje dhe çfarë mund të bëni."
+      },
+      "working": {
+        "title": "Po ruhet tani",
+        "detail": "Mund të vazhdoni punën ndërsa arka përfundon veprimin."
+      },
+      "pending": {
+        "title": "Në pritje të konfirmimit",
+        "detail": "Arka ende po kontrollon rezultatin. Mund të vazhdoni punën."
+      },
+      "solved": {
+        "title": "U zgjidh",
+        "detail": "Arka konfirmoi rezultatin."
+      },
+      "support": {
+        "title": "Nevojitet mbështetje",
+        "detail": "Shihni më poshtë çfarë është prekur. Kërkoni ndihmë nga The Small."
+      },
+      "offline": {
+        "title": "Arka punon pa lidhje",
+        "detail": "Porositë mbeten në këtë arkë dhe dërgohen kur të rikthehet lidhja."
+      },
+      "stale": {
+        "title": "Kontrolli nuk përfundoi",
+        "detail": "Informacioni më poshtë është i orës {{time}}."
+      },
+      "unavailable": {
+        "detail": "Arka nuk mundi të kontrollohej. Kontrolloni sërish pas pak."
+      },
+      "loading": {
+        "detail": "Arka po kontrollohet tani."
+      }
+    },
+    "action": {
+      "recheck": "Kontrolloni sërish",
+      "saveAgain": "Ruajeni sërish",
+      "saveAddress": "Ruajeni sërish adresën",
+      "restorePrinter": "Riktheni cilësimin e fundit të printerit",
+      "printer": "Hapni cilësimet e printerit",
+      "openPayment": "Hapni pagesën",
+      "openConnection": "Hapni cilësimet e lidhjes",
+      "send": "Dërgoni tani",
+      "signIn": "Hyni sërish",
+      "askSupport": "Kërkoni mbështetje",
+      "supportDetails": "Hapni të dhënat për mbështetjen",
+      "noSafeAction": "Mbështetja duhet ta kontrollojë këtë.",
+      "noLongerNeeded": "Ndryshimi nuk duhet më",
+      "keepDetails": "Mbajini të dhënat siç janë",
+      "keepExplanation": "Porosia mban të dhënat që shihni tani dhe çështja mbyllet.",
+      "offline": "Ky veprim kërkon lidhje me internetin.",
+      "sendFailed": "Ndryshimet nuk u dërguan.",
+      "sendChecked": "Kontrolli i dërgimit përfundoi."
+    },
+    "phase": {
+      "working": "Po ruhet",
+      "pending": "Në pritje të konfirmimit",
+      "solved": "U zgjidh në {{time}}",
+      "failed": "Ndryshimi nuk përfundoi.",
+      "busy": "Arka po kryente një veprim tjetër. Shtypeni sërish pas pak.",
+      "signIn": "Hyrja juaj ka skaduar. Hyni sërish në arkë.",
+      "shift": "Në këtë arkë duhet një turn aktiv i arkëtarit ose përgjegjësit.",
+      "pin": "PIN-i nuk përputhet.",
+      "permission": "Kërkojini përgjegjësit ta kontrollojë.",
+      "grant": "Miratimi ka skaduar. Shtypeni sërish për të konfirmuar.",
+      "parked": "Ky ndryshim kërkon ndërhyrjen e mbështetjes.",
+      "checkingOld": "Nga kontrolli i fundit i suksesshëm",
+      "correctionWorking": "Të dhënat e klientit po ruhen",
+      "correctionPending": "Ndryshimi i të dhënave të klientit pret konfirmimin",
+      "correctionSaved": "Të dhënat e klientit u ruajtën",
+      "correctionKept": "Të dhënat e klientit mbetën siç ishin"
+    },
+    "step": {
+      "save": "Ruajtja",
+      "confirm": "Konfirmimi",
+      "done": "U zgjidh"
+    },
+    "subject": {
+      "orderNumber": "Porosia nr. {{number}}",
+      "order": "Porosia",
+      "till": "Arka",
+      "expense": "Shpenzimi",
+      "staffPayment": "Pagesa e stafit",
+      "driverPayment": "Pagesa e shpërndarësit",
+      "payment": "Pagesa",
+      "printer": "Printeri",
+      "closeout": "Mbyllja e ditës (Z)"
+    },
+    "orderType": {
+      "delivery": "Dërgesë",
+      "pickup": "Marrje me vete",
+      "dine_in": "Në lokal"
+    },
+    "services": {
+      "title": "Arka tani",
+      "orders": "Porositë",
+      "internet": "Interneti",
+      "sync": "Dërgimi në zyrë",
+      "printer": "Printeri",
+      "closeout": "Mbyllja e ditës (Z)",
+      "support": "Mbështetja"
+    },
+    "status": {
+      "working": "Në punë",
+      "limited": "Me kufizime",
+      "blocked": "Kërkon kontroll",
+      "start_shift": "Duhet turn",
+      "connected": "Lidhur",
+      "offline": "Pa lidhje",
+      "unknown": "Pa konfirmim",
+      "healthy": "Gjithçka u dërgua",
+      "waiting": "Në pritje të dërgimit",
+      "stuck": "Kërkon kontroll",
+      "failed": "Nuk përfundoi",
+      "ready": "Gati",
+      "attention": "Kërkon kontroll",
+      "not_configured": "Pa konfiguruar",
+      "via_main_terminal": "Në arkën kryesore",
+      "not_needed": "Nuk nevojitet",
+      "notified": "Raporti mbërriti",
+      "not_sent": "Nuk u dërgua raport",
+      "failed_to_notify": "Dërgimi nuk u konfirmua",
+      "open": "Hapur",
+      "openSince": "Hapur që në {{time}}",
+      "overdue": "Ende hapur",
+      "submitted": "Në pritje të konfirmimit",
+      "unavailable": "E padisponueshme",
+      "not_checked": "Kontrollohet në mbyllje",
+      "not_applicable": "Në arkën kryesore"
+    },
+    "help": {
+      "title": "Keni nevojë për ndihmë?",
+      "available": "The Small mund të lidhet me këtë arkë. Do të shihni një kod që mund t’ia jepni.",
+      "unavailable": "Mbështetja nga larg nuk u nis. Kërkojini përgjegjësit të organizojë një vizitë. Mund të ruani ende një raport.",
+      "offline": "The Small mund të lidhet kur të kthehet interneti. Mund të ruani një raport tani.",
+      "permission": "Kërkojini përgjegjësit të kërkojë lidhjen. Mund të përgatisni ende një raport."
+    },
+    "support": {
+      "title": "Për mbështetjen",
+      "hint": "Vetëm nëse jua kërkon mbështetja",
+      "attempts": "Çfarë u provua",
+      "identifiers": "Të dhënat",
+      "automaticActor": "Arka",
+      "unknownActor": "Punonjësi nuk u identifikua",
+      "report": "Raport për The Small",
+      "reportTopic": "Tema e raportit",
+      "allTopics": "E gjithë arka",
+      "tools": "Mjetet e mbështetjes dhe kopjet e arkës"
+    },
+    "report": {
+      "new": "Raport i ri",
+      "preparing": "Raporti po përgatitet…",
+      "none": "Nuk është dërguar ende raport.",
+      "sent": "Raporti mbërriti te The Small dhe një kopje është ruajtur këtu ({{time}}).",
+      "automatic": "U dërgua automatikisht në {{time}}. The Small e mori raportin.",
+      "local": "U ruajt vetëm në këtë arkë në {{time}}. Raporti nuk u dërgua.",
+      "failed": "Raporti nuk u dërgua.",
+      "explanation": "Raporti ruhet në këtë arkë. Kur ka lidhje, i dërgohet edhe The Small.",
+      "previous": "Kopjet e mëparshme",
+      "noCopies": "Nuk ka ende kopje të ruajtura.",
+      "openCopy": "Hapni dosjen e kopjes së datës {{date}}",
+      "waiting": "Raporti u ruajt në këtë arkë. Do të dërgohet kur të rikthehet lidhja.",
+      "sendFailed": "Raporti është ruajtur këtu. Dorëzimi nuk u konfirmua.",
+      "historyUnavailable": "Raportet e ruajtura nuk mund të lexoheshin.",
+      "archivedLocal": "Ruajtur në këtë arkë.",
+      "pending": "Raporti u ruajt në arkë. Ende nuk është dërguar."
+    },
+    "families": {
+      "customerCorrection": {
+        "title": "Ndryshimi i të dhënave të klientit nuk u ruajt",
+        "detail": "Porosia mban ende të dhënat e mëparshme. Shitja dhe pagesa nuk preken."
+      },
+      "connection": {
+        "title": "Arka nuk është më e lidhur me dyqanin",
+        "detail": "Përgjegjësi mund ta lidhë sërish arkën te cilësimet e lidhjes."
+      },
+      "invalidOrders": {
+        "title": "Disa porosi përmbajnë artikuj që arka nuk i njeh",
+        "detail": "Përgjegjësi duhet t’i kontrollojë ato porosi."
+      },
+      "order": {
+        "title": "Një ndryshim në porosi nuk u ruajt",
+        "detail": "Kontrollojeni porosinë siç shfaqet në arkë para ndryshimeve të tjera."
+      },
+      "wrongMoney": {
+        "title": "Pagesa dhe totali i porosisë nuk përputhen",
+        "detail": "Mos e tarifoni klientin sërish. Kërkojini përgjegjësit të kontrollojë shumat."
+      },
+      "driver": {
+        "title": "Caktimi i shpërndarësit nuk u ruajt",
+        "detail": "Kontrolloni kush do ta dorëzojë porosinë."
+      },
+      "orderPaymentWait": {
+        "title": "Një ndryshim në porosi nuk përfundoi",
+        "detail": "Pagesa pret atë ndryshim. Mos e tarifoni klientin sërish."
+      },
+      "orderWaiting": {
+        "title": "Ndryshimi pret porosinë fillestare",
+        "detail": "Arka po kërkon porosinë para se të ruajë ndryshimin."
+      },
+      "orderMissing": {
+        "title": "Porosia fillestare nuk u gjet",
+        "detail": "Ndryshimi duhet kontrolluar para ruajtjes."
+      },
+      "catalog": {
+        "title": "Disponueshmëria e artikullit nuk u përditësua në arkat e tjera",
+        "detail": "Kontrolloni disponueshmërinë para se të pranoni një porosi për këtë artikull."
+      },
+      "address": {
+        "title": "Adresa e re nuk u caktua si kryesore",
+        "detail": "Porosia nuk preket."
+      },
+      "customerDuplicate": {
+        "title": "Një klient me të njëjtin numër telefoni ekziston",
+        "detail": "Kontrolloni nëse është i njëjti person."
+      },
+      "customerPhone": {
+        "title": "Numri i telefonit të klientit duhet korrigjuar",
+        "detail": "Porosia dhe mbyllja e ditës nuk preken."
+      },
+      "customerDirectory": {
+        "title": "Të dhënat e reja të klientit mbetën në këtë arkë",
+        "detail": "Ndryshimet mund të mos shfaqen në arkat e tjera."
+      },
+      "shiftClosed": {
+        "title": "Turni u mbyll në një arkë tjetër",
+        "detail": "Kërkojini përgjegjësit të kontrollojë shumat. Mos përsëritni pagesë apo rimbursim."
+      },
+      "oldOrderCorrection": {
+        "title": "Një korrigjim i mëparshëm i porosisë nuk përfundoi",
+        "detail": "Përgjegjësi krahason porosinë me faturën para mbylljes së ditës."
+      },
+      "phoneShifts": {
+        "title": "Mbyllja e ditës pret turnet në telefon",
+        "detail": "Mbylleni turnin nga telefoni ose te Stafi. Pastaj mbyllja e ditës do të dërgohet automatikisht."
+      },
+      "uncertainPayment": {
+        "title": "Pagesa me kartë nuk është konfirmuar",
+        "detail": "Kontrolloni terminalin e bankës. Mos e tarifoni klientin sërish."
+      },
+      "platform": {
+        "title": "Pagesa e platformës duhet kontrolluar",
+        "detail": "Platforma e mori pagesën. Mos e merrni sërish në arkë."
+      },
+      "balance": {
+        "title": "Porosia ka një shumë të papaguar",
+        "detail": "Hapni pagesën për të kontrolluar shumën e mbetur."
+      },
+      "payment": {
+        "title": "Një regjistrim pagese duhet kontrolluar",
+        "detail": "Mos përsëritni tarifim apo rimbursim."
+      },
+      "paymentWaiting": {
+        "title": "Pagesa është në pritje të porosisë",
+        "detail": "Pagesa është regjistruar këtu. Mos e tarifoni sërish klientin."
+      },
+      "refundWaiting": {
+        "title": "Rimbursimi pret pagesën fillestare",
+        "detail": "Mos e regjistroni për herë të dytë rimbursimin ose anulimin."
+      },
+      "refundMissing": {
+        "title": "Pagesa fillestare për këtë rimbursim nuk u gjet",
+        "detail": "Kërkojini mbështetjes të kontrollojë pagesën para një ndryshimi tjetër."
+      },
+      "oldPayments": {
+        "title": "Pagesat e mëparshme duhen kontrolluar",
+        "detail": "Përgjegjësi duhet të kontrollojë historikun e pagesave."
+      },
+      "courierMoney": {
+        "title": "Pagesa me para në dorë dhe shënimi i shpërndarësit ndryshojnë",
+        "detail": "Kërkojini përgjegjësit të kontrollojë turnin e shpërndarësit."
+      },
+      "courierCheck": {
+        "title": "Paratë e shpërndarësit nuk u kontrolluan",
+        "detail": "Përgjegjësi duhet ta kontrollojë këtë turn."
+      },
+      "printerSetting": {
+        "title": "Printeri nuk e njohu cilësimin e faturave",
+        "detail": "Riktheni cilësimin e fundit dhe kontrolloni një faturë prove."
+      },
+      "printer": {
+        "title": "Printeri duhet kontrolluar",
+        "detail": "Porositë ruhen. Kontrolloni letrën, energjinë dhe lidhjen."
+      },
+      "waiting": {
+        "title": "Disa ndryshime presin të dërgohen",
+        "detail": "Ndryshimet janë ruajtur në këtë arkë.",
+        "stuck": "Ndryshime në pritje të dërgimit: {{count}}. Pritja më e gjatë është {{duration}}."
+      },
+      "printing": {
+        "title": "Faturat nuk po shtypen",
+        "detail": "Fatura në pritje: {{count}}. Kontrolloni letrën, energjinë dhe lidhjen."
+      },
+      "sending": {
+        "title": "Disa ndryshime nuk u dërguan",
+        "detail": "Mbeten në këtë arkë dhe duhen kontrolluar para dërgimit."
+      },
+      "orderCheck": {
+        "title": "Arka nuk mundi ta kontrollonte porosinë",
+        "detail": "Mbetet te porositë aktive. Kontrolloni sërish pas pak."
+      },
+      "dayClose": {
+        "title": "Mbyllja e ditës duhet kontrolluar",
+        "detail": "Kontrolloni porositë dhe pagesat para mbylljes."
+      },
+      "dayOverdue": {
+        "title": "Dita mbetet e hapur",
+        "detail": "Mbylleni ditën në përfundim të shërbimit."
+      },
+      "fiscal": {
+        "title": "Disa fatura nuk kanë mbërritur te shërbimi tatimor",
+        "detail": "Mbyllja e ditës po pret këto fatura."
+      },
+      "crash": {
+        "title": "Arka u mbyll papritur",
+        "detail": "Kontrollojeni porosinë e fundit para se ta regjistroni sërish."
+      }
+    }
+  }
+}

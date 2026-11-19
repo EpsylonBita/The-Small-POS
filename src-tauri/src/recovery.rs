@@ -1433,6 +1433,34 @@ pub(crate) fn create_pre_recovery_action_snapshot(
     create_snapshot_for_db(db, RecoveryPointKind::PreRecoveryAction, None)
 }
 
+/// Copy the WAL through its own read connection so a whole-database snapshot
+/// does not hold the payment and checkout writer mutex.
+pub(crate) fn create_health_pre_action_snapshot(
+    db: &db::DbState,
+) -> Result<RecoveryPointMetadata, String> {
+    let permit = crate::support::critical_op::global()
+        .try_begin_support_attributed(false, None)
+        .map_err(crate::support::critical_op::attributed_refusal)?;
+    let conn = crate::order_notice_recovery::observer_connection(&db.db_path, false)
+        .map_err(|_| "SNAPSHOT_FAILED")?;
+    permit.guard_connection(
+        &conn,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    );
+    let isolated = db::DbState {
+        conn: std::sync::Mutex::new(conn),
+        db_path: db.db_path.clone(),
+    };
+    let snapshot = create_pre_recovery_action_snapshot(&isolated);
+    if let Some(kind) = permit.preempted_by() {
+        return Err(kind.preemption_error());
+    }
+    if permit.is_cancelled() {
+        return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+    }
+    snapshot
+}
+
 pub(crate) fn snapshot_before_destructive_action(
     db: &db::DbState,
     kind: RecoveryPointKind,

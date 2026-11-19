@@ -38,9 +38,9 @@ test('extractPrivilegedActionError treats bare fresh PIN text as reauth', () => 
   });
 });
 
-test('RecoveryCenterPanel routes visually safe recovery actions through privileged confirmation', () => {
+test('useTillHealthActions routes visually safe recovery actions through privileged confirmation', () => {
   const source = fs.readFileSync(
-    path.join(projectRoot, 'src', 'renderer', 'components', 'recovery', 'RecoveryCenterPanel.tsx'),
+    path.join(projectRoot, 'src', 'renderer', 'components', 'recovery', 'useTillHealthActions.tsx'),
     'utf8',
   );
 

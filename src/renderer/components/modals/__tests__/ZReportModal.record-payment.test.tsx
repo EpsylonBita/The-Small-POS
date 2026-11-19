@@ -259,13 +259,12 @@ describe('ZReportModal Record cash / Record card', { timeout: 20_000 }, () => {
     expect(mock.resolvePaymentBlocker).toHaveBeenCalledTimes(1);
   });
 
-  it('says so when no cashier or manager is checked in, and records nothing', async () => {
+  it.each([
+    { code: 'AUTH_SHIFT_REQUIRED' },
+    { code: 'UNAUTHORIZED', reason: 'Active cashier or manager shift required on this terminal' },
+  ])('explains $code when no cashier or manager is checked in', async refusal => {
     mock.generateZReport.mockResolvedValue(reportWith([unrecordedFinding()]));
-    mock.resolvePaymentBlocker.mockRejectedValueOnce({
-      code: 'UNAUTHORIZED',
-      scope: 'cash_drawer_control',
-      reason: 'Active cashier or manager shift required on this terminal',
-    });
+    mock.resolvePaymentBlocker.mockRejectedValueOnce({ ...refusal, scope: 'cash_drawer_control' });
     const i18n = await renderModal('en');
 
     const recordCash = await recordCashButton(i18n);

@@ -86,6 +86,7 @@ const EVENT_MAP: Record<string, string> = {
 
   // --- Database health ---
   'database_health_update': 'database-health-update',
+  'diagnostics_reports_changed': 'diagnostics-reports-changed',
 
   // --- Terminal settings ---
   'terminal_settings_updated': 'terminal-settings-updated',
@@ -135,6 +136,7 @@ const EVENT_MAP: Record<string, string> = {
   'caller_id_status_changed': 'callerid:status-changed',
 
   // --- ECR events ---
+  'ecr_device_admission_updated': 'ecr:device-admission-updated',
   'ecr_event_device_connected': 'ecr:event:device-connected',
   'ecr_event_device_disconnected': 'ecr:event:device-disconnected',
   'ecr_event_device_status_changed': 'ecr:event:device-status-changed',

@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { getBridge } from '../../../lib';
 import { formatCurrency } from '../../utils/format';
 import { satelliteHandoverMessage } from '../../utils/satelliteHandoverText';
+import { extractPrivilegedActionError, privilegedActionFeedback } from '../../utils/privileged-actions';
 
 interface BlockingHandover {
   handoverId: string;
@@ -67,11 +68,11 @@ export function SatelliteHandoverReleasePanel({ cashierShiftId, onReleased }: {
       onReleased();
     } catch (failure) {
       const text = refusalText(failure);
-      setError(/Invalid PIN|UNAUTHORIZED|MANAGER_APPROVAL/.test(text)
+      setError(extractPrivilegedActionError(failure)?.code === 'AUTH_PIN_WRONG' || /Invalid PIN|UNAUTHORIZED|MANAGER_APPROVAL/.test(text)
         ? t('modals.staffShift.satelliteHandover.releaseWrongPin', {
           defaultValue: "That PIN can't release it. A manager with the right to cancel orders enters their own PIN.",
         })
-        : t('modals.staffShift.satelliteHandover.releaseFailed', {
+        : privilegedActionFeedback(failure, t) ?? t('modals.staffShift.satelliteHandover.releaseFailed', {
           defaultValue: "The handover couldn't be released. Nothing changed; try again.",
         }));
       setPins((current) => ({ ...current, [handover.handoverId]: '' }));

@@ -26,6 +26,30 @@
       "lastKnown": "Zuletzt bekannt: {{status}}",
       "closedUntil": "Geschlossen bis {{time}}",
       "closureStatus": "efood-Status: {{status}}",
+      "box": {
+        "detailUnavailable": "BOX konnte nicht aktualisiert werden. Versuche es erneut.",
+        "throttled": "BOX antwortet nicht. Prüfe den Laden in BOX Merchant.",
+        "customerHoursHelp": "Kunden sehen den Laden nur dann als geöffnet, wenn er hier geöffnet ist und die BOX-Öffnungszeiten gelten.",
+        "hours": {
+          "title": "BOX-Wochenöffnungszeiten",
+          "explain": "Beim Senden werden alle sieben Tage in BOX ersetzt. Geben Sie für jeden Tag Zeiten an oder markieren Sie, dass an diesem Tag keine Öffnungszeit beginnt.",
+          "lastSent": "Zuletzt vom POS gesendete Wochenzeiten · {{time}}. Änderungen in BOX Merchant werden hier nicht angezeigt.",
+          "noHistory": "Es sind keine vom POS gesendeten Zeiten gespeichert. BOX liefert die aktuellen Öffnungszeiten nicht.",
+          "noStart": "An diesem Tag beginnt keine Öffnungszeit",
+          "nextDay": "Folgetag",
+          "invalid": "Verwenden Sie HH:mm und vermeiden Sie Überschneidungen, auch am Folgetag. Ganztägig: 00:00–24:00.",
+          "failed": "Die Änderung wurde nicht bestätigt. Prüfen Sie die Zeiten in BOX Merchant.",
+          "conflict": "Eine andere Kasse hat neuere Zeiten gespeichert. Laden Sie diese, um weiterzubearbeiten.",
+          "save": "Wochenzeiten an BOX senden"
+        },
+        "autoOpen": "BOX automatisch öffnen",
+        "autoHelp": "Öffnet bei der ersten Kassenanmeldung und schließt mit dem Z-Bericht.",
+        "statusHelp": "BOX meldet die aktuelle Verfügbarkeit nicht.",
+        "lastAction": "Letzte bestätigte POS-Anfrage · {{action}}, {{time}}",
+        "automationUnconfirmed": "Die Automatikeinstellung konnte nicht bestätigt werden. Bitte aktualisieren.",
+        "requestUnconfirmed": "Die Anfrage konnte nicht bestätigt werden. Prüfen Sie den Status in BOX Merchant.",
+        "refused": "BOX hat die Anfrage abgelehnt."
+      },
       "status": {
         "open": "Geöffnet",
         "closed": "Geschlossen",

@@ -1,7 +1,6 @@
 use super::super::critical_op::SupportPermit;
 use super::*;
 use std::{
-    fs::File,
     io::{Read, Seek, SeekFrom},
     path::Path,
     time::{Duration, Instant},
@@ -32,15 +31,12 @@ pub fn collect_evidence(
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut lines = Vec::new();
     let mut dropped = 0;
-    let mut paths = std::fs::read_dir(root)
-        .map_err(|_| super::super::evidence::error("HEALTH_OBSERVATION_MISSING"))?
-        .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().starts_with("pos.log"))
-        .map(|e| e.path())
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths.reverse();
-    let file_limit = paths.len() > 3;
+    let files = projection::trusted_log_files(root)
+        .map_err(|_| super::super::evidence::error("HEALTH_OBSERVATION_MISSING"))?;
+    if files.paths.is_empty() {
+        return Err(super::super::evidence::error("HEALTH_OBSERVATION_MISSING"));
+    }
+    let file_limit = files.paths.len() > 3 || files.unreadable > 0;
     let mut file_bytes_skipped = 0u64;
     let mut deadline_reached = false;
     let rank = |s: &str| match s {
@@ -50,12 +46,12 @@ pub fn collect_evidence(
         "error" => 3,
         _ => 4,
     };
-    for path in paths.into_iter().take(3) {
+    for path in files.paths.into_iter().take(3) {
         if permit.is_cancelled() {
             return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
         }
-        let mut file = File::open(path)
-            .map_err(|_| super::super::evidence::error("HEALTH_OBSERVATION_MISSING"))?;
+        let mut file = projection::open_trusted_file(&path, root)
+            .ok_or_else(|| super::super::evidence::error("HEALTH_OBSERVATION_MISSING"))?;
         let size = file
             .metadata()
             .map_err(|_| super::super::evidence::error("HEALTH_OBSERVATION_MISSING"))?
@@ -164,14 +160,38 @@ pub fn collect_evidence(
         bytes += line.to_string().len();
         bytes <= 128 * 1024
     });
-    let mut output = json!({"lines":lines,"truncation":if truncated||bytes>128*1024||file_limit||file_bytes_skipped>0||deadline_reached{json!([{"field":"lines","reason":"lines"}])}else{json!([])},"redaction_dropped":dropped,"coverage":{"source":"retained_projected_log_tail","max_files":3,"max_bytes_per_file":128*1024,"files_omitted":file_limit,"file_bytes_skipped":file_bytes_skipped,"deadline_reached":deadline_reached,"matching_lines_before_cap":matching_lines,"returned_lines":lines.len(),"oldest_at":lines.last().map(|l|&l["at"]),"newest_at":lines.first().map(|l|&l["at"]),"complete":!file_limit && file_bytes_skipped==0 && !deadline_reached && !truncated && bytes<=128*1024 && dropped==0}});
-    // The v1 coverage contract only describes projected codes. Text mode uses
-    // the shared optional shape, like Android, rather than inventing a source.
-    if input["detail"] == "text" {
-        output
-            .as_object_mut()
-            .ok_or("INTERNAL_ERROR")?
-            .remove("coverage");
-    }
+    let output = json!({"lines":lines,"truncation":if truncated||bytes>128*1024||file_limit||file_bytes_skipped>0||deadline_reached{json!([{"field":"lines","reason":"lines"}])}else{json!([])},"redaction_dropped":dropped,"coverage":{"source":"retained_projected_log_tail","max_files":3,"max_bytes_per_file":128*1024,"files_omitted":file_limit,"file_bytes_skipped":file_bytes_skipped,"deadline_reached":deadline_reached,"matching_lines_before_cap":matching_lines,"returned_lines":lines.len(),"oldest_at":lines.last().map(|l|&l["at"]),"newest_at":lines.first().map(|l|&l["at"]),"complete":!file_limit && file_bytes_skipped==0 && !deadline_reached && !truncated && bytes<=128*1024 && dropped==0}});
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn dated_log_text_distinguishes_no_file_from_no_matches() {
+        let dir = crate::tests::harness::TempDir::new();
+        let gate = super::super::super::critical_op::CriticalOpGate::new();
+        let permit = gate.try_begin_support(false, None).unwrap();
+        assert_eq!(
+            collect(dir.path(), &json!({"detail":"text"}), &permit).unwrap_err(),
+            "INTERNAL_ERROR|HEALTH_OBSERVATION_MISSING"
+        );
+        std::fs::write(dir.path().join("pos.2026-11-18"),
+            "2026-11-18T12:00:00Z WARN the_small_pos_lib::sync: Parity sync failed: AUTH_LOCKED_OUT\n").unwrap();
+        std::fs::write(dir.path().join("pos.log.secrets"), "must be ignored").unwrap();
+        let read = collect(dir.path(), &json!({"detail":"text"}), &permit).unwrap();
+        assert_eq!(read["coverage"]["returned_lines"], 1);
+        assert!(read["lines"][0]["message"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("AUTH_LOCKED_OUT"));
+        let filtered = collect(
+            dir.path(),
+            &json!({"detail":"text","since":"2026-11-18T13:00:00Z"}),
+            &permit,
+        )
+        .unwrap();
+        assert_eq!(filtered["coverage"]["matching_lines_before_cap"], 0);
+        assert_eq!(filtered["coverage"]["complete"], true);
+    }
 }

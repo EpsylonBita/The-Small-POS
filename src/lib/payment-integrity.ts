@@ -1,4 +1,5 @@
 import type { TFunction } from "i18next";
+import { privilegedActionFeedback } from "../renderer/utils/privileged-actions";
 
 import { formatFiscalCloseBlockedError } from "./fiscal-closeout";
 import { formatUnitShiftsQueueReason } from "./unit-shifts-queue-reason";
@@ -668,6 +669,9 @@ export function formatPaymentIntegrityError(
   if (payload?.blockers?.length) {
     return summarizeUnsettledPaymentBlockers(payload.blockers, t);
   }
+
+  const approvalMessage = t && privilegedActionFeedback(value, t);
+  if (approvalMessage) return approvalMessage;
 
   if (payload?.error?.trim()) {
     return payload.error.trim();

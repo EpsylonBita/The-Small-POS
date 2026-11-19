@@ -143,21 +143,6 @@ fn recovery_log_entry_from_payload(entry: &Value) -> Value {
     })
 }
 
-fn request_param_string_array(request: &Value, key: &str) -> Vec<String> {
-    request_param(request, key)
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 async fn guarded_renderer_db_mutation<T>(
     db: &db::DbState,
     sync_state: &sync::SyncState,
@@ -439,7 +424,7 @@ pub async fn recovery_create_pre_action_snapshot(
 ) -> Result<recovery::RecoveryPointMetadata, String> {
     run_blocking_command("recovery_create_pre_action_snapshot", move || {
         let db = app.state::<db::DbState>();
-        recovery::create_pre_recovery_action_snapshot(&db)
+        recovery::create_health_pre_action_snapshot(&db)
     })
     .await
 }
@@ -454,6 +439,18 @@ pub async fn recovery_record_action_log(
         let mut raw_entry = arg0.ok_or_else(|| "Missing recovery action log entry".to_string())?;
         if raw_entry.get("nativeOrderCorrection").is_some() || raw_entry.get("automatic").is_some() || raw_entry.get("automaticIntent").is_some() {
             return Err("Native correction evidence cannot be supplied by the renderer".into());
+        }
+        if raw_entry["issueCode"] == "customer_correction_refused" {
+            if raw_entry["outcome"] == "failed" {
+                let reason = raw_entry["errorMessage"].as_str().unwrap_or_default();
+                let code = crate::order_notice_evidence::machine_code(reason);
+                raw_entry["errorMessage"] = json!(
+                    crate::support::critical_op::preemption_evidence(reason)
+                        .map_or(code.clone(), |kind| format!("{code}: {kind}"))
+                );
+            } else {
+                raw_entry["errorMessage"] = Value::Null;
+            }
         }
         let entry = recovery_log_entry_from_payload(&raw_entry);
         let target_refs = entry
@@ -833,7 +830,7 @@ pub async fn recovery_execute_action(
             let auth = app.state::<auth::AuthState>();
             let sync = app.state::<std::sync::Arc<sync::SyncState>>();
             let cancellation = app.state::<tokio_util::sync::CancellationToken>();
-            tauri::async_runtime::block_on(recovery_execute_action_core(
+            recovery_execute_action_on_blocking_worker(
                 arg0,
                 support_authorized,
                 &db,
@@ -841,7 +838,7 @@ pub async fn recovery_execute_action(
                 &sync,
                 &cancellation,
                 &app,
-            ))
+            )
         })
         .await;
     }
@@ -855,6 +852,26 @@ pub async fn recovery_execute_action(
         &app,
     )
     .await
+}
+
+fn recovery_execute_action_on_blocking_worker(
+    request: Option<Value>,
+    support_authorized: bool,
+    db: &db::DbState,
+    auth: &auth::AuthState,
+    sync: &std::sync::Arc<sync::SyncState>,
+    cancellation: &tokio_util::sync::CancellationToken,
+    app: &impl TerminalEventSink,
+) -> Result<Value, auth::GuardedCommandError> {
+    tauri::async_runtime::block_on(recovery_execute_action_core(
+        request,
+        support_authorized,
+        db,
+        auth,
+        sync,
+        cancellation,
+        app,
+    ))
 }
 
 /// The server's refusal to force-close a phone (child terminal) shift: it
@@ -872,17 +889,12 @@ pub(crate) fn health_action_admission(
 ) -> Result<&'static crate::support::remedies::Remedy, String> {
     use crate::support::remedies::{self, Match};
     let action = request["actionId"].as_str().ok_or("INVALID_INPUT")?;
-    // The fallback is chosen only when the request names no recipe. Written as
-    // `unwrap_or(match ..)` it was evaluated first, so an action outside the
-    // three below was refused even when its request carried a valid recipe
-    // (18/11/2026: both customer-correction buttons answered
-    // REMEDY_NOT_APPLICABLE after the PIN and the row held the store's Z).
     let id = match (request["recipeId"].as_str(), action) {
         (Some(id), _) => id,
         (None, "nativeCustomerAddressDefaultRetry") => "customer-address-default.retry",
         (None, "printerReprobe") => "printerReprobe",
         (None, "testPrint") => "testPrint",
-        (None, _) => return Err("REMEDY_NOT_APPLICABLE".into()),
+        _ => return Err("REMEDY_NOT_APPLICABLE".into()),
     };
     let r = remedies::recipe(id, request["recipeVersion"].as_u64().unwrap_or(1))?;
     if r.action_id != action {
@@ -893,15 +905,132 @@ pub(crate) fn health_action_admission(
         target_count: 1,
         ..Default::default()
     };
-    remedies::eligible(
-        r,
-        &m,
-        &remedies::budget(conn, r, request["entityId"].as_str())?,
-        now,
-        stale,
-        busy,
-    )?;
+    let target = if action == "nativeCustomerAddressDefaultRetry" {
+        request["params"]["sampleItemId"]
+            .as_str()
+            .or_else(|| request["entityId"].as_str())
+    } else {
+        request["entityId"].as_str()
+    };
+    remedies::eligible(r, &m, &remedies::budget(conn, r, target)?, now, stale, busy)?;
     Ok(r)
+}
+
+fn require_pre_action_snapshot(db: &db::DbState, request: &Value) -> Result<(), String> {
+    let id = request["snapshotPointId"]
+        .as_str()
+        .ok_or("SNAPSHOT_FAILED")?;
+    if !recovery::list_recovery_points(db)
+        .map_err(|_| "SNAPSHOT_FAILED")?
+        .iter()
+        .any(|point| {
+            point.id == id
+                && point.kind == recovery::RecoveryPointKind::PreRecoveryAction
+                && std::path::Path::new(&point.snapshot_path).is_file()
+        })
+    {
+        return Err("SNAPSHOT_FAILED".into());
+    }
+    Ok(())
+}
+
+fn correct_platform_drawer_rows(
+    tx: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<Value, String> {
+    let drawer_rows = payments::platform_held_drawer_payment_ids(tx, order_id)?;
+    if drawer_rows.is_empty() {
+        return Err("PLATFORM_MISMATCH_NOT_ELIGIBLE".into());
+    }
+    let mut changed_ids = Vec::with_capacity(drawer_rows.len() * 2);
+    for payment_id in &drawer_rows {
+        let result = crate::refunds::void_payment_with_adjustment_in_transaction(
+            tx,
+            payment_id,
+            PLATFORM_MISMATCH_VOID_REASON,
+            None,
+            None,
+        )?;
+        let adjustment_id = result["adjustmentId"]
+            .as_str()
+            .ok_or("PLATFORM_VOID_NOT_VERIFIED")?;
+        let verified: bool = tx
+            .query_row(
+                "SELECT EXISTS (
+                SELECT 1 FROM order_payments p JOIN payment_adjustments a ON a.payment_id = p.id
+                WHERE p.id = ?1 AND p.order_id = ?2 AND p.status = 'voided'
+                  AND a.id = ?3 AND a.adjustment_type = 'void' AND a.reason = ?4
+            )",
+                rusqlite::params![
+                    payment_id,
+                    order_id,
+                    adjustment_id,
+                    PLATFORM_MISMATCH_VOID_REASON
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !verified {
+            return Err("PLATFORM_VOID_NOT_VERIFIED".into());
+        }
+        changed_ids.push(payment_id.clone());
+        changed_ids.push(adjustment_id.to_owned());
+    }
+    let settled = payments::auto_settle_platform_order(tx, order_id)?;
+    let settlement_ids = payments::verified_platform_settlement_ids(tx, order_id)?;
+    if !payments::platform_held_drawer_payment_ids(tx, order_id)?.is_empty() {
+        return Err("PLATFORM_VOID_NOT_VERIFIED".into());
+    }
+    if settled {
+        changed_ids.extend(settlement_ids);
+    }
+    Ok(json!({
+        "success": true, "requiresRefresh": true, "changedIds": changed_ids,
+        "voidedPaymentIds": drawer_rows, "settlementRecorded": settled,
+        "verification": {"status": "passed"}
+    }))
+}
+
+fn requeue_legacy_sync_rows(conn: &rusqlite::Connection, request: &Value) -> Result<(), String> {
+    if request["params"]["queueStatus"] == "conflict" {
+        return Err("PARITY_ROWS_PARKED".into());
+    }
+    if request["params"]["queueOwner"]
+        .as_str()
+        .is_some_and(|owner| owner != "sync_queue")
+    {
+        return Err("PARITY_WRONG_QUEUE_OWNER".into());
+    }
+    let id = request["queueId"].as_i64().ok_or_else(|| {
+        if request["issueCode"] == "UNKNOWN_CONFLICT_REVIEW" {
+            "PARITY_ROWS_PARKED"
+        } else {
+            "PARITY_EXACT_QUEUE_ID_REQUIRED"
+        }
+    })?;
+    let entity = request["entityId"].as_str();
+    let entity_type = request["entityType"].as_str();
+    let count = conn
+        .execute(
+            "UPDATE sync_queue SET status='pending', retry_count=0, updated_at=datetime('now')
+         WHERE id=?1 AND entity_type IN ('order','z_report')
+           AND status IN ('failed','blocked','deferred')
+           AND (?2 IS NULL OR entity_id=?2) AND (?3 IS NULL OR entity_type=?3)",
+            rusqlite::params![id, entity, entity_type],
+        )
+        .map_err(|_| "PARITY_LEGACY_REQUEUE_FAILED")?;
+    if count != 1 {
+        return Err("PARITY_NO_ROWS_REQUEUED".into());
+    }
+    let status: String = conn
+        .query_row("SELECT status FROM sync_queue WHERE id=?1", [id], |r| {
+            r.get(0)
+        })
+        .map_err(|_| "PARITY_STATUS_UNAVAILABLE")?;
+    if status != "pending" {
+        return Err("PARITY_NO_ROWS_REQUEUED".into());
+    }
+    Ok(())
 }
 
 async fn recovery_execute_action_core(
@@ -923,28 +1052,15 @@ async fn recovery_execute_action_core(
         "resendOrderCustomerCorrection" | "keepServerOrderCustomerDetails" => {
             use crate::order_notice_recovery as owner;
             if !support_authorized {
-                auth::authorize_privileged_action(
-                    auth::PrivilegedActionScope::CashDrawerControl,
-                    db,
-                    auth_state,
-                )?;
+                auth::authorize_health_drawer_action(db, auth_state)?;
             }
+            require_pre_action_snapshot(db, &request)?;
             let snapshot = request["snapshotPointId"]
                 .as_str()
                 .ok_or("SNAPSHOT_FAILED")?;
-            if !crate::recovery::list_recovery_points(db)?
-                .iter()
-                .any(|point| {
-                    point.id == snapshot
-                        && point.kind == crate::recovery::RecoveryPointKind::PreRecoveryAction
-                        && std::path::Path::new(&point.snapshot_path).is_file()
-                })
-            {
-                return Err("SNAPSHOT_FAILED".into());
-            }
             let permit = crate::support::critical_op::global()
-                .try_begin_support(true, None)
-                .map_err(|_| "CONCURRENT_OPERATION")?;
+                .try_begin_support_attributed(true, None)
+                .map_err(crate::support::critical_op::attributed_refusal)?;
             let isolated = db::DbState {
                 conn: std::sync::Mutex::new(owner::observer_connection(&db.db_path, true)?),
                 db_path: db.db_path.clone(),
@@ -971,16 +1087,7 @@ async fn recovery_execute_action_core(
                 let before = owner::capture(&conn, &row)?;
                 (row, before)
             };
-            let remote = crate::order_header_preflight::remote_id(&before)?
-                .ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
-            let answer = crate::admin_fetch_detailed(
-                Some(db),
-                &format!("/api/pos/orders/sync?order_id={remote}"),
-                "GET",
-                None,
-            )
-            .await
-            .map_err(|_| "EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
+            let answer = owner::fetch_canonical(db, &before).await?;
             owner::verify(&before, &answer)?;
             let result = sync::guarded_renderer_local_mutation(
                 db,
@@ -1000,7 +1107,18 @@ async fn recovery_execute_action_core(
                     result
                 },
             )
-            .await?;
+            .await;
+            let result = result.map_err(|error| {
+                if let Some(kind) = permit.preempted_by() {
+                    kind.preemption_error()
+                } else if error == "PREEMPTED_BY_CRITICAL_OPERATION" {
+                    // SQLite admission also uses the generic error for a
+                    // non-busy failure with no observed critical operation.
+                    "ORDER_CORRECTION_WRITE_FAILED".to_string()
+                } else {
+                    error
+                }
+            })?;
             if let Ok(order) = sync::get_order_by_id(db, &row.order) {
                 app.emit_json("order_realtime_update", order);
             }
@@ -1020,14 +1138,11 @@ async fn recovery_execute_action_core(
                 )?;
             }
             if !support_authorized {
-                auth::authorize_privileged_action(
-                    auth::PrivilegedActionScope::CashDrawerControl,
-                    db,
-                    auth_state,
-                )?;
+                auth::authorize_health_drawer_action(db, auth_state)?;
             }
-            let target = request["entityId"]
+            let target = request["params"]["sampleItemId"]
                 .as_str()
+                .or_else(|| request["entityId"].as_str())
                 .ok_or("REMEDY_NOT_APPLICABLE")?;
             let result = sync::guarded_renderer_local_mutation(
                 db,
@@ -1072,16 +1187,13 @@ async fn recovery_execute_action_core(
                     "params": {
                         "openPayment": true,
                         "reasonCode": reason_code,
+                        "paymentMethod": request["routeTarget"]["params"]["paymentMethod"],
                     },
                 },
                 "message": "Opening the blocked order payment screen.",
             }))
         }
-        "contactDev" | "contactOperator" => Ok(json!({
-            "success": true,
-            "requiresRefresh": false,
-            "message": "No safe automated fix is available yet. Diagnostics were prepared for development support.",
-        })),
+        "contactDev" | "contactOperator" => Err("INCIDENT_SENDER_REQUIRED".into()),
         "clearLegacyFinancialOrphan" => {
             let entity_type = request_field_str(&request, "entityType")
                 .map(ToOwned::to_owned)
@@ -1158,11 +1270,7 @@ async fn recovery_execute_action_core(
             }))
         }
         "openShiftRepair" | "forceCloseShift" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let shift_id = request
                 .get("shiftId")
                 .and_then(|v| v.as_str())
@@ -1246,35 +1354,93 @@ async fn recovery_execute_action_core(
         }
 
         "retrySync" => {
-            let queue_id = request.get("queueId").and_then(|v| v.as_i64());
-            let entity_id = request
-                .get("entityId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            if let Some(qid) = queue_id {
-                if let Ok(conn) = db.conn.lock() {
-                    let _ = conn.execute(
-                        "UPDATE sync_queue SET status = 'pending', retry_count = 0, updated_at = datetime('now') WHERE id = ?1",
-                        rusqlite::params![qid],
-                    );
-                }
-            } else if !entity_id.is_empty() {
-                if let Ok(conn) = db.conn.lock() {
-                    let _ = conn.execute(
-                        "UPDATE sync_queue SET status = 'pending', retry_count = 0, updated_at = datetime('now') WHERE entity_id = ?1 AND status IN ('failed', 'blocked')",
-                        rusqlite::params![entity_id],
-                    );
-                }
+            if request["queueId"].as_i64().is_some() {
+                require_pre_action_snapshot(db, &request)?;
             }
-
+            let conn = db
+                .conn
+                .lock()
+                .map_err(|_| "PARITY_LOCAL_STEP_UNAVAILABLE")?;
+            requeue_legacy_sync_rows(&conn, &request)?;
             Ok(json!({
-                "success": true,
-                "requiresRefresh": true,
-                "message": "Sync rows were requeued.",
+                "success": true, "requiresRefresh": true,
+                "changedIds": [request["queueId"].to_string()],
+                "targetOutcome": "untouched",
+                "verification": {"status":"pending"}
             }))
         }
         "runParitySyncNow" => {
+            let targets: Vec<String> = request["params"]["queueRowIds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .take(sync_queue::MAX_ITEMS_BY_ID)
+                .map(str::to_owned)
+                .collect();
+            if !targets.is_empty() {
+                let context =
+                    sync::RendererParityExecutionContext::new(db, sync_state, cancellation).await?;
+                let before = context
+                    .run_local_step(|conn| sync_queue::renderer_items_by_id(conn, &targets))?;
+                let result = context
+                    .process_queue(app, "recovery:run_parity_sync_now", true)
+                    .await?;
+                let target_outcomes = context.run_local_step(|conn| {
+                    let after = sync_queue::renderer_items_by_id(conn, &targets)?;
+                    targets
+                        .iter()
+                        .map(|id| {
+                            let current = after.iter().find(|row| &row.id == id);
+                            let previous = before.iter().find(|row| &row.id == id);
+                            let outcome = if sync_queue::queue_row_is_set_aside(conn, id)? {
+                                "set_aside"
+                            } else {
+                                match (previous, current) {
+                                    (Some(_), None) if result.acknowledged_ids.contains(id) => {
+                                        "sent"
+                                    }
+                                    (None, _) | (_, None) => "unknown",
+                                    (_, Some(row))
+                                        if row.status == "deferred"
+                                            || row.error_message.as_deref().is_some_and(
+                                                |text| {
+                                                    text.to_ascii_lowercase()
+                                                        .contains("waiting for")
+                                                },
+                                            ) =>
+                                    {
+                                        "waiting"
+                                    }
+                                    (Some(old), Some(row))
+                                        if old.last_attempt != row.last_attempt
+                                            && matches!(
+                                                row.status.as_str(),
+                                                "failed" | "conflict" | "dead_letter"
+                                            ) =>
+                                    {
+                                        "refused"
+                                    }
+                                    _ => "untouched",
+                                }
+                            };
+                            Ok(json!({"id":id, "outcome":outcome}))
+                        })
+                        .collect::<Result<Vec<_>, String>>()
+                })?;
+                let changed: Vec<_> = targets
+                    .iter()
+                    .filter(|id| result.acknowledged_ids.contains(id))
+                    .collect();
+                let sent = target_outcomes
+                    .iter()
+                    .all(|target| target["outcome"] == "sent");
+                return Ok(json!({
+                    "success":sent, "requiresRefresh":true, "changedIds":changed,
+                    "targetOutcomes":target_outcomes,
+                    "verification":{"status":if sent {"passed"} else {"pending"}}
+                }));
+            }
             let result = sync::process_renderer_parity_queue_guarded(
                 db,
                 sync_state.as_ref(),
@@ -1289,6 +1455,11 @@ async fn recovery_execute_action_core(
                 sync_queue::renderer_get_status(&conn)
             }
             .map_err(auth::GuardedCommandError::from)?;
+            // Run normal queue maintenance, including payment mirrors, before
+            // reporting that a parked-only pass had no rows to send.
+            if result.processed == 0 && status.conflicts > 0 && status.total == status.conflicts {
+                return Err("PARITY_ROWS_PARKED".into());
+            }
 
             Ok(json!({
                 "success": true,
@@ -1514,8 +1685,7 @@ async fn recovery_execute_action_core(
         }
         "retryParityItem" => {
             let item_id = request_param_str(&request, "sampleItemId")
-                .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
-                .ok_or_else(|| "Missing parity item id".to_string())?;
+                .ok_or("PARITY_EXACT_QUEUE_ID_REQUIRED")?;
             if crate::table_close_recovery::confirm_selected_close(
                 db,
                 sync_state.as_ref(),
@@ -1529,209 +1699,95 @@ async fn recovery_execute_action_core(
                     "verification":{"status":"passed"},
                     "message":"The original table close was confirmed as already completed. No payment or table was changed."}));
             }
-            let should_repair_parent_wait = sync::guarded_renderer_local_mutation(
-                db,
-                sync_state.as_ref(),
-                cancellation,
-                |conn| {
-                    conn.query_row(
-                        "SELECT EXISTS(
-                         SELECT 1
-                         FROM parity_sync_queue
-                         WHERE id = ?1
-                           AND table_name = 'orders'
-                           AND upper(operation) = 'UPDATE'
-                           AND COALESCE(module_type, '') <> 'repairs'
-                           AND table_name NOT IN ('repairs', 'repair_attachments')
-                           AND error_message IS NOT NULL
-                           AND lower(error_message) LIKE '%waiting for parent order sync%'
-                     )",
-                        rusqlite::params![item_id.as_str()],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .map_err(|_| "PARITY_ITEM_READ_FAILED".to_string())
-                },
-            )
-            .await
-            .map_err(auth::GuardedCommandError::from)?;
-            if should_repair_parent_wait {
-                let stats = sync::repair_order_update_replay_blockers(
-                    db,
-                    sync_state.as_ref(),
-                    app,
-                    cancellation,
-                )
-                .await
-                .map_err(auth::GuardedCommandError::from)?;
-                let status = {
-                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                    sync_queue::renderer_get_status(&conn)
-                }
-                .map_err(auth::GuardedCommandError::from)?;
-                return Ok(json!({
-                    "success": true,
-                    "requiresRefresh": true,
-                    "message": format!(
-                        "Parent-order recovery ran before retrying the child row: requeued {} parent insert row(s), requeued {} parent-wait row(s), processed {}, failed {}, conflicts {}, remaining {}.",
-                        stats.requeued_parent_order_inserts,
-                        stats.requeued_parent_wait_orders,
-                        stats.parent_insert_pass.as_ref().map(|value| value.processed).unwrap_or(0)
-                            + stats.first_pass.processed
-                            + stats.second_pass.as_ref().map(|value| value.processed).unwrap_or(0),
-                        stats.parent_insert_pass.as_ref().map(|value| value.failed).unwrap_or(0)
-                            + stats.first_pass.failed
-                            + stats.second_pass.as_ref().map(|value| value.failed).unwrap_or(0),
-                        stats.parent_insert_pass.as_ref().map(|value| value.conflicts).unwrap_or(0)
-                            + stats.first_pass.conflicts
-                            + stats.second_pass.as_ref().map(|value| value.conflicts).unwrap_or(0),
-                        status.total,
-                    ),
-                }));
-            }
             let result = sync::guarded_renderer_retry_item(
                 db,
                 sync_state.as_ref(),
                 app,
                 cancellation,
                 "recovery:retry_parity_item",
-                item_id.as_str(),
+                &item_id,
             )
-            .await
-            .map_err(auth::GuardedCommandError::from)?;
-            let status = {
-                let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                sync_queue::renderer_get_status(&conn)
+            .await;
+            let conn = db.conn.lock().map_err(|_| "PARITY_STATUS_UNAVAILABLE")?;
+            if let Err(code) = &result {
+                if code != "PARITY_SYNC_PARTIAL" && code != "PARITY_SYNC_FAILED" {
+                    return Err(code.clone().into());
+                }
             }
-            .map_err(auth::GuardedCommandError::from)?;
-            Ok(json!({
-                "success": true,
-                "requiresRefresh": true,
-                "message": format!(
-                    "Parity item was retried now: processed {}, failed {}, conflicts {}, remaining {}.",
-                    result.processed,
-                    result.failed,
-                    result.conflicts,
-                    status.total,
-                ),
-            }))
-        }
-        "repairPlatformSettlementMismatch" => {
-            // The founder's own words on the 17/09/2026 order: «ήταν από
-            // πλατφόρμα έτσι κι αλλιώς και ήταν κάρτα» — the customer paid by
-            // card ONLINE, to efood. That money reaches us by bank
-            // settlement; it never passed through this till's terminal.
-            //
-            // Correcting it is two writes that must not come apart: void the
-            // drawer row, then record the settlement the platform owes. Doing
-            // only the first swaps this blocker for
-            // `platform_settlement_missing`, which is exactly the dead end the
-            // printed advice used to lead to.
-            //
-            // Eligibility is the order's own disposition, checked in
-            // `platform_held_drawer_payment_ids`: prepaid-online or
-            // platform-rider COD only — the cases where `record_payment`
-            // already refuses a fresh drawer tender. Money the store really
-            // collected is unreachable from here.
-            let order_id = request_field_str(&request, "orderId")
-                .map(ToOwned::to_owned)
-                .or_else(|| request_param_str(&request, "orderId"))
-                .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
-                .ok_or_else(|| "Missing order id".to_string())?;
-
-            let drawer_rows =
-                sync::guarded_renderer_local_mutation(db, sync_state.as_ref(), cancellation, {
-                    let order_id = order_id.clone();
-                    move |conn| payments::platform_held_drawer_payment_ids(conn, order_id.as_str())
-                })
-                .await
-                .map_err(auth::GuardedCommandError::from)?;
-            if drawer_rows.is_empty() {
-                return Err(auth::GuardedCommandError::from(
-                    "PLATFORM_MISMATCH_NOT_ELIGIBLE".to_string(),
-                ));
-            }
-
-            // `void_payment_with_adjustment` writes the `payment_adjustments`
-            // row and queues it, so the office sees the correction rather than
-            // a row that quietly changed state.
-            for payment_id in &drawer_rows {
-                crate::refunds::void_payment_with_adjustment(
-                    db,
-                    payment_id,
-                    PLATFORM_MISMATCH_VOID_REASON,
-                    None,
-                    None,
+            let current: Option<(String, Option<String>)> = conn
+                .query_row(
+                    "SELECT status, error_message FROM parity_sync_queue WHERE id=?1",
+                    [&item_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .map_err(auth::GuardedCommandError::from)?;
-            }
-
-            let settled =
-                sync::guarded_renderer_local_mutation(db, sync_state.as_ref(), cancellation, {
-                    let order_id = order_id.clone();
-                    move |conn| payments::auto_settle_platform_order(conn, order_id.as_str())
-                })
-                .await
-                .map_err(auth::GuardedCommandError::from)?;
-
-            info!(
-                order_id = %order_id,
-                voided_rows = drawer_rows.len(),
-                settled,
-                "Platform-held money corrected: drawer rows voided and settlement recorded"
-            );
+                .optional()
+                .map_err(|_| "PARITY_STATUS_UNAVAILABLE")?;
+            let set_aside = sync_queue::queue_row_is_set_aside(&conn, &item_id)?;
+            let target_outcome = if set_aside {
+                "set_aside"
+            } else {
+                match current
+                    .as_ref()
+                    .map(|(status, error)| (status.as_str(), error.as_deref()))
+                {
+                    None if result
+                        .as_ref()
+                        .is_ok_and(|r| r.acknowledged_ids.contains(&item_id)) =>
+                    {
+                        "sent"
+                    }
+                    Some(("deferred", _)) => "waiting",
+                    Some(("pending", Some(reason)))
+                        if reason.to_ascii_lowercase().contains("waiting for") =>
+                    {
+                        "waiting"
+                    }
+                    Some(("conflict" | "failed" | "dead_letter", _)) => "refused",
+                    _ if result.is_ok() => "untouched",
+                    _ => return Err(result.err().unwrap().into()),
+                }
+            };
+            let sent = target_outcome == "sent";
             Ok(json!({
-                "success": true,
-                "requiresRefresh": true,
-                "voidedPaymentIds": drawer_rows,
-                "settlementRecorded": settled,
-                "message": format!(
-                    "Voided {} till row(s) on {order_id} and {} the platform settlement. No drawer money was touched.",
-                    drawer_rows.len(),
-                    if settled { "recorded" } else { "left" },
-                ),
+                "success": sent, "requiresRefresh": true, "targetOutcome":target_outcome,
+                "changedIds": if sent { vec![item_id] } else { vec![] },
+                "verification": {"status": if sent {"passed"} else {"pending"}}
             }))
         }
-        "settlePlatformOrder" => {
-            // `platform_settlement_missing`: the platform is holding this
-            // money and the canonical settlement row was never written. The
-            // payment screen cannot help — it refuses cash and card on a
-            // platform-held order, correctly — so this writes the row the
-            // sync path already writes, through the same reviewed helper.
-            //
-            // Nothing is guessed. `auto_settle_platform_order` refuses any
-            // order whose own disposition does not say the platform settles
-            // it, takes the amount from the order's outstanding balance, fixes
-            // the tender from that disposition, books it as `other` so the
-            // drawer expectation is untouched, and carries an idempotency key
-            // so a second press cannot write a second row.
+        "repairPlatformSettlementMismatch" | "settlePlatformOrder" => {
+            auth::authorize_health_drawer_action(db, auth_state)?;
+            require_pre_action_snapshot(db, &request)?;
             let order_id = request_field_str(&request, "orderId")
                 .map(ToOwned::to_owned)
                 .or_else(|| request_param_str(&request, "orderId"))
-                .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
-                .ok_or_else(|| "Missing order id".to_string())?;
-            let settled =
-                sync::guarded_renderer_local_mutation(db, sync_state.as_ref(), cancellation, {
-                    let order_id = order_id.clone();
-                    move |conn| payments::auto_settle_platform_order(conn, order_id.as_str())
+                .ok_or("PLATFORM_ORDER_REQUIRED")?;
+            let context =
+                sync::RendererParityExecutionContext::new(db, sync_state, cancellation).await?;
+            let _binding = context.acquire_step_lease()?;
+            let permit = crate::support::critical_op::global()
+                .try_begin_support(true, None)
+                .map_err(|_| "CONCURRENT_OPERATION")?;
+            let conn = crate::order_notice_recovery::observer_connection(&db.db_path, true)?;
+            let tx = permit.begin_write_nowait(&conn)?;
+            let result = if action_id == "repairPlatformSettlementMismatch" {
+                correct_platform_drawer_rows(&tx, &order_id)?
+            } else {
+                if !payments::platform_held_drawer_payment_ids(&tx, &order_id)?.is_empty()
+                    || !payments::auto_settle_platform_order(&tx, &order_id)?
+                {
+                    return Err("PLATFORM_SETTLEMENT_NOT_ELIGIBLE".into());
+                }
+                let ids = payments::verified_platform_settlement_ids(&tx, &order_id)?;
+                json!({
+                    "success": true, "requiresRefresh": true, "changedIds": ids,
+                    "verification": {"status": "passed"}
                 })
-                .await
-                .map_err(auth::GuardedCommandError::from)?;
-            if !settled {
-                return Err(auth::GuardedCommandError::from(
-                    "PLATFORM_SETTLEMENT_NOT_ELIGIBLE".to_string(),
-                ));
+            };
+            if permit.is_cancelled() || cancellation.is_cancelled() {
+                return Err("CONCURRENT_OPERATION".into());
             }
-            info!(
-                order_id = %order_id,
-                "Platform settlement recorded from the order's own disposition"
-            );
-            Ok(json!({
-                "success": true,
-                "requiresRefresh": true,
-                "message": format!(
-                    "Platform settlement recorded for {order_id} from the platform's own disposition. No drawer money was touched.",
-                ),
-            }))
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(result)
         }
         "resolveDuplicateCustomerConflict" => {
             // The office rejected this customer INSERT because it already holds
@@ -1854,11 +1910,7 @@ async fn recovery_execute_action_core(
             }))
         }
         "validatePendingOrders" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let result =
                 sync::validate_pending_orders(db).map_err(auth::GuardedCommandError::from)?;
             let total_pending = result
@@ -1875,47 +1927,59 @@ async fn recovery_execute_action_core(
             }))
         }
         "removeInvalidOrders" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
-            let order_ids = request_param_string_array(&request, "orderIds");
-            if order_ids.is_empty() {
-                return Err("No invalid orders were provided for removal".into());
+            auth::authorize_health_drawer_action(db, auth_state)?;
+            require_pre_action_snapshot(db, &request)?;
+            let snapshot_id = request["snapshotPointId"]
+                .as_str()
+                .ok_or("SNAPSHOT_FAILED")?;
+            let rows: Vec<(i64, String)> =
+                serde_json::from_value(request["params"]["invalidRows"].clone())
+                    .map_err(|_| "INVALID_ORDER_PREVIEW_REQUIRED")?;
+            if rows.is_empty() {
+                return Err("INVALID_ORDER_PREVIEW_REQUIRED".into());
             }
-            let result = sync::remove_invalid_orders(db, order_ids)
-                .map_err(auth::GuardedCommandError::from)?;
-            let removed = result.get("removed").and_then(Value::as_i64).unwrap_or(0);
-            Ok(json!({
-                "success": true,
-                "requiresRefresh": true,
-                "message": format!("Removed {removed} invalid order row(s) from the local queue."),
-            }))
+            let permit = crate::support::critical_op::global()
+                .try_begin_support(true, None)
+                .map_err(|_| "CONCURRENT_OPERATION")?;
+            let conn = crate::order_notice_recovery::observer_connection(&db.db_path, true)?;
+            let tx = permit.begin_write_nowait(&conn)?;
+            let ids = sync::remove_exact_invalid_order_rows(&tx, &rows, snapshot_id)?;
+            for id in &ids {
+                let exists: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sync_queue WHERE id=?1)",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if exists {
+                    return Err("INVALID_ORDER_REMOVAL_NOT_VERIFIED".into());
+                }
+            }
+            if permit.is_cancelled() || cancellation.is_cancelled() {
+                return Err("CONCURRENT_OPERATION".into());
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(json!({"success":true, "requiresRefresh":true,
+                "changedIds":ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "verification":{"status":"passed"}}))
         }
         "retryFinancialItem" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let queue_id = request_field_i64(&request, "queueId")
                 .or_else(|| request_param_i64(&request, "queueId"))
                 .ok_or_else(|| "Missing financial queue id".to_string())?;
-            sync::retry_financial_queue_item(db, queue_id)
-                .map_err(auth::GuardedCommandError::from)?;
+            require_pre_action_snapshot(db, &request)?;
+            let (selected_id, status) = sync::retry_financial_queue_item(db, queue_id)?;
             Ok(json!({
-                "success": true,
-                "requiresRefresh": true,
-                "message": "Financial sync item was requeued.",
+                "success": true, "requiresRefresh": true,
+                "changedIds": [selected_id.to_string()],
+                "targetOutcome": if status == "deferred" { "waiting" } else { "untouched" },
+                "verification": {"status":"pending"}
             }))
         }
         "retryAllFailedFinancial" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let count: usize = {
                 let conn = db.conn.lock().map_err(|e| e.to_string())?;
                 let now = chrono::Utc::now().to_rfc3339();
@@ -1959,11 +2023,7 @@ async fn recovery_execute_action_core(
             }))
         }
         "resolveCheckoutPaymentBlocker" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
 
             let order_id = request_field_str(&request, "orderId")
                 .map(ToOwned::to_owned)
@@ -2030,19 +2090,11 @@ async fn recovery_execute_action_core(
             }))
         }
         "repairOrphanedFinancial" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             Err("RECOVERY_ORPHANED_FINANCIAL_GUARDED_AUDIT_REQUIRED".into())
         }
         "repairWaitingParentPayments" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let repaired = guarded_renderer_db_mutation(
                 db,
                 sync_state.as_ref(),
@@ -2058,11 +2110,7 @@ async fn recovery_execute_action_core(
             }))
         }
         "repairWaitingParentAdjustments" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let repaired = guarded_renderer_db_mutation(
                 db,
                 sync_state.as_ref(),
@@ -2078,11 +2126,7 @@ async fn recovery_execute_action_core(
             }))
         }
         "requeueFailedOrderValidationRows" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let repaired = guarded_renderer_db_mutation(
                 db,
                 sync_state.as_ref(),
@@ -2098,11 +2142,7 @@ async fn recovery_execute_action_core(
             }))
         }
         "requeueRetryableFailedShiftRows" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let repaired = guarded_renderer_db_mutation(
                 db,
                 sync_state.as_ref(),
@@ -2118,11 +2158,7 @@ async fn recovery_execute_action_core(
             }))
         }
         "requeueFailedFinancialShiftRows" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let repaired = guarded_renderer_db_mutation(
                 db,
                 sync_state.as_ref(),
@@ -2138,11 +2174,7 @@ async fn recovery_execute_action_core(
             }))
         }
         "requeueFailedShiftCashierReferenceRows" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let repaired = guarded_renderer_db_mutation(
                 db,
                 sync_state.as_ref(),
@@ -2158,11 +2190,7 @@ async fn recovery_execute_action_core(
             }))
         }
         "requeueFailedAdjustmentMissingEndpointRows" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let repaired = guarded_renderer_db_mutation(
                 db,
                 sync_state.as_ref(),
@@ -2178,11 +2206,7 @@ async fn recovery_execute_action_core(
             }))
         }
         "requeueFailedAdjustmentLegacyValidationRows" => {
-            auth::authorize_privileged_action(
-                auth::PrivilegedActionScope::CashDrawerControl,
-                db,
-                auth_state,
-            )?;
+            auth::authorize_health_drawer_action(db, auth_state)?;
             let repaired = guarded_renderer_db_mutation(
                 db,
                 sync_state.as_ref(),
@@ -2203,7 +2227,7 @@ async fn recovery_execute_action_core(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use rusqlite::{types::ValueRef, Connection};
     use serde_json::json;
@@ -2247,6 +2271,900 @@ mod tests {
 
     impl TerminalEventSink for NoopTerminalEventSink {
         fn emit_json(&self, _event: &str, _payload: serde_json::Value) {}
+    }
+
+    pub(crate) const TOMIKRO_ORDER: &str = "66666666-6666-4666-8666-666666666666";
+    pub(crate) const TOMIKRO_QUEUE: &str = "77777777-7777-4777-8777-777777777777";
+    const REMOTE_ORDER: &str = "5f0e3c1a-7a8d-4c3e-9a51-2d7c1f5e6b01";
+    const TERMINAL: &str = "terminal-tomikro-fixture";
+
+    pub(crate) fn order_notice_tomikro_fixture() -> (crate::tests::harness::TestDb, Value) {
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        for (key, value) in [
+            ("organization_id", "fixture-org"),
+            ("branch_id", "fixture-branch"),
+            ("terminal_id", TERMINAL),
+        ] {
+            db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        let local_items = json!([{
+            "id":"manual-1794879583843-z0t3gg2w0","isManual":true,"is_manual":true,
+            "menuItemId":null,"menu_item_id":null,"name":"Manual line","menuItemName":"Manual line",
+            "menu_item_name":"Manual line","quantity":1,"price":14.5,"unitPrice":14.5,"unit_price":14.5,
+            "totalPrice":14.5,"total_price":14.5,"originalUnitPrice":14.5,"original_unit_price":14.5,
+            "isPriceOverridden":false,"is_price_overridden":false,"customizations":[],
+            "priceIncludesVat":true,"vatClass":"standard","fiscalDocumentProfile":"manual_item",
+            "categoryPath":"Manual category","service_id":null,"appointment_id":null
+        }]);
+        let payload = json!({"client_event_id":"original-correction-event","customer_id":"33333333-3333-4333-8333-333333333333",
+            "customer_name":"Corrected customer","customer_phone":"Corrected phone","delivery_address":"Corrected address",
+            "delivery_floor":"2","delivery_notes":null,"expected_version":1,"name_on_ringer":"Corrected bell",
+            "orderId":TOMIKRO_ORDER,"organization_id":"fixture-org","status":"pending"});
+        conn.execute(
+            "INSERT INTO orders(id,supabase_id,organization_id,branch_id,terminal_id,order_type,status,payment_status,
+                sync_status,version,remote_version,total_amount,total_amount_cents,items,customer_id,customer_name,
+                customer_phone,delivery_address,delivery_floor,delivery_notes,name_on_ringer,created_at,updated_at)
+             VALUES(?1,?2,'fixture-org','fixture-branch',?3,'delivery','delivered','paid','synced',1,NULL,
+                14.5,1450,?4,'33333333-3333-4333-8333-333333333333','Corrected customer','Corrected phone','Corrected address','2',NULL,
+                'Corrected bell','2026-11-18T03:58:00Z','2026-11-18T04:13:12Z')",
+            rusqlite::params![TOMIKRO_ORDER, REMOTE_ORDER, TERMINAL, local_items.to_string()]
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,sync_state,sync_status,remote_payment_id,created_at,updated_at)
+             VALUES('fixture-payment',?1,'cash',14.50,1450,'EUR','completed','applied','synced','remote-fixture-payment',
+                '2026-11-18T04:13:12Z','2026-11-18T04:13:12Z')", [TOMIKRO_ORDER]
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,status,
+                error_message,attempts,created_at,conflict_strategy,version,module_type)
+             VALUES(?1,'orders',?2,'UPDATE',?3,'fixture-org','conflict','UNKNOWN_CONFLICT_REVIEW',0,
+                '2026-11-18T04:13:13Z','server-wins',1,'orders')",
+            rusqlite::params![TOMIKRO_QUEUE, TOMIKRO_ORDER, payload.to_string()]
+        ).unwrap();
+        let mut order =
+            crate::edit_settlement_recovery::capture_order_headers(&conn, TOMIKRO_ORDER).unwrap();
+        // GET exact-order lookup returns the embedded rows and a normalized
+        // items projection. The projection carries metadata but omits the
+        // raw line's original_unit_price and is_price_overridden fields.
+        let customizations = json!({"_meta":{"line_kind":"manual_item","category_id":null,
+            "product_name":"Manual line","category_name":null}});
+        let line_id = "22222222-2222-4222-8222-222222222222";
+        let raw_line = json!({"id":line_id,"order_id":REMOTE_ORDER,"menu_item_id":null,"menu_item_name":"Manual line",
+            "quantity":1,"unit_price":14.5,"total_price":14.5,"original_unit_price":14.5,"is_price_overridden":false,
+            "notes":null,"customizations":customizations,"service_id":null,"appointment_id":null});
+        let hydrated = json!({"id":line_id,"menu_item_id":null,"menuItemId":null,"menu_item_name":"Manual line",
+            "menuItemName":"Manual line","name":"Manual line","quantity":1,"unit_price":14.5,"unitPrice":14.5,
+            "price":14.5,"total_price":14.5,"totalPrice":14.5,"notes":null,"special_instructions":null,
+            "customizations":customizations,"category_name":null,"categoryName":null,"category_path":null,"categoryPath":null});
+        order.as_object_mut().unwrap().extend(json!({
+            "id":REMOTE_ORDER,"client_order_id":TOMIKRO_ORDER,"organization_id":"fixture-org","branch_id":"fixture-branch",
+            "status":"delivered","payment_status":"paid","version":4,"total_amount":14.5,"total_amount_cents":1450,
+            "customer_name":"Earlier customer","customer_phone":"Earlier phone","delivery_address":"Earlier address",
+            "name_on_ringer":"Earlier bell","notes":null,"special_instructions":null,"order_items":[raw_line],"items":[hydrated]
+        }).as_object().unwrap().clone());
+        drop(conn);
+        (
+            db,
+            json!({"success":true,"orders":[order],"total_count":1,"has_more":false,"exact_order_lookup":true}),
+        )
+    }
+
+    pub(crate) fn order_notice_tomikro_endpoint(url: &str) {
+        use crate::tests::fake_keyring::set;
+        set("terminal_id", TERMINAL);
+        set("admin_dashboard_url", url);
+        set(
+            "pos_api_key",
+            &json!({"key":"fixture-key","tid":TERMINAL,"url":url}).to_string(),
+        );
+    }
+
+    fn order_notice_legacy_audit(conn: &Connection) {
+        // Installed 1.4.153 wrote its automatic claim against the order ID,
+        // its pre-PIN failures against the queue, and no attempts to parity.
+        for (index, (time, action, target, reason)) in [
+            (
+                "04:13:15",
+                "resendOrderCustomerCorrection",
+                TOMIKRO_ORDER,
+                None,
+            ),
+            (
+                "06:59:50",
+                "runParitySyncNow",
+                "processor",
+                Some("PARITY_SYNC_PARTIAL"),
+            ),
+            (
+                "07:00:00",
+                "resendOrderCustomerCorrection",
+                TOMIKRO_QUEUE,
+                Some("Active cashier or manager shift required on this terminal"),
+            ),
+            (
+                "07:00:07",
+                "resendOrderCustomerCorrection",
+                TOMIKRO_QUEUE,
+                Some("Active cashier or manager shift required on this terminal"),
+            ),
+            (
+                "07:00:11",
+                "retrySync",
+                TOMIKRO_ORDER,
+                Some("Sync rows were requeued."),
+            ),
+            (
+                "07:00:14",
+                "keepServerOrderCustomerDetails",
+                TOMIKRO_QUEUE,
+                Some("Active cashier or manager shift required on this terminal"),
+            ),
+            (
+                "07:00:18",
+                "resendOrderCustomerCorrection",
+                TOMIKRO_QUEUE,
+                Some("Active cashier or manager shift required on this terminal"),
+            ),
+            (
+                "07:00:23",
+                "resendOrderCustomerCorrection",
+                TOMIKRO_QUEUE,
+                Some("Active cashier or manager shift required on this terminal"),
+            ),
+            (
+                "08:02:10",
+                "runParitySyncNow",
+                "processor",
+                Some("PARITY_SYNC_PARTIAL"),
+            ),
+            (
+                "08:02:15",
+                "retrySync",
+                TOMIKRO_ORDER,
+                Some("Sync rows were requeued."),
+            ),
+            (
+                "08:02:23",
+                "resendOrderCustomerCorrection",
+                TOMIKRO_QUEUE,
+                Some("Active session required"),
+            ),
+            (
+                "08:02:39",
+                "retrySync",
+                TOMIKRO_ORDER,
+                Some("Sync rows were requeued."),
+            ),
+            (
+                "08:02:47",
+                "keepServerOrderCustomerDetails",
+                TOMIKRO_QUEUE,
+                Some("Active session required"),
+            ),
+            (
+                "08:03:38",
+                "runParitySyncNow",
+                "processor",
+                Some("PARITY_SYNC_PARTIAL"),
+            ),
+            (
+                "08:20:26",
+                "resendOrderCustomerCorrection",
+                TOMIKRO_QUEUE,
+                Some("Active session required"),
+            ),
+            (
+                "08:20:42",
+                "keepServerOrderCustomerDetails",
+                TOMIKRO_QUEUE,
+                Some("Active session required"),
+            ),
+            (
+                "08:31:00",
+                "employeeOrderAttempt",
+                TOMIKRO_QUEUE,
+                Some("REMEDY_NOT_APPLICABLE"),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let automatic = reason.is_none();
+            let recipe = match action {
+                "resendOrderCustomerCorrection" => Some("order-customer-correction.resend"),
+                "keepServerOrderCustomerDetails" => Some("order-customer-correction.keep-server"),
+                _ => None,
+            };
+            let id = if automatic {
+                format!("automatic-order-header:{TOMIKRO_QUEUE}")
+            } else {
+                format!("legacy-audit-{index}")
+            };
+            conn.execute(
+                "INSERT INTO recovery_action_log(id,action_id,issue_code,issue_id,recipe_id,recipe_version,
+                  entity_type,entity_id,order_id,success,created_at,error_message,payload_json)
+                 VALUES(?1,?2,?3,?4,?5,1,'order',?6,?7,0,?8,?9,?10)",
+                rusqlite::params![id, action, if recipe.is_some() {"customer_correction_refused"} else {"UNKNOWN_CONFLICT_REVIEW"},
+                    TOMIKRO_QUEUE,recipe,target,TOMIKRO_ORDER,format!("2026-11-18T{time}Z"),reason,
+                    json!({"automatic":automatic,"automaticIntent":automatic,"outcome":"failed",
+                        "machineReason": if automatic { Some("AUTOMATIC_ATTEMPT_INTERRUPTED") } else { None },
+                        "noticeQueueId":TOMIKRO_QUEUE,"organizationId":"fixture-org","errorMessage":reason}).to_string()]
+            ).unwrap();
+        }
+    }
+
+    pub(crate) fn assert_order_notice_tomikro_outcome(conn: &Connection, resend: bool) {
+        let result: (i64, String, String, String, Option<i64>) = conn.query_row(
+            "SELECT total_amount_cents,status,payment_status,customer_name,remote_version FROM orders WHERE id=?1",
+            [TOMIKRO_ORDER], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))
+        ).unwrap();
+        assert_eq!(
+            (result.0, result.1.as_str(), result.2.as_str()),
+            (1450, "delivered", "paid")
+        );
+        assert_eq!(
+            result.3,
+            if resend {
+                "Corrected customer"
+            } else {
+                "Earlier customer"
+            }
+        );
+        assert_eq!(result.4, if resend { None } else { Some(4) });
+        let payment: (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*),SUM(amount_cents) FROM order_payments WHERE order_id=?1",
+                [TOMIKRO_ORDER],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(payment, (1, 1450));
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id=?1",
+                [TOMIKRO_QUEUE],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        let audit: (String, Option<String>) = conn.query_row(
+            "SELECT json_extract(payload_json,'$.retiredRequest'),json_extract(payload_json,'$.replacementQueueId')
+             FROM recovery_action_log WHERE issue_id=?1 AND json_extract(payload_json,'$.nativeOrderCorrection')=1",
+            [TOMIKRO_QUEUE], |r| Ok((r.get(0)?,r.get(1)?))
+        ).unwrap();
+        let retired: Value = serde_json::from_str(&audit.0).unwrap();
+        assert_eq!(retired["expected_version"], 1);
+        assert_eq!(retired["status"], "pending");
+        if resend {
+            let pending: String = conn.query_row(
+                "SELECT data FROM parity_sync_queue WHERE id=?1 AND status='pending' AND attempts=0",
+                [audit.1.unwrap()], |r| r.get(0),
+            ).unwrap();
+            let replacement: Value = serde_json::from_str(&pending).unwrap();
+            assert_eq!(replacement["expected_version"], 4);
+            assert_eq!(replacement["status"], "delivered");
+            assert_ne!(replacement["client_event_id"], retired["client_event_id"]);
+            assert_eq!(replacement["delivery_notes"], Value::Null);
+        } else {
+            assert_eq!(audit.1, None);
+        }
+    }
+
+    async fn acknowledge_order_notice_tomikro_resend(
+        db: &db::DbState,
+        state: &sync::SyncState,
+        cancel: &tokio_util::sync::CancellationToken,
+        mut lookup: Value,
+    ) {
+        let mut canonical = lookup["orders"][0].take();
+        canonical["version"] = json!(5);
+        canonical["customer_name"] = json!("Corrected customer");
+        canonical["customer_phone"] = json!("Corrected phone");
+        canonical["delivery_address"] = json!("Corrected address");
+        canonical["name_on_ringer"] = json!("Corrected bell");
+        let ack = crate::tests::fake_http::MockServer::new(
+            json!({"success":true,"data":canonical,"processing_time_ms":1}).to_string(),
+        );
+        order_notice_tomikro_endpoint(&ack.url);
+        let result = sync::process_renderer_parity_queue_guarded(
+            db,
+            state,
+            &NoopTerminalEventSink,
+            cancel,
+            "recovery:test_tomikro",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (result.processed, result.failed, result.conflicts),
+            (1, 0, 0)
+        );
+        let requests = ack.recorded();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            (requests[0].method.as_str(), requests[0].path.as_str()),
+            ("PATCH", "/api/pos/orders")
+        );
+        let body = requests[0].json_body().unwrap();
+        assert_eq!(body["id"], REMOTE_ORDER);
+        assert_eq!(body["expected_version"], 4);
+        assert_eq!(body["status"], "delivered");
+        assert_eq!(body["delivery_notes"], Value::Null);
+        for key in [
+            "payment_status",
+            "payment_method",
+            "items",
+            "total_amount",
+            "header_edit_original",
+        ] {
+            assert!(body.get(key).is_none(), "unexpected PATCH field {key}");
+        }
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            crate::order_notice_evidence::collect(&conn).unwrap(),
+            json!([])
+        );
+        let order: (String, i64) = conn
+            .query_row(
+                "SELECT payment_status, remote_version FROM orders WHERE id=?1",
+                [TOMIKRO_ORDER],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(order, ("paid".into(), 5));
+        let observed: (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*),SUM(amount_cents) FROM order_payments WHERE order_id=?1",
+                [TOMIKRO_ORDER],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(observed, (1, 1450));
+    }
+
+    #[test]
+    fn order_notice_tomikro_manual_actions_admit_real_history_and_exact_snapshot() {
+        use crate::order_notice_recovery as owner;
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        for (action, recipe) in [
+            (owner::KEEP, "order-customer-correction.keep-server"),
+            (owner::RESEND, "order-customer-correction.resend"),
+        ] {
+            let (db, answer) = order_notice_tomikro_fixture();
+            let server = crate::tests::fake_http::MockServer::new(answer.to_string());
+            order_notice_tomikro_endpoint(&server.url);
+            {
+                let conn = db.state.conn.lock().unwrap();
+                order_notice_legacy_audit(&conn);
+                assert!(!crate::order_notice_auto::eligible(
+                    &conn,
+                    &owner::refused(&conn, TOMIKRO_QUEUE).unwrap().unwrap()
+                )
+                .unwrap());
+            }
+            let auth = auth::AuthState::new();
+            auth::tests::login_as_staff(&db.state, &auth);
+            auth::tests::insert_active_shift(&db.state, TERMINAL, "cashier");
+            auth::confirm_privileged_action(
+                Some(json!({"scope":"cash_drawer_control","pin":"4321"})),
+                &db.state,
+                &auth,
+            )
+            .unwrap();
+            let snapshot = recovery::create_pre_recovery_action_snapshot(&db.state).unwrap();
+            let state = std::sync::Arc::new(sync::SyncState::new());
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let request = json!({"actionId":action,"issueCode":"customer_correction_refused",
+                "recipeId":recipe,"recipeVersion":1,"entityType":"order","entityId":TOMIKRO_QUEUE,
+                "params":{"queueId":TOMIKRO_QUEUE},"snapshotPointId":snapshot.id});
+            let _action = crate::support::remedies::action_gate().try_begin().unwrap();
+            let result = recovery_execute_action_on_blocking_worker(
+                Some(request),
+                false,
+                &db.state,
+                &auth,
+                &state,
+                &cancel,
+                &NoopTerminalEventSink,
+            )
+            .unwrap();
+            assert_eq!(result["success"], true);
+            assert_eq!(
+                result["verification"]["status"],
+                if action == owner::RESEND {
+                    "pending"
+                } else {
+                    "passed"
+                }
+            );
+            let requests = server.recorded();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].method, "GET");
+            assert_eq!(
+                requests[0].path,
+                format!("/api/pos/orders/sync?order_id={REMOTE_ORDER}")
+            );
+            assert_order_notice_tomikro_outcome(
+                &db.state.conn.lock().unwrap(),
+                action == owner::RESEND,
+            );
+            if action == owner::RESEND {
+                tauri::async_runtime::block_on(acknowledge_order_notice_tomikro_resend(
+                    &db.state, &state, &cancel, answer,
+                ));
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn order_notice_tomikro_automatic_retries_busy_writer_and_keeps_real_reason() {
+        use crate::order_notice_auto as automatic;
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        crate::order_notice_recovery::set_test_reachable(true);
+        let (db, answer) = order_notice_tomikro_fixture();
+        let state = sync::SyncState::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let writer = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let server =
+            crate::tests::fake_http::MockServer::new_with_request_hook(answer.to_string(), {
+                let path = db.state.db_path.clone();
+                let writer = writer.clone();
+                move || {
+                    let conn = Connection::open(&path).unwrap();
+                    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    *writer.lock().unwrap() = Some(conn);
+                }
+            });
+        order_notice_tomikro_endpoint(&server.url);
+        let failure = automatic::attempt(&db.state, &state, &cancel, TOMIKRO_QUEUE)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            automatic::persist_failure(&db.state.db_path, TOMIKRO_QUEUE, &failure),
+            Err("NOTICE_DATABASE_BUSY".into())
+        );
+        drop(writer.lock().unwrap().take());
+        automatic::persist_failure(&db.state.db_path, TOMIKRO_QUEUE, &failure).unwrap();
+        let db = db.restart();
+        {
+            let conn = db.state.conn.lock().unwrap();
+            let evidence = crate::order_notice_evidence::collect(&conn).unwrap();
+            assert_eq!(
+                evidence[0]["automatic_attempt"],
+                json!({"ran":true,"outcome":"failed","reason":"NOTICE_DATABASE_BUSY"})
+            );
+            let row = crate::order_notice_recovery::refused(&conn, TOMIKRO_QUEUE)
+                .unwrap()
+                .unwrap();
+            assert!(!automatic::eligible(&conn, &row).unwrap());
+            conn.execute("UPDATE recovery_action_log SET payload_json=json_set(payload_json,'$.retryAtMs',0) WHERE id=?1",
+                [format!("automatic-order-header:{TOMIKRO_QUEUE}")]).unwrap();
+            assert!(automatic::eligible(&conn, &row).unwrap());
+        }
+        let server = crate::tests::fake_http::MockServer::new(answer.to_string());
+        order_notice_tomikro_endpoint(&server.url);
+        assert!(
+            automatic::attempt(&db.state, &state, &cancel, TOMIKRO_QUEUE)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            automatic::attempt(&db.state, &state, &cancel, TOMIKRO_QUEUE)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(server.count(), 1);
+        let conn = db.state.conn.lock().unwrap();
+        assert_order_notice_tomikro_outcome(&conn, true);
+        let count: i64 = conn.query_row("SELECT json_extract(payload_json,'$.attemptCount') FROM recovery_action_log WHERE id=?1",
+            [format!("automatic-order-header:{TOMIKRO_QUEUE}")], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2);
+        drop(conn);
+        acknowledge_order_notice_tomikro_resend(&db.state, &state, &cancel, answer).await;
+    }
+
+    #[test]
+    fn order_notice_tomikro_manual_metadata_preserves_real_line_drift() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let (db, answer) = order_notice_tomikro_fixture();
+        let conn = db.state.conn.lock().unwrap();
+        use crate::order_notice_recovery as owner;
+        let row = owner::refused(&conn, TOMIKRO_QUEUE).unwrap().unwrap();
+        let before = owner::capture(&conn, &row).unwrap();
+        owner::verify(&before, &answer).unwrap();
+        for (field, value) in [
+            ("original_unit_price", json!(12.00)),
+            ("is_price_overridden", json!(true)),
+            (
+                "customizations",
+                json!({"_meta":{"line_kind":"manual_item"},"actual_option":true}),
+            ),
+        ] {
+            let mut changed = answer.clone();
+            changed["orders"][0]["order_items"][0][field] = value.clone();
+            if field == "customizations" {
+                changed["orders"][0]["items"][0][field] = value;
+            }
+            assert_eq!(
+                owner::verify(&before, &changed),
+                Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into())
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn order_notice_tomikro_parked_rows_refuse_both_generic_retries() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let (db, _) = order_notice_tomikro_fixture();
+        let server = crate::tests::fake_http::MockServer::new("{}");
+        order_notice_tomikro_endpoint(&server.url);
+        let auth = auth::AuthState::new();
+        let state = std::sync::Arc::new(sync::SyncState::new());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        for action in ["retrySync", "runParitySyncNow"] {
+            let request = json!({"actionId":action,"issueCode":"UNKNOWN_CONFLICT_REVIEW","entityType":"orders","entityId":TOMIKRO_ORDER});
+            let error = recovery_execute_action_core(
+                Some(request),
+                false,
+                &db.state,
+                &auth,
+                &state,
+                &cancel,
+                &NoopTerminalEventSink,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), "PARITY_ROWS_PARKED");
+        }
+        assert_eq!(server.count(), 0);
+        let conn = db.state.conn.lock().unwrap();
+        let row: (String, i64) = conn
+            .query_row(
+                "SELECT status,attempts FROM parity_sync_queue WHERE id=?1",
+                [TOMIKRO_QUEUE],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("conflict".into(), 0));
+        conn.execute(
+            "INSERT INTO sync_queue(entity_type,entity_id,operation,payload,idempotency_key,status,retry_count)
+             VALUES('order','unrelated-legacy','UPDATE','{}','legacy-fixture','deferred',2)",
+            [],
+        )
+        .unwrap();
+        let legacy_id = conn.last_insert_rowid();
+        requeue_legacy_sync_rows(&conn, &json!({"queueId":legacy_id})).unwrap();
+        let resumed: (String, i64) = conn
+            .query_row(
+                "SELECT status,retry_count FROM sync_queue WHERE id=?1",
+                [legacy_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(resumed, ("pending".into(), 0));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn health_snapshot_does_not_take_the_business_mutex() {
+        let _gate = crate::support::critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        let _business = db.state.conn.lock().unwrap();
+        let snapshot = recovery::create_health_pre_action_snapshot(&db.state).unwrap();
+        assert!(std::path::Path::new(&snapshot.snapshot_path).is_file());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn health_platform_correction_rolls_back_if_settlement_insert_fails_and_retries_after_reopen(
+    ) {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let (db, _) = order_notice_tomikro_fixture();
+        order_notice_tomikro_endpoint("http://127.0.0.1:15401");
+        let auth = auth::AuthState::new();
+        auth::tests::login_as_admin(&db.state, &auth);
+        auth::tests::insert_active_shift(&db.state, TERMINAL, "cashier");
+        auth::tests::grant_cash_drawer_for_test(&auth);
+        {
+            let conn = db.state.conn.lock().unwrap();
+            db::set_setting(&conn, "restaurant", "currency", "EUR").unwrap();
+            conn.execute(
+                "UPDATE orders SET plugin='efood', external_plugin_order_id='ext-platform',
+                   currency='EUR', ghost_metadata=?1,
+                   staff_shift_id=(SELECT id FROM staff_shifts WHERE terminal_id=?2 AND status='active' LIMIT 1)
+                 WHERE id=?3",
+                rusqlite::params![json!({"food_delivery":{"payment_method":"cash","prepaid":false,"delivery_provider":"platform_delivery"}}).to_string(), TERMINAL, TOMIKRO_ORDER],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions
+                   (id, staff_shift_id, cashier_id, branch_id, terminal_id, currency, opening_amount, opening_amount_cents, total_cash_sales, total_cash_sales_cents, opened_at, created_at, updated_at)
+                 SELECT 'platform-drawer', id, staff_id, 'fixture-branch', ?1, 'EUR', 100, 10000, 14.50, 1450, datetime('now'), datetime('now'), datetime('now')
+                 FROM staff_shifts WHERE terminal_id=?1 AND status='active' LIMIT 1",
+                [TERMINAL],
+            ).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_platform_settlement BEFORE INSERT ON order_payments
+                 WHEN NEW.method = 'other'
+                   AND (SELECT status FROM order_payments WHERE id='fixture-payment') = 'voided'
+                   AND (SELECT COUNT(*) FROM payment_adjustments) = 1
+                 BEGIN SELECT RAISE(ABORT,'settlement write interrupted'); END;",
+            )
+            .unwrap();
+        }
+        let state = std::sync::Arc::new(sync::SyncState::new());
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let request = |snapshot: &str| {
+            json!({
+                "actionId":"repairPlatformSettlementMismatch", "issueCode":"platform_settlement_mismatch",
+                "entityType":"order", "entityId":TOMIKRO_ORDER, "orderId":TOMIKRO_ORDER,
+                "snapshotPointId":snapshot, "routeTarget":{"screen":"orderPayment","orderId":TOMIKRO_ORDER}
+            })
+        };
+        let snapshot = recovery::create_pre_recovery_action_snapshot(&db.state).unwrap();
+        let error = recovery_execute_action_core(
+            Some(request(&snapshot.id)),
+            false,
+            &db.state,
+            &auth,
+            &state,
+            &cancellation,
+            &NoopTerminalEventSink,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "EDIT_LOCAL_STORAGE_CONSTRAINT");
+
+        let reopened = db::DbState {
+            conn: std::sync::Mutex::new(Connection::open(&db.state.db_path).unwrap()),
+            db_path: db.state.db_path.clone(),
+        };
+        let read = |conn: &Connection| {
+            conn.query_row(
+            "SELECT (SELECT status FROM order_payments WHERE id='fixture-payment'),
+                    (SELECT total_cash_sales_cents FROM cash_drawer_sessions WHERE id='platform-drawer'),
+                    (SELECT COUNT(*) FROM payment_adjustments),
+                    (SELECT COUNT(*) FROM order_payments WHERE method='other')",
+            [], |row| Ok((row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,i64>(3)?)),
+        ).unwrap()
+        };
+        {
+            let conn = reopened.conn.lock().unwrap();
+            assert_eq!(read(&conn), ("completed".into(), 1450, 0, 0));
+            conn.execute_batch("DROP TRIGGER fail_platform_settlement;")
+                .unwrap();
+        }
+        let snapshot = recovery::create_pre_recovery_action_snapshot(&reopened).unwrap();
+        let result = recovery_execute_action_core(
+            Some(request(&snapshot.id)),
+            false,
+            &reopened,
+            &auth,
+            &state,
+            &cancellation,
+            &NoopTerminalEventSink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["verification"]["status"], "passed");
+        assert_eq!(result["changedIds"].as_array().unwrap().len(), 3);
+        assert!(recovery_execute_action_core(
+            Some(request(&snapshot.id)),
+            false,
+            &reopened,
+            &auth,
+            &state,
+            &cancellation,
+            &NoopTerminalEventSink
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            read(&reopened.conn.lock().unwrap()),
+            ("voided".into(), 0, 1, 1)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn health_invalid_removal_rechecks_preview_and_preserves_an_unselected_sibling() {
+        let _keys = crate::tests::fake_keyring::install_empty();
+        let _gate = crate::support::critical_op::install_test_gate();
+        let db = crate::tests::harness::TestDb::open();
+        {
+            let conn = db.state.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "terminal_id", TERMINAL).unwrap();
+        }
+        let auth = auth::AuthState::new();
+        auth::tests::login_as_admin(&db.state, &auth);
+        auth::tests::insert_active_shift(&db.state, TERMINAL, "cashier");
+        auth::tests::grant_cash_drawer_for_test(&auth);
+        let ids = {
+            let conn = db.state.conn.lock().unwrap();
+            let insert = |key: &str| {
+                conn.execute("INSERT INTO sync_queue(entity_type, entity_id, operation, payload, idempotency_key, status)
+                              VALUES ('order','missing-order','UPDATE','{}',?1,'pending')", [key]).unwrap();
+                conn.last_insert_rowid()
+            };
+            [insert("preview-row"), insert("sibling-row")]
+        };
+        let preview = sync::validate_pending_orders(&db.state).unwrap();
+        assert_eq!(preview["invalid_orders"][0]["queue_id"], ids[0]);
+        let snapshot = recovery::create_pre_recovery_action_snapshot(&db.state).unwrap();
+        let request = json!({"actionId":"removeInvalidOrders", "issueCode":"invalid_orders_pending",
+            "snapshotPointId":snapshot.id, "params":{"invalidRows":[[ids[0],"missing-order"]]}});
+        {
+            let conn = db.state.conn.lock().unwrap();
+            conn.execute("INSERT INTO orders(id,items,created_at,updated_at) VALUES('missing-order','[]',datetime('now'),datetime('now'))", []).unwrap();
+        }
+        let state = std::sync::Arc::new(sync::SyncState::new());
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let failed = recovery_execute_action_core(
+            Some(request.clone()),
+            false,
+            &db.state,
+            &auth,
+            &state,
+            &cancellation,
+            &NoopTerminalEventSink,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failed.to_string(), "INVALID_ORDER_PREVIEW_CHANGED");
+        {
+            let conn = db.state.conn.lock().unwrap();
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_queue WHERE entity_id='missing-order'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 2);
+            conn.execute("DELETE FROM orders WHERE id='missing-order'", [])
+                .unwrap();
+        }
+        let result = recovery_execute_action_core(
+            Some(request),
+            false,
+            &db.state,
+            &auth,
+            &state,
+            &cancellation,
+            &NoopTerminalEventSink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["changedIds"], json!([ids[0].to_string()]));
+        let conn = db.state.conn.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT id FROM sync_queue WHERE entity_id='missing-order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, ids[1]);
+        let (archived_id, payload, snapshot_id): (i64, String, String) = conn.query_row(
+            "SELECT json_extract(discarded_payload,'$.queue_id'), json_extract(discarded_payload,'$.payload'),
+                    json_extract(discarded_payload,'$.snapshot_point_id')
+             FROM conflict_audit_log WHERE resolution='invalid_order_send_removed'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(
+            (archived_id, payload, snapshot_id),
+            (ids[0], "{}".into(), snapshot.id)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn health_exact_parity_retry_keeps_parked_and_legacy_siblings() {
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let server = crate::tests::fake_http::MockServer::new(r#"{"success":true}"#);
+        let _keys = crate::tests::fake_keyring::install_seeded([
+            (
+                "pos_api_key",
+                json!({"key":"PRIVATE_KEY","tid":"terminal-recovery","url":server.url.clone()})
+                    .to_string(),
+            ),
+            ("terminal_id", "terminal-recovery".to_string()),
+            ("admin_dashboard_url", server.url.clone()),
+        ]);
+        let db = crate::tests::harness::TestDb::open();
+        let selected = {
+            let conn = db.state.conn.lock().unwrap();
+            seed_failed_recovery_row(&conn, "same-customer", "customers", 100);
+            let selected: String = conn
+                .query_row(
+                    "SELECT id FROM parity_sync_queue WHERE record_id='same-customer'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            conn.execute(
+                "INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,created_at,status,error_message,module_type)
+                   SELECT 'parked-sibling',table_name,record_id,'UPDATE',data,organization_id,created_at,'conflict','UNKNOWN_CONFLICT_REVIEW',module_type
+                     FROM parity_sync_queue WHERE id=?1",
+                [&selected],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue(entity_type,entity_id,operation,payload,idempotency_key,status,retry_count)
+                 VALUES('customer','same-customer','UPDATE','{}','legacy-sibling','failed',6)",
+                [],
+            ).unwrap();
+            selected
+        };
+        let health = crate::diagnostics::get_system_health(&db.state).unwrap();
+        let blockers = health["syncBlockerDetails"].as_array().unwrap();
+        let selected_blocker = blockers
+            .iter()
+            .find(|row| row["queueItemId"] == selected)
+            .unwrap();
+        let parked = blockers
+            .iter()
+            .find(|row| row["queueItemId"] == "parked-sibling")
+            .unwrap();
+        assert_eq!(selected_blocker["queue"], "parity_sync_queue");
+        assert_eq!(parked["entityId"], selected_blocker["entityId"]);
+        let snapshot = recovery::create_pre_recovery_action_snapshot(&db.state).unwrap();
+        let request = |blocker: &Value| {
+            json!({
+                "actionId":"retryParityItem", "issueId":format!("sync-blocker-parity_sync_queue:{}", blocker["queueItemId"].as_str().unwrap()),
+                "entityType":blocker["entityType"], "entityId":blocker["entityId"], "snapshotPointId":snapshot.id,
+                "params":{"queueOwner":blocker["queue"],"sampleItemId":blocker["queueItemId"],"queueStatus":blocker["queueStatus"]}
+            })
+        };
+        let auth = auth::AuthState::new();
+        let state = std::sync::Arc::new(sync::SyncState::new());
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let refused = recovery_execute_action_core(
+            Some(request(parked)),
+            false,
+            &db.state,
+            &auth,
+            &state,
+            &cancellation,
+            &NoopTerminalEventSink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused["success"], false);
+        assert_eq!(refused["targetOutcome"], "refused");
+        assert_eq!(server.count(), 0);
+        let sent = recovery_execute_action_core(
+            Some(request(selected_blocker)),
+            false,
+            &db.state,
+            &auth,
+            &state,
+            &cancellation,
+            &NoopTerminalEventSink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sent["changedIds"], json!([selected]));
+        assert_eq!(sent["targetOutcome"], "sent");
+        assert_eq!(server.count(), 1);
+        let conn = db.state.conn.lock().unwrap();
+        let (parked, legacy): (String, i64) = conn
+            .query_row(
+                "SELECT (SELECT status FROM parity_sync_queue WHERE id='parked-sibling'),
+                    (SELECT retry_count FROM sync_queue WHERE idempotency_key='legacy-sibling')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((parked, legacy), ("conflict".into(), 6));
     }
 
     const CORRECTION_ORDER: &str = "11111111-1111-4111-8111-111111111111";
@@ -2709,7 +3627,7 @@ mod tests {
             &tokio_util::sync::CancellationToken::new(), &NoopTerminalEventSink,
         ).await.unwrap_err();
         assert!(
-            matches!(error, auth::GuardedCommandError::Structured(ref error) if error.code == "UNAUTHORIZED")
+            matches!(error, auth::GuardedCommandError::Structured(ref error) if error.code == "AUTH_SESSION_REQUIRED")
         );
         assert_eq!(
             before,

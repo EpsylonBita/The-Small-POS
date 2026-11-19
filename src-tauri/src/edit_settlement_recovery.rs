@@ -460,6 +460,18 @@ pub(crate) fn valid_edit_detail_hash(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn is_edit_approval_code(code: &str) -> bool {
+    matches!(
+        code,
+        "UNAUTHORIZED"
+            | "AUTH_SESSION_REQUIRED"
+            | "AUTH_SESSION_EXPIRED"
+            | "AUTH_SHIFT_REQUIRED"
+            | "AUTH_PIN_WRONG"
+            | "AUTH_LOCKED_OUT"
+    ) || crate::diagnostics::is_runtime_error_code(code)
+}
+
 /// The fixed code at the head of a refusal (`EDIT_X: detail` → `EDIT_X`).
 pub(crate) fn refusal_code(error: &str) -> &str {
     // Money-action approval errors carry required scope/approval metadata.
@@ -470,7 +482,7 @@ pub(crate) fn refusal_code(error: &str) -> &str {
         }
         if let Some(code) = payload["code"]
             .as_str()
-            .filter(|code| crate::diagnostics::is_runtime_error_code(code))
+            .filter(|code| is_edit_approval_code(code))
         {
             if let Some(start) = error.find(code) {
                 return &error[start..start + code.len()];
@@ -481,7 +493,7 @@ pub(crate) fn refusal_code(error: &str) -> &str {
         .find(|ch: char| !(ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_'))
         .unwrap_or(error.len());
     let code = &error[..end];
-    if crate::diagnostics::is_runtime_error_code(code) {
+    if is_edit_approval_code(code) {
         code
     } else {
         // Recognize the historic Tomikro refusals as well as new source codes.
@@ -504,11 +516,7 @@ pub(crate) fn refusal_code(error: &str) -> &str {
 pub(crate) fn normalize_edit_error(error: String) -> String {
     if serde_json::from_str::<Value>(&error)
         .ok()
-        .and_then(|payload| {
-            payload["code"].as_str().map(|code| {
-                code == "UNAUTHORIZED" || crate::diagnostics::is_runtime_error_code(code)
-            })
-        })
+        .and_then(|payload| payload["code"].as_str().map(is_edit_approval_code))
         == Some(true)
     {
         return error;
@@ -854,6 +862,10 @@ mod refusal_contract_tests {
             "NO_APPROVER_IN_STORE",
             "APPROVALS_PAUSED",
             "AUTH_LOCKED_OUT",
+            "AUTH_SESSION_REQUIRED",
+            "AUTH_SESSION_EXPIRED",
+            "AUTH_SHIFT_REQUIRED",
+            "AUTH_PIN_WRONG",
             "MANAGER_PIN_REFUSED",
             "UNAUTHORIZED",
         ] {

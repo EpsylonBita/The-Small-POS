@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RecoveryActionDescriptor, RecoveryIssue } from '../../../../lib';
 import { acquireRecoveryAction, executeHealthRecoveryAction, SupportRemedyRunner, buildRecoveryActionRequest, type OnsiteDecision, type SupportRunnerOptions } from '../SupportRemedyRunner';
 
-const mocks = vi.hoisted(() => ({ snapshot: vi.fn(), execute: vi.fn(), log: vi.fn(), on: vi.fn(), off: vi.fn() }));
-vi.mock('../../../../lib', () => ({ getBridge: () => ({ recovery: { createPreActionSnapshot: mocks.snapshot, executeAction: mocks.execute, recordActionLog: mocks.log } }), onEvent: mocks.on, offEvent: mocks.off }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), snapshot: vi.fn(), execute: vi.fn(), log: vi.fn(), on: vi.fn(), off: vi.fn() }));
+vi.mock('../../../../lib', () => ({ getBridge: () => ({ invoke: mocks.invoke, recovery: { createPreActionSnapshot: mocks.snapshot, executeAction: mocks.execute, recordActionLog: mocks.log } }), onEvent: mocks.on, offEvent: mocks.off }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: mocks.on }));
 const action: RecoveryActionDescriptor = { id: 'repairPaymentTotalConflict', recipeId: 'payment-total-conflict.repair', recipeVersion: 1,
   labelKey: 'label', requiresSnapshot: true, safetyLevel: 'safe', requiresOnline: true, confirmationRequired: false };
@@ -21,6 +21,32 @@ function setup(overrides: Partial<SupportRunnerOptions> = {}) {
 beforeEach(() => { mocks.log.mockResolvedValue({ id: 'your-audit' }); mocks.on.mockResolvedValue(mocks.off); mocks.snapshot.mockResolvedValue({ id: 'your-snapshot' }); mocks.execute.mockResolvedValue({ success: true, requiresRefresh: true, verification: { status: 'pending' } }); });
 afterEach(() => vi.clearAllMocks());
 describe('remote Health execution', () => {
+  it.each([
+    ['order-customer-correction.resend', 'resendOrderCustomerCorrection'],
+    ['order-customer-correction.keep-server', 'keepServerOrderCustomerDetails'],
+  ] as const)('dispatches the exact native target for %s with or without an integrity export', async (recipeId, actionId) => {
+    const fresh = <T,>(content: T) => ({ status: 'fresh', at: new Date().toISOString(), age_ms: 0, content });
+    const unavailable = { status: 'unavailable', at: null, age_ms: null, content: null };
+    const notice = { queueId: 'your-native-correction', orderId: 'your-order', orderNumber: '1',
+      kind: 'customer_correction_refused', state: 'refused', actions: [actionId] };
+    for (const integrity of [unavailable, fresh({ valid: true, issues: [] })]) {
+      mocks.invoke.mockResolvedValue({
+        systemHealth: fresh({ orderNotices: [{ ...notice, queueId: 'misleading-health-row' }],
+          syncBacklog: {}, syncBacklogStatus: 'ok', printerStatus: { configured: false } }),
+        integrity, financialItems: fresh([]), parityItems: fresh([]), orderNotices: fresh([notice]),
+      });
+      const { runner, onsite, ipc } = setup({ matches: undefined });
+      await runner.run({ ...input, recipe_id: recipeId, target_key: notice.queueId });
+      expect(onsite).toHaveBeenCalledOnce();
+      expect(mocks.execute).toHaveBeenLastCalledWith(expect.objectContaining({
+        actionId, entityId: notice.queueId, orderId: notice.orderId,
+        params: expect.objectContaining({ queueId: notice.queueId }),
+      }));
+      expect(ipc).toHaveBeenCalledWith('support_remedy_result', expect.objectContaining({ onsite: 'confirmed' }));
+      vi.clearAllMocks();
+    }
+  });
+
   it('refuses reconnect from the real shipped matcher without executing an action', async () => {
     const { runner, ipc } = setup({ matches: async () => (await import('../SupportMatcherBridge')).matchHealthRemedies({ systemHealth: null }, false, key => key) });
     await runner.run({ ...input, recipe_id: 'reconnect' });

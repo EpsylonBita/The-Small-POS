@@ -59,6 +59,13 @@ async function mounted() {
 }
 
 describe('renderer support IPC contract', () => {
+  it('requests receipt labels on banner polls', async () => {
+    await mounted();
+    expect(calls('support_banner_state')).toContainEqual([
+      'support_banner_state', { supports_payment_receipt_label: true },
+    ]);
+  });
+
   it('normalizes native banner names and denies connecting without heartbeat/permission metadata', () => {
     const parsed = SupportBannerSnapshotSchema.parse({ state: 'paused', operator_display_name: 'Operator', remaining_ms: 1000 });
     expect(parsed.state).toBe('pausedOffline');

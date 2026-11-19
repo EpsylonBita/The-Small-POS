@@ -72,16 +72,7 @@ pub fn save_post(store: &Connection, snapshot: &str, post: &Value) -> Result<(),
     Ok(())
 }
 
-pub fn availability(app: &tauri::AppHandle) -> bool {
-    let Some(state) = app.try_state::<std::sync::Arc<crate::sync::SyncState>>() else {
-        return false;
-    };
-    let Some(db) = app.try_state::<crate::db::DbState>() else {
-        return false;
-    };
-    let (v, age) = crate::sync::support_availability_with_age(&db.db_path, &state);
-    availability_ok(&v, age)
-}
+#[cfg(test)]
 pub fn availability_ok(v: &Value, age: Option<u64>) -> bool {
     v["available"] == true
         && v["min_protocol_version"].as_u64().is_some_and(|n| n <= 1)
@@ -117,6 +108,7 @@ pub fn validate(c: &Command, admitted: bool) -> Result<(), &'static str> {
             return Err("POLICY_REFUSED");
         }
     }
+    super::confirmed_payment_receipt::validate(c)?;
     if c.payload.get("proposal").is_some() {
         super::confirmed_sql::params_of(&c.payload["proposal"]).map_err(|_| "POLICY_REFUSED")?;
         let sql = c.payload["proposal"]["sql"]
@@ -135,11 +127,11 @@ pub fn current(app: &tauri::AppHandle, rt: &Runtime, c: &Command) -> Result<(), 
     if !rt.banner_ready.load(Ordering::Acquire) || !super::dispatch::window_visible(app) {
         return Err("TILL_PAUSED".into());
     }
-    if !availability(app) {
-        return Err("FEATURE_DISABLED".into());
-    }
     let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
     let s = core.session.as_ref().ok_or("SESSION_ENDED")?;
+    if !core.confirmed_authority_fresh(Instant::now()) {
+        return Err("FEATURE_DISABLED".into());
+    }
     delivery::recheck(c, &s.admission, &core.clock, Instant::now()).map_err(str::to_string)?;
     let pinned:bool=core.executor.db.conn.query_row("SELECT EXISTS(SELECT 1 FROM support_confirmed_sessions WHERE session_id=? AND consent_version=? AND mode='founder_conversation')",params![c.session_id,CONSENT_VERSION],|r|r.get(0)).map_err(guards::error)?;
     if !pinned {
@@ -168,7 +160,51 @@ pub fn event(store: &Connection, c: &Command, name: &str, now: i64) -> Result<()
             if key == "reason" { 200 } else { 300 },
         )
     };
-    let details = json!({"event":name,"command_id":c.command_id,"session_id":c.session_id,"explanation":safe("explanation"),"reason":safe("reason"),"payload_sha256":c.payload_sha256,"at":clock::iso(now)});
+    let mut details = json!({"event":name,"command_id":c.command_id,"session_id":c.session_id,"explanation":safe("explanation"),"reason":safe("reason"),"payload_sha256":c.payload_sha256,"at":clock::iso(now)});
+    let action = &c.payload["action"];
+    if super::confirmed_payment_receipt::handles(c) {
+        let input = &action["inputs"];
+        if ["order_id", "server_payment_id"].iter().all(|key| {
+            input[*key]
+                .as_str()
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+        }) {
+            details["label"] = json!({"key":"restorePaymentReceiptMirror","values":{
+                "order_id":input["order_id"], "server_payment_id":input["server_payment_id"]
+            }});
+        }
+    } else if action["action_id"] == "remedy.run.v1" {
+        if let Some(recipe) = action["inputs"]["recipe"]["id"]
+            .as_str()
+            .and_then(crate::order_notice_recovery::CorrectionRecipe::from_id)
+        {
+            let key = if recipe == crate::order_notice_recovery::CorrectionRecipe::Resend {
+                "resendCustomerCorrection"
+            } else {
+                "keepServerCustomerDetails"
+            };
+            if let Some(id) = action["inputs"]["order_id"]
+                .as_str()
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            {
+                details["label"] = json!({"key":key,"values":{"order_id":id}});
+            }
+        }
+    } else if let Some(key) = match action["action_id"].as_str() {
+        Some("queue.retry_row.v2") => Some("retryParkedRow"),
+        Some("queue.set_aside.v2") => Some("setAsideParkedGroup"),
+        Some("queue.return_to_queue.v2") => Some("returnParkedGroup"),
+        _ => None,
+    } {
+        if let Some(id) = action["inputs"]["queue_id"].as_str().filter(|id| {
+            (1..=128).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+        }) {
+            details["label"] = json!({"key":key,"values":{"queue_id":id}});
+        }
+    }
     store.execute("INSERT INTO support_confirmed_events(session_id,command_id,event,details_json,created_at) VALUES(?1,?2,?3,?4,?5)",params![c.session_id,c.command_id,name,details.to_string(),clock::iso(now)]).map_err(guards::error)?;
     Ok(())
 }
@@ -227,6 +263,42 @@ pub fn run(
         return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
     }
     let live = app.state::<crate::db::DbState>().db_path.clone();
+    if super::confirmed_payment_receipt::handles(c) {
+        let state = app.state::<crate::db::DbState>();
+        let read = Connection::open_with_flags(&live, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(guards::error)?;
+        let scope = super::identity::observed_session(&read, &live, &c.session_id)?;
+        let (now, expires) = {
+            let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
+            let session = core.session.as_ref().ok_or("SESSION_ENDED")?;
+            (
+                core.now(),
+                clock::parse(&c.expires_at)?.min(clock::parse(&session.admission.max_expires_at)?),
+            )
+        };
+        drop(read);
+        let deadline = Instant::now()
+            + std::time::Duration::from_millis(expires.saturating_sub(now).max(0) as u64);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _watch = watch_authority(app, c, cancelled.clone())?;
+        return super::confirmed_payment_receipt::run(
+            store,
+            &live,
+            c,
+            &scope,
+            &state,
+            || {
+                if !rt.banner_ready.load(Ordering::Acquire) || cancelled.load(Ordering::Acquire) {
+                    return Err("SESSION_ENDED".into());
+                }
+                if Instant::now() >= deadline {
+                    return Err("COMMAND_EXPIRED".into());
+                }
+                Ok(())
+            },
+            now,
+        );
+    }
     if c.payload["action"]["action_id"] == "recovery.undo_snapshot.v1" {
         return super::confirmed_restore::run(app, rt, store, &live, c);
     }
@@ -244,16 +316,22 @@ pub fn run(
     )?;
     let scope = {
         let core = rt.core.lock().map_err(|_| "INTERNAL_ERROR")?;
-        super::identity::for_session(&db, &core, &c.session_id)?
+        let scope = super::identity::for_session(&db, &core, &c.session_id)?;
+        if super::confirmed_recovery::handles(c)
+            && super::identity::observed_session(&db, &live, &c.session_id)? != scope
+        {
+            return Err("PAYLOAD_DRIFT".into());
+        }
+        scope
     };
     drop(db);
     let now = { rt.core.lock().map_err(|_| "INTERNAL_ERROR")?.now() };
     if c.payload["step"] == "sql_dry_run" {
         return super::confirmed_sql::dry(store, &live, c, &scope, now, &permit);
     }
+    let read_watch = watch_authority(app, c, permit.cancelled.clone())?;
     let prepared = if super::confirmed_state_actions::handles(c) {
         current(app, rt, c)?;
-        let _watch = watch_authority(app, c, permit.cancelled.clone())?;
         Some(
             super::confirmed_state_actions::prepare(app, c, &live, &scope, &permit)
                 .map_err(super::confirmed_state_actions::failure)?,
@@ -271,6 +349,35 @@ pub fn run(
         if permit.is_cancelled() || handoff.is_cancelled() {
             return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
         }
+        let correction = if c.payload["action"]["action_id"] == "remedy.run.v1" {
+            let inputs = &c.payload["action"]["inputs"];
+            let db = crate::db::DbState {
+                conn: std::sync::Mutex::new(crate::order_notice_recovery::observer_connection(
+                    &live, false,
+                )?),
+                db_path: live.clone(),
+            };
+            Some(
+                super::confirmed_recovery::prepare_correction(
+                    &db,
+                    &scope,
+                    inputs["target_key"].as_str().ok_or("INVALID_INPUT")?,
+                    inputs["order_id"].as_str().ok_or("INVALID_INPUT")?,
+                    &permit,
+                    || {
+                        current(app, rt, c)?;
+                        if permit.is_cancelled() || handoff.is_cancelled() {
+                            return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
+                        }
+                        Ok(())
+                    },
+                )
+                .map_err(super::confirmed_recovery::refusal)?,
+            )
+        } else {
+            None
+        };
+        drop(read_watch);
         drop(permit);
         let writer = gate.try_begin_support(true, None).map_err(str::to_string)?;
         current(app, rt, c)?;
@@ -308,7 +415,12 @@ pub fn run(
                 super::confirmed_sql::execute(store, &live, c, &scope, now, &writer, &snap, recheck)
             }
             Some("action") => {
-                let result = if let Some(prepared) = prepared {
+                let result = if super::confirmed_recovery::handles(c) {
+                    super::confirmed_recovery::run(
+                        store, &live, c, &scope, now, &writer, &snap, correction, recheck,
+                    )
+                    .map_err(super::confirmed_recovery::refusal)
+                } else if let Some(prepared) = prepared {
                     super::confirmed_state_actions::run(
                         store, &live, c, &scope, now, &writer, &snap, prepared, recheck,
                     )

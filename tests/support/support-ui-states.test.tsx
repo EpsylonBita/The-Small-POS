@@ -67,14 +67,16 @@ register('support surface and selection tokens meet 4.5:1 in both themes', () =>
 register('one shared session owner mounts the banner and direct Health action', () => {
   const app = readFileSync('src/renderer/App.tsx', 'utf8');
   const health = readFileSync('src/renderer/components/SyncStatusIndicator.tsx', 'utf8');
+  const window = readFileSync('src/renderer/components/recovery/TillHealthWindow.tsx', 'utf8');
+  const support = readFileSync('src/renderer/components/recovery/TillHealthSupport.tsx', 'utf8');
   // Phase 3 put the restore notice and interaction host inside the same single provider.
   assert.equal(app.split('<SupportSessionProvider>').length - 1, 1);
   assert.match(app, /<SupportSessionProvider>(?:(?!<\/SupportSessionProvider>).)*<AppContent \/>(?:(?!<\/SupportSessionProvider>).)*<\/SupportSessionProvider>/);
   assert.ok(app.includes('<SupportBanner />'));
-  // Founder, 04/11/2026: «Σύνδεση υποστήριξης», its code and «Τέλος» sit inside «Ενέργειες υποστήριξης»,
-  // which opens by itself while support is live; nothing support-related above «Χρειάζεται έλεγχο».
-  assert.doesNotMatch(health, /overflow-y-auto px-5 py-5 sm:px-6">\s*<SupportConnectAction \/>/);
-  assert.match(health, /<details className=\{cn\('pos-frost[^']*', liquidGlassModalTone\('neutral'\)\)\}\s+open=\{supportActionsOpen\}[\s\S]*?<summary[^>]*>\{t\('sync\.healthModal\.sections\.supportActions'\)\}<\/summary>\s*<div[^>]*>\s*<SupportConnectAction \/>/);
-  assert.equal(health.split('<SupportConnectAction />').length - 1, 1);
-  assert.match(health, /useEffect\(\(\) => \{\s*if \(supportLive\) \{ setSupportActionsOpen\(true\); \}/);
+  assert.match(health, /onAskSupport=\{\(\) => \{ void supportSession\?\.start\(\); \}\}/);
+  assert.match(health, /supportFlowOpen=\{!focus\?\.orderId && supportLive\}/);
+  assert.match(window, /openSupport\(\); props\.onAskSupport\(\)/);
+  assert.match(window, /supportOpen && props\.support/);
+  assert.doesNotMatch(window, /<SupportConnectAction/);
+  assert.equal(support.split('<SupportConnectAction hideLauncher />').length - 1, 1);
 });

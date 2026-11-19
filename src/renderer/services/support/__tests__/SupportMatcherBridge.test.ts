@@ -39,9 +39,14 @@ describe('Health-owned remedy matching', () => {
       integrity: { status, at: '2026-11-02T00:00:00Z', age_ms: 360_000, content: status === 'stale' ? { valid: true, issues: [] } : null } });
     const matches = await readHealthRemedyMatches(key => key);
     expect(matches.every(entry => entry.matches_now === 'not_applicable' && entry.target_count === 0 && entry.targets.length === 0)).toBe(true);
-    expect(matches[0]?.observation).toMatchObject({ status, inputs: { integrity: { status, age_ms: 360_000 } } });
-    expect(matches[0]?.explanation).toContain(`"status":"${status}"`);
-    expect(matches[0]?.explanation).toContain('"age_ms":360000');
+    const generic = matches.find(match => match.id === 'customer-address-default-conflict.repair');
+    expect(generic?.observation).toMatchObject({ status, inputs: { integrity: { status, age_ms: 360_000 } } });
+    expect(generic?.explanation).toContain(`"status":"${status}"`);
+    expect(generic?.explanation).toContain('"age_ms":360000');
+    const correction = matches.find(match => match.id === 'order-customer-correction.resend');
+    expect(correction?.observation).toEqual({ status: 'unavailable', inputs: {
+      orderNotices: { status: 'unavailable', at: null, age_ms: null },
+    } });
   });
   it('gets the three shipped Health actions from current Health observations and configured default printer', () => {
     const dispose = registerSupportHealthObservation({ problem: 'syncWaiting', realtime: 'disconnected', stale: false });

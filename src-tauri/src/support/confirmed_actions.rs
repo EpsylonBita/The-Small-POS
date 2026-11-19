@@ -17,7 +17,7 @@ use std::{
 fn field<'a>(v: &'a Value, k: &str) -> Result<&'a str, String> {
     v[k].as_str().ok_or("INVALID_INPUT".into())
 }
-fn row(c: &Connection, table: &str, id: &str) -> Result<Value, String> {
+pub(super) fn row(c: &Connection, table: &str, id: &str) -> Result<Value, String> {
     guards::rows(
         c,
         &format!("SELECT * FROM {} WHERE id=?", super::replica::quote(table)),
@@ -27,12 +27,26 @@ fn row(c: &Connection, table: &str, id: &str) -> Result<Value, String> {
     .next()
     .ok_or("POLICY_REFUSED".into())
 }
-fn payload_hash(r: &Value) -> String {
+pub(super) fn payload_hash(r: &Value) -> String {
     contracts::payload_hash(
         &json!({"id":r["id"],"table_name":r["table_name"],"record_id":r["record_id"],"operation":r["operation"],"organization_id":r["organization_id"],"data":r["data"],"entity_type":r["entity_type"],"entity_id":r["entity_id"],"payload":r["payload"]}),
     )
 }
 fn queue_scope(c: &Connection, r: &Value, scope: &Scope, financial: bool) -> Result<(), String> {
+    queue_scope_inner(c, r, scope, financial, false)
+}
+
+pub(super) fn parked_queue_scope(c: &Connection, r: &Value, scope: &Scope) -> Result<(), String> {
+    queue_scope_inner(c, r, scope, false, true)
+}
+
+fn queue_scope_inner(
+    c: &Connection,
+    r: &Value,
+    scope: &Scope,
+    financial: bool,
+    allow_parked: bool,
+) -> Result<(), String> {
     if !financial && r["organization_id"] != scope.organization_id {
         return Err("PROTECTED_RECORD".into());
     }
@@ -103,7 +117,8 @@ fn queue_scope(c: &Connection, r: &Value, scope: &Scope, financial: bool) -> Res
         if order["order_context"]
             .as_str()
             .is_some_and(|v| v.trim().eq_ignore_ascii_case("repair_settlement"))
-            || ["conflict", "processing"].contains(&order["sync_status"].as_str().unwrap_or(""))
+            || order["sync_status"] == "processing"
+            || (!allow_parked && order["sync_status"] == "conflict")
         {
             return Err("PROTECTED_RECORD".into());
         }
@@ -142,7 +157,7 @@ fn queue_scope(c: &Connection, r: &Value, scope: &Scope, financial: bool) -> Res
     }
     Ok(())
 }
-fn not_claimed(c: &Connection, id: &str) -> Result<(), String> {
+pub(super) fn not_claimed(c: &Connection, id: &str) -> Result<(), String> {
     let claimed:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_set_aside WHERE queue_id=? AND z_report_id IS NOT NULL)",[id],|r|r.get(0)).map_err(guards::error)?;
     if claimed {
         return Err("PROTECTED_RECORD".into());
@@ -216,7 +231,7 @@ pub fn run(
         .map_err(guards::error)?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")
         .map_err(guards::error)?;
-    permit.guard_connection(&conn, Instant::now() + Duration::from_secs(2));
+    permit.guard_connection(&conn, clock::monotonic_now() + Duration::from_secs(2));
     // Scope is re-resolved on this connection, never accepted from the command.
     if super::identity::local(&conn)? != *scope {
         return Err("PAYLOAD_DRIFT".into());
@@ -225,7 +240,7 @@ pub fn run(
 
     recheck()?;
     let post = std::cell::RefCell::new(None::<Value>);
-    let start = Instant::now();
+    let start = clock::monotonic_now();
     permit.guard_connection(&conn, start + Duration::from_millis(250));
     let db = crate::db::DbState {
         conn: std::sync::Mutex::new(conn),
@@ -351,10 +366,11 @@ pub fn run(
         };
         let conn = db.conn.lock().map_err(|_| "INTERNAL_ERROR")?;
         let tx = permit.begin_write(&conn)?;
+        let schema = guards::schema(&conn)?;
         if super::identity::local(&conn)? != *scope {
             return Err("PAYLOAD_DRIFT".into());
         }
-        if snapshot::watermarks_for_write(&conn, permit, start + Duration::from_millis(250))?
+        if snapshot::full_for_write(&conn, &schema, permit, start + Duration::from_millis(250))?
             != snap.full
         {
             return Err("PAYLOAD_DRIFT".into());
@@ -477,11 +493,11 @@ pub fn run(
                             return Err("PAYLOAD_DRIFT".into());
                         }
                     }
-                    crate::sync::retry_financial_queue_item(
-                        &db,
+                    let conn = db.conn.lock().map_err(|_| "INTERNAL_ERROR")?;
+                    crate::sync::retry_financial_queue_item_in_transaction(
+                        &conn,
                         queue_id.parse().map_err(|_| "INVALID_INPUT")?,
                     )?;
-                    let conn = db.conn.lock().map_err(|_| "INTERNAL_ERROR")?;
                     recheck()?;
                     let after = row(&conn, table, queue_id)?;
                     if payload_hash(&root) != payload_hash(&after) || after["status"] != "pending" {
@@ -526,7 +542,7 @@ pub fn run(
                 pending = true;
                 evidence = queue_evidence(&conn, table, queue_id, "due", false, &originals)?;
                 finish_tx(
-                    &conn, tx, c, now, permit, start, &recheck, &before, cap, &post,
+                    &conn, tx, c, now, permit, start, &recheck, &before, cap, &post, &schema,
                 )?;
                 affected = members;
             }
@@ -560,7 +576,7 @@ pub fn run(
                 store.execute("INSERT INTO support_confirmed_groups(root_id,session_id,command_id,members_json,returned_at) VALUES(?,?,?,?,NULL) ON CONFLICT(root_id) DO UPDATE SET session_id=excluded.session_id,command_id=excluded.command_id,members_json=excluded.members_json,returned_at=NULL",params![queue_id,c.session_id,c.command_id,serde_json::to_string(&members).map_err(|_|"INTERNAL_ERROR")?]).map_err(guards::error)?;
             }
             finish_tx(
-                &conn, tx, c, now, permit, start, &recheck, &before, cap, &post,
+                &conn, tx, c, now, permit, start, &recheck, &before, cap, &post, &schema,
             )?;
             affected = members;
             if !group {
@@ -610,7 +626,7 @@ pub fn run(
         post.borrow().as_ref().ok_or("OUTCOME_UNKNOWN")?,
     )?;
     Ok(
-        json!({"step":"action","kind":"untrusted_till_data","outcome":if pending{"pending"}else{"resolved"},"observation_time":clock::iso(now+start.elapsed().as_millis() as i64),"snapshot_id":snap.id,"snapshot":snapshot::metadata(store,&snap.id).map_err(|_|"OUTCOME_UNKNOWN")?,"affected_ids":affected,"changed_rows":changed,"verification":{"fresh":true,"matches_expected":true,"sync":if pending{"pending"}else{"not_applicable"}},"evidence":evidence,"undo":{"kind":if group{"set_aside_group"}else{"snapshot"},"reference":if group{input["queue_id"].clone()}else{json!(snap.id)},"reason":null}}),
+        json!({"step":"action","kind":"untrusted_till_data","outcome":if pending{"pending"}else{"resolved"},"observation_time":clock::iso(now+clock::monotonic_now().duration_since(start).as_millis() as i64),"snapshot_id":snap.id,"snapshot":snapshot::metadata(store,&snap.id).map_err(|_|"OUTCOME_UNKNOWN")?,"affected_ids":affected,"changed_rows":changed,"verification":{"fresh":true,"matches_expected":true,"sync":if pending{"pending"}else{"not_applicable"}},"evidence":evidence,"undo":{"kind":if group{"set_aside_group"}else{"snapshot"},"reference":if group{input["queue_id"].clone()}else{json!(snap.id)},"reason":null}}),
     )
 }
 pub(super) fn finish_tx(
@@ -624,13 +640,14 @@ pub(super) fn finish_tx(
     before: &Effects,
     cap: u64,
     post: &std::cell::RefCell<Option<Value>>,
+    schema: &[guards::Table],
 ) -> Result<(), String> {
     changes(conn, before, cap)?;
     recheck()?;
     if permit.is_cancelled() {
         return Err("PREEMPTED_BY_CRITICAL_OPERATION".into());
     }
-    if start.elapsed() > Duration::from_millis(250) {
+    if clock::monotonic_now().duration_since(start) > Duration::from_millis(250) {
         return Err("QUERY_TIMEOUT".into());
     }
     conn.execute(
@@ -638,8 +655,9 @@ pub(super) fn finish_tx(
         params![c.command_id, clock::iso(now)],
     )
     .map_err(guards::error)?;
-    *post.borrow_mut() = Some(snapshot::watermarks_for_write(
+    *post.borrow_mut() = Some(snapshot::full_for_write(
         conn,
+        schema,
         permit,
         start + Duration::from_millis(250),
     )?);

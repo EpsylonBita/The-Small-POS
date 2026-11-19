@@ -11,6 +11,8 @@ export interface ApprovalErrorPayload extends PrivilegedActionErrorPayload {
 const KNOWN_PRIVILEGED_ERROR_CODES = new Set([
   'UNAUTHORIZED', 'REAUTH_REQUIRED', 'NO_APPROVER_IN_STORE', 'APPROVALS_PAUSED',
   'AUTH_LOCKED_OUT', 'MANAGER_PIN_REFUSED',
+  'AUTH_SESSION_REQUIRED', 'AUTH_SESSION_EXPIRED', 'AUTH_SHIFT_REQUIRED',
+  'AUTH_PIN_WRONG', 'AUTH_CONFIRMATION_CANCELLED', 'AUTH_GRANT_EXPIRED', 'AUTH_PERMISSION_REQUIRED',
 ])
 
 const normalizeCode = (value: unknown): string | null => {
@@ -95,13 +97,14 @@ const parseFromText = (
     // Ignore invalid JSON and fall back to pattern parsing.
   }
 
-  const match = trimmed.match(/\b(REAUTH_REQUIRED|UNAUTHORIZED)\b[:\s-]*(.*)$/i)
-  if (!match) {
+  const match = trimmed.match(/^([A-Z_]+)\b[:\s-]*(.*)$/i)
+  const code = normalizeCode(match?.[1])
+  if (!match || !code) {
     return null
   }
 
   return {
-    code: match[1].toUpperCase(),
+    code,
     scope: fallbackScope,
     reason: match[2]?.trim() || undefined,
     ttlSeconds: null,
@@ -165,7 +168,43 @@ export const extractPrivilegedActionError = (
   return null
 }
 
-export const getErrorMessage = (error: unknown, fallback: string): string => {
+export function isPrivilegedShiftRequired(error: unknown): boolean {
+  const payload = extractPrivilegedActionError(error)
+  return payload?.code === 'AUTH_SHIFT_REQUIRED' ||
+    (payload?.code === 'UNAUTHORIZED' && /shift/i.test(payload.reason ?? '')) ||
+    /cashier or manager shift required/i.test(error instanceof Error ? error.message : String(error))
+}
+
+export function isPrivilegedConfirmationCancelled(error: unknown): boolean {
+  return extractPrivilegedActionError(error)?.code === 'AUTH_CONFIRMATION_CANCELLED' ||
+    (error instanceof Error && error.message === 'Privileged action confirmation cancelled')
+}
+
+type Translate = (key: string, options?: Record<string, unknown>) => unknown
+
+export function privilegedActionFeedbackKey(error: unknown): string | undefined {
+  const payload = extractPrivilegedActionError(error)
+  if (isPrivilegedShiftRequired(error)) return 'orderSyncNotice.shiftRequired'
+  switch (payload?.code) {
+    case 'UNAUTHORIZED':
+      if (payload.reason === 'Active session required') return 'orderSyncNotice.signInAgain'
+      break
+    case 'AUTH_SESSION_REQUIRED': return 'orderSyncNotice.signInAgain'
+    case 'AUTH_SESSION_EXPIRED': return 'orderSyncNotice.sessionExpired'
+    case 'AUTH_PIN_WRONG': return 'login.errors.invalidPin'
+    case 'AUTH_LOCKED_OUT': return 'orderSyncNotice.pinLocked'
+  }
+}
+
+export function privilegedActionFeedback(error: unknown, t: Translate): string | undefined {
+  const key = privilegedActionFeedbackKey(error)
+  return key ? String(t(key)) : undefined
+}
+
+export const getErrorMessage = (error: unknown, fallback: string, t?: Translate): string => {
+  const feedback = t && privilegedActionFeedback(error, t)
+  if (feedback) return feedback
+
   const privilegedError = extractPrivilegedActionError(error)
   if (privilegedError?.reason) {
     return privilegedError.reason

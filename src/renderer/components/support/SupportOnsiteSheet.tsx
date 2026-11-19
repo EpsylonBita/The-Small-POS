@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { z } from 'zod';
 import { getBridge } from '../../../lib';
 import { useSupportSession } from '../../hooks/useSupportSession';
+import { isPrivilegedConfirmationCancelled, privilegedActionFeedback } from '../../utils/privileged-actions';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import { listenSupportEvent, OnsiteRequestSchema, SupportRemedyRunner, type OnsiteDecision } from '../../services/support/SupportRemedyRunner';
 import { SupportOnsiteChip, supportButtonClass, supportSelectedClass } from './SupportOnsiteChip';
@@ -23,7 +24,7 @@ export const TierThreeOnsiteRequestSchema = OnsiteRequestSchema.extend({
 type OnsiteRequest = z.infer<typeof TierThreeOnsiteRequestSchema>;
 
 export function SupportOnsiteSheet({ request, deferred, canConfirm, busy = false, failed = false, onShown, onDecision }: {
-  request: OnsiteRequest; deferred: boolean; canConfirm: boolean; busy?: boolean; failed?: boolean;
+  request: OnsiteRequest; deferred: boolean; canConfirm: boolean; busy?: boolean; failed?: boolean | string;
   onShown(id: string): void; onDecision(decision: OnsiteDecision): void;
 }) {
   const { t } = useTranslation();
@@ -81,7 +82,7 @@ export function SupportOnsiteSheet({ request, deferred, canConfirm, busy = false
       <button type="button" className={supportButtonClass} aria-expanded={details} onClick={() => setDetails(value => !value)}>{t('support.onsite.technicalDetails')}</button>
       {details && <pre className="mt-2 whitespace-pre-wrap break-all text-sm">{request.technical_details}</pre>}
     </div>}
-    {failed && <p role="alert">{t('support.code.retry')}</p>}
+    {failed && <p role="alert">{typeof failed === 'string' ? failed : t('support.code.retry')}</p>}
     {busy ? <p role="status">{t('support.banner.executing')}</p> : request.check_id
       ? <SupportPhysicalCheck checkId={request.check_id} armed={armed && canConfirm} onAnswer={onDecision} />
       : <div className="mt-4 flex flex-wrap gap-2">
@@ -97,7 +98,7 @@ export function SupportInteractionHost() {
   const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
   const current = useRef({ session, t, runWithPrivilegedConfirmation }); current.current = { session, t, runWithPrivilegedConfirmation };
   const [request, setRequest] = useState<OnsiteRequest | null>(null);
-  const [busy, setBusy] = useState(false), [failed, setFailed] = useState(false), [otherDialog, setOtherDialog] = useState(false);
+  const [busy, setBusy] = useState(false), [failed, setFailed] = useState<boolean | string>(false), [otherDialog, setOtherDialog] = useState(false);
   const pending = useRef<{ request: OnsiteRequest; resolve(answer: OnsiteDecision): void } | null>(null);
   const decisionInFlight = useRef(false);
   const host = useRef<HTMLDivElement>(null);
@@ -163,10 +164,10 @@ export function SupportInteractionHost() {
       if (response === false || response && typeof response === 'object' && 'success' in response && response.success === false) { throw new Error('On-site decision refused'); }
       if (pending.current !== active) { return; }
       pending.current = null; setRequest(null); active.resolve(decision);
-    } catch {
+    } catch (error) {
       if (decision === 'timeout' && pending.current === active) {
         pending.current = null; setRequest(null); active.resolve('timeout');
-      } else { setFailed(true); }
+      } else if (!isPrivilegedConfirmationCancelled(error)) { setFailed(privilegedActionFeedback(error, t) ?? true); }
     }
     finally { decisionInFlight.current = false; setBusy(false); }
   };

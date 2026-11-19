@@ -32,6 +32,7 @@ export interface PrivilegedActionConfirmResponse {
   sessionId: string;
   ttlSeconds: number;
   expiresAt: string;
+  sessionRenewedUntil?: string | null;
   /** A manager's approval: what it approves, who gave it, how. */
   approval?: MoneyApproval;
   approvedBy?: string;
@@ -446,7 +447,9 @@ export interface PaymentIntegrityErrorPayload {
 }
 
 export interface SyncBlockerDetail {
-  queueId: number;
+  queue?: 'sync_queue' | 'parity_sync_queue';
+  queueId?: number;
+  queueItemId?: string;
   entityType: string;
   entityId: string;
   operation: string;
@@ -1498,6 +1501,8 @@ export interface DiagnosticsCheckoutPaymentBlockers {
 export interface DiagnosticsSystemHealth {
   orderNotices?: import('./order-sync-notices').OrderSyncNotice[] | null;
   orderNoticeGate?: { status: 'unknown' | 'unavailable' | 'clear'; code?: string; refusal_count?: number; pending_report?: boolean };
+  /** Set while the details of the order issues cannot be read; reported to support with its cause. */
+  orderIssueEvidenceFailure?: { code: string; open_notices: number | null } | null;
   schemaVersion: number;
   syncBacklog: Record<string, Record<string, number>>;
   /**
@@ -1507,6 +1512,7 @@ export interface DiagnosticsSystemHealth {
   syncBacklogStatus?: 'ok' | 'unavailable';
   paymentAdjustmentBacklog: DiagnosticsPaymentAdjustmentBacklog;
   syncBlockerDetails?: SyncBlockerDetail[];
+  readFailures?: string[];
   terminalContext?: DiagnosticsTerminalContext;
   syncStatusSummary?: DiagnosticsSyncStatusSummary;
   lastSyncTimes: Record<string, string | null>;
@@ -1613,6 +1619,7 @@ export interface PosIncidentCandidate {
 
 export interface RemoteIncidentReportResponse {
   success: boolean;
+  localPrepared?: boolean;
   incidentId?: string | null;
   status?: 'open' | 'resolved' | string;
   deduped?: boolean;
@@ -1621,6 +1628,10 @@ export interface RemoteIncidentReportResponse {
   bundleStored?: boolean;
   path?: string;
   lastSentAt?: string;
+  createdAt?: string;
+  deliveryState?: 'waiting' | 'sent' | 'failed' | 'local';
+  historical?: boolean;
+  reportId?: string;
   candidate?: PosIncidentCandidate;
   error?: string;
 }

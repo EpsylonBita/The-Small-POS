@@ -167,6 +167,31 @@ pub fn classify_incidents(health: &Value) -> Vec<PosIncidentCandidate> {
             should_report: true,
         });
     }
+    if let Some(code) = health["orderIssueEvidenceFailure"]["code"].as_str() {
+        // Founder, 17/11/2026: when the till cannot read the details of its
+        // order issues, that itself reaches us, with its cause. Only the
+        // classifier's own code is forwarded.
+        let code = if crate::order_notice_recovery::is_notice_failure_code(code) {
+            code
+        } else {
+            "ORDER_NOTICE_OBSERVATION_FAILED"
+        };
+        let mut evidence = json!({"issue_kind":"evidence_unavailable","refusal_code":code});
+        // The issues it could not describe, when their list was readable.
+        if let Some(open) = health["orderIssueEvidenceFailure"]["open_notices"].as_u64() {
+            evidence["order_issue_count"] = json!(open);
+        }
+        incidents.push(PosIncidentCandidate {
+            issue_code: "sync.active_error".into(),
+            severity: PosIncidentSeverity::High,
+            fingerprint: format!(
+                "{terminal_id}:sync.active_error:order_issue:evidence_unavailable:{code}"
+            ),
+            summary: "The till could not read the details of its order issues.".into(),
+            evidence,
+            should_report: true,
+        });
+    }
     let mut groups: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
     if let Some(issues) = health["orderIssueEvidence"].as_array() {
         for issue in issues {
@@ -1207,70 +1232,9 @@ pub async fn send_candidate_report(
     candidate: &PosIncidentCandidate,
     health: &Value,
 ) -> Result<Value, String> {
-    send_candidate_report_with_bundle(db, candidate, health, None).await
-}
-
-pub async fn send_candidate_report_with_bundle(
-    db: &db::DbState,
-    candidate: &PosIncidentCandidate,
-    health: &Value,
-    bundle_path: Option<&str>,
-) -> Result<Value, String> {
-    use base64::Engine;
-    use sha2::{Digest, Sha256};
-    let about = diagnostics::get_about_info();
-    let mut public_health = health.clone();
-    if let Some(fields) = public_health.as_object_mut() {
-        fields.remove("orderNotices");
-    }
-    let redacted_health = diagnostics::redact_remote_diagnostics_value(public_health);
-    let mut body = json!({
-        "severity": candidate.severity.as_str(),
-        "issueCode": candidate.issue_code,
-        "fingerprint": candidate.fingerprint,
-        "summary": candidate.summary,
-        "evidence": diagnostics::redact_remote_diagnostics_value(candidate.evidence.clone()),
-        "redactedHealth": redacted_health,
-        "appVersion": about.get("version").and_then(Value::as_str),
-        "gitSha": about.get("gitSha").and_then(Value::as_str),
-        "platform": about.get("platform").and_then(Value::as_str),
-        "occurredAt": Utc::now().to_rfc3339(),
-    });
-
-    let mut bundle_hash = None;
-    if let Some(path) = bundle_path {
-        // Same 2 MiB limit as shared/pos/health/incident-transfer.ts.
-        if std::fs::metadata(path)
-            .map_err(|_| "Diagnostics ZIP unavailable")?
-            .len()
-            > 2 * 1024 * 1024
-        {
-            return Err("Diagnostics ZIP exceeds the 2 MiB upload limit".into());
-        }
-        let bytes = std::fs::read(path).map_err(|_| "Diagnostics ZIP could not be read")?;
-        bundle_hash = Some(crate::core_helpers::lower_hex(&Sha256::digest(&bytes)));
-        body["diagnosticBundle"] = json!({
-            "fileName": std::path::Path::new(path).file_name().and_then(|name| name.to_str()),
-            "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
-            "redacted": true,
-        });
-    }
-
+    let body = incident_body(candidate, health, Utc::now());
     match crate::admin_fetch(Some(db), "/api/pos/incidents/report", "POST", Some(body)).await {
         Ok(response) => {
-            if let Some(hash) = bundle_hash {
-                if response.get("bundleStored").and_then(Value::as_bool) != Some(true)
-                    || response.get("bundleSha256").and_then(Value::as_str) != Some(hash.as_str())
-                    || response.get("incidentId").and_then(Value::as_str).is_none()
-                {
-                    record_send_failure(
-                        db,
-                        &candidate.fingerprint,
-                        "diagnostics_zip_not_confirmed",
-                    );
-                    return Err("Diagnostics ZIP delivery was not confirmed".into());
-                }
-            }
             record_send_success(db, &candidate.fingerprint, &response);
             if is_order_issue_fingerprint(&candidate.fingerprint) {
                 write_setting(
@@ -1286,6 +1250,64 @@ pub async fn send_candidate_report_with_bundle(
             Err(error)
         }
     }
+}
+
+// Storage and notification are independent. Only the request's exact ZIP
+// and an identifiable incident constitute a storage receipt.
+pub(crate) fn verified_bundle_receipt(response: &Value, expected_hash: &str) -> bool {
+    response["bundleStored"] == true
+        && response["bundleSha256"].as_str() == Some(expected_hash)
+        && response["incidentId"]
+            .as_str()
+            .is_some_and(|id| !id.trim().is_empty())
+}
+
+pub(crate) fn incident_body(
+    candidate: &PosIncidentCandidate,
+    health: &Value,
+    occurred_at: DateTime<Utc>,
+) -> Value {
+    let about = diagnostics::get_about_info();
+    let mut public_health = health.clone();
+    if let Some(fields) = public_health.as_object_mut() {
+        fields.remove("orderNotices");
+    }
+    let redacted_health = diagnostics::redact_remote_diagnostics_value(public_health);
+    json!({
+        "severity": candidate.severity.as_str(),
+        "issueCode": candidate.issue_code,
+        "fingerprint": candidate.fingerprint,
+        "summary": candidate.summary,
+        "evidence": diagnostics::redact_remote_diagnostics_value(candidate.evidence.clone()),
+        "redactedHealth": redacted_health,
+        "appVersion": about.get("version").and_then(Value::as_str),
+        "gitSha": about.get("gitSha").and_then(Value::as_str),
+        "platform": about.get("platform").and_then(Value::as_str),
+        "occurredAt": occurred_at.to_rfc3339(),
+    })
+}
+
+pub(crate) async fn post_bundle_report(
+    endpoint: &(String, zeroize::Zeroizing<String>),
+    mut body: Value,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<Value, crate::api::AdminFetchError> {
+    use base64::Engine;
+    body["diagnosticBundle"] = json!({
+        "fileName": file_name,
+        "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+        "redacted": true,
+    });
+    crate::api::fetch_from_admin_detailed_with_timeout(
+        &endpoint.0,
+        &endpoint.1,
+        "/api/pos/incidents/report",
+        "POST",
+        Some(body),
+        std::time::Duration::from_secs(12),
+    )
+    .await
 }
 
 fn record_send_success(db: &db::DbState, fingerprint: &str, response: &Value) {
@@ -1676,6 +1698,90 @@ mod tests {
         assert_eq!(original.fingerprint, changed.fingerprint);
     }
     #[test]
+    fn unreadable_order_evidence_reaches_us_with_its_cause_and_clears_when_readable() {
+        // Founder, 17/11/2026: a till that cannot read the details of its
+        // order issues used to say nothing about them until it could.
+        let mut health = super::json!({"terminalContext":{"terminalId":"term-1"},
+            "orderIssueEvidence":null,"observerFailures":["orderIssueEvidence"],
+            "orderIssueEvidenceFailure":{"code":"NOTICE_COLUMN_MISSING_PAYLOAD_JSON","open_notices":3}});
+        let candidates = super::classify_incidents(&health);
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.issue_code, "sync.active_error");
+        assert!(matches!(
+            candidate.severity,
+            super::PosIncidentSeverity::High
+        ));
+        assert_eq!(
+            candidate.fingerprint,
+            "term-1:sync.active_error:order_issue:evidence_unavailable:NOTICE_COLUMN_MISSING_PAYLOAD_JSON"
+        );
+        // The three issues it could not describe are the count we read.
+        assert_eq!(
+            candidate.evidence,
+            super::json!({"issue_kind":"evidence_unavailable",
+                "refusal_code":"NOTICE_COLUMN_MISSING_PAYLOAD_JSON","order_issue_count":3})
+        );
+        // While it lasts, nothing about order issues clears.
+        let unreadable = super::unreadable_fingerprints(&health);
+        assert!(unreadable(&candidate.fingerprint));
+        assert!(unreadable(
+            "term-1:sync.active_error:order_issue:change_refused:ORDER_EDIT_CONFLICT"
+        ));
+        let fingerprint = candidate.fingerprint.clone();
+
+        // The list of issues was unreadable as well: no count is claimed.
+        health["orderIssueEvidenceFailure"]["open_notices"] = super::Value::Null;
+        assert_eq!(
+            super::classify_incidents(&health)[0].evidence,
+            super::json!({"issue_kind":"evidence_unavailable",
+                "refusal_code":"NOTICE_COLUMN_MISSING_PAYLOAD_JSON"})
+        );
+        // A code that did not come from the classifier is never forwarded.
+        health["orderIssueEvidenceFailure"]["code"] =
+            super::json!("no such column: customers.phone");
+        assert!(super::classify_incidents(&health)[0]
+            .fingerprint
+            .ends_with(":evidence_unavailable:ORDER_NOTICE_OBSERVATION_FAILED"));
+
+        // Readable again: nothing is raised, and the report clears after the
+        // usual clean observations.
+        let readable = super::json!({"terminalContext":{"terminalId":"term-1"},
+            "orderIssueEvidence":[],"observerFailures":[],"orderIssueEvidenceFailure":null});
+        assert!(super::classify_incidents(&readable).is_empty());
+        let now = chrono::Utc::now();
+        let mut open = super::OpenIncidentReports::new();
+        super::mark_incident_reported(&mut open, &fingerprint, now);
+        let absent = std::collections::BTreeSet::new();
+        health["orderIssueEvidenceFailure"]["code"] =
+            super::json!("NOTICE_COLUMN_MISSING_PAYLOAD_JSON");
+        for _ in 0..3 {
+            assert!(super::advance_incident_clearance(
+                &mut open,
+                &absent,
+                &super::unreadable_fingerprints(&health),
+                now
+            )
+            .is_empty());
+        }
+        assert!(super::advance_incident_clearance(
+            &mut open,
+            &absent,
+            &super::unreadable_fingerprints(&readable),
+            now
+        )
+        .is_empty());
+        assert_eq!(
+            super::advance_incident_clearance(
+                &mut open,
+                &absent,
+                &super::unreadable_fingerprints(&readable),
+                now
+            ),
+            vec![fingerprint]
+        );
+    }
+    #[test]
     fn order_issue_reports_group_by_kind_and_code_and_clear_only_on_fresh_proof() {
         let mut health = super::json!({"terminalContext":{"terminalId":"term-1"},"orderIssueEvidence":[
             {"issue_kind":"customer_correction_refused","refusal_code":"UNKNOWN_CONFLICT_REVIEW"},
@@ -2040,6 +2146,31 @@ mod tests {
 
     fn optional_time(vectors: &Value, sec: &Value) -> Option<DateTime<Utc>> {
         sec.as_i64().map(|sec| vector_time(vectors, sec))
+    }
+
+    #[test]
+    fn manual_bundle_receipt_requires_storage_exact_hash_and_incident_independent_of_notification()
+    {
+        let expected_hash = "fixture-correct-hash";
+        let receipt = json!({
+            "bundleStored": true, "bundleSha256": expected_hash, "incidentId": "incident-1",
+            "alertSent": false, "alertStatus": "failed"
+        });
+        assert!(verified_bundle_receipt(&receipt, expected_hash));
+        for (field, value) in [
+            ("bundleStored", json!(false)),
+            ("bundleSha256", json!("wrong-hash")),
+            ("incidentId", Value::Null),
+            ("incidentId", json!(" ")),
+        ] {
+            let mut unverified = receipt.clone();
+            unverified[field] = value;
+            unverified["alertSent"] = json!(true);
+            assert!(
+                !verified_bundle_receipt(&unverified, expected_hash),
+                "{field}"
+            );
+        }
     }
 
     fn test_db() -> db::DbState {

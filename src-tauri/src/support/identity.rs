@@ -45,6 +45,32 @@ pub fn for_session(conn: &Connection, core: &Core, session: &str) -> Result<Scop
     Ok(scope)
 }
 
+pub(super) fn observed_session(
+    conn: &Connection,
+    live: &std::path::Path,
+    session: &str,
+) -> Result<Scope, String> {
+    let scope = local(conn)?;
+    let support = Connection::open_with_flags(
+        live.with_file_name("support.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|_| "SESSION_ENDED")?;
+    let encoded: String = support.query_row(
+        "SELECT e.scope_json FROM support_evidence_sessions e JOIN support_session_state s USING(session_id) WHERE s.session_id=? AND s.status='active'",
+        [session],|row| row.get(0),
+    ).map_err(|_|"SESSION_ENDED")?;
+    let observed: serde_json::Value =
+        serde_json::from_str(&encoded).map_err(|_| "PAYLOAD_DRIFT")?;
+    if observed["organization_id"] != scope.organization_id
+        || observed["branch_id"] != scope.branch_id
+        || observed["terminal_id"] != scope.terminal_id
+    {
+        return Err("PAYLOAD_DRIFT".into());
+    }
+    Ok(scope)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

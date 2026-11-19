@@ -3663,9 +3663,9 @@
     "zGate": {
       "approvalTitle": "Mit Ihrer PIN bestätigen",
       "approvalSubtitle": "Einen Datensatz zurückzustellen erfordert das Recht, Zahlungen zu stornieren. Ein Mitarbeiter mit diesem Recht gibt seine eigene PIN ein. Nichts wird gelöscht oder belastet.",
-      "setAsideDone": "Zurückgestellt. Der Datensatz bleibt an dieser Kasse, und der Z-Bericht führt ihn als nicht auf dem Server.",
-      "undoDone": "Der Datensatz ist zurück: Er hält den Tagesabschluss wieder auf, bis der Server ihn annimmt.",
-      "actionFailed": "Das ging nicht. Nichts wurde geändert.",
+      "setAsideDone": "Zur Prüfung beiseitegelegt. Die Kasse behält den Eintrag und führt ihn im Tagesabschluss auf.",
+      "undoDone": "Dieser Eintrag wartet wieder auf das Senden. Bis dahin kann er den Tagesabschluss aufhalten.",
+      "actionFailed": "Die Änderung konnte nicht bestätigt werden. Prüfen Sie die Liste erneut.",
       "stale": "Diese Liste konnte nicht neu gelesen werden. Sie zeigt den letzten gültigen Stand.",
       "unavailable": "Die an dieser Kasse abgeschlossenen Tage konnten nicht gelesen werden. Versuchen Sie es erneut.",
       "localTitle": "An dieser Kasse abgeschlossene Tage, noch nicht auf dem Server: {{count}}",
@@ -6663,6 +6663,8 @@
     "kioskCardPending": "KARTE",
     "kioskCashPendingA11y": "Bar am Kiosk gewählt; Zahlung ausstehend",
     "kioskCardPendingA11y": "Karte am Kiosk gewählt; Zahlung ausstehend",
+    "platformCashPendingA11y": "Bar auf der Plattform gewählt; Zahlung ausstehend",
+    "platformCardPendingA11y": "Karte auf der Plattform gewählt; Zahlung ausstehend",
     "platformPayment": "PLATTFORMZAHLUNG",
     "platformPaymentA11y": "Zahlung durch die Plattform abgerechnet; das Geschäft kassiert nicht"
   },
@@ -9382,6 +9384,34 @@
     "portionNotSaved": "Karte belastet, Zahlung noch nicht gespeichert. Nicht erneut belasten."
   },
   "recovery": {
+    "actionStatus": {
+      "signIn": "Erneut anmelden",
+      "sendRecord": "Diesen Eintrag senden",
+      "sendWaiting": "Wartende Einträge senden",
+      "preparePaymentUpdates": "Zahlungsänderungen zum Senden vorbereiten",
+      "exportCopy": "Kopie für den Support exportieren",
+      "reviewOrders": "Bestelleinträge prüfen",
+      "removeLabel": "Ungültige Sendeeinträge entfernen",
+      "removeTitle": "Ungültige Sendeeinträge entfernen?",
+      "removeMessage": "Die ausgewählten Sendeeinträge werden vor dem Entfernen erneut geprüft. Die Kasse behält eine Kopie. Bestellungen und Zahlungen bleiben auf der Kasse.",
+      "sent": "Gesendet",
+      "waiting": "Wartet auf einen zugehörigen Eintrag",
+      "untouched": "Wartet noch auf das Senden",
+      "refused": "Konnte nicht gesendet werden",
+      "set_aside": "Zur Prüfung beiseitegelegt",
+      "unknown": "Das Senden konnte nicht bestätigt werden",
+      "checked": "Prüfung abgeschlossen",
+      "reportNotified": "Bericht empfangen. Der Support wurde benachrichtigt.",
+      "reportStored": "Bericht empfangen. Eine Benachrichtigung konnte nicht bestätigt werden.",
+      "reportPrepared": "Eine Kopie liegt auf dieser Kasse. Der Empfang wurde nicht bestätigt.",
+      "reportFailed": "Der Bericht konnte auf dieser Kasse nicht erstellt werden.",
+      "grantExpired": "Ihre Freigabe ist abgelaufen. Geben Sie die Kassen-PIN erneut ein.",
+      "permissionRequired": "Bitten Sie eine berechtigte Person um Freigabe.",
+      "approverUnavailable": "Freigebende Person unbekannt",
+      "recordTitle": "Dieser Eintrag erfordert Aufmerksamkeit",
+      "recordSummary": "Die Kasse behält diesen Eintrag zur Prüfung.",
+      "recordGuidance": "Öffnen Sie die Details oder senden Sie einen Bericht an den Support."
+    },
     "confirmations": {
       "cashDrawerControl": {
         "title": "Wiederherstellungsaktion bestätigen",
@@ -10718,6 +10748,13 @@
   }
 ,
   "orderSyncNotice": {
+    "sessionExpired": "Die Anmeldung an der Kasse ist abgelaufen. Geben Sie die Kassen-PIN erneut ein.",
+    "signInAgain": "Melden Sie sich erneut an der Kasse an.",
+    "shiftRequired": "An dieser Kasse muss eine Kassierkraft oder eine verantwortliche Person im Dienst sein.",
+    "pinLocked": "Die PIN wurde zu oft falsch eingegeben. Warten Sie ein paar Minuten und versuchen Sie es erneut.",
+    "cancelled": "Es wurde nichts geändert.",
+    "callSupport": "Das hat nicht geklappt. Rufen Sie den Support an.",
+    "saved": "Die Änderung wurde gespeichert.",
     "checkUnavailableHealth": "Die Kasse kann gerade nicht prüfen, ob bei Bestellungen noch etwas zu klären ist. Sie bleiben bei den aktiven Bestellungen.",
     "checkUnavailableGuidance": "Versuchen Sie es gleich noch einmal. Falls das weiterhin passiert, rufen Sie den Support an.",
     "checkUnavailable": "Die Kasse kann gerade nicht prüfen, ob bei Bestellung #{{number}} noch etwas zu klären ist. Deshalb bleibt sie bei den aktiven Bestellungen. Versuchen Sie es gleich noch einmal. Falls das weiterhin passiert, rufen Sie den Support an.",

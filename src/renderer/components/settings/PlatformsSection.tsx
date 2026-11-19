@@ -5,6 +5,9 @@ import { posApiGet, posApiPost } from '../../utils/api-helpers'
 import { POSGlassSwitch } from '../ui/pos-glass-components'
 import { StatusLine, solidButton, type StatusTone } from './SettingsKit'
 import { EfoodWeeklyScheduleEditor } from './EfoodWeeklyScheduleEditor'
+import { BoxWeeklyScheduleEditor, type BoxScheduleSaveResult } from './BoxWeeklyScheduleEditor'
+import type { BoxWeeklySchedule } from '../../../../../shared/platforms/box-weekly-schedule'
+import { boxAvailabilityError, boxAvailabilityFeedbackEnglish, boxAvailabilityFeedbackKey } from '../../../../../shared/platforms/box-availability-error'
 import type { EfoodDaySchedule } from '../../services/efoodWeeklySchedule'
 import { useEfoodPartner } from '../../hooks/useEfoodPartner'
 
@@ -23,6 +26,13 @@ export interface Platform {
   name: string
   open: boolean | null
   controllable: boolean
+  auto_open?: boolean
+  last_requested_open?: boolean | null
+  last_requested_at?: string | null
+  weekly_schedule?: BoxWeeklySchedule | null
+  weekly_schedule_at?: string | null
+  weekly_schedule_revision?: string
+  box_follow_up_error?: 'provider_rejected' | 'box_throttled'
   /** Wolt-only: true when the provider is online AND actually taking orders right now. */
   accepting_orders?: boolean | null
   reason?: string | null
@@ -60,7 +70,11 @@ interface PlatformActionBody {
   error?: string
 }
 
-type PendingAction = 'open' | 'close'
+type PendingAction = 'open' | 'close' | 'automation' | 'schedule'
+type PlatformChange =
+  | { open: boolean }
+  | { auto_open: boolean }
+  | { weekly_schedule: BoxWeeklySchedule; expected_schedule_revision: string }
 
 // The backend returns this exact marker only for a proved provider 403 on a
 // platform write (HTTP 502 {success:false, error:'provider_forbidden'}); the
@@ -140,6 +154,14 @@ function formatClosedUntil(value: string | null | undefined, language: string | 
 }
 
 const REASON_DEFAULTS: Record<string, { key: string; defaultValue: string }> = {
+  box_automation_unconfirmed: {
+    key: 'settings.platforms.box.automationUnconfirmed',
+    defaultValue: 'Could not confirm the setting was saved. Refresh to check.',
+  },
+  box_request_unconfirmed: {
+    key: 'settings.platforms.box.requestUnconfirmed',
+    defaultValue: 'Could not confirm the request. Check the shop in BOX Merchant.',
+  },
   module_disabled: {
     key: 'settings.platforms.reason.moduleDisabled',
     defaultValue: 'A required module is not enabled on this register.',
@@ -207,6 +229,11 @@ const REASON_DEFAULTS: Record<string, { key: string; defaultValue: string }> = {
 export const PlatformsSection: React.FC = () => {
   const { t, i18n } = useTranslation()
   const [platforms, setPlatforms] = useState<Platform[]>([])
+  const [box, setBox] = useState<Platform | null>(null)
+  const [boxDetailFailed, setBoxDetailFailed] = useState(false)
+  const [boxBusy, setBoxBusy] = useState(false)
+  const boxListed = useRef(false)
+  const boxReadGeneration = useRef(0)
   const [lastKnownOpen, setLastKnownOpen] = useState<Record<string, boolean>>({})
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -253,6 +280,30 @@ export const PlatformsSection: React.FC = () => {
     }
   }, [])
 
+  const loadBoxDetails = useCallback(async (placeholder?: Platform) => {
+    if (!boxListed.current) return false
+    const read = ++boxReadGeneration.current
+    const mutation = mutationGenerationRef.current.box || 0
+    if (placeholder) {
+      setBox(previous => previous ?? placeholder)
+    }
+    const response = await posApiGet<PlatformsListBody>('/pos/platforms?plugin_id=box').catch(() => null)
+    const generation = mutationGenerationRef.current.box || 0
+    if (!mountedRef.current || read !== boxReadGeneration.current || generation !== mutation) return false
+    const received = response?.data?.platforms?.find(entry => entry.plugin_id === 'box')
+    if (!response?.success || response.data?.success === false || !received
+      || (!received.controllable && !['unsupported', 'wrong_terminal', 'module_disabled'].includes(received.reason ?? ''))
+      || (received.controllable && !received.weekly_schedule_revision)) {
+      setBoxDetailFailed(true)
+      return false
+    }
+    if (generation % 2 === 1) return false
+    setBox(previous => received.controllable ? received : { ...previous, ...received })
+    setBoxDetailFailed(false)
+    setBoxBusy(false)
+    return received.controllable && Boolean(received.weekly_schedule_revision)
+  }, [])
+
   const loadPlatforms = useCallback(async (options?: { refresh?: boolean }) => {
     const myGeneration = ++listGenerationRef.current
     const mutationSnapshot = { ...mutationGenerationRef.current }
@@ -273,13 +324,27 @@ export const PlatformsSection: React.FC = () => {
     if (!mountedRef.current || myGeneration !== listGenerationRef.current) return
 
     const body = response.data
-    const list = body?.platforms
-    if (!response.success || body?.success === false || !Array.isArray(list)) {
+    const incoming = body?.platforms
+    const legacyOk = response.success && body?.success !== false && Array.isArray(incoming)
+    const announcedBox = legacyOk ? incoming.find(entry => entry.plugin_id === 'box') : undefined
+    if (announcedBox) {
+      boxListed.current = true
+      void loadBoxDetails(announcedBox)
+    } else if (legacyOk && boxListed.current) {
+      boxListed.current = false
+      ++boxReadGeneration.current
+      // Invalidate a write without changing its in-flight parity.
+      mutationGenerationRef.current.box = (mutationGenerationRef.current.box || 0) + 2
+      setBox(previous => previous?.controllable ? { ...previous, controllable: false } : previous)
+      setBoxDetailFailed(true)
+      setBoxBusy(false)
+    }
+    if (!legacyOk) {
       // A failed read started before a toggle cannot invalidate the newer
       // confirmed write (or hide the operator's pending/unknown recovery UI).
       const supersededByMutation = Object.entries(mutationGenerationRef.current)
-        .some(([pluginId, generation]) => generation % 2 === 1
-          || generation !== (mutationSnapshot[pluginId] || 0))
+        .some(([pluginId, generation]) => pluginId !== 'box' && (generation % 2 === 1
+          || generation !== (mutationSnapshot[pluginId] || 0)))
       if (!supersededByMutation) {
         setLoadFailed(true)
       } else {
@@ -295,6 +360,7 @@ export const PlatformsSection: React.FC = () => {
       return
     }
 
+    const list = incoming.filter(entry => entry.plugin_id !== 'box')
     setLoadFailed(false)
     setPlatforms((current) => {
       const stalePluginIds = new Set(
@@ -331,7 +397,8 @@ export const PlatformsSection: React.FC = () => {
     })
     setIsLoading(false)
     setIsRefreshing(false)
-  }, [])
+    return true
+  }, [loadBoxDetails])
 
   useEffect(() => {
     void loadPlatforms()
@@ -400,42 +467,85 @@ export const PlatformsSection: React.FC = () => {
   }, [anyAwaitingProvider, isOnline, confirmationWaitRestarts, loadPlatforms])
 
   const setPlatform = (pluginId: string, next: Platform) => {
+    if (pluginId === 'box') {setBox(next); return}
     setPlatforms((current) =>
       current.map((entry) => (entry.plugin_id === pluginId ? next : entry)),
     )
   }
 
-  const handleToggle = async (platform: Platform, nextOpen: boolean) => {
-    if (!isOnline) return
-    if (inFlightRef.current.has(platform.plugin_id)) return
+  const handleChange = async (platform: Platform, change: PlatformChange): Promise<BoxScheduleSaveResult | undefined> => {
+    const isBox = platform.plugin_id === 'box'
+    if (!isOnline || (isBox && !boxListed.current) || inFlightRef.current.has(platform.plugin_id)) return
     inFlightRef.current.add(platform.plugin_id)
-    mutationGenerationRef.current[platform.plugin_id] =
-      (mutationGenerationRef.current[platform.plugin_id] || 0) + 1
+    const mutation = (mutationGenerationRef.current[platform.plugin_id] || 0) + 1
+    mutationGenerationRef.current[platform.plugin_id] = mutation
+    const canApply = () => mountedRef.current && (!isBox || (boxListed.current && mutationGenerationRef.current.box === mutation))
 
     if (platform.open !== null) {
       setLastKnownOpen((current) => ({ ...current, [platform.plugin_id]: platform.open === true }))
     }
-    setPending((current) => ({ ...current, [platform.plugin_id]: nextOpen ? 'open' : 'close' }))
+    const action: PendingAction = 'weekly_schedule' in change ? 'schedule'
+      : 'auto_open' in change ? 'automation' : change.open ? 'open' : 'close'
+    setPending((current) => ({ ...current, [platform.plugin_id]: action }))
     setUncertain((current) => ({ ...current, [platform.plugin_id]: false }))
+    if (isBox) setBoxBusy(false)
+
+    const showUnconfirmedChange = () => {
+      if (platform.plugin_id === 'box') {
+        setPlatform(platform.plugin_id, {
+          ...platform,
+          reason: action === 'automation' ? 'box_automation_unconfirmed' : 'box_request_unconfirmed',
+        })
+        return
+      }
+      setPlatform(platform.plugin_id, {
+        ...platform,
+        open: null,
+        pending: false,
+        closed_until: null,
+        reason: 'outcome_unknown',
+      })
+      setUncertain((current) => ({ ...current, [platform.plugin_id]: true }))
+    }
 
     try {
-      const response = await posApiPost<PlatformActionBody>('/pos/platforms', {
+      const response = await posApiPost<PlatformActionBody>(platform.plugin_id === 'box' ? '/pos/platforms?plugin_id=box' : '/pos/platforms', {
         plugin_id: platform.plugin_id,
-        open: nextOpen,
+        ...change,
       })
-      if (!mountedRef.current) return
+      if (!canApply()) return
       const body = response.data
 
       if (response.success && body?.success !== false && body?.platform) {
         const next = body.platform
         setPlatform(platform.plugin_id, next)
         setUncertain((current) => ({ ...current, [platform.plugin_id]: false }))
-        if (isAwaitingProvider(next)) {
+        if (!isBox && isAwaitingProvider(next)) {
           // Accepted, but not yet visible in the provider's status: restart the
           // automatic re-read cadence from this newest change.
           confirmationWaitStartedAtRef.current = Date.now()
           setConfirmationWaitRestarts((current) => current + 1)
         }
+        return 'saved'
+      }
+
+      const boxError = platform.plugin_id === 'box'
+        ? boxAvailabilityError(body?.error) ?? boxAvailabilityError(response.error) : undefined
+      if (action === 'schedule') return boxError ?? 'failed'
+      if (boxError === 'busy' && (action === 'open' || action === 'close')) {
+        setBoxBusy(true)
+        return
+      }
+      if (boxError === 'busy' || boxError === 'provider_rejected') {
+        setPlatform(platform.plugin_id, boxError === 'provider_rejected'
+          && ['box_request_unconfirmed', 'outcome_unknown', 'box_throttled'].includes(platform.reason ?? '')
+          ? { ...platform, box_follow_up_error: boxError }
+          : { ...platform, reason: boxError })
+        return
+      }
+
+      if (action === 'automation') {
+        showUnconfirmedChange()
         return
       }
 
@@ -454,7 +564,7 @@ export const PlatformsSection: React.FC = () => {
         return
       }
 
-      if (isProviderRejectedError(response.error) || isProviderRejectedError(body?.error)) {
+      if (platform.plugin_id !== 'box' && (isProviderRejectedError(response.error) || isProviderRejectedError(body?.error))) {
         // efood refused the change outright, so nothing changed there: keep the
         // previous status (not Unknown) and say why, without the uncertainty banner.
         setPlatform(platform.plugin_id, { ...platform, reason: 'provider_rejected' })
@@ -464,25 +574,13 @@ export const PlatformsSection: React.FC = () => {
 
       // The action's outcome could not be confirmed: show Unknown rather than
       // claiming the previous open/closed value is still accurate.
-      setPlatform(platform.plugin_id, {
-        ...platform,
-        open: null,
-        pending: false,
-        closed_until: null,
-        reason: 'outcome_unknown',
-      })
-      setUncertain((current) => ({ ...current, [platform.plugin_id]: true }))
+      showUnconfirmedChange()
     } catch {
-      if (!mountedRef.current) return
-      setPlatform(platform.plugin_id, {
-        ...platform,
-        open: null,
-        pending: false,
-        closed_until: null,
-        reason: 'outcome_unknown',
-      })
-      setUncertain((current) => ({ ...current, [platform.plugin_id]: true }))
+      if (!canApply()) return
+      if (action === 'schedule') return 'failed'
+      showUnconfirmedChange()
     } finally {
+      const refreshBox = isBox && !canApply()
       mutationGenerationRef.current[platform.plugin_id] =
         (mutationGenerationRef.current[platform.plugin_id] || 0) + 1
       inFlightRef.current.delete(platform.plugin_id)
@@ -492,6 +590,7 @@ export const PlatformsSection: React.FC = () => {
           delete next[platform.plugin_id]
           return next
         })
+        if (refreshBox) void loadBoxDetails()
       }
     }
   }
@@ -565,19 +664,18 @@ export const PlatformsSection: React.FC = () => {
         </div>
       )}
 
+      {!isLoading && loadFailed && (
+        <div role="alert" className="pos-notice pos-notice--bad">
+          <AlertTriangle className="pos-notice__icon h-5 w-5" />
+          <span className="text-sm">{t('settings.platforms.loadFailed', 'Could not load platforms')}</span>
+        </div>
+      )}
       {isLoading ? (
         <div className="flex items-center justify-center gap-2 py-8 text-sm liquid-glass-modal-text-muted">
           <Loader2 className="h-5 w-5 animate-spin" />
           {t('settings.platforms.loading', 'Loading platforms...')}
         </div>
-      ) : loadFailed ? (
-        <div role="alert" className="pos-notice pos-notice--bad">
-          <AlertTriangle className="pos-notice__icon h-5 w-5" />
-          <span className="text-sm">
-            {t('settings.platforms.loadFailed', 'Could not load platforms')}
-          </span>
-        </div>
-      ) : platforms.length === 0 ? (
+      ) : loadFailed && !box ? null : platforms.length === 0 && !box ? (
         <section className="pos-group">
           <div className="pos-row">
             <div className="pos-row__label">
@@ -593,7 +691,9 @@ export const PlatformsSection: React.FC = () => {
         </section>
       ) : (
         <div className="space-y-4">
-          {platforms.map((platform) => {
+          {[...(loadFailed ? [] : platforms), ...(box ? [box] : [])].map((platform) => {
+            const isBox = platform.plugin_id === 'box'
+            const boxActionTime = isBox && platform.last_requested_at ? Date.parse(platform.last_requested_at) : NaN
             const action = pending[platform.plugin_id]
             const isPending = Boolean(action)
             const awaitingProvider = isAwaitingProvider(platform)
@@ -604,11 +704,16 @@ export const PlatformsSection: React.FC = () => {
             const isUncertain = Boolean(uncertain[platform.plugin_id]) && !awaitingProvider
             const closureEndTime =
               platform.open === false ? formatClosedUntil(platform.closed_until, i18n?.language) : null
-            const reasonText = describeReason(platform.reason, closureEndTime)
+            const reason = isBox && boxDetailFailed && platform.reason === 'unsupported' ? null : platform.reason
+            const boxMessageKey = isBox && reason && ['box_request_unconfirmed', 'outcome_unknown', 'provider_rejected', 'busy', 'box_throttled'].includes(reason)
+              ? boxAvailabilityFeedbackKey(reason) : null
+            const boxActionMessage = boxMessageKey ? t(boxMessageKey, boxAvailabilityFeedbackEnglish[boxMessageKey]) : null
+            const boxFollowUpKey = isBox && platform.box_follow_up_error ? boxAvailabilityFeedbackKey(platform.box_follow_up_error) : null
+            const reasonText = boxActionMessage ?? describeReason(reason, closureEndTime)
             // A closure reason already explains the end (or deliberately hides a
             // safety bound), so the generic "Closed until" line is for the rest.
             const showClosedUntil = closureEndTime !== null && !awaitingProvider && !closureExplained
-            const showExplicitActions = platform.controllable && platform.open === null
+            const showExplicitActions = platform.controllable && (isBox || platform.open === null)
             const knownBefore = lastKnownOpen[platform.plugin_id]
             const showAcceptingOrders =
               platform.open === true && typeof platform.accepting_orders === 'boolean'
@@ -630,7 +735,24 @@ export const PlatformsSection: React.FC = () => {
                     >
                       {platform.name}
                     </span>
-                    {showConfirmationLabel ? (
+                    {isBox ? (
+                      <>
+                        <span className="pos-row__help">
+                          {t('settings.platforms.box.statusHelp', 'BOX does not report live availability.')}
+                        </span>
+                        {typeof platform.last_requested_open === 'boolean' && Number.isFinite(boxActionTime) && (
+                          <span className="pos-row__help" role="status">
+                            {t('settings.platforms.box.lastAction', {
+                              action: platform.last_requested_open
+                                ? t('settings.platforms.open', 'Open')
+                                : t('settings.platforms.close', 'Close'),
+                              time: new Date(boxActionTime).toLocaleString(i18n?.language, { dateStyle: 'short', timeStyle: 'short' }),
+                              defaultValue: 'Last accepted POS request · {{action}}, {{time}}',
+                            })}
+                          </span>
+                        )}
+                      </>
+                    ) : showConfirmationLabel ? (
                       <StatusLine tone="warn">
                         <span className="inline-flex items-center gap-1.5">
                           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
@@ -707,7 +829,7 @@ export const PlatformsSection: React.FC = () => {
                     <div className="flex shrink-0 items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => void handleToggle(platform, true)}
+                        onClick={() => void handleChange(platform, { open: true })}
                         disabled={!isOnline || isPending}
                         className={solidButton('secondary', 'md')}
                       >
@@ -716,7 +838,7 @@ export const PlatformsSection: React.FC = () => {
                       </button>
                       <button
                         type="button"
-                        onClick={() => void handleToggle(platform, false)}
+                        onClick={() => void handleChange(platform, { open: false })}
                         disabled={!isOnline || isPending}
                         className={solidButton('secondary', 'md')}
                       >
@@ -731,12 +853,67 @@ export const PlatformsSection: React.FC = () => {
                         aria-labelledby={`platform-${platform.plugin_id}-label`}
                         checked={platform.open === true}
                         disabled={!isOnline || isPending}
-                        onChange={(next) => void handleToggle(platform, next)}
+                        onChange={(next) => void handleChange(platform, { open: next })}
                       />
                     </div>
                   )}
                   </div>
                 </div>
+
+                {isBox && boxDetailFailed && (
+                  <p role="alert" className="pos-row__help">
+                    {t('settings.platforms.box.detailUnavailable', 'Could not refresh BOX. Try again.')}
+                  </p>
+                )}
+                {boxFollowUpKey && (
+                  <p role="alert" className="pos-row__help">
+                    {t(boxFollowUpKey, boxAvailabilityFeedbackEnglish[boxFollowUpKey])}
+                  </p>
+                )}
+                {isBox && boxBusy && (
+                  <p role="alert" className="pos-row__help">
+                    {t(boxAvailabilityFeedbackKey('busy'), boxAvailabilityFeedbackEnglish['settings.platforms.reason.busy'])}
+                  </p>
+                )}
+                {isBox && platform.controllable && (
+                  <p className="pos-row__help">
+                    {t('settings.platforms.box.customerHoursHelp', 'Customers only see the shop as open when it is open here and within BOX opening hours.')}
+                  </p>
+                )}
+                {isBox && platform.controllable && typeof platform.auto_open === 'boolean' && (
+                  <div className="pos-row">
+                    <div className="pos-row__label">
+                      <span id="box-auto-open-label" className="pos-row__title">
+                        {t('settings.platforms.box.autoOpen', 'Automatic BOX opening')}
+                      </span>
+                      <span className="pos-row__help">
+                        {t('settings.platforms.box.autoHelp', 'Opens at the first cashier check-in and closes with the Z report.')}
+                      </span>
+                    </div>
+                    <div className="pos-row__control flex items-center gap-2">
+                      {action === 'automation' && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                      <POSGlassSwitch
+                        aria-labelledby="box-auto-open-label"
+                        checked={platform.auto_open}
+                        disabled={!isOnline || isPending}
+                        onChange={(next) => void handleChange(platform, { auto_open: next })}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {isBox && platform.weekly_schedule !== undefined && (
+                  <BoxWeeklyScheduleEditor
+                    schedule={platform.weekly_schedule}
+                    savedAt={platform.weekly_schedule_at ?? null}
+                    revision={platform.weekly_schedule_revision}
+                    disabled={!isOnline || isPending}
+                    detailUnavailable={boxDetailFailed || !platform.controllable}
+                    reload={() => loadBoxDetails()}
+                    save={(weekly_schedule, expected_schedule_revision) =>
+                      handleChange(platform, { weekly_schedule, expected_schedule_revision })}
+                  />
+                )}
 
                 {/* efood: weekly hours, the efood page inside the POS and its schedule editor. */}
                 {canManageEfoodSchedule && (
