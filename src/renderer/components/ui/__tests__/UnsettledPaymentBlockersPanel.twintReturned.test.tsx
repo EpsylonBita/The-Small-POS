@@ -51,9 +51,30 @@ const blocker = (unsaved: Record<string, unknown>): UnsettledPaymentBlocker => (
 
 const returnedButton = () => screen.queryByTestId(`twint-returned-${KEY}`)
 
-afterEach(() => cleanup())
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+})
 
 describe('UnsettledPaymentBlockersPanel and TWINT returned outside the POS', () => {
+  it('shows amounts without an unreadable currency and logs that value once', () => {
+    const currency = 'Native currency error'
+    const target = blocker({ currency })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { rerender } = render(<UnsettledPaymentBlockersPanel blockers={[target]} />)
+    expect(screen.getAllByText(/12[,.]35/)).toHaveLength(2)
+    expect(document.body).not.toHaveTextContent(currency)
+    rerender(<UnsettledPaymentBlockersPanel blockers={[{ ...target }]} />)
+    // This file's translator knows no label at all, so the status is logged too; only the currency is under test.
+    expect(warn.mock.calls.filter(([message, detail]) =>
+      message === '[UnsettledPaymentBlockersPanel] Unrecognized payment detail:' &&
+      (detail as { field?: string } | undefined)?.field === 'currency')).toEqual([
+      ['[UnsettledPaymentBlockersPanel] Unrecognized payment detail:', {
+        orderId: target.orderId, field: 'currency', value: currency,
+      }],
+    ])
+  })
+
   it('offers it for a TWINT receipt that can never be saved, and never the card way out', () => {
     const onResolveTwintReturned = vi.fn()
     const onResolveUnsavedPayment = vi.fn()

@@ -5,8 +5,7 @@
 //!
 //! Fed by [`super::status`] from `GET /api/pos/fiscal/status`. A confirmed
 //! "Inactive" answer (the server told us no fiscal plugin is active for this
-//! branch) is used for exactly one thing: queued fiscal rows of that branch
-//! do not hold the Z — neither the close-day guard
+//! branch) keeps queued fiscal rows from holding the Z — neither the close-day guard
 //! ([`super::close_day_guard`]) nor the closeout drain's failure accounting
 //! (`sync_queue::fiscal_row_is_closeout_exempt`).
 //!
@@ -67,8 +66,9 @@ struct CacheState {
     db_path: Option<PathBuf>,
 }
 
+static CACHE: OnceLock<Mutex<CacheState>> = OnceLock::new();
+
 fn state() -> MutexGuard<'static, CacheState> {
-    static CACHE: OnceLock<Mutex<CacheState>> = OnceLock::new();
     CACHE
         .get_or_init(|| Mutex::new(CacheState::default()))
         .lock()
@@ -113,10 +113,27 @@ pub fn initialize(conn: &Connection, db_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Only closeout uses the last confirmed answer without a TTL. Receipts still
+/// Closeout uses the last confirmed answer without a TTL. Receipts still
 /// enqueue unconditionally; freshness-sensitive fiscal checks keep `verdict`.
 pub fn closeout_verdict(branch_id: &str) -> CacheVerdict {
-    match state().by_branch.get(branch_id) {
+    last_confirmed_verdict(&state(), branch_id)
+}
+
+/// The same last confirmed answer when the reader cannot wait for a refresh.
+pub(crate) fn try_closeout_verdict(branch_id: &str) -> CacheVerdict {
+    #[cfg(test)]
+    if let Some(pinned) = TEST_VERDICTS.with(|pins| pins.borrow().get(branch_id).copied()) {
+        return pinned;
+    }
+    CACHE
+        .get()
+        .and_then(|cache| cache.try_lock().ok())
+        .map(|cache| last_confirmed_verdict(&cache, branch_id))
+        .unwrap_or(CacheVerdict::Unknown)
+}
+
+fn last_confirmed_verdict(cache: &CacheState, branch_id: &str) -> CacheVerdict {
+    match cache.by_branch.get(branch_id) {
         Some(entry) if entry.active => CacheVerdict::Active,
         Some(_) => CacheVerdict::Inactive,
         None => CacheVerdict::Unknown,
@@ -248,6 +265,23 @@ pub fn inactive_branch_ids() -> Vec<String> {
         .collect();
     ids.sort();
     ids
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_VERDICTS: std::cell::RefCell<std::collections::HashMap<String, CacheVerdict>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Test-only: the answer `try_closeout_verdict` gives on this test's thread.
+/// The cache is one per process, and every test that opens a database
+/// re-initialises it, so a parallel test could clear the answer between a
+/// test's `update` and its read.
+#[cfg(test)]
+pub(crate) fn pin_for_test(branch_id: &str, verdict: CacheVerdict) {
+    TEST_VERDICTS.with(|pins| {
+        pins.borrow_mut().insert(branch_id.to_owned(), verdict);
+    });
 }
 
 /// Test-only: clear all cached entries between tests. NEVER call in production.

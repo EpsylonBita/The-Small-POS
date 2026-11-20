@@ -4,23 +4,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(), cancelWithApproval: vi.fn(), updateStatus: vi.fn(), onCancelled: vi.fn(),
+  getSetting: vi.fn(),
 }));
 vi.mock('../../../lib', () => ({ getBridge: () => ({ invoke: mocks.invoke,
   orders: { cancelWithApproval: mocks.cancelWithApproval, updateStatus: mocks.updateStatus } }) }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('react-hot-toast', () => ({ default: { success: vi.fn(), error: vi.fn() } }));
+vi.mock('../useTerminalSettings', () => ({
+  useTerminalSettings: () => ({ getSetting: mocks.getSetting, error: null }),
+}));
 vi.mock('../usePrivilegedActionConfirmation', () => ({ usePrivilegedActionConfirmation: () => ({
   runWithPrivilegedConfirmation: ({ action }: any) => action('approved-pin'), confirmationModal: null,
 }) }));
 vi.mock('../../components/modals/OrderCancellationModal', () => ({
-  default: ({ isOpen, manualReturn, onConfirmCancel }: any) => isOpen ? <div role="dialog">
+  default: ({ isOpen, manualReturn, onConfirmCancel, platformOrder }: any) => isOpen ? <div role="dialog" data-platform={platformOrder}>
     <span>{manualReturn ? manualReturn.amountCents : 'reason-only'}</span>
     <button onClick={() => void onConfirmCancel('Returned order', manualReturn ? 'bank' : undefined)}>Confirm cancel</button>
   </div> : null,
 }));
 import { useReturnedOrderCancellation } from '../useReturnedOrderCancellation';
-function Harness() {
-  const { requestCancellation, modal } = useReturnedOrderCancellation(mocks.onCancelled);
+function Harness({ order }: { order?: unknown }) {
+  const { requestCancellation, modal } = useReturnedOrderCancellation(mocks.onCancelled, order);
   return <><button onClick={() => void requestCancellation('order').then(value => {
     document.body.dataset.providerFallback = String(!value);
   })}>Return</button>{modal}</>;
@@ -66,6 +70,15 @@ describe('history returned-order cancellation host', () => {
     await act(async () => { fireEvent.click(screen.getByText('Confirm cancel')); });
     expect(mocks.invoke.mock.calls[1]).toEqual(['order_cancel_manual_refund', { orderId: 'order',
       generation: 'ledger', requestId: 'event', reason: 'Returned order', returnChannel: 'bank' }]);
+  });
+  it.each([false, true])('uses the platform cancellation dialog only with the switch on (%s)', async enabled => {
+    mocks.getSetting.mockReturnValue(JSON.stringify({ platform_driver_cash_auto: enabled }));
+    mocks.invoke.mockResolvedValue({ ...plan, requiresReturn: true, amountCents: 400, currency: 'EUR' });
+    render(<Harness order={{ plugin: 'efood' }} />);
+    await act(async () => { fireEvent.click(screen.getByText('Return')); });
+    expect(mocks.getSetting).toHaveBeenCalledWith('terminal', 'enabled_features');
+    expect(screen.getByRole('dialog').getAttribute('data-platform')).toBe(String(enabled));
+    expect(mocks.invoke.mock.calls.map(call => call[0])).toEqual(['order_prepare_manual_cancel']);
   });
   it('authorizes existing refund behavior only for original provider returns', async () => {
     mocks.invoke.mockRejectedValue(new Error('ORIGINAL_PROVIDER_RETURN_REQUIRED'));

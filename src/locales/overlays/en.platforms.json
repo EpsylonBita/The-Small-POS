@@ -154,6 +154,10 @@
     }
   },
   "cancellationNotice": {
+    "driverCash": "The till has recorded {{amount}} in cash with driver {{name}} for this order. Before correcting the payment, check whether the driver collected the cash and whether they have already handed it in or returned it.",
+    "driverCashNoName": "The till has recorded {{amount}} in cash with the driver for this order. Before correcting the payment, check whether the driver collected the cash and whether they have already handed it in or returned it.",
+    "paymentInReview": "The payment for this order is awaiting review.",
+    "checkPayments": "This order has a recorded cash payment. Check whether the cash was received or returned before correcting the payment.",
     "eyebrow": "Order cancelled by platform",
     "stopPreparing": "Stop preparing this order",
     "explain": "The delivery platform cancelled this order. Do not continue preparing or dispatching it.",

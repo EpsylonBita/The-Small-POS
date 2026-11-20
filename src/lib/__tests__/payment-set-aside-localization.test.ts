@@ -167,7 +167,10 @@ describe('payments set aside for review, in every locale', () => {
     const t = await translatorFor('sq');
     const fix = t('paymentIntegrity.fixCodes.payments_need_review');
     expect(fix).toContain('ë');
-    expect(fix).toMatch(/^Ktheja paratë/);
+    // Support comes first since the texts review of 19/11/2026; the money-back step keeps its informal imperative.
+    expect(fix).toMatch(/^Nëse pagesa/);
+    expect(fix).toContain('kontakto mbështetjen');
+    expect(fix).toContain('ktheja paratë klientit');
     expect(t('payment.setAside.message', { amount: money(13) })).toContain('Mos i arkëto');
   });
 

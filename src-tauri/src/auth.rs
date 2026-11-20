@@ -1724,6 +1724,19 @@ fn get_current_session(auth: &AuthState) -> Option<StaffSession> {
     current_session_for_pin(auth).filter(|session| !session.is_expired())
 }
 
+/// Best-effort attribution for an optional audit that cannot wait on auth.
+pub(crate) fn try_current_audit_staff_id(auth: &AuthState) -> Option<String> {
+    let current_id = auth.current_session_id.try_lock().ok()?.clone()?;
+    let sessions = auth.sessions.try_lock().ok()?;
+    let session = sessions
+        .get(&current_id)
+        .filter(|session| !session.is_expired())?;
+    let id = session
+        .database_staff_id()
+        .unwrap_or(session.staff_id.trim());
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
 /// Expired sessions are proof of the previous identity only. The terminal
 /// role PIN must be verified before one can be made active again.
 fn current_session_for_pin(auth: &AuthState) -> Option<StaffSession> {

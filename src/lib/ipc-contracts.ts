@@ -342,6 +342,39 @@ export interface UnsettledPaymentBlocker {
   platformHeld?: boolean;
 }
 
+export interface DriverCheckoutDelivery {
+  id: string;
+  order_id: string;
+  order_number?: string;
+  box_order_label?: string;
+  status?: string;
+  order_status?: string;
+  customer_name?: string | null;
+  delivery_address?: string | null;
+  total_amount?: number | null;
+  cash_collected?: number;
+  payment_method?: string;
+}
+
+/** The driver fields of the existing shift summary. Other fields keep their legacy shape. */
+export interface ShiftSummaryPayload {
+  [key: string]: unknown;
+  success?: boolean;
+  driverDeliveries?: DriverCheckoutDelivery[];
+}
+
+export type DriverCashForNotice =
+  | { state: 'driver_cash'; amountCents: number; currency: string; collectorName: string | null }
+  | { state: 'review' }
+  | { state: 'check' };
+
+export interface ShiftCloseFigures {
+  expected?: number;
+  closing?: number;
+  variance?: number;
+  currency?: string | null;
+}
+
 /** A card payment charged on this till and not saved yet (30/09/2026). */
 export interface UnsavedPaymentSummary {
   idempotencyKey: string;

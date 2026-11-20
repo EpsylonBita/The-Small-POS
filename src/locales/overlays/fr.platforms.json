@@ -154,6 +154,10 @@
     }
   },
   "cancellationNotice": {
+    "driverCash": "La caisse a enregistré {{amount}} en espèces auprès du livreur {{name}} pour cette commande. Avant de corriger le paiement, vérifiez si le livreur a encaissé cette somme et s’il l’a déjà remise ou rendue.",
+    "driverCashNoName": "La caisse a enregistré {{amount}} en espèces auprès du livreur pour cette commande. Avant de corriger le paiement, vérifiez si le livreur a encaissé cette somme et s’il l’a déjà remise ou rendue.",
+    "paymentInReview": "Le paiement de cette commande est en attente de vérification.",
+    "checkPayments": "Un paiement en espèces est enregistré pour cette commande. Vérifiez si les espèces ont été encaissées ou rendues avant de corriger le paiement.",
     "eyebrow": "Commande annulée par la plateforme",
     "stopPreparing": "Arrêtez de préparer cette commande",
     "explain": "La plateforme de livraison a annulé cette commande. Ne continuez pas à la préparer ni à l'expédier.",

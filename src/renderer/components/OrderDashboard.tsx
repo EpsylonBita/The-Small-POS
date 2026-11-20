@@ -232,6 +232,7 @@ import { useTableReleaseGuard } from "../hooks/useTableReleaseGuard";
 import {
   findCancelRefusals,
   hasTableServiceEvidence,
+  isPlatformDriverCashAutoEnabled,
   ORDER_HAS_PAYMENTS,
   ORDER_PAYMENT_NOT_RECORDED,
 } from "../utils/orderCancelGuard";
@@ -558,6 +559,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const { resolvedTheme } = useTheme();
     const {
       getSetting,
+      error: terminalSettingsError,
       refresh: refreshTerminalSettings,
       loaded: terminalSettingsLoaded,
       reload: reloadTerminalSettings,
@@ -6341,29 +6343,39 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Shared entry: the Refund screen must hand off before it returns any money.
     const beginOrderCancellation = async (orderIds: string[], refundHandoff = false): Promise<boolean> => {
       const targets = [...orders, ...pendingExternalOrders].filter(order => orderIds.includes(order.id));
-      const blockedOrder = targets.find(order => order.status !== 'pending'
-        && !boxOrderStatusMutationAllowed(order, 'cancelled'));
-      if (blockedOrder) {
-        toast.error(t(isBoxOrder(blockedOrder) ? boxLocalCancellationMessageKey(blockedOrder) : 'platformCancellation.platformOnly'));
-        return true;
-      }
-      if (targets.some(order => isBoxOrder(order) && order.status !== 'pending')
-        && targets.some(order => !isBoxOrder(order) && isExternalPlatform(String(order.plugin || order.order_plugin || order.platform || order.order_platform)))) {
-        toast.error(t('boxOrder.cancelSeparately'));
-        return true;
-      }
+      const platformCashAuto = !terminalSettingsError
+        && isPlatformDriverCashAutoEnabled(getSetting('terminal', 'enabled_features'));
+      const announcePlatformBlock = (preflightIds?: ReadonlySet<string>): boolean => {
+        const blockedOrder = targets.find(order => order.status !== 'pending'
+          && !preflightIds?.has(order.id)
+          && !boxOrderStatusMutationAllowed(order, 'cancelled'));
+        if (blockedOrder) {
+          toast.error(t(isBoxOrder(blockedOrder) ? boxLocalCancellationMessageKey(blockedOrder) : 'platformCancellation.platformOnly'));
+          return true;
+        }
+        if (targets.some(order => isBoxOrder(order) && order.status !== 'pending')
+          && targets.some(order => !isBoxOrder(order) && isExternalPlatform(String(order.plugin || order.order_plugin || order.platform || order.order_platform)))) {
+          toast.error(t('boxOrder.cancelSeparately'));
+          return true;
+        }
+        return false;
+      };
+      if (!platformCashAuto && announcePlatformBlock()) return true;
       const refusals = await findCancelRefusals(orderIds);
+      // Native preflight decides paid cancellations and table history.
+      const tableIds = orderIds.filter(id =>
+        hasTableServiceEvidence([...orders, ...pendingExternalOrders].find(row => row.id === id)));
+      const preflightIds = new Set([
+        ...refusals.hasPayments,
+        ...tableIds,
+        ...(refundHandoff ? orderIds : []),
+      ]);
+      if (platformCashAuto && announcePlatformBlock(preflightIds)) return true;
       if (refundHandoff && refusals.notRecorded.length > 0) throw new Error("ORDER_PAYMENT_NOT_RECORDED");
       if (refusals.notRecorded.length > 0) announceCancelRefusedNotRecorded(refusals.notRecorded);
       const plans: Record<string, ManualCancellationPlan> = {};
       const protectedOrders: string[] = [];
-      // Table checks are decided by table evidence, never by the dine-in
-      // label alone: a kiosk eat-in order is cancelled like a counter
-      // order (review 06/10/2026). Orders holding money are prepared
-      // anyway, so the till decides their table history itself.
-      const tableIds = orderIds.filter(id =>
-        hasTableServiceEvidence([...orders, ...pendingExternalOrders].find(row => row.id === id)));
-      for (const orderId of new Set([...refusals.hasPayments, ...tableIds, ...(refundHandoff ? orderIds : [])])) {
+      for (const orderId of preflightIds) {
         try {
           plans[orderId] = await prepareManualOrderCancellation(bridge, orderId);
         } catch (error) {

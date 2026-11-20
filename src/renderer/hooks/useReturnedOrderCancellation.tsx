@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
+import { foodDeliveryPlatform } from '../../../../shared/platforms/order-cancellation';
 import { getBridge } from '../../lib';
 import OrderCancellationModal from '../components/modals/OrderCancellationModal';
 import { releaseRefusedTableCancellation } from '../services/TableManualCancellation';
+import { isPlatformDriverCashAutoEnabled } from '../utils/orderCancelGuard';
 import { usePrivilegedActionConfirmation } from './usePrivilegedActionConfirmation';
+import { useTerminalSettings } from './useTerminalSettings';
 import {
   prepareManualOrderCancellation, applyPreparedOrderCancellation,
   manualCancellationFailureKey, manualCancellationFailureOptions, type ManualCancellationPlan,
@@ -12,14 +15,19 @@ import {
 
 /** History has the same return/cancel modal and native commit as the dashboard.
  * Only an explicit provider-original refusal falls back to ordinary refund. */
-export function useReturnedOrderCancellation(onCancelled: () => void | Promise<void>) {
+export function useReturnedOrderCancellation(onCancelled: () => void | Promise<void>, order?: unknown) {
   const bridge = getBridge();
   const { t } = useTranslation();
-  const [plan, setPlan] = useState<ManualCancellationPlan | null>(null);
+  const { getSetting, error: terminalSettingsError } = useTerminalSettings();
+  const [plan, setPlan] = useState<(ManualCancellationPlan & { platform: string | null }) | null>(null);
   const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
   const requestCancellation = async (orderId: string): Promise<boolean> => {
+    const platformCashAuto = !terminalSettingsError
+      && isPlatformDriverCashAutoEnabled(getSetting('terminal', 'enabled_features'));
     try {
-      setPlan(await prepareManualOrderCancellation(bridge, orderId));
+      const prepared = await prepareManualOrderCancellation(bridge, orderId);
+      const platform = platformCashAuto && prepared.requiresReturn ? foodDeliveryPlatform(order) : null;
+      setPlan({ ...prepared, platform });
       return true;
     } catch (error) {
       if (String(error).includes('ORIGINAL_PROVIDER_RETURN_REQUIRED')) return false;
@@ -28,6 +36,8 @@ export function useReturnedOrderCancellation(onCancelled: () => void | Promise<v
   };
   const modal = <>
     <OrderCancellationModal isOpen={plan !== null} orderCount={1}
+      platformOrder={Boolean(plan?.platform && plan.platform !== 'box')}
+      boxLocalCancellation={plan?.platform === 'box'}
       manualReturn={plan?.requiresReturn ? { amountCents: plan.amountCents, currency: plan.currency } : undefined}
       recovery={plan?.pending ? { reason: plan.reason || '', returnChannel: plan.returnChannel } : undefined}
       savedAttempt={plan?.pending && plan.tableSessionId ? { refused: Boolean(plan.refused), onRelease: async () => {

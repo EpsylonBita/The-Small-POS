@@ -469,7 +469,7 @@ const OrdersPage: React.FC = () => {
     bridge.sync,
   ]);
 
-  const returnedCancellation = useReturnedOrderCancellation(fetchOrders);
+  const returnedCancellation = useReturnedOrderCancellation(fetchOrders, selectedOrder);
 
   useEffect(() => {
     fetchOrders();

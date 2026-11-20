@@ -1,7 +1,8 @@
 //! Record an operator-confirmed manual return and cancel in one durable write.
 //! This never calls a provider or makes a charge. Provider originals cannot enter.
 use crate::{
-    auth, commands::orders, db, gift_financial_opening::OpeningScope, money::Cents, payments,
+    auth, commands::orders, db, gift_financial_opening::OpeningScope, money::Cents, payment_review,
+    payments, platform_cash_assignment,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -15,9 +16,7 @@ const SETUP_UNKNOWN: &str = "PAYMENT_CONNECTION_STATUS_UNAVAILABLE";
 /// A receipt this till mirrored from another till has no local provenance:
 /// its canonical server row decides, and reading it needs a connection.
 pub(crate) const RECEIPT_CHECK_UNAVAILABLE: &str = "ORIGINAL_RECEIPT_CHECK_UNAVAILABLE";
-/// An efood/Wolt (or other external) order returns its money through the
-/// platform; the till never records a manual return for it (Android
-/// `readManualCancellationState`).
+/// An external order needs proof of retained store cash to allow a manual return.
 pub(crate) const PLATFORM_ORDER_RETURN_REQUIRED: &str = "PLATFORM_ORDER_RETURN_REQUIRED";
 const PERMISSION_REQUIRED: &str = "ORDER_CANCELLATION_PERMISSION_REQUIRED";
 /// The store-role permission that lets a staff member cancel a paid order
@@ -467,14 +466,18 @@ fn no_connected_bank(admission: ProviderAdmission) -> Result<(), String> {
 }
 
 /// Our own channels (`pos`, `kiosk`, `web`, `android-ios`) or no recorded
-/// source. An external order id or any other source returns money through its
-/// platform (`crate::platforms`, the shared closed classification).
-fn order_source_allows_manual_return(conn: &Connection, id: &str) -> Result<bool, String> {
-    let (plugin, external): (Option<String>, Option<String>) = conn
+/// source. An external order id or any other source requires the store-cash
+/// check (`crate::platforms`, the shared closed classification).
+fn order_source_allows_manual_return(
+    conn: &Connection,
+    id: &str,
+    platform_cash_auto: bool,
+) -> Result<bool, String> {
+    let (plugin, external, metadata): (Option<String>, Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT plugin,external_plugin_order_id FROM orders WHERE id=?1",
+            "SELECT plugin,external_plugin_order_id,ghost_metadata FROM orders WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(|e| e.to_string())?;
     if external.as_deref().is_some_and(|v| !v.trim().is_empty()) {
@@ -485,7 +488,17 @@ fn order_source_allows_manual_return(conn: &Connection, id: &str) -> Result<bool
             .as_deref()
             .and_then(crate::platforms::normalize_platform_slug)
         {
-            None => true,
+            // With native preflight enabled, also recognize the renderer's
+            // metadata-only platform orders. They still need the writer's proof.
+            None => {
+                !platform_cash_auto
+                    || !metadata
+                        .and_then(payments::food_delivery_from_metadata)
+                        .and_then(|food| food.get("platform")?.as_str().map(str::to_owned))
+                        .is_some_and(|platform| {
+                            crate::platforms::is_external_delivery_platform(&platform)
+                        })
+            }
             Some(slug) => crate::platforms::INTERNAL_ORDER_PLATFORMS.contains(&slug.as_str()),
         },
     )
@@ -570,6 +583,70 @@ pub(crate) fn original_is_manual_with_metadata(
     }))
 }
 
+fn has_retained_manual_cash(
+    conn: &Connection,
+    order_id: &str,
+    receipts: &CanonicalReceipts,
+) -> Result<bool, String> {
+    if !payments::platform_declares_store_driver_cash(conn, order_id) {
+        return Ok(false);
+    }
+    let (remote_order_id, client_request_id): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT NULLIF(TRIM(supabase_id), ''), NULLIF(TRIM(client_request_id), '')
+             FROM orders WHERE id = ?1",
+            [order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    if platform_cash_assignment::has_unresolved_collection(
+        conn,
+        order_id,
+        remote_order_id.as_deref(),
+        client_request_id.as_deref(),
+    )? {
+        return Ok(false);
+    }
+    let counted = payments::counted_financial_payment_sql(conn, "p")?;
+    let settlement = payments::platform_settlement_row_sql("p");
+    let excluded = format!(
+        "({settlement} OR p.status = '{}')",
+        payment_review::DUPLICATE_REVIEW_PAYMENT_STATUS
+    );
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT p.id, LOWER(TRIM(COALESCE(p.method, ''))), {excluded}
+             FROM order_payments p
+             WHERE p.order_id = ?1 AND ({excluded} OR (
+                 {counted}
+                 AND NOT EXISTS(SELECT 1 FROM payment_adjustments a
+                                WHERE a.payment_id = p.id AND a.adjustment_type = 'void')
+                 AND COALESCE(p.amount_cents, CAST(ROUND(p.amount * 100) AS INTEGER), 0) >
+                     COALESCE((SELECT SUM(COALESCE(a.amount_cents, CAST(ROUND(a.amount * 100) AS INTEGER)))
+                               FROM payment_adjustments a
+                               WHERE a.payment_id = p.id AND a.adjustment_type = 'refund'), 0)))"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([order_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut found_cash = false;
+    for row in rows {
+        let (payment_id, method, is_excluded) = row.map_err(|e| e.to_string())?;
+        if is_excluded || method != "cash" || !receipt_is_manual(conn, &payment_id, receipts)? {
+            return Ok(false);
+        }
+        found_cash = true;
+    }
+    Ok(found_cash)
+}
+
 fn prepare(conn: &Connection, raw_id: &str, evidence: &ReturnEvidence) -> Result<Value, String> {
     let id = orders::validate_manual_cancel_target(conn, raw_id)?;
     prepare_validated(conn, &id, evidence)
@@ -645,9 +722,10 @@ pub(crate) fn prepare_validated(
             return Err(orders::ORDER_PAYMENT_NOT_RECORDED.into());
         }
     }
-    // The order's own source first: an efood/Wolt order's money is the
-    // platform's to return, whatever its payment row says (Android parity).
-    if !order_source_allows_manual_return(conn, id)? {
+    let platform_cash_auto = platform_cash_assignment::platform_driver_cash_auto_enabled(conn);
+    if !order_source_allows_manual_return(conn, id, platform_cash_auto)?
+        && !(platform_cash_auto && has_retained_manual_cash(conn, id, &receipts).unwrap_or(false))
+    {
         return Err(PLATFORM_ORDER_RETURN_REQUIRED.into());
     }
     no_connected_bank(admission)?;
@@ -1161,10 +1239,10 @@ pub(crate) mod tests {
     }
 
     // The planning and commit paths with a fresh, provider-free admission.
-    fn prepare(conn: &Connection, raw_id: &str) -> Result<Value, String> {
+    pub(crate) fn prepare(conn: &Connection, raw_id: &str) -> Result<Value, String> {
         super::prepare(conn, raw_id, &admitted(conn))
     }
-    fn commit(conn: &Connection, input: &Value, actor: &str) -> Result<Value, String> {
+    pub(crate) fn commit(conn: &Connection, input: &Value, actor: &str) -> Result<Value, String> {
         super::commit(conn, input, &test_actor(actor), &admitted(conn))
     }
 
@@ -2749,9 +2827,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_delivery_platform_order_never_records_a_manual_return_like_android() {
-        // Android refuses `external_plugin_order_id` and non-internal sources;
-        // the desktop accepted an efood/Wolt order whose payment row was manual.
+    fn delivery_platform_orders_with_card_receipts_still_refuse_manual_return() {
         for (plugin, external, refused) in [
             (Some("efood"), None, true),
             (Some("Wolt"), Some("W-77"), true),

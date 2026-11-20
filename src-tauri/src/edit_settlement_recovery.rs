@@ -1938,7 +1938,7 @@ fn adopt_canonical_order_inner(
 /// items .max(50)), while the read-only quote accepts 500.
 pub(crate) const EDIT_PATCH_MAX_LINES: i64 = 50;
 
-fn feature_flag(value: &Value) -> Option<bool> {
+pub(crate) fn feature_flag(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(flag) => Some(*flag),
         Value::Number(number) => match number.as_i64() {

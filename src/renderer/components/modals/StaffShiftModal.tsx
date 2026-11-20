@@ -111,7 +111,9 @@ import {
   type GiftCloseText,
 } from './StaffShiftGiftClose';
 import {
+  formatCashierCloseRefusal,
   formatPaymentIntegrityError,
+  formatRecordPaymentFailure,
   extractPaymentIntegrityPayload,
 } from '../../../lib/payment-integrity';
 
@@ -3623,6 +3625,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       return;
     }
 
+    const cashierClose = effectiveShift.role_type === 'cashier' || effectiveShift.role_type === 'manager';
     console.log('✅ All checks passed, calling closeShift via bridge...');
     setLoading(true);
     setError('');
@@ -3643,7 +3646,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         closedBy,
         paymentAmount: isDriver ? driverPaymentAmount : undefined
       }) as unknown as ShiftIpcResult;
-      console.log('closeShift result:', result);
+      if (result.success || !cashierClose) {
+        console.log('closeShift result:', result);
+      }
 
       if (result.success && (result as unknown as Record<string, unknown>).giftFinancialClosing != null) {
         // A retained gift original is never a generic success or print.
@@ -3678,25 +3683,35 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           console.error('[StaffShiftModal] Staff checkout print error:', printErr);
         }
       } else {
+        if (cashierClose) console.warn('[StaffShiftModal] Cashier close refused:', result);
         const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
         setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
         const handover = satelliteHandoverMessage(result.error, t);
         if (handover?.refused) setSatelliteReleaseShiftId(String(effectiveShift.id));
-        setError(handover ? handover.text : result.error?.includes('SHIFT_CURRENCY_SETTLEMENT_REQUIRED') ? t('modals.staffShift.currencySettlementRequired') : result.error || t('modals.staffShift.closeShiftFailed'));
+        if (handover) setError(handover.text);
+        else if (result.error?.includes('SHIFT_CURRENCY_SETTLEMENT_REQUIRED')) setError(t('modals.staffShift.currencySettlementRequired'));
+        else if (cashierClose) setError(formatCashierCloseRefusal(result, t, formatCurrency));
+        else setError(result.error || t('modals.staffShift.closeShiftFailed'));
         if (readRefusalCode(result, '').startsWith('GIFT_CLOSING_')) {
           rediscoverGiftClose();
         }
       }
     } catch (err) {
+      if (cashierClose) console.warn('[StaffShiftModal] Cashier close refused:', err);
       const paymentIntegrityPayload = extractPaymentIntegrityPayload(err);
       setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
       // A satellite handover holding this close: said in till language, and a
       // refused one offers the manager's release (fix review 06/10/2026).
-      // Any other rejection keeps its raw IPC text.
       const handover = satelliteHandoverMessage(err, t);
       if (handover?.refused) setSatelliteReleaseShiftId(String(effectiveShift.id));
       if (handover) setError(handover.text);
-      else setError(extractErrorMessage(err, t('modals.staffShift.closeShiftFailed')));
+      else if (cashierClose) {
+        const currencySettlementRequired = readRefusalCode(err, '') === 'SHIFT_CURRENCY_SETTLEMENT_REQUIRED'
+          || extractErrorMessage(err, '').includes('SHIFT_CURRENCY_SETTLEMENT_REQUIRED');
+        setError(currencySettlementRequired
+          ? t('modals.staffShift.currencySettlementRequired')
+          : formatCashierCloseRefusal(err, t, formatCurrency));
+      } else setError(extractErrorMessage(err, t('modals.staffShift.closeShiftFailed')));
     } finally {
       setLoading(false);
     }
@@ -3912,31 +3927,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           }),
         );
         return;
-      case 'refused': {
-        const paymentIntegrityPayload = extractPaymentIntegrityPayload(outcome.result);
-        if (paymentIntegrityPayload?.blockers) {
-          setCheckoutPaymentBlockers(paymentIntegrityPayload.blockers);
-        }
-        setError(
-          formatPaymentIntegrityError(
-            outcome.result,
-            t('modals.staffShift.closeShiftFailed'),
-            t,
-          ),
-        );
-        return;
-      }
+      case 'refused':
       case 'failed': {
-        const paymentIntegrityPayload = extractPaymentIntegrityPayload(outcome.error);
+        const failure = outcome.kind === 'refused' ? outcome.result : outcome.error;
+        console.warn('[StaffShiftModal] Recording payment failed:', failure);
+        const paymentIntegrityPayload = extractPaymentIntegrityPayload(failure);
         if (paymentIntegrityPayload?.blockers) {
           setCheckoutPaymentBlockers(paymentIntegrityPayload.blockers);
         }
         setError(
-          formatPaymentIntegrityError(
-            outcome.error,
-            t('modals.staffShift.closeShiftFailed'),
-            t,
-          ),
+          formatRecordPaymentFailure(failure, t, 'modals.staffShift.paymentRecordFailed', method),
         );
         return;
       }
@@ -3963,7 +3963,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 orderNumber: blocker.orderNumber,
                 method: methodLabel,
                 defaultValue:
-                  'Recorded the missing {{method}} payment for {{orderNumber}}. Retry shift checkout.',
+                  'The {{method}} payment for order {{orderNumber}} was recorded. Press "Checkout" again.',
               }),
         );
       }
@@ -7604,11 +7604,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <UnsettledPaymentBlockersPanel
               blockers={checkoutPaymentBlockers}
               title={t('modals.staffShift.paymentIntegrityTitle', {
-                defaultValue: 'Orders Blocking Shift Checkout',
+                defaultValue: 'Orders to settle before the shift can close',
               })}
               helperText={t('modals.staffShift.paymentIntegrityHelper', {
-                defaultValue:
-                  'These orders belong to the current business day. Record or confirm the missing payment row before the cashier can check out.',
+                defaultValue: 'Follow the instruction beside each order.',
               })}
               className="mb-4"
               onResolveBlocker={recordCheckoutBlocker.requestRecord}

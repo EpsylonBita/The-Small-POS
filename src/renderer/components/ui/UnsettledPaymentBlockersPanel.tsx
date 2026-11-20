@@ -1,4 +1,5 @@
 import { AlertTriangle, CreditCard, RotateCcw, Undo2 } from "lucide-react";
+import { useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { UnsettledPaymentBlocker } from "../../../lib/ipc-contracts";
@@ -7,11 +8,13 @@ import {
   getLocalizedPaymentBlockerReason,
   getLocalizedPaymentMethod,
   getLocalizedPaymentStatus,
+  getPaymentBlockerOrderNumber,
   isPaymentsNeedReviewBlocker,
   isPaymentsNotSavedBlocker,
   paymentBlockerKey,
 } from "../../../lib/payment-integrity";
 import { formatCurrency, formatDateTime } from "../../utils/format";
+import { recordedFolioCurrency } from "../../utils/folio-currency";
 import { setAsideResolvingKey } from "../../utils/paymentSetAside";
 import { isManualTwintRecord, unsavedResolvingKey, unsavedSavingKey } from "../../utils/unsavedPayments";
 import { CashHandIcon } from '../icons/PaymentMethodIcons';
@@ -115,6 +118,56 @@ export function UnsettledPaymentBlockersPanel({
   resolvingKey = null,
 }: UnsettledPaymentBlockersPanelProps) {
   const { t } = useTranslation();
+  const reported = useRef(new Set<string>());
+  const rows = useMemo(() => (Array.isArray(blockers) ? blockers : []).map((blocker) => {
+    const reason = getLocalizedPaymentBlockerReason(blocker, t, formatCurrency, "");
+    const fix = getLocalizedPaymentBlockerFix(blocker, t, formatCurrency, "");
+    const method = getLocalizedPaymentMethod(blocker.paymentMethod, t, "");
+    const status = getLocalizedPaymentStatus(blocker.paymentStatus, t, "");
+    const orderNumber = getPaymentBlockerOrderNumber(blocker);
+    const unsavedPayment = isPaymentsNotSavedBlocker(blocker) ? blocker.unsavedPayment : undefined;
+    const twintCurrency = unsavedPayment?.currency || "CHF";
+    const invalidTwintCurrency = unsavedPayment && isManualTwintRecord(unsavedPayment) &&
+      !recordedFolioCurrency(twintCurrency);
+    return { blocker, reason, fix, method, status, orderNumber, twintCurrency, invalidTwintCurrency };
+  }), [blockers, t]);
+
+  useEffect(() => {
+    const currentDiagnostics = new Set<string>();
+    for (const { blocker, reason, fix, method, status, orderNumber, twintCurrency, invalidTwintCurrency } of rows) {
+      const key = paymentBlockerKey(blocker);
+      const warn = (diagnostic: unknown[], message: string, details: object) => {
+        const id = JSON.stringify([key, ...diagnostic]);
+        if (currentDiagnostics.has(id)) return;
+        currentDiagnostics.add(id);
+        if (!reported.current.has(id)) console.warn(message, details);
+      };
+      if (!reason || !fix) {
+        const wording = {
+          reasonCode: blocker.reasonCode,
+          reasonText: blocker.reasonText,
+          suggestedFix: blocker.suggestedFix,
+          orderId: blocker.orderId,
+          reasonVariant: blocker.reasonVariant,
+          reasonAmounts: blocker.reasonAmounts,
+        };
+        warn(["wording", wording], "[UnsettledPaymentBlockersPanel] Missing localized blocker wording:", wording);
+      }
+      for (const [field, value, label] of [
+        ["paymentMethod", blocker.paymentMethod, method],
+        ["paymentStatus", blocker.paymentStatus, status],
+        ["orderNumber", blocker.orderNumber, orderNumber],
+        ["currency", twintCurrency, !invalidTwintCurrency],
+      ] as const) {
+        if (!label) {
+          warn([field, value], "[UnsettledPaymentBlockersPanel] Unrecognized payment detail:", {
+            orderId: blocker.orderId, field, value,
+          });
+        }
+      }
+    }
+    reported.current = currentDiagnostics;
+  }, [rows]);
 
   if (!Array.isArray(blockers) || blockers.length === 0) {
     return null;
@@ -130,23 +183,16 @@ export function UnsettledPaymentBlockersPanel({
         </div>
         <div className="min-w-0 flex-1">
           <div className="text-sm font-extrabold uppercase tracking-[0.18em] text-amber-800 dark:text-amber-200">
-            {title ||
-              t("paymentIntegrity.blockersTitle", {
-                defaultValue: "Payment Integrity Blockers",
-              })}
+            {title || t("paymentIntegrity.blockersTitle")}
           </div>
           <p className="mt-1 text-sm font-medium text-amber-800 dark:text-amber-200">
-            {helperText ||
-              t("paymentIntegrity.blockersHelper", {
-                defaultValue:
-                  "These orders must be repaired before this action can continue.",
-              })}
+            {helperText || t("paymentIntegrity.blockersHelper")}
           </p>
         </div>
       </div>
 
       <div className="mt-4 space-y-3">
-        {blockers.map((blocker) => {
+        {rows.map(({ blocker, reason, fix, method, status, orderNumber, twintCurrency, invalidTwintCurrency }) => {
           const outstanding = Math.max(
             Number(blocker.totalAmount || 0) - Number(blocker.settledAmount || 0),
             0,
@@ -184,7 +230,9 @@ export function UnsettledPaymentBlockersPanel({
           const unsavedPayment = isPaymentsNotSavedBlocker(blocker)
             ? blocker.unsavedPayment
             : undefined;
-          const formatBlockerAmount=(amount:number)=>unsavedPayment && isManualTwintRecord(unsavedPayment) ? formatCurrency(amount,unsavedPayment.currency || 'CHF') : formatCurrency(amount);
+          const formatBlockerAmount = (amount: number) => unsavedPayment && isManualTwintRecord(unsavedPayment)
+            ? formatCurrency(amount, invalidTwintCurrency ? null : twintCurrency)
+            : formatCurrency(amount);
           // Shared rule R4 (round 3, 01/10/2026): an order whose money the
           // delivery platform holds is never offered "Record the payment":
           // the money is restored from the server (Sync Now), never taken at
@@ -228,15 +276,17 @@ export function UnsettledPaymentBlockersPanel({
                       ? t("payment.notSaved.newOrder", {
                           defaultValue: "New order, not saved yet",
                         })
-                      : blocker.orderNumber}
+                      : orderNumber || t("paymentIntegrity.orderNumberFallback")}
                   </div>
                   <div className="mt-1 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
                     {t("paymentIntegrity.reasonLabel", {
-                      defaultValue: "Reason",
+                      defaultValue: "What happened",
                     })}
                   </div>
                   <div className="mt-1 text-sm font-medium text-slate-100">
-                    {getLocalizedPaymentBlockerReason(blocker, t, formatCurrency)}
+                    {reason || (orderNumber
+                      ? t("paymentIntegrity.blockerReasonFallback", { orderNumber })
+                      : t("paymentIntegrity.blockerReasonFallbackWithoutNumber"))}
                   </div>
                 </div>
 
@@ -289,7 +339,7 @@ export function UnsettledPaymentBlockersPanel({
                       })}
                     </div>
                     <div className="mt-2 text-sm font-bold text-red-800 dark:text-red-200">
-                      {isManualTwintRecord(unsavedPayment) ? formatCurrency(unsavedPayment.amountCents / 100,unsavedPayment.currency || 'CHF') : formatCurrency(unsavedPayment.amount || 0)}
+                      {isManualTwintRecord(unsavedPayment) ? formatBlockerAmount(unsavedPayment.amountCents / 100) : formatCurrency(unsavedPayment.amount || 0)}
                     </div>
                   </div>
                   <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
@@ -335,7 +385,7 @@ export function UnsettledPaymentBlockersPanel({
                   <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.settledLabel", {
-                        defaultValue: "Settled",
+                        defaultValue: "Payment recorded",
                       })}
                     </div>
                     <div className="mt-2 text-sm font-bold text-emerald-800 dark:text-emerald-200">
@@ -345,7 +395,7 @@ export function UnsettledPaymentBlockersPanel({
                   <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.outstandingLabel", {
-                        defaultValue: "Outstanding",
+                        defaultValue: "Amount missing from the record",
                       })}
                     </div>
                     <div className="mt-2 text-sm font-bold text-amber-800 dark:text-amber-200">
@@ -364,24 +414,24 @@ export function UnsettledPaymentBlockersPanel({
                     )}`}
                   >
                     {getMethodIcon(blocker.paymentMethod || "")}
-                    {getLocalizedPaymentMethod(blocker.paymentMethod || "pending", t)}
+                    {method || t("paymentIntegrity.methods.unknown")}
                   </span>
                   <span className="inline-flex rounded-full border border-slate-400/20 bg-slate-500/10 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-slate-200">
                     {reviewPayment
                       ? getLocalizedPaymentStatus("duplicate_review", t)
                       : unsavedPayment
                         ? getLocalizedPaymentStatus("not_saved", t)
-                        : getLocalizedPaymentStatus(blocker.paymentStatus || "pending", t)}
+                        : status || t("paymentIntegrity.statuses.unknown")}
                   </span>
                 </div>
 
                 <div className="rounded-2xl border border-(--pos-s-border) bg-(--pos-s-surface-2) px-3 py-2 text-sm font-medium text-amber-800 dark:text-amber-200 xl:max-w-[60%]">
                   <span className="mr-2 text-xs font-bold uppercase tracking-[0.18em] text-amber-800 dark:text-amber-200">
                     {t("paymentIntegrity.fixLabel", {
-                      defaultValue: "Fix",
+                      defaultValue: "What to do",
                     })}
                   </span>
-                  {getLocalizedPaymentBlockerFix(blocker, t, formatCurrency)}
+                  {fix || t("paymentIntegrity.blockerFixFallback")}
                 </div>
               </div>
 

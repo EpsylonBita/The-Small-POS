@@ -12,19 +12,57 @@
  * notice follows the shared modal stack and participates in the same blocker
  * bookkeeping as the other windows.
  *
- * This never touches order status, refunds or the provider: it only shows
- * what `GET /pos/platforms/cancellations` already recorded and lets staff
- * acknowledge having seen it. Acknowledgement is purely local to this
- * terminal (`platformCancellationNoticeStore`).
+ * This never touches order status, refunds or the provider. It displays the
+ * recorded cancellation and reads the local payment information independently.
+ * Acknowledgement is purely local to this terminal (`platformCancellationNoticeStore`).
  */
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { fromCents } from '@shared/utils/money';
+import { getBridge, offEvent, onEvent } from '../../../lib';
+import type { DriverCashForNotice } from '../../../lib/ipc-contracts';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { useCancellationNotices } from '../../hooks/useCancellationNotices';
 import { playSelectedPlatformSound } from '../../services/platformNotificationSound';
 import { playAppAudioTones } from '../../services/appAudio';
+import { formatCurrency } from '../../utils/format';
+
+export function useCancellationPaymentText(orderId: string | null, generation = 0): string | null {
+  const { t } = useTranslation();
+  const request = useMemo(() => ({ orderId, generation }), [orderId, generation]);
+  const [result, setResult] = useState<{ request: typeof request; answer: DriverCashForNotice } | null>(null);
+
+  useEffect(() => {
+    const { orderId } = request;
+    if (!orderId) return;
+    let current = true;
+    // Start after the render and sound, with the same fallback for sync and async failures.
+    void Promise.resolve()
+      .then(() => current ? getBridge().orders.getDriverCashForNotice(orderId) : null)
+      .then(answer => {
+        if (current && answer) setResult({ request, answer });
+      })
+      .catch(() => {});
+    return () => { current = false; };
+  }, [request]);
+
+  if (result?.request !== request) return null;
+  const { answer } = result;
+  switch (answer.state) {
+    case 'driver_cash': {
+      const amount = formatCurrency(fromCents(answer.amountCents), answer.currency);
+      return answer.collectorName?.trim()
+        ? t('cancellationNotice.driverCash', { amount, name: answer.collectorName })
+        : t('cancellationNotice.driverCashNoName', { amount });
+    }
+    case 'review':
+      return t('cancellationNotice.paymentInReview');
+    case 'check':
+      return t('cancellationNotice.checkPayments');
+  }
+}
 
 export interface CancellationNoticeManagerProps {
   /** Staff authenticated with a stable, resolvable org/branch/terminal identity. */
@@ -39,8 +77,16 @@ export const CancellationNoticeManager: React.FC<CancellationNoticeManagerProps>
   enabled,
 }) => {
   const { t } = useTranslation();
-  const { current, queueLength, acknowledging, acknowledgeFailed, persistPending, acknowledge, retry } =
+  const { current, queueLength, acknowledging, acknowledgeFailed, persistPending, acknowledge, scopeGeneration, retry } =
     useCancellationNotices(enabled);
+  const [terminalGeneration, setTerminalGeneration] = useState(0);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const onCredentialsChanged = () => setTerminalGeneration(generation => generation + 1);
+    onEvent('terminal-credentials-updated', onCredentialsChanged);
+    return () => offEvent('terminal-credentials-updated', onCredentialsChanged);
+  }, [enabled]);
 
   const ackButtonRef = useRef<HTMLButtonElement | null>(null);
   const headerMarkerRef = useRef<HTMLDivElement | null>(null);
@@ -86,6 +132,12 @@ export const CancellationNoticeManager: React.FC<CancellationNoticeManagerProps>
       stopSoundRef.current = null;
     },
     [],
+  );
+
+  // Either counter only grows, so their sum changes whenever the terminal or the notice scope does.
+  const paymentText = useCancellationPaymentText(
+    enabled ? current?.id ?? null : null,
+    terminalGeneration + (scopeGeneration ?? 0),
   );
 
   if (!enabled || !current) {
@@ -155,6 +207,10 @@ export const CancellationNoticeManager: React.FC<CancellationNoticeManagerProps>
             </div>
           ) : null}
         </dl>
+
+        {paymentText && (
+          <p className="text-sm text-slate-700 dark:text-slate-200">{paymentText}</p>
+        )}
 
         {queueLength > 1 ? (
           <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">

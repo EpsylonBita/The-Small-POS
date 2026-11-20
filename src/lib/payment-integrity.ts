@@ -1,5 +1,8 @@
 import type { TFunction } from "i18next";
-import { privilegedActionFeedback } from "../renderer/utils/privileged-actions";
+import {
+  extractPrivilegedActionError,
+  privilegedActionFeedback,
+} from "../renderer/utils/privileged-actions";
 
 import { formatFiscalCloseBlockedError } from "./fiscal-closeout";
 import { formatUnitShiftsQueueReason } from "./unit-shifts-queue-reason";
@@ -216,11 +219,18 @@ function blockerInterpolation(
     outstandingAmount: formatMoney(Math.max(total - settled, 0)),
   };
 
-  for (const [key, cents] of Object.entries(blocker.reasonAmounts ?? {})) {
-    values[key] = formatMoney(cents / 100);
-  }
+  // Only the amounts the sentences name; built without a computed property write.
+  const reasonAmounts = Object.fromEntries([
+    "paymentAmount", "overpaidAmount", "netSettledAmount", "ceilingAmount",
+    "drawerAmount", "platformSettledAmount",
+  ].flatMap((key): Array<[string, string]> => {
+    const cents = blocker.reasonAmounts?.[key];
+    return typeof cents === "number" && Number.isFinite(cents)
+      ? [[key, formatMoney(cents / 100)]]
+      : [];
+  }));
 
-  return values;
+  return { ...values, ...reasonAmounts };
 }
 
 function normalizeReviewPayment(value: unknown): ReviewPaymentSummary | undefined {
@@ -496,98 +506,133 @@ export function extractSyncCloseoutPayload(
   return null;
 }
 
-function paymentMethodKey(method: string): string {
-  return `paymentIntegrity.methods.${method || "pending"}`;
-}
+const isLabelCode = (value: string) => /^[a-z0-9_]+$/.test(value);
 
-function paymentStatusKey(status: string): string {
-  return `paymentIntegrity.statuses.${status || "pending"}`;
+export function getPaymentBlockerOrderNumber(blocker: UnsettledPaymentBlocker): string {
+  const number = blocker.orderNumber;
+  return typeof number === "string" && number.trim() && number !== blocker.orderId ? number : "";
 }
 
 export function getLocalizedPaymentMethod(
-  method: string,
+  method: unknown,
   t: TFunction,
+  fallback = t("paymentIntegrity.methods.unknown"),
 ): string {
-  if (method.trim().toLowerCase() === "twint") return "TWINT";
-  return t(paymentMethodKey(method), { defaultValue: method || "pending" });
+  const code = typeof method === "string" ? method.trim().toLowerCase() : "";
+  if (code === "twint") return "TWINT";
+  const key = code === "mixed" ? "split" : code === "room-charge" ? "room_charge" : code;
+  return isLabelCode(key) ? t(`paymentIntegrity.methods.${key}`, { defaultValue: fallback }) : fallback;
 }
 
 export function getLocalizedPaymentStatus(
-  status: string,
+  status: unknown,
   t: TFunction,
+  fallback = t("paymentIntegrity.statuses.unknown"),
 ): string {
-  return t(paymentStatusKey(status), { defaultValue: status || "pending" });
+  const key = typeof status === "string" ? status.trim().toLowerCase() : "";
+  return isLabelCode(key) ? t(`paymentIntegrity.statuses.${key}`, { defaultValue: fallback }) : fallback;
 }
 
 /**
  * The keys a blocker sentence may live under, most specific first: the variant
- * of a two-shaped reason code, then the code itself. `reasonText` /
- * `suggestedFix` — the desktop's English — is the last resort, so a code no
- * locale has translated still says something true.
+ * of a two-shaped reason code, then the code itself.
  */
 function blockerSentenceKeys(
   namespace: "reasonCodes" | "fixCodes",
   blocker: UnsettledPaymentBlocker,
 ): string[] {
+  if (!isLabelCode(blocker.reasonCode)) return [];
   const base = `paymentIntegrity.${namespace}.${blocker.reasonCode}`;
-  return blocker.reasonVariant
+  return blocker.reasonVariant && isLabelCode(blocker.reasonVariant)
     ? [`${base}__${blocker.reasonVariant}`, base]
     : [base];
+}
+
+function localizeBlockerSentence(
+  namespace: "reasonCodes" | "fixCodes",
+  blocker: UnsettledPaymentBlocker,
+  t: TFunction,
+  formatMoney: (amount: number) => string,
+  localizedFallback: string | undefined,
+  nativeFallback: string,
+): string {
+  const fallback = localizedFallback ?? nativeFallback;
+  const keys = blockerSentenceKeys(namespace, blocker);
+  if (keys.length === 0) return fallback;
+  const values = blockerInterpolation(blocker, t, formatMoney);
+  if (localizedFallback !== undefined) {
+    if (!getPaymentBlockerOrderNumber(blocker)) delete values.orderNumber;
+    const template = t(keys, { defaultValue: "", skipInterpolation: true });
+    if (typeof template !== "string" || !template || [...template.matchAll(/\{\{(\w+)\}\}/g)]
+      .some(([, key]) => !Object.prototype.hasOwnProperty.call(values, key))) return fallback;
+  }
+  return t(keys, { ...values, defaultValue: fallback });
 }
 
 export function getLocalizedPaymentBlockerReason(
   blocker: UnsettledPaymentBlocker,
   t: TFunction,
   formatMoney: (amount: number) => string = defaultFormatMoney,
+  fallback?: string,
 ): string {
   if (blocker.unsavedPayment?.method === 'twint' && blocker.unsavedPayment.kind.startsWith('manual_twint_')) return t('twintPayment.receiptRecovery');
-  return t(blockerSentenceKeys("reasonCodes", blocker), {
-    defaultValue: blocker.reasonText,
-    ...blockerInterpolation(blocker, t, formatMoney),
-  });
+  return localizeBlockerSentence("reasonCodes", blocker, t, formatMoney, fallback, blocker.reasonText);
 }
 
 export function getLocalizedPaymentBlockerFix(
   blocker: UnsettledPaymentBlocker,
   t: TFunction,
   formatMoney: (amount: number) => string = defaultFormatMoney,
+  fallback?: string,
 ): string {
   if (blocker.unsavedPayment?.method === 'twint' && blocker.unsavedPayment.kind.startsWith('manual_twint_')) return t(blocker.unsavedPayment.canSaveAgain ? 'twintPayment.saveOriginal' : 'twintPayment.receiptReconcile');
-  return t(blockerSentenceKeys("fixCodes", blocker), {
-    defaultValue: blocker.suggestedFix,
-    ...blockerInterpolation(blocker, t, formatMoney),
-  });
+  return localizeBlockerSentence("fixCodes", blocker, t, formatMoney, fallback, blocker.suggestedFix);
 }
 
 export function summarizeUnsettledPaymentBlockers(
   blockers: UnsettledPaymentBlocker[],
   t?: TFunction,
+  localizedFallback?: string,
+  formatMoney?: (amount: number) => string,
 ): string {
   if (blockers.length === 0) {
     return "";
   }
 
+  const first = blockers[0];
+  const nativeFallback = localizedFallback === undefined ? undefined : "";
+  const orderNumber = localizedFallback === undefined ? first.orderNumber : getPaymentBlockerOrderNumber(first);
+  const reason = t
+    ? getLocalizedPaymentBlockerReason(first, t, formatMoney, nativeFallback)
+    : first.reasonText;
+  if (!reason && localizedFallback !== undefined) return localizedFallback;
+
   if (blockers.length === 1) {
-    const blocker = blockers[0];
-    const reason = t
-      ? getLocalizedPaymentBlockerReason(blocker, t)
-      : blocker.reasonText;
-    const fix = t ? getLocalizedPaymentBlockerFix(blocker, t) : blocker.suggestedFix;
-    return `${blocker.orderNumber}: ${reason} ${fix}`.trim();
+    const fix = t
+      ? getLocalizedPaymentBlockerFix(first, t, formatMoney, nativeFallback)
+      : first.suggestedFix;
+    if (!fix && localizedFallback !== undefined) return localizedFallback;
+    return `${orderNumber ? `${orderNumber}: ` : ""}${reason} ${fix}`.trim();
   }
 
-  const first = blockers[0];
   if (t) {
+    if (!orderNumber && localizedFallback !== undefined) {
+      return t("paymentIntegrity.multipleOrdersSummaryWithoutNumber", {
+        count: blockers.length,
+        reason,
+        defaultValue: localizedFallback,
+      });
+    }
     return t("paymentIntegrity.multipleOrdersSummary", {
       count: blockers.length,
-      orderNumber: first.orderNumber,
-      reason: getLocalizedPaymentBlockerReason(first, t),
-      defaultValue:
+      orderNumber,
+      reason,
+      defaultValue: localizedFallback ??
         "{{count}} orders are blocked. First blocker {{orderNumber}}: {{reason}}",
     });
   }
 
-  return `${blockers.length} orders are blocked. First blocker ${first.orderNumber}: ${first.reasonText}`.trim();
+  return `${blockers.length} orders are blocked. First blocker ${first.orderNumber}: ${reason}`.trim();
 }
 
 function closeoutStageLabel(payload: SyncCloseoutBlockedPayload, t: TFunction): string {
@@ -678,6 +723,128 @@ export function formatPaymentIntegrityError(
   }
 
   return fallback;
+}
+
+export function formatZReportLoadFailure(value: unknown, t: TFunction): string {
+  const fallback = t("modals.zReport.loadFailed");
+  const blockers = extractPaymentIntegrityPayload(value)?.blockers;
+  if (blockers?.length) return summarizeUnsettledPaymentBlockers(blockers, t, fallback);
+  return privilegedActionFeedback(value, t) ?? fallback;
+}
+
+export function formatCashierCloseRefusal(
+  value: unknown,
+  t: TFunction,
+  formatMoney: (amount: number) => string,
+): string {
+  const fallback = t("modals.staffShift.cashierCloseRefused");
+  const blockers = extractPaymentIntegrityPayload(value)?.blockers;
+  if (blockers?.length) {
+    const summary = summarizeUnsettledPaymentBlockers(blockers, t, "", formatMoney);
+    if (summary) return summary;
+  }
+
+  // IPC refusals can put the approval code in errorCode rather than code.
+  const approvalResult = collectCandidateRecords(value).find((record) =>
+    firstString(record, ["errorCode", "error_code"]));
+  const approvalValue = approvalResult
+    ? { ...approvalResult, code: firstString(approvalResult, ["code", "errorCode", "error_code"]) }
+    : value;
+  const signIn = privilegedActionFeedback(approvalValue, t) ?? privilegedActionFeedback(value, t);
+  if (signIn) return signIn;
+  const approval = extractPrivilegedActionError(approvalValue) ?? extractPrivilegedActionError(value);
+  switch (approval?.code) {
+    case "REAUTH_REQUIRED":
+    case "AUTH_PERMISSION_REQUIRED":
+    case "NO_APPROVER_IN_STORE":
+    case "MANAGER_PIN_REFUSED":
+      return t("modals.staffShift.cashierCloseApprovalRequired");
+    case "AUTH_GRANT_EXPIRED":
+      return t("recovery.actionStatus.grantExpired");
+    case "APPROVALS_PAUSED":
+      return t("auth.managerApproval.paused", { minutes: approval.minutes ?? 5 });
+    default:
+      return fallback;
+  }
+}
+
+// Native stale refusals in src-tauri/src/payments.rs:4617, 4642, 4648.
+// The last two can still include blockers for the order that was refused.
+const STALE_RECORD_PAYMENT_REASONS = new Set([
+  "THIS ORDER NO LONGER HAS A PAYMENT BLOCKER. REFRESH THE PAYMENT BLOCKERS AND TRY AGAIN.",
+  "THIS ORDER NO LONGER HAS A COLLECTIBLE OUTSTANDING BALANCE. REFRESH THE PAYMENT BLOCKERS AND TRY AGAIN.",
+  "THE OUTSTANDING BALANCE CHANGED SINCE IT WAS CONFIRMED. REFRESH THE PAYMENT BLOCKERS AND TRY AGAIN.",
+  "ORDER NOT FOUND",
+  "ORDER_NOT_FOUND",
+  "PAYMENT_ORDER_NOT_FOUND",
+]);
+
+export function formatRecordPaymentFailure(
+  value: unknown,
+  t: TFunction,
+  fallbackKey: "modals.staffShift.paymentRecordFailed" | "modals.zReport.recordPaymentFailed",
+  method: 'cash' | 'card',
+  orderId?: string,
+): string {
+  const candidates = collectCandidateRecords(value);
+  const reasons = [
+    value,
+    ...candidates.flatMap(({ code, errorCode, error_code, error, message, reason, details, cause }) =>
+      [code, errorCode, error_code, error, message, reason, details, cause]),
+  ].flatMap((reason) => typeof reason === 'string' ? [reason.trim().toUpperCase()] : []);
+  const staleKey = fallbackKey === 'modals.staffShift.paymentRecordFailed'
+    ? 'paymentIntegrity.recordFailureStaleCheckout'
+    : 'paymentIntegrity.recordFailureStale';
+  if (reasons.some((reason) => STALE_RECORD_PAYMENT_REASONS.has(reason))) return t(staleKey);
+
+  for (const reason of reasons) {
+    switch (reason) {
+      case "STORE_CURRENCY_UNAVAILABLE":
+        return t("paymentIntegrity.recordFailureCurrency");
+      case "PAYMENT_CURRENCY_UNAVAILABLE":
+      case "ORDER_CURRENCY_UNAVAILABLE":
+      case "ORIGINAL_CURRENCY_UNAVAILABLE":
+        return t("modals.zReport.recordPaymentOriginalCurrencyMissing");
+    }
+  }
+
+  const blockerList = candidates.find((candidate) => Array.isArray(parseJsonString(candidate.blockers)))?.blockers;
+  const blockers = normalizeBlockers(blockerList);
+  // On the Z, a replacement list can omit the order whose button was used.
+  if (orderId && blockerList !== undefined && !blockers.some((blocker) => blocker.orderId === orderId)) {
+    return t(staleKey);
+  }
+  if (blockers.length > 0) {
+    return summarizeUnsettledPaymentBlockers(blockers.map((blocker) => ({
+      ...blocker,
+      reasonText: t("paymentIntegrity.blockersHelper"),
+      suggestedFix: "",
+    })), t);
+  }
+
+  const approvalMessage = privilegedActionFeedback(value, t);
+  if (approvalMessage) return approvalMessage;
+
+  const approval = extractPrivilegedActionError(value);
+  switch (approval?.code) {
+    case "REAUTH_REQUIRED":
+      return t(approval.approval ? "auth.managerApproval.subtitle" : "modals.zReport.recordApprovalSubtitle");
+    case "AUTH_GRANT_EXPIRED":
+      return t("recovery.actionStatus.grantExpired");
+    case "AUTH_PERMISSION_REQUIRED":
+      return t("recovery.actionStatus.permissionRequired");
+    case "NO_APPROVER_IN_STORE":
+      return t("auth.managerApproval.noApprover", { right: t("auth.managerApproval.rights.voidPayments") });
+    case "APPROVALS_PAUSED":
+      return t("auth.managerApproval.paused", { minutes: approval.minutes ?? 5 });
+    case "MANAGER_PIN_REFUSED":
+      return t("auth.managerApproval.pinRefused", { right: t("auth.managerApproval.rights.voidPayments") });
+  }
+
+  return t(fallbackKey, {
+    button: t(method === 'cash' ? 'modals.zReport.resolveBlockerCash' : 'modals.zReport.resolveBlockerCard'),
+    defaultValue: 'The payment was not recorded. Press "{{button}}" again.',
+  });
 }
 
 /**

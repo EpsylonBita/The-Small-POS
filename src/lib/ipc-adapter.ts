@@ -51,6 +51,9 @@ import type {
   RemoteIncidentReportResponse,
   EndOfDayStatusResponse,
   UnsettledPaymentBlocker,
+  DriverCashForNotice,
+  ShiftCloseFigures,
+  ShiftSummaryPayload,
   RecoveryActionRequest,
   RecoveryActionResult,
   RecoveryActionLogEntry,
@@ -1527,6 +1530,9 @@ export interface CloseShiftParams {
   paymentAmount?: number;
 }
 
+export type ShiftCloseResult = IpcResult<ShiftCloseFigures> & ShiftCloseFigures;
+export type ShiftSummaryResult = ShiftSummaryPayload & { data?: ShiftSummaryPayload };
+
 export interface ShiftPrintCheckoutParams {
   shiftId: string;
   roleType?: string;
@@ -1909,6 +1915,7 @@ export interface PlatformBridge {
   orders: {
     getAll(): Promise<Order[]>;
     getById(orderId: string): Promise<Order | null>;
+    getDriverCashForNotice(orderId: string): Promise<DriverCashForNotice | null>;
     getByCustomerPhone(phone: string): Promise<any>;
     create(payload: CreateOrderPayload): Promise<IpcResult<Order>>;
     createWithInitialPayment(
@@ -2249,7 +2256,7 @@ export interface PlatformBridge {
   // -- Shifts ----------------------------------------------------------------
   shifts: {
     open(params: OpenShiftParams): Promise<IpcResult>;
-    close(params: CloseShiftParams): Promise<IpcResult>;
+    close(params: CloseShiftParams): Promise<ShiftCloseResult>;
     pendingCashReturns(): Promise<any>;
     /** This Main's phone shifts (founder rule 13/10/2026); never cached natively. */
     unitReadiness(since?: string | null): Promise<AdminApiBridgeResponse<unknown>>;
@@ -2287,7 +2294,7 @@ export interface PlatformBridge {
     getSummary(
       shiftId: string,
       options?: { skipBackfill?: boolean },
-    ): Promise<any>;
+    ): Promise<ShiftSummaryResult>;
     recordExpense(params: RecordExpenseParams): Promise<IpcResult>;
     deleteExpense(params: DeleteShiftExpenseParams): Promise<IpcResult>;
     getExpenses(shiftId: string): Promise<any[]>;
@@ -3723,6 +3730,8 @@ export class TauriBridge implements PlatformBridge {
   orders = {
     getAll: () => this.inv("order:get-all"),
     getById: (id: string) => this.inv("order:get-by-id", id),
+    getDriverCashForNotice: (orderId: string): Promise<DriverCashForNotice | null> =>
+      this.tauriInvoke("order_driver_cash_for_notice", { orderId }),
     getByCustomerPhone: (phone: string) =>
       this.inv("order:get-by-customer-phone", phone),
     create: (p: CreateOrderPayload) => this.inv("order:create", p),
@@ -4076,7 +4085,7 @@ export class TauriBridge implements PlatformBridge {
 
   shifts = {
     open: (p: OpenShiftParams) => this.inv("shift:open", p),
-    close: (p: CloseShiftParams) => this.inv("shift:close", p),
+    close: (p: CloseShiftParams): Promise<ShiftCloseResult> => this.inv("shift:close", p),
     pendingCashReturns: () => this.adminFetch("/api/pos/shifts/remote-checkout"),
     // Phones hand over to the Main (founder rule 13/10/2026): this Main's
     // open, closed and unreceived phone shifts. Never cached natively.
@@ -4152,7 +4161,7 @@ export class TauriBridge implements PlatformBridge {
       ) as Promise<ShiftCheckInEligibility>,
     getActiveCashierByTerminalLoose: (t: string) =>
       this.inv("shift:get-active-cashier-by-terminal-loose", t),
-    getSummary: (id: string, opts?: { skipBackfill?: boolean }) =>
+    getSummary: (id: string, opts?: { skipBackfill?: boolean }): Promise<ShiftSummaryResult> =>
       this.inv("shift:get-summary", id, opts),
     recordExpense: (p: RecordExpenseParams) =>
       this.inv("shift:record-expense", p),

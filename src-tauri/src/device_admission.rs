@@ -102,6 +102,22 @@ pub(crate) fn last_known(conn: &Connection, device_type: &str) -> Option<Admissi
     same_scope(&stored, &scope).then_some(stored)
 }
 
+/// An optional foreground write can use the synced scope without a keyring read.
+pub(crate) fn last_known_in_local_scope(conn: &Connection, device_type: &str) -> Option<Admission> {
+    let stored = read_stored(conn, device_type)?;
+    let read = |key| db::get_setting(conn, "terminal", key);
+    let organization = read("organization_id")?;
+    let branch = read("branch_id")?;
+    let terminal = read("terminal_id")?;
+    let matches = !organization.trim().is_empty()
+        && !branch.trim().is_empty()
+        && !terminal.trim().is_empty()
+        && stored.organization_id == organization.trim()
+        && stored.branch_id == branch.trim()
+        && stored.terminal_id == terminal.trim();
+    matches.then_some(stored)
+}
+
 /// Whether a device of `device_type` may act on this till.
 pub(crate) fn is_admitted(conn: &Connection, device_type: &str) -> bool {
     last_known(conn, device_type).is_some_and(|admission| admission.admitted)

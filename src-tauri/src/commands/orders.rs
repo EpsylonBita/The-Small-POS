@@ -11351,9 +11351,21 @@ pub async fn order_assign_driver(
         let driver_id = arg1.ok_or("Missing driverId")?;
         let notes = arg2;
         let now = Utc::now().to_rfc3339();
+        let actor = app
+            .try_state::<crate::auth::AuthState>()
+            .and_then(|auth| crate::auth::try_current_audit_staff_id(&auth));
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let (order_id, driver_name, assigned_status, completion_refusal) =
-            assign_driver_locally(&conn, &order_id_raw, &driver_id, notes.as_deref(), &now)?;
+            assign_driver_locally_with_platform_cash(
+                &conn,
+                &order_id_raw,
+                &driver_id,
+                notes.as_deref(),
+                &now,
+                DriverAssignmentCash::Direct {
+                    actor: actor.as_deref(),
+                },
+            )?;
         let earning_created = true;
         drop(conn);
         // Use is_print_action_enabled (not setting_bool) so the default-true behaviour
@@ -11405,16 +11417,41 @@ pub async fn order_assign_driver(
     .await
 }
 
-/// The local half of `order_assign_driver`, in one connection: the order
-/// moves to the driver's shift, the canonical driver earning is written and
-/// queued, and a pending delivery tip names the driver. Answers the local
-/// order id, the driver's display name and the status the order now has.
+pub(crate) enum DriverAssignmentCash<'a> {
+    Disabled,
+    Direct { actor: Option<&'a str> },
+}
+
+// Existing native tests use the release's local entry point.
+#[cfg(test)]
 pub(crate) fn assign_driver_locally(
     conn: &rusqlite::Connection,
     order_id_raw: &str,
     driver_id: &str,
     notes: Option<&str>,
     now: &str,
+) -> Result<(String, Option<String>, String, Option<String>), String> {
+    assign_driver_locally_with_platform_cash(
+        conn,
+        order_id_raw,
+        driver_id,
+        notes,
+        now,
+        DriverAssignmentCash::Disabled,
+    )
+}
+
+/// The local half of `order_assign_driver`, in one connection: the order
+/// moves to the driver's shift, the canonical driver earning is written and
+/// queued, and a pending delivery tip names the driver. Answers the local
+/// order id, the driver's display name and the status the order now has.
+pub(crate) fn assign_driver_locally_with_platform_cash(
+    conn: &rusqlite::Connection,
+    order_id_raw: &str,
+    driver_id: &str,
+    notes: Option<&str>,
+    now: &str,
+    cash: DriverAssignmentCash<'_>,
 ) -> Result<(String, Option<String>, String, Option<String>), String> {
     // Reserve a bare connection before reading; nested callers retain their
     // transaction, while the savepoint still undoes only this assignment.
@@ -11472,6 +11509,16 @@ pub(crate) fn assign_driver_locally(
             // refused earning or receipt row left the assignment half applied).
             crate::sync_queue::ensure_enqueue_capacity(conn, 3)?;
 
+            let platform_cash = match cash {
+                DriverAssignmentCash::Direct { actor } => {
+                    crate::platform_cash_assignment::PlatformCash::before_move(
+                        conn, &order_id, driver_id, shift_id, now,
+                    )
+                    .map(|cash| (cash, actor))
+                }
+                DriverAssignmentCash::Disabled => None,
+            };
+
             let assignment = order_ownership::assign_order_to_driver_shift(
                 conn,
                 &order_id,
@@ -11481,60 +11528,106 @@ pub(crate) fn assign_driver_locally(
                 now,
             )?;
 
-            let earning_id = order_ownership::upsert_driver_earning(
-                conn,
-                &order_id,
-                driver_id,
-                &assignment,
-                now,
-            )?;
+            let tail = |assignment: &order_ownership::DriverOwnershipAssignment,
+                        strict: bool|
+             -> Result<String, String> {
+                let earning_id = order_ownership::upsert_driver_earning(
+                    conn, &order_id, driver_id, assignment, now,
+                )?;
 
-            // A delivery tip can be collected before dispatch. Resolve every pending
-            // driver allocation to the actual driver/shift at the same point that the
-            // canonical driver earning is created, then rebuild its payment sync row
-            // so an already-offline payment cannot retain a stale pending recipient.
-            resolve_delivery_tip_recipients_for_assignment(
-                conn,
-                &order_id,
-                driver_id,
-                &assignment.driver_shift_id,
-                now,
-            )?;
+                // A delivery tip can be collected before dispatch. Resolve every pending
+                // driver allocation to the actual driver/shift at the same point that the
+                // canonical driver earning is created, then rebuild its payment sync row
+                // so an already-offline payment cannot retain a stale pending recipient.
+                resolve_delivery_tip_recipients_for_assignment(
+                    conn,
+                    &order_id,
+                    driver_id,
+                    &assignment.driver_shift_id,
+                    now,
+                )?;
 
-            let assigned_status: String = conn
-                .query_row(
-                    "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
-                    rusqlite::params![order_id],
-                    |row| row.get(0),
-                )
-                .unwrap_or_else(|_| current_status.clone());
+                let assigned_status = conn
+                    .query_row(
+                        "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+                        rusqlite::params![order_id],
+                        |row| row.get(0),
+                    )
+                    .or_else(|error| {
+                        if strict {
+                            Err(error)
+                        } else {
+                            Ok(current_status.clone())
+                        }
+                    })
+                    .map_err(|error| format!("read assigned order status: {error}"))?;
 
-            let _ = conn.execute(
-                "UPDATE orders
+                let update = conn.execute(
+                    "UPDATE orders
          SET delivery_notes = COALESCE(?1, delivery_notes),
              sync_status = 'pending',
              updated_at = ?2
          WHERE id = ?3",
-                rusqlite::params![notes, now, order_id],
-            );
+                    rusqlite::params![notes, now, order_id],
+                );
 
-            let driver_earning_sync_payload =
-                order_ownership::build_driver_earning_sync_payload(conn, &earning_id)?;
-            order_ownership::enqueue_or_refresh_driver_earning_sync_row(
-                conn,
-                &earning_id,
-                &driver_earning_sync_payload,
-            )?;
+                if strict {
+                    let updated =
+                        update.map_err(|error| format!("write assigned order notes: {error}"))?;
+                    if updated != 1 {
+                        return Err("Assigned order notes were not written".into());
+                    }
+                }
 
-            let order_sync_payload = serde_json::json!({
-                "orderId": order_id,
-                "orderType": "delivery",
-                "status": assigned_status,
-                "driverId": driver_id,
-                "driverName": driver_name,
-                "deliveryNotes": notes,
-            });
-            enqueue_order_sync_payload(conn, &order_id, &order_sync_payload)?;
+                let driver_earning_sync_payload =
+                    order_ownership::build_driver_earning_sync_payload(conn, &earning_id)?;
+                order_ownership::enqueue_or_refresh_driver_earning_sync_row(
+                    conn,
+                    &earning_id,
+                    &driver_earning_sync_payload,
+                )?;
+
+                let order_sync_payload = serde_json::json!({
+                    "orderId": order_id,
+                    "orderType": "delivery",
+                    "status": assigned_status,
+                    "driverId": driver_id,
+                    "driverName": driver_name,
+                    "deliveryNotes": notes,
+                });
+                enqueue_order_sync_payload(conn, &order_id, &order_sync_payload)?;
+                Ok(assigned_status)
+            };
+
+            // The release reserves three rows. Leave room for the receipt,
+            // the driver's checkout, and a checkout earning refresh.
+            let with_cash = match platform_cash {
+                Some((cash, actor))
+                    if assignment.completion_refusal.is_none()
+                        && crate::sync_queue::ensure_enqueue_capacity(conn, 3 + 1 + 2).is_ok() =>
+                {
+                    cash.try_with_tail(conn, actor, now, || {
+                        let paid =
+                            order_ownership::load_order_attribution_snapshot(conn, &order_id)?;
+                        let paid_assignment = order_ownership::DriverOwnershipAssignment {
+                            completion_refusal: None,
+                            driver_shift_id: assignment.driver_shift_id.clone(),
+                            branch_id: paid.branch_id,
+                            delivery_fee: paid.delivery_fee,
+                            tip_amount: paid.tip_amount,
+                            payment_method: paid.payment_method,
+                            cash_collected: paid.cash_collected,
+                            card_amount: paid.card_amount,
+                        };
+                        tail(&paid_assignment, true)
+                    })?
+                }
+                _ => None,
+            };
+            let assigned_status = match with_cash {
+                Some(status) => status,
+                None => tail(&assignment, false)?,
+            };
             Ok((
                 order_id,
                 driver_name,
@@ -11965,7 +12058,14 @@ pub(crate) fn change_order_driver_locally(
         move_order_to_driver(&tx, &plan, now)?
     } else {
         let (order_id, driver_name, status, completion_refusal) =
-            assign_driver_locally(&tx, &plan.order_id, &plan.new_driver_id, None, now)?;
+            assign_driver_locally_with_platform_cash(
+                &tx,
+                &plan.order_id,
+                &plan.new_driver_id,
+                None,
+                now,
+                DriverAssignmentCash::Disabled,
+            )?;
         let earning_id: Option<String> = tx
             .query_row(
                 "SELECT id FROM driver_earnings WHERE order_id = ?1 LIMIT 1",
@@ -13476,7 +13576,10 @@ mod dto_tests {
                 "order_notify_platform_ready",
                 "notify_platform_ready_locally(",
             ),
-            ("order_assign_driver", "assign_driver_locally("),
+            (
+                "order_assign_driver",
+                "assign_driver_locally_with_platform_cash(",
+            ),
             ("order_reset_to_active", "reset_order_to_active_locally("),
         ] {
             let start = source

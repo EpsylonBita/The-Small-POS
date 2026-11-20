@@ -94,6 +94,11 @@ export interface UseCancellationNoticesResult {
    */
   persistPending: boolean;
   acknowledge: () => void;
+  /**
+   * Grows whenever the queue was reset for a new identity or a new server
+   * scope. A reader that started for an earlier value must drop its answer.
+   */
+  scopeGeneration: number;
   /** Retries persisting/refreshing when `persistPending` is true. */
   retry: () => void;
 }
@@ -111,6 +116,7 @@ export function useCancellationNotices(enabled: boolean): UseCancellationNotices
   const [undurable, setUndurable] = useState<PlatformCancellationNotice[]>([]);
   const [acknowledging, setAcknowledging] = useState(false);
   const [acknowledgeFailed, setAcknowledgeFailed] = useState(false);
+  const [scopeGeneration, setScopeGeneration] = useState(0);
 
   const identityRef = useRef<CancellationNoticeIdentity | null>(null);
   const scopeRef = useRef<string | null>(null);
@@ -134,6 +140,7 @@ export function useCancellationNotices(enabled: boolean): UseCancellationNotices
 
   const resetForNewIdentity = useCallback(() => {
     generationRef.current += 1;
+    setScopeGeneration(generation => generation + 1);
     scopeRef.current = null;
     resumeCursorRef.current = null;
     ackInFlightRef.current = false;
@@ -185,6 +192,7 @@ export function useCancellationNotices(enabled: boolean): UseCancellationNotices
           // attempting the merge — the old notices are no longer valid for
           // this terminal and must never linger on screen while we merge.
           generationRef.current += 1;
+          setScopeGeneration(generation => generation + 1);
           setDurablePending([]);
           setUndurable([]);
         }
@@ -415,6 +423,7 @@ export function useCancellationNotices(enabled: boolean): UseCancellationNotices
     acknowledgeFailed,
     persistPending,
     acknowledge,
+    scopeGeneration,
     retry,
   };
 }

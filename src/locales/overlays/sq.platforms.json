@@ -154,6 +154,10 @@
     }
   },
   "cancellationNotice": {
+    "driverCash": "Arka ka regjistruar {{amount}} në para në dorë te korrieri {{name}} për këtë porosi. Para se të korrigjosh pagesën, kontrollo nëse korrieri i ka marrë paratë dhe nëse i ka dorëzuar ose kthyer tashmë.",
+    "driverCashNoName": "Arka ka regjistruar {{amount}} në para në dorë te korrieri për këtë porosi. Para se të korrigjosh pagesën, kontrollo nëse korrieri i ka marrë paratë dhe nëse i ka dorëzuar ose kthyer tashmë.",
+    "paymentInReview": "Pagesa për këtë porosi është në pritje të kontrollit.",
+    "checkPayments": "Për këtë porosi është regjistruar një pagesë në para në dorë. Kontrollo nëse paratë u arkëtuan ose u kthyen para se të korrigjosh pagesën.",
     "eyebrow": "Porosia u anulua nga platforma",
     "stopPreparing": "Ndalo përgatitjen e kësaj porosie",
     "explain": "Platforma e dërgesave e anuloi këtë porosi. Mos vazhdo ta përgatitësh apo ta nisësh.",

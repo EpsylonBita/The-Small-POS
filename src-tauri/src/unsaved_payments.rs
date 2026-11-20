@@ -915,6 +915,66 @@ pub(crate) fn list(
     Ok(entries)
 }
 
+/// The same unresolved records as `list`, scoped to the order's three aliases.
+pub(crate) fn has_unresolved_for_order(
+    conn: &Connection,
+    order_id: &str,
+    remote_order_id: Option<&str>,
+    client_request_id: Option<&str>,
+) -> Result<bool, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT ls.setting_value
+             FROM local_settings ls
+             WHERE ls.setting_category = ?1
+               AND CASE WHEN json_valid(ls.setting_value)
+                        THEN json_extract(ls.setting_value, '$.orderId') END IN (?2, ?3, ?4)
+               AND NOT EXISTS (
+                 SELECT 1 FROM order_payments op WHERE op.idempotency_key = ls.setting_key
+                   AND COALESCE(json_extract(ls.setting_value,'$.kind'),'') NOT IN ('manual_twint_checkout','manual_twint_payment')
+                   AND LOWER(TRIM(COALESCE(json_extract(ls.setting_value,'$.method'),''))) <> 'twint'
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM order_payments op
+                 WHERE (op.order_id = json_extract(ls.setting_value, '$.orderId')
+                        OR op.order_id IN (
+                            SELECT o.id FROM orders o
+                            WHERE o.client_request_id = json_extract(ls.setting_value, '$.orderId')
+                        ))
+                   AND LOWER(TRIM(json_extract(ls.setting_value, '$.method'))) = 'card'
+                   AND LOWER(TRIM(op.method)) = 'card'
+                   AND op.transaction_ref IS NOT NULL
+                   AND TRIM(op.transaction_ref) <> ''
+                   AND op.transaction_ref = json_extract(ls.setting_value, '$.transactionRef')
+                   AND COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
+                       = json_extract(ls.setting_value, '$.amountCents')
+               )",
+        )
+        .map_err(|e| format!("prepare the order's charged payments not saved: {e}"))?;
+    let mut rows = statement
+        .query(params![
+            UNSAVED_CHARGED_PAYMENT_CATEGORY,
+            order_id,
+            remote_order_id,
+            client_request_id
+        ])
+        .map_err(|e| format!("read the order's charged payments not saved: {e}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read a charged payment not saved: {e}"))?
+    {
+        let raw: String = row
+            .get(0)
+            .map_err(|e| format!("read a charged payment not saved: {e}"))?;
+        if let Some(entry) = parse(&raw) {
+            if !entry.is_manual_twint() || saved_row_for(conn, &entry).ok().flatten().is_none() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// How many charged payments are still not saved (any order): the end of
 /// day refuses while one exists.
 pub(crate) fn count(conn: &Connection) -> Result<usize, String> {

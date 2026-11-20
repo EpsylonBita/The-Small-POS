@@ -3056,11 +3056,31 @@ test('dashboard cancellation prepares paid returns and preserves protected-order
     /const handleOutstandingCancelOrder = \(\) => \{[\s\S]*?outstandingHasRecordedPayment\(pendingPayment\)\) return;[\s\S]*?void beginOrderCancellation\(\[pendingPayment\.orderId\]\);/,
   );
   const prepare = source.slice(prepareStart, prepareEnd);
-  assert.match(prepare, /const refusals = await findCancelRefusals\(orderIds\);/);
-  assert.match(prepare, /if \(refusals\.notRecorded\.length > 0\) announceCancelRefusedNotRecorded\(refusals\.notRecorded\);/);
+  assert.match(prepare, /const platformCashAuto = !terminalSettingsError\s*&& isPlatformDriverCashAutoEnabled\(getSetting\('terminal', 'enabled_features'\)\);/);
   assert.match(
     prepare,
-    /for \(const orderId of new Set\(\[\.\.\.refusals\.hasPayments, \.\.\.tableIds, \.\.\.\(refundHandoff \? orderIds : \[\]\)\]\)\) \{\s*try \{\s*plans\[orderId\] = await prepareManualOrderCancellation\(bridge, orderId\);\s*\} catch \(error\) \{[\s\S]*?protectedOrders\.push\(orderId\);/,
+    /if \(!platformCashAuto && announcePlatformBlock\(\)\) return true;\s*const refusals = await findCancelRefusals\(orderIds\);/,
+    'the released screen block applies to the whole selection before any preflight when the switch is off',
+  );
+  assert.match(prepare, /if \(refusals\.notRecorded\.length > 0\) announceCancelRefusedNotRecorded\(refusals\.notRecorded\);/);
+  assert.match(prepare, /const tableIds = orderIds\.filter\(id =>\s*hasTableServiceEvidence\(\[\.\.\.orders, \.\.\.pendingExternalOrders\]\.find\(row => row\.id === id\)\)\);/);
+  assert.match(
+    prepare,
+    /const preflightIds = new Set\(\[\s*\.\.\.refusals\.hasPayments,\s*\.\.\.tableIds,\s*\.\.\.\(refundHandoff \? orderIds : \[\]\),\s*\]\);\s*if \(platformCashAuto && announcePlatformBlock\(preflightIds\)\) return true;/,
+    'paid orders, table orders and a refund hand-off all go to the native preflight',
+  );
+  // 20/11/2026: a platform order whose retained money is the store's own cash
+  // may be returned and cancelled, and only the till can prove that. So an
+  // order that goes to the native preflight is decided there, not by the
+  // screen's platform block; every other platform order keeps that block.
+  assert.match(
+    prepare,
+    /const blockedOrder = targets\.find\(order => order\.status !== 'pending'\s*&& !preflightIds\?\.has\(order\.id\)\s*&& !boxOrderStatusMutationAllowed\(order, 'cancelled'\)\);/,
+    'only an order delegated to native preflight skips the released platform block',
+  );
+  assert.match(
+    prepare,
+    /for \(const orderId of preflightIds\) \{\s*try \{\s*plans\[orderId\] = await prepareManualOrderCancellation\(bridge, orderId\);\s*\} catch \(error\) \{[\s\S]*?protectedOrders\.push\(orderId\);/,
     'paid and table orders must obtain native plans; failed preflight remains protected',
   );
   assert.match(prepare, /const cancellable = orderIds\.filter\(id => !refusals\.notRecorded\.includes\(id\) && !protectedOrders\.includes\(id\)\);/);

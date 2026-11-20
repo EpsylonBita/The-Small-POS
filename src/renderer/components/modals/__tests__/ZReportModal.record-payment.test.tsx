@@ -84,11 +84,11 @@ vi.mock('../../ui/pos-glass-components', () => ({
   POSGlassInput: (props: any) => <input {...props} />,
 }));
 
-import en from '../../../../locales/en.json';
-import el from '../../../../locales/el.json';
-import sq from '../../../../locales/sq.json';
+import { onEvent } from '../../../../lib';
+import { localeBundles } from '../../../../locales/bundles';
 import ZReportModal from '../ZReportModal';
 
+const { en, el, sq } = localeBundles;
 const LOCALES = { en, el, sq } as const;
 type Lng = keyof typeof LOCALES;
 
@@ -172,14 +172,25 @@ const recordCashButton = async (i18n: Awaited<ReturnType<typeof createI18n>>) =>
   );
 };
 
+const confirmRecordCash = async (i18n: Awaited<ReturnType<typeof createI18n>>) => {
+  fireEvent.click(await recordCashButton(i18n));
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('modals.zReport.recordConfirmAction') }));
+  });
+};
+
 describe('ZReportModal Record cash / Record card', { timeout: 20_000 }, () => {
   beforeEach(() => {
+    vi.mocked(onEvent).mockClear();
     mock.generateZReport.mockReset();
     mock.resolvePaymentBlocker.mockReset();
     mock.confirmPrivilegedAction.mockReset();
   });
 
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
 
   it('asks first, then records the confirmed amount and reads the report again', async () => {
     mock.generateZReport
@@ -219,6 +230,221 @@ describe('ZReportModal Record cash / Record card', { timeout: 20_000 }, () => {
     await waitFor(() =>
       expect(mock.generateZReport.mock.calls.length).toBeGreaterThan(readsBefore),
     );
+  });
+
+  it.each([
+    { recordRefused: false, reloadRejected: true },
+    { recordRefused: false, reloadRejected: false },
+    { recordRefused: true, reloadRejected: true },
+  ])('shows the refresh instruction when reloading fails (record refused: $recordRefused, reload rejected: $reloadRejected)', async ({ recordRefused, reloadRejected }) => {
+    const raw = 'SQLITE_BUSY: raw report reload error';
+    mock.generateZReport.mockResolvedValue(reportWith([unrecordedFinding()]));
+    mock.resolvePaymentBlocker.mockImplementationOnce(async () => {
+      if (reloadRejected) mock.generateZReport.mockRejectedValueOnce(new Error(raw));
+      else mock.generateZReport.mockResolvedValueOnce({ success: false, error: raw });
+      return recordRefused
+        ? { success: false, error: 'Raw record refusal' }
+        : { success: true, charged: false, remainingBlockers: [] };
+    });
+    const i18n = await renderModal('el');
+    await confirmRecordCash(i18n);
+
+    expect(await screen.findByText('Η αναφορά δεν ανανεώθηκε. Πατήστε «Ανανέωση αναφοράς».')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(raw);
+    expect(screen.getByRole('button', { name: i18n.t('modals.zReport.refresh') })).toBeEnabled();
+    expect(mock.resolvePaymentBlocker).toHaveBeenCalledOnce();
+  });
+
+  it('shows the localized refresh instruction and logs an exception on the first load', async () => {
+    const failure = new Error('SQLITE_BUSY: raw first report load error');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mock.generateZReport.mockRejectedValueOnce(failure);
+    const i18n = await renderModal('el');
+
+    expect(await screen.findByText('Η αναφορά δεν φορτώθηκε. Πατήστε «Ανανέωση αναφοράς».')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(failure.message);
+    expect(screen.getByRole('button', { name: i18n.t('modals.zReport.refresh') })).toBeEnabled();
+    expect(warn).toHaveBeenCalledWith('[ZReportModal] Report load failed:', failure);
+  });
+
+  it('shows the localized refresh instruction and logs a refused first load without blockers', async () => {
+    const refusal = {
+      success: false,
+      errorCode: 'UNSETTLED_PAYMENT_BLOCKER',
+      error: 'SQLITE_BUSY: raw report refusal',
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mock.generateZReport.mockResolvedValueOnce(refusal);
+    await renderModal('el');
+
+    expect(await screen.findByText('Η αναφορά δεν φορτώθηκε. Πατήστε «Ανανέωση αναφοράς».')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(refusal.error);
+    expect(warn).toHaveBeenCalledWith('[ZReportModal] Report load failed:', refusal);
+  });
+
+  it('shows a localized banner and blocker wording on the default Review tab after a refused load', async () => {
+    const blocker = {
+      ...unrecordedFinding(),
+      reasonCode: 'future_payment_reason',
+      reasonText: 'Native payment row reason.',
+      suggestedFix: 'Native ledger repair instruction.',
+    };
+    const refusal = {
+      success: false,
+      errorCode: 'UNSETTLED_PAYMENT_BLOCKER',
+      error: 'Raw first report refusal with a blocker.',
+      blockers: [blocker],
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mock.generateZReport.mockResolvedValue(refusal);
+    await renderModal('el');
+
+    expect(await screen.findByText('Η αναφορά δεν φορτώθηκε. Πατήστε «Ανανέωση αναφοράς».')).toBeInTheDocument();
+    expect(screen.getByText('Έλεγχος').closest('button')).toHaveClass('bg-(--pos-s-sel-bg)');
+    expect(screen.getByText('Η πληρωμή της παραγγελίας A-0120 χρειάζεται έλεγχο.')).toBeInTheDocument();
+    expect(screen.getByText('Ενημερώστε τον υπεύθυνο. Αν το πρόβλημα παραμένει, καλέστε την υποστήριξη.')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(blocker.reasonText);
+    expect(document.body).not.toHaveTextContent(blocker.suggestedFix);
+    expect(document.body).not.toHaveTextContent(refusal.error);
+    expect(warn).toHaveBeenCalledWith('[ZReportModal] Report load failed:', refusal);
+  });
+
+  it('logs a refused background refresh and keeps the displayed report', async () => {
+    const report = reportWith([unrecordedFinding()]);
+    const refusal = { success: false, error: 'Raw silent refresh refusal.' };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mock.generateZReport.mockResolvedValue({
+      ...report,
+      data: { ...report.data, zReportId: 'stored-report-1' },
+    });
+    const i18n = await renderModal('el');
+    const displayedButton = await recordCashButton(i18n);
+    const before = document.body.textContent;
+    const readsBefore = mock.generateZReport.mock.calls.length;
+    const refresh = vi.mocked(onEvent).mock.calls.find(([event]) => event === 'shift-updated')?.[1];
+    expect(refresh).toBeTypeOf('function');
+    mock.generateZReport.mockResolvedValueOnce(refusal);
+
+    await act(async () => { refresh?.(undefined); });
+
+    expect(mock.generateZReport).toHaveBeenCalledTimes(readsBefore + 1);
+    expect(warn).toHaveBeenCalledWith('[ZReportModal] Silent live refresh failed:', refusal);
+    expect(document.body.textContent).toBe(before);
+    expect(displayedButton).toBeInTheDocument();
+  });
+
+  it('shows a generic Review reason and remembers only the current unknown codes', async () => {
+    const reasonCode = 'future_payment_reason';
+    const otherCode = 'other_reason';
+    const newCode = 'changed_reason';
+    const reportWithReasons = (...codes: string[]) => {
+      const report = reportWith([unrecordedFinding()]);
+      report.data.integrity.findingsByReason.push(...codes.map(code => ({
+        reasonCode: code, orders: 1, difference: 13,
+      })));
+      return report;
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mock.generateZReport.mockResolvedValue(reportWithReasons(reasonCode, otherCode));
+    const i18n = await renderModal('el');
+
+    expect(await screen.findAllByText('Άλλο θέμα πληρωμής')).toHaveLength(2);
+    expect(document.body).not.toHaveTextContent(reasonCode);
+    expect(document.body).not.toHaveTextContent('future payment reason');
+    const codes = () => warn.mock.calls
+      .filter(([message]) => message === '[ZReportModal] Missing localized Review reason:')
+      .map(([, code]) => code);
+    // The modal logs from an effect. The labels reach the DOM at the commit and
+    // the effect runs after it, so an expected log is waited for, never read at
+    // once (CI run 44750774447 read an empty list on a slow runner). A read that
+    // expects no new log stays a single assertion after the reload's `act`; the
+    // next awaited read compares the whole list, so a late duplicate fails there.
+    await waitFor(() => expect(codes()).toEqual([reasonCode, otherCode]));
+
+    const refresh = async (...nextCodes: string[]) => {
+      mock.generateZReport.mockResolvedValue(reportWithReasons(...nextCodes));
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: i18n.t('modals.zReport.refresh') })); });
+    };
+    await refresh(reasonCode, otherCode);
+    expect(codes()).toEqual([reasonCode, otherCode]);
+    await refresh(newCode, otherCode);
+    await waitFor(() => expect(codes()).toEqual([reasonCode, otherCode, newCode]));
+    await refresh(otherCode);
+    expect(await screen.findByText('Άλλο θέμα πληρωμής')).toBeInTheDocument();
+    expect(codes()).toEqual([reasonCode, otherCode, newCode]);
+    await refresh(newCode, otherCode);
+    await waitFor(() => expect(codes()).toEqual([reasonCode, otherCode, newCode, newCode]));
+  });
+
+  it('shows unclassified source totals and remembers only the current source IDs', async () => {
+    const source = 'source_a';
+    const otherSource = 'source_b';
+    const newSource = 'source_c';
+    const reportWithSources = (...sources: string[]) => {
+      const report = reportWith([]);
+      return {
+        ...report,
+        data: { ...report.data, integrity: {
+          ...report.data.integrity,
+          unclassifiedPlatforms: sources.map(source => ({ source, orders: 2, amount: 13 })),
+        } },
+      };
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mock.generateZReport.mockResolvedValue(reportWithSources(source, otherSource));
+    const i18n = await renderModal('el');
+
+    const labels = await screen.findAllByText('Άγνωστη πηγή παραγγελίας');
+    expect(labels).toHaveLength(2);
+    expect(labels[0].parentElement).toHaveTextContent(/×2 · 13[,.]00/);
+    expect(screen.getByText('Τα ποσά των παραγγελιών από άγνωστες πηγές περιλαμβάνονται στα παραπάνω σύνολα.')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(source);
+    const sourceIds = () => warn.mock.calls
+      .filter(([message]) => message === '[ZReportModal] Unclassified order source in Review:')
+      .map(([, id]) => id);
+    // Logged from an effect, like the unknown reason codes above: an expected
+    // log is waited for; a read that expects no new log is asserted once.
+    await waitFor(() => expect(sourceIds()).toEqual([source, otherSource]));
+
+    const refresh = async (...nextSources: string[]) => {
+      mock.generateZReport.mockResolvedValue(reportWithSources(...nextSources));
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: i18n.t('modals.zReport.refresh') })); });
+    };
+    await refresh(source, otherSource);
+    expect(sourceIds()).toEqual([source, otherSource]);
+    await refresh(newSource, otherSource);
+    await waitFor(() => expect(sourceIds()).toEqual([source, otherSource, newSource]));
+    await refresh(otherSource);
+    expect(await screen.findByText('Άγνωστη πηγή παραγγελίας')).toBeInTheDocument();
+    expect(sourceIds()).toEqual([source, otherSource, newSource]);
+    await refresh(newSource, otherSource);
+    await waitFor(() => expect(sourceIds()).toEqual([source, otherSource, newSource, newSource]));
+  });
+
+  it('localizes and logs both the failed automatic reload after recording and the failed manual refresh', async () => {
+    const reloadFailure = new Error('SQLITE_BUSY: raw automated reload failure');
+    const retryFailure = new Error('SQLITE_BUSY: raw manual refresh failure');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mock.generateZReport.mockResolvedValue(reportWith([unrecordedFinding()]));
+    mock.resolvePaymentBlocker.mockImplementationOnce(async () => {
+      mock.generateZReport.mockRejectedValueOnce(reloadFailure);
+      return { success: true, charged: false, remainingBlockers: [] };
+    });
+    const i18n = await renderModal('el');
+    await confirmRecordCash(i18n);
+
+    expect(await screen.findByText('Η αναφορά δεν ανανεώθηκε. Πατήστε «Ανανέωση αναφοράς».')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(reloadFailure.message);
+    expect(warn).toHaveBeenCalledWith('[ZReportModal] Report refresh after recording payment failed:', reloadFailure);
+
+    mock.generateZReport.mockRejectedValueOnce(retryFailure);
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('modals.zReport.refresh') }));
+
+    expect(await screen.findByText('Η αναφορά δεν φορτώθηκε. Πατήστε «Ανανέωση αναφοράς».')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(reloadFailure.message);
+    expect(document.body).not.toHaveTextContent(retryFailure.message);
+    expect(warn).toHaveBeenCalledWith('[ZReportModal] Report load failed:', retryFailure);
+    expect(mock.resolvePaymentBlocker).toHaveBeenCalledOnce();
   });
 
   it('records nothing when the operator cancels the confirmation', async () => {
@@ -279,29 +505,127 @@ describe('ZReportModal Record cash / Record card', { timeout: 20_000 }, () => {
   });
 
   it.each([
+    {
+      name: 'a refusal without blockers',
+      respond: () => mock.resolvePaymentBlocker.mockResolvedValueOnce({
+        success: false, errorCode: 'UNSETTLED_PAYMENT_BLOCKER', error: 'raw record refusal',
+      }),
+      expected: 'Η πληρωμή δεν καταγράφηκε. Πατήστε ξανά «Καταγραφή πληρωμής μετρητών».',
+      raw: 'raw record refusal',
+    },
+    {
+      name: 'STORE_CURRENCY_UNAVAILABLE',
+      respond: () => mock.resolvePaymentBlocker.mockResolvedValueOnce({
+        success: false, error: 'STORE_CURRENCY_UNAVAILABLE', blockers: [unrecordedFinding()],
+      }),
+      expected: 'Η πληρωμή δεν καταγράφηκε. Ζητήστε από τον υπεύθυνο να ελέγξει τη χώρα του καταστήματος.',
+      raw: 'STORE_CURRENCY_UNAVAILABLE',
+    },
+    {
+      name: 'missing original currency',
+      respond: () => mock.resolvePaymentBlocker.mockRejectedValueOnce('ORIGINAL_CURRENCY_UNAVAILABLE'),
+      expected: 'Δεν έχει αποθηκευτεί το αρχικό νόμισμα αυτής της παραγγελίας. Η αλλαγή χώρας δεν τη διορθώνει. Η υποστήριξη πρέπει να ελέγξει την αρχική απόδειξη πριν καταγραφεί πληρωμή.',
+      raw: 'ORIGINAL_CURRENCY_UNAVAILABLE',
+    },
+    {
+      name: 'an order that was not found',
+      respond: () => mock.resolvePaymentBlocker.mockRejectedValueOnce('Order not found'),
+      expected: 'Η πληρωμή δεν καταγράφηκε. Πατήστε «Ανανέωση αναφοράς».',
+      raw: 'Order not found',
+    },
+    ...[
+      { error: 'This order no longer has a payment blocker.', blockers: [] },
+      { error: 'This order no longer has a collectible outstanding balance.', blockers: [unrecordedFinding()] },
+      { error: 'The outstanding balance changed since it was confirmed.', blockers: [unrecordedFinding()] },
+    ].map(({ error, blockers }) => ({
+      name: `${error} (${blockers.length ? 'with the same blocker' : 'without blockers'})`,
+      respond: () => mock.resolvePaymentBlocker.mockResolvedValueOnce({
+        success: false, errorCode: 'UNSETTLED_PAYMENT_BLOCKER', blockers,
+        error: `${error} Refresh the payment blockers and try again.`,
+      }),
+      expected: 'Η πληρωμή δεν καταγράφηκε. Πατήστε «Ανανέωση αναφοράς».',
+      raw: error,
+    })),
+    {
+      name: 'an unknown failure',
+      respond: () => mock.resolvePaymentBlocker.mockRejectedValueOnce(new Error('SQLITE_BUSY: raw write error')),
+      expected: 'Η πληρωμή δεν καταγράφηκε. Πατήστε ξανά «Καταγραφή πληρωμής μετρητών».',
+      raw: 'SQLITE_BUSY',
+    },
+  ])('shows Greek feedback for $name', async ({ respond, expected, raw }) => {
+    mock.generateZReport.mockResolvedValue(reportWith([unrecordedFinding()]));
+    respond();
+    const i18n = await renderModal('el');
+    await confirmRecordCash(i18n);
+
+    expect(await screen.findByText(expected)).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(raw);
+    expect(mock.resolvePaymentBlocker).toHaveBeenCalledOnce();
+  });
+
+  it.each([
     { code: 'ORDER_CURRENCY_UNAVAILABLE', reply: 'rejection' },
     { code: 'PAYMENT_CURRENCY_UNAVAILABLE', reply: 'rejection' },
     { code: 'ORDER_CURRENCY_UNAVAILABLE', reply: 'refusal' },
-  ])(
-    'explains $code ($reply) as missing historical evidence without suggesting a country change', async ({ code, reply }) => {
-      mock.generateZReport.mockResolvedValue(reportWith([unrecordedFinding()]));
-      if (reply === 'refusal') {
-        mock.resolvePaymentBlocker.mockResolvedValueOnce({ success: false, error: code });
-      } else {
-        mock.resolvePaymentBlocker.mockRejectedValueOnce(code);
-      }
-      const i18n = await renderModal('el');
-      fireEvent.click(await recordCashButton(i18n));
-      await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: i18n.t('modals.zReport.recordConfirmAction') }));
-      });
-      expect(await screen.findByText(i18n.t('modals.zReport.resolveBlockerFailed', {
-        orderNumber: 'A-0120',
-        error: i18n.t('modals.zReport.recordPaymentOriginalCurrencyMissing'),
-      }))).toBeTruthy();
-      expect(mock.resolvePaymentBlocker).toHaveBeenCalledTimes(1);
-    },
-  );
+  ])('shows the historical currency message for $code ($reply)', async ({ code, reply }) => {
+    mock.generateZReport.mockResolvedValue(reportWith([unrecordedFinding()]));
+    if (reply === 'refusal') {
+      mock.resolvePaymentBlocker.mockResolvedValueOnce({ success: false, error: code });
+    } else {
+      mock.resolvePaymentBlocker.mockRejectedValueOnce(code);
+    }
+    const i18n = await renderModal('el');
+    await confirmRecordCash(i18n);
+
+    expect(await screen.findByText(i18n.t('modals.zReport.recordPaymentOriginalCurrencyMissing'))).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(code);
+    expect(mock.resolvePaymentBlocker).toHaveBeenCalledOnce();
+  });
+
+  it('names the card record button after a generic card failure', async () => {
+    mock.generateZReport.mockResolvedValue(reportWith([{ ...unrecordedFinding(), paymentMethod: 'card' }]));
+    mock.resolvePaymentBlocker.mockRejectedValueOnce(new Error('raw card record error'));
+    const i18n = await renderModal('el');
+    fireEvent.click(await screen.findByRole('button', { name: /Καταγραφή πληρωμής κάρτας/ }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: i18n.t('modals.zReport.recordConfirmAction') }));
+    });
+
+    expect(await screen.findByText('Η πληρωμή δεν καταγράφηκε. Πατήστε ξανά «Καταγραφή πληρωμής κάρτας».')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent('raw card record error');
+  });
+
+  it('shows the Greek expired sign-in message when the write is rejected after PIN approval', async () => {
+    mock.generateZReport.mockResolvedValue(reportWith([unrecordedFinding()]));
+    mock.resolvePaymentBlocker
+      .mockRejectedValueOnce({ code: 'REAUTH_REQUIRED', reason: 'Fresh PIN confirmation required' })
+      .mockRejectedValueOnce({ code: 'AUTH_SESSION_EXPIRED', reason: 'raw expired session' });
+    mock.confirmPrivilegedAction.mockResolvedValue({ success: true });
+    const i18n = await renderModal('el');
+    await confirmRecordCash(i18n);
+    await screen.findByText(i18n.t('modals.zReport.recordApprovalTitle'));
+    for (const digit of '123456') fireEvent.click(screen.getByRole('button', { name: digit }));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('common.actions.confirm') }));
+
+    expect(await screen.findByText('Η σύνδεση του ταμείου έληξε. Πληκτρολογήστε ξανά το PIN του ταμείου.')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent('raw expired session');
+    expect(mock.resolvePaymentBlocker).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks staff to refresh the report when the refusal returns blockers for another order', async () => {
+    const otherOrder = { ...unrecordedFinding(), orderId: 'order-2', orderNumber: 'A-0121' };
+    mock.generateZReport
+      .mockResolvedValueOnce(reportWith([unrecordedFinding()]))
+      .mockResolvedValue(reportWith([otherOrder]));
+    mock.resolvePaymentBlocker.mockResolvedValueOnce({
+      success: false, errorCode: 'UNSETTLED_PAYMENT_BLOCKER', error: 'raw changed list', blockers: [otherOrder],
+    });
+    const i18n = await renderModal('el');
+    await confirmRecordCash(i18n);
+
+    expect(await screen.findByText('Η πληρωμή δεν καταγράφηκε. Πατήστε «Ανανέωση αναφοράς».')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent('raw changed list');
+  });
 
   it('tells the operator a record already made was not added twice', async () => {
     mock.generateZReport.mockResolvedValue(reportWith([unrecordedFinding()]));

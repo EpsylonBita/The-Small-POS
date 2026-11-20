@@ -83,6 +83,8 @@ mod panic_hook;
 mod payment_integrity;
 mod payment_review;
 mod payments;
+mod platform_cash_assignment;
+mod platform_cash_notice;
 mod platforms;
 mod print;
 mod print_dispatch;
@@ -1852,6 +1854,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::payments::refund_void_payment,
             commands::payments::refund_list_order_adjustments,
             commands::payments::refund_get_payment_balance,
+            platform_cash_notice::order_driver_cash_for_notice,
             // Z-Reports
             commands::zreports::zreport_generate,
             commands::zreports::zreport_get,

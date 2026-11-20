@@ -154,6 +154,10 @@
     }
   },
   "cancellationNotice": {
+    "driverCash": "La cassa ha registrato {{amount}} in contanti presso il fattorino {{name}} per questo ordine. Prima di correggere il pagamento, verifica se il fattorino ha incassato i contanti e se li ha già consegnati o restituiti.",
+    "driverCashNoName": "La cassa ha registrato {{amount}} in contanti presso il fattorino per questo ordine. Prima di correggere il pagamento, verifica se il fattorino ha incassato i contanti e se li ha già consegnati o restituiti.",
+    "paymentInReview": "Il pagamento di questo ordine è in attesa di verifica.",
+    "checkPayments": "Per questo ordine è registrato un pagamento in contanti. Controlla se i contanti sono stati incassati o restituiti prima di correggere il pagamento.",
     "eyebrow": "Ordine annullato dalla piattaforma",
     "stopPreparing": "Interrompi la preparazione di questo ordine",
     "explain": "La piattaforma di consegna ha annullato questo ordine. Non continuare a prepararlo o a spedirlo.",

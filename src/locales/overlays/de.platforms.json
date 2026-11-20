@@ -154,6 +154,10 @@
     }
   },
   "cancellationNotice": {
+    "driverCash": "Die Kasse hat für diese Bestellung {{amount}} in bar beim Fahrer {{name}} erfasst. Prüfen Sie vor der Korrektur der Zahlung, ob der Fahrer das Bargeld kassiert und bereits abgegeben oder zurückgegeben hat.",
+    "driverCashNoName": "Die Kasse hat für diese Bestellung {{amount}} in bar beim Fahrer erfasst. Prüfen Sie vor der Korrektur der Zahlung, ob der Fahrer das Bargeld kassiert und bereits abgegeben oder zurückgegeben hat.",
+    "paymentInReview": "Die Zahlung für diese Bestellung muss noch geprüft werden.",
+    "checkPayments": "Für diese Bestellung ist eine Barzahlung erfasst. Prüfen Sie, ob das Bargeld eingenommen oder zurückgegeben wurde, bevor Sie die Zahlung korrigieren.",
     "eyebrow": "Bestellung von der Plattform storniert",
     "stopPreparing": "Zubereitung dieser Bestellung stoppen",
     "explain": "Die Lieferplattform hat diese Bestellung storniert. Nicht weiter zubereiten oder ausliefern.",

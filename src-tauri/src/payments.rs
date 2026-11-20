@@ -3674,6 +3674,90 @@ pub(crate) fn platform_settlement_kind(
     None
 }
 
+/// Automatic assignment cash requires an explicit, consistent store-driver declaration.
+pub(crate) fn platform_declares_store_driver_cash(conn: &Connection, order_id: &str) -> bool {
+    let Some((plugin, food_delivery)) = platform_food_delivery(conn, order_id) else {
+        return false;
+    };
+    let store_driver = food_delivery
+        .get("delivery_provider")
+        .and_then(Value::as_str)
+        == Some("vendor_delivery");
+    let consistent_daas = if plugin == "box" {
+        food_delivery.get("box_daas") == Some(&Value::Bool(false))
+            && food_delivery
+                .get("box_daas_declared")
+                .is_none_or(|declared| declared.as_str() == Some("absent"))
+    } else {
+        matches!(
+            food_delivery.get("box_daas"),
+            None | Some(Value::Bool(false))
+        )
+    };
+    store_driver
+        && consistent_daas
+        && food_delivery.get("payment_type").is_none_or(|tender| {
+            tender
+                .as_str()
+                .is_some_and(|method| method.trim().eq_ignore_ascii_case("cash"))
+        })
+        && platform_cash_is_store_collectable(conn, order_id, &food_delivery)
+}
+
+pub(crate) fn platform_food_delivery(
+    conn: &Connection,
+    order_id: &str,
+) -> Option<(String, serde_json::Map<String, Value>)> {
+    let (plugin, metadata) = conn
+        .query_row(
+            "SELECT COALESCE(plugin, ''), COALESCE(ghost_metadata, '') FROM orders WHERE id = ?1",
+            [order_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .ok()?;
+    if !crate::platforms::is_external_delivery_platform(&plugin) {
+        return None;
+    }
+    Some((
+        crate::platforms::normalize_platform_slug(&plugin)?,
+        food_delivery_from_metadata(metadata)?,
+    ))
+}
+
+pub(crate) fn food_delivery_from_metadata(
+    metadata: String,
+) -> Option<serde_json::Map<String, Value>> {
+    let food_delivery =
+        read_platform_cash_record(Value::String(metadata))?.remove("food_delivery")?;
+    read_platform_cash_record(food_delivery)
+}
+
+fn platform_cash_is_store_collectable(
+    conn: &Connection,
+    order_id: &str,
+    food_delivery: &serde_json::Map<String, Value>,
+) -> bool {
+    matches!(
+        food_delivery.get("prepaid"),
+        None | Some(Value::Null | Value::Bool(false))
+    ) && food_delivery
+        .get("payment_method")
+        .and_then(Value::as_str)
+        .is_some_and(|method| method.trim().eq_ignore_ascii_case("cash"))
+        && order_money_is_store_collectable(conn, order_id)
+}
+
+/// Platform snapshots can encode each metadata object as JSON text.
+fn read_platform_cash_record(mut value: Value) -> Option<serde_json::Map<String, Value>> {
+    loop {
+        match value {
+            Value::Object(fields) => return Some(fields),
+            Value::String(raw) => value = serde_json::from_str(&raw).ok()?,
+            _ => return None,
+        }
+    }
+}
+
 /// Does the store itself collect this order's money? The shared contract
 /// (`shared/platforms/payment-coverage.ts` `isStoreCollectableOrder`, founder
 /// review 16/09/2026: "unknown means ask the operator, never assume"), as on
@@ -3993,6 +4077,10 @@ pub(crate) fn kiosk_requested_tender(
     }
 }
 
+pub(crate) fn unpaid_order_header_sql(column: &str) -> String {
+    format!("LOWER(TRIM(COALESCE({column}, ''))) IN ('', 'pending', 'unpaid')")
+}
+
 /// Founder, 09/11/2026 (Le Petit Paris): «θα έπρεπε να καταγράφεται
 /// μετρητά/κάρτα ανάλογα τι έχει επιλέξει ο πελάτης, και όταν το κατάστημα
 /// την στέλνει στις ολοκληρωμένες σημαίνει πως έχει πληρωθεί χωρίς να
@@ -4026,12 +4114,15 @@ pub(crate) fn auto_record_kiosk_requested_payment(
     conn: &Connection,
     order_id: &str,
 ) -> Result<bool, String> {
-    let row: Option<(Option<String>, String, String, Option<String>, String)> = conn
+    let row: Option<(Option<String>, String, String, Option<String>, bool)> = conn
         .query_row(
-            "SELECT ghost_metadata, COALESCE(order_type, ''),
+            &format!(
+                "SELECT ghost_metadata, COALESCE(order_type, ''),
                     LOWER(TRIM(COALESCE(status, ''))), table_session_id,
-                    LOWER(TRIM(COALESCE(payment_status, '')))
-             FROM orders WHERE id = ?1",
+                    {}
+                 FROM orders WHERE id = ?1",
+                unpaid_order_header_sql("payment_status")
+            ),
             params![order_id],
             |row| {
                 Ok((
@@ -4045,14 +4136,14 @@ pub(crate) fn auto_record_kiosk_requested_payment(
         )
         .optional()
         .map_err(|e| format!("load kiosk order before recording its tender: {e}"))?;
-    let Some((metadata, order_type, status, table_session_id, payment_status)) = row else {
+    let Some((metadata, order_type, status, table_session_id, unpaid_header)) = row else {
         return Ok(false);
     };
     // Only an order nobody has been paid for yet. A paid or partly paid label
     // whose local rows are missing is a missing-payment case: it keeps its
     // blocker and is restored from the server or recorded by a manager, never
     // collected again here as new money in today's drawer (PR #432 review).
-    if !matches!(payment_status.as_str(), "" | "pending" | "unpaid") {
+    if !unpaid_header {
         return Ok(false);
     }
     let Some(method) = kiosk_requested_tender(

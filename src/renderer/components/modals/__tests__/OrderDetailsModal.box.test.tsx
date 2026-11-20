@@ -9,8 +9,10 @@
  *   unknown outcome: check it with BOX).
  * `t` answers from the real merged English bundle.
  */
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DriverCashForNotice } from '../../../../lib/ipc-contracts';
+import { formatCurrency } from '../../../utils/format';
 import OrderDetailsModal from '../OrderDetailsModal';
 
 const i18nMock = vi.hoisted(() => ({
@@ -41,8 +43,10 @@ const i18nMock = vi.hoisted(() => ({
 }));
 
 const mocks = vi.hoisted(() => ({
+  onEvent: vi.fn(),
+  offEvent: vi.fn(),
   bridge: {
-    orders: { getById: vi.fn(), getByCustomerPhone: vi.fn() },
+    orders: { getById: vi.fn(), getByCustomerPhone: vi.fn(), getDriverCashForNotice: vi.fn() },
     payments: {
       getOrderPayments: vi.fn(),
       getPaidItems: vi.fn(),
@@ -65,8 +69,14 @@ vi.mock('react-i18next', async (importOriginal) => {
 vi.mock('../../../../lib', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   getBridge: () => mocks.bridge,
-  onEvent: vi.fn(),
-  offEvent: vi.fn(),
+  onEvent: mocks.onEvent,
+  offEvent: mocks.offEvent,
+}));
+
+vi.mock('../RefundVoidModal', () => ({
+  default: ({ onRefundComplete }: { onRefundComplete: () => void }) => (
+    <button data-testid="complete-refund" onClick={() => onRefundComplete()}>Complete refund</button>
+  ),
 }));
 
 vi.mock('../../../contexts/theme-context', () => ({
@@ -158,12 +168,165 @@ afterEach(cleanup);
 
 beforeEach(() => {
   row = orderRow();
+  mocks.bridge.orders.getDriverCashForNotice.mockReset().mockResolvedValue(null);
   mocks.bridge.orders.getById.mockImplementation(async () => row);
   mocks.bridge.orders.getByCustomerPhone.mockResolvedValue({ success: true, orders: [] });
   mocks.bridge.payments.getOrderPayments.mockResolvedValue([]);
   mocks.bridge.payments.getPaidItems.mockResolvedValue([]);
   mocks.bridge.payments.getSettlementSnapshot.mockResolvedValue({ success: false });
   mocks.bridge.payments.listUnsavedPayments.mockResolvedValue({ payments: [] });
+});
+
+describe('OrderDetailsModal cancelled platform payment', () => {
+  const cash = (collectorName: string | null, amountCents = 1250): DriverCashForNotice =>
+    ({ state: 'driver_cash', amountCents, currency: 'CHF', collectorName });
+  const cancelledOrder = (overrides: Record<string, unknown> = {}) =>
+    orderRow({ status: 'cancelled', items: [{ name: 'Pita', quantity: 1, total_price: 4 }], ...overrides });
+  const details = (isOpen = true, orderId = ORDER_ID) =>
+    <OrderDetailsModal isOpen={isOpen} orderId={orderId} onClose={vi.fn()} />;
+  const review = tr('cancellationNotice.paymentInReview');
+  const check = tr('cancellationNotice.checkPayments');
+  const cashText = (amount: number) =>
+    tr('cancellationNotice.driverCashNoName', { amount: formatCurrency(amount, 'CHF') }).replace(/\s+/g, ' ');
+
+  function deferredCash() {
+    let resolve!: (answer: DriverCashForNotice) => void;
+    const promise = new Promise<DriverCashForNotice>(done => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  it('offers the void entry for a cancelled platform order with a paid header', async () => {
+    row = cancelledOrder({ payment_status: 'paid' });
+    await renderDetails();
+    expect(await screen.findByTestId('order-details-void-refund')).toBeEnabled();
+  });
+
+  it.each([
+    { label: 'driver cash', answer: cash('Μαρία'),
+      wording: () => tr('cancellationNotice.driverCash', { amount: formatCurrency(12.5, 'CHF'), name: 'Μαρία' }) },
+    { label: 'driver cash without a name', answer: cash(null),
+      wording: () => tr('cancellationNotice.driverCashNoName', { amount: formatCurrency(12.5, 'CHF') }) },
+    { label: 'review', answer: { state: 'review' }, wording: () => review },
+    { label: 'check', answer: { state: 'check' }, wording: () => check },
+  ])('shows $label in the payment panel', async ({ answer, wording }) => {
+    row = cancelledOrder();
+    mocks.bridge.orders.getDriverCashForNotice.mockResolvedValueOnce(answer);
+    await renderDetails();
+
+    // The money formatter separates code and amount with a no-break space; the page text is matched with plain spaces.
+    const text = wording().replace(/\s+/g, ' ');
+    const line = await screen.findByText(text);
+    expect(line.parentElement).toHaveTextContent('Payment status');
+    expect(screen.getAllByText(text)).toHaveLength(1);
+    expect(mocks.bridge.orders.getDriverCashForNotice.mock.calls).toStrictEqual([[ORDER_ID]]);
+  });
+
+  it.each([
+    { label: 'a non-cancelled platform order', overrides: { status: 'confirmed' } },
+    { label: 'a cancelled non-platform order', overrides: { plugin: 'pos' } },
+  ])('makes no read for $label', async ({ overrides }) => {
+    row = cancelledOrder(overrides);
+    await renderDetails();
+    expect(mocks.bridge.orders.getDriverCashForNotice).not.toHaveBeenCalled();
+  });
+
+  it.each(['null', 'rejected'] as const)('shows no line when the read is %s', async outcome => {
+    row = cancelledOrder();
+    if (outcome === 'rejected') {
+      mocks.bridge.orders.getDriverCashForNotice.mockRejectedValueOnce(new Error('read failed'));
+    }
+    await renderDetails();
+    await waitFor(() => expect(mocks.bridge.orders.getDriverCashForNotice).toHaveBeenCalledOnce());
+    expect(screen.queryByText(review)).toBeNull();
+    expect(screen.queryByText(check)).toBeNull();
+    expect(screen.queryByText(/^The till has recorded/)).toBeNull();
+  });
+
+  it('drops a late payment reply after opening another order', async () => {
+    row = cancelledOrder();
+    let resolveFirst!: (answer: DriverCashForNotice) => void;
+    mocks.bridge.orders.getDriverCashForNotice
+      .mockReturnValueOnce(new Promise<DriverCashForNotice>(resolve => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce({ state: 'check' });
+    const { rerender } = render(details());
+    await waitFor(() => expect(mocks.bridge.orders.getDriverCashForNotice.mock.calls).toStrictEqual([[ORDER_ID]]));
+
+    row = cancelledOrder({ id: 'b', order_number: 'BOX-0043' });
+    rerender(details(true, 'b'));
+    expect(await screen.findByText(check)).toBeInTheDocument();
+    await act(async () => resolveFirst({ state: 'review' }));
+    expect(screen.queryByText(review)).toBeNull();
+    expect(screen.getByText(check)).toBeInTheDocument();
+    expect(mocks.bridge.orders.getDriverCashForNotice.mock.calls).toStrictEqual([[ORDER_ID], ['b']]);
+  });
+
+  it('reads again on reopening the same order after the receipt arrives', async () => {
+    row = cancelledOrder();
+    mocks.bridge.orders.getDriverCashForNotice.mockResolvedValueOnce(null).mockResolvedValueOnce(cash('Μαρία'));
+    const { rerender } = render(details());
+    await waitFor(() => expect(mocks.bridge.orders.getDriverCashForNotice).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/Μαρία/)).toBeNull();
+    rerender(details(false));
+    rerender(details());
+
+    expect(await screen.findByText(/Μαρία/)).toBeInTheDocument();
+    expect(mocks.bridge.orders.getDriverCashForNotice.mock.calls).toStrictEqual([[ORDER_ID], [ORDER_ID]]);
+  });
+
+  it.each(['already shown', 'still pending'])('refreshes the same order after a refund when the first amount is %s', async firstState => {
+    row = cancelledOrder({ payment_status: 'paid' });
+    const payment = { id: 'cash-1', method: 'cash', status: 'completed', amount: 12.5 };
+    mocks.bridge.payments.getOrderPayments
+      .mockResolvedValueOnce([payment])
+      .mockResolvedValueOnce([{ ...payment, refundedAmount: 4 }]);
+    const beforeRefund = deferredCash();
+    const afterRefund = deferredCash();
+    mocks.bridge.orders.getDriverCashForNotice
+      .mockReturnValueOnce(beforeRefund.promise)
+      .mockReturnValueOnce(afterRefund.promise);
+    await renderDetails();
+    await waitFor(() => expect(mocks.bridge.orders.getDriverCashForNotice.mock.calls).toStrictEqual([[ORDER_ID]]));
+
+    if (firstState === 'already shown') {
+      await act(async () => beforeRefund.resolve(cash(null)));
+      expect(screen.getByText(cashText(12.5))).toBeInTheDocument();
+    }
+
+    fireEvent.click(screen.getByTestId('order-details-void-refund'));
+    fireEvent.click(screen.getByTestId('complete-refund'));
+    await waitFor(() => expect(mocks.bridge.orders.getDriverCashForNotice.mock.calls).toStrictEqual([[ORDER_ID], [ORDER_ID]]));
+    expect(mocks.bridge.payments.getOrderPayments.mock.calls).toStrictEqual([[ORDER_ID], [ORDER_ID]]);
+    expect(screen.queryByText(cashText(12.5))).toBeNull();
+
+    await act(async () => afterRefund.resolve(cash(null, 850)));
+    expect(screen.getByText(cashText(8.5))).toBeInTheDocument();
+    if (firstState === 'still pending') {
+      await act(async () => beforeRefund.resolve(cash(null)));
+      expect(screen.getByText(cashText(8.5))).toBeInTheDocument();
+      expect(screen.queryByText(cashText(12.5))).toBeNull();
+    }
+  });
+
+  it('drops the old terminal reply when the same cancelled order stays open', async () => {
+    row = cancelledOrder();
+    const previousTerminal = deferredCash();
+    mocks.bridge.orders.getDriverCashForNotice
+      .mockReturnValueOnce(previousTerminal.promise)
+      .mockResolvedValueOnce({ state: 'check' });
+    await renderDetails();
+    await waitFor(() => expect(mocks.bridge.orders.getDriverCashForNotice.mock.calls).toStrictEqual([[ORDER_ID]]));
+
+    await act(async () => {
+      for (const [event, listener] of mocks.onEvent.mock.calls) {
+        if (event === 'terminal-credentials-updated') listener();
+      }
+    });
+    expect(await screen.findByText(check)).toBeInTheDocument();
+    await act(async () => previousTerminal.resolve(cash(null)));
+    expect(screen.getByText(check)).toBeInTheDocument();
+    expect(screen.queryByText(cashText(12.5))).toBeNull();
+    expect(mocks.bridge.orders.getDriverCashForNotice.mock.calls).toStrictEqual([[ORDER_ID], [ORDER_ID]]);
+  });
 });
 
 describe('OrderDetailsModal — BOX display-only lines', () => {

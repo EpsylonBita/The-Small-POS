@@ -105,8 +105,9 @@ import type {
 import {
   extractPaymentIntegrityPayload,
   formatOperatorFacingError,
-  formatPaymentIntegrityError,
+  formatRecordPaymentFailure,
   formatSetAsidePaymentMessage,
+  formatZReportLoadFailure,
   getLocalizedPaymentMethod,
   paymentBlockerKey,
 } from '../../../lib/payment-integrity';
@@ -154,16 +155,33 @@ const PHONE_SHIFT_HANDOVER_LABELS: Record<ZReportPhoneShiftHandover, string> = {
   not_counted: 'Not counted',
 };
 
+function originalPaymentCurrencyMessage(
+  message: string,
+  t: ReturnType<typeof useTranslation>['t'],
+): string | undefined {
+  if (['ORDER_CURRENCY_UNAVAILABLE', 'PAYMENT_CURRENCY_UNAVAILABLE', 'ORIGINAL_CURRENCY_UNAVAILABLE'].includes(message.trim())) {
+    return t('modals.zReport.recordPaymentOriginalCurrencyMissing');
+  }
+  return undefined;
+}
+
 function extractErrorMessage(
   error: unknown,
   fallback: string,
   t: ReturnType<typeof useTranslation>['t'],
 ): string {
   const message = formatOperatorFacingError(error, fallback, t);
-  if (['ORDER_CURRENCY_UNAVAILABLE', 'PAYMENT_CURRENCY_UNAVAILABLE', 'ORIGINAL_CURRENCY_UNAVAILABLE'].includes(message.trim())) {
-    return t('modals.zReport.recordPaymentOriginalCurrencyMissing');
-  }
-  return message;
+  return originalPaymentCurrencyMessage(message, t) ?? message;
+}
+
+function recordBlockerFailureText(
+  error: unknown,
+  orderId: string,
+  method: 'cash' | 'card',
+  t: ReturnType<typeof useTranslation>['t'],
+): string {
+  console.warn('[ZReportModal] Recording payment failed:', error);
+  return formatRecordPaymentFailure(error, t, 'modals.zReport.recordPaymentFailed', method, orderId);
 }
 
 // Normalize a raw backend slug to a canonical lookup key: lowercase, trim, and collapse
@@ -314,6 +332,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   // The export picker (founder, 14/10/2026): every Z export reads a stored Z.
   const [exportDialogIntent, setExportDialogIntent] = useState<ZReportExportKind | null>(null);
   const [reportReloadVersion, setReportReloadVersion] = useState(0);
+  const recordReloadScopeRef = useRef<number | null>(null);
   // The till's own connection (native health probe). Offline the day cannot
   // close, so the checklist must not read "No sync blocker detected" (offline
   // audit 07/10/2026). Informational: the native Z refusal decides.
@@ -467,6 +486,18 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
 
     let active = true;
     const shouldAutoRefresh = isUsingLiveDefaultDate && !lockDate;
+    const reloadAfterRecord = recordReloadScopeRef.current === statusScopeRef.current;
+    recordReloadScopeRef.current = null;
+
+    const logLoadFailure = (failure: unknown) => console.warn(
+      reloadAfterRecord
+        ? '[ZReportModal] Report refresh after recording payment failed:'
+        : '[ZReportModal] Report load failed:',
+      failure,
+    );
+    const loadFailureText = (failure: unknown) => reloadAfterRecord
+      ? t('modals.zReport.recordPaymentReloadFailed')
+      : formatZReportLoadFailure(failure, t);
 
     const load = async (silent = false) => {
       if (!silent) {
@@ -477,19 +508,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
 
       try {
         const result = await bridge.reports.generateZReport({ branchId, date: selectedDate });
+        if (!silent && result?.success === false) logLoadFailure(result);
         if (!active) return;
 
         if (result?.success === false) {
           const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
           if (!silent) {
             setPaymentBlockers(paymentIntegrityPayload?.blockers || []);
-            setError(
-              formatPaymentIntegrityError(
-                result,
-                t('modals.zReport.loadFailed'),
-                t,
-              ),
-            );
+            setError(loadFailureText(result));
+          } else {
+            console.warn('[ZReportModal] Silent live refresh failed:', result);
           }
           return;
         }
@@ -507,6 +535,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           setError(null);
         }
       } catch (e: unknown) {
+        if (!silent) logLoadFailure(e);
         if (!active) return;
 
         if (silent) {
@@ -514,7 +543,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           return;
         }
 
-        setError(extractErrorMessage(e, t('modals.zReport.loadFailed'), t));
+        setError(loadFailureText(e));
       } finally {
         if (!active || silent) return;
         setLoading(false);
@@ -564,6 +593,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       const startedScope = recordScopeRef.current;
       recordScopeRef.current = null;
       if (startedScope !== null && statusScopeRef.current !== startedScope) return;
+      const reloadAfterRecord = () => {
+        recordReloadScopeRef.current = statusScopeRef.current;
+        setReportReloadVersion((current) => current + 1);
+      };
       const methodLabel = t(
         method === 'cash' ? 'modals.zReport.cash' : 'modals.zReport.card',
       ).toLowerCase();
@@ -584,16 +617,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             setPaymentBlockers(paymentIntegrityPayload.blockers);
           }
           setSubmitResult(
-            t('modals.zReport.resolveBlockerFailed', {
-              orderNumber: blocker.orderNumber,
-              error: extractErrorMessage(
-                outcome.result,
-                t('modals.zReport.submissionFailed'),
-                t,
-              ),
-            }),
+            recordBlockerFailureText(
+              outcome.result,
+              blocker.orderId,
+              method,
+              t,
+            ),
           );
-          setReportReloadVersion((current) => current + 1);
+          reloadAfterRecord();
           return;
         }
         case 'failed': {
@@ -602,14 +633,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             setPaymentBlockers(paymentIntegrityPayload.blockers);
           }
           setSubmitResult(
-            t('modals.zReport.resolveBlockerFailed', {
-              orderNumber: blocker.orderNumber,
-              error: extractErrorMessage(
-                outcome.error,
-                t('modals.zReport.submissionFailed'),
-                t,
-              ),
-            }),
+            recordBlockerFailureText(
+              outcome.error,
+              blocker.orderId,
+              method,
+              t,
+            ),
           );
           return;
         }
@@ -623,7 +652,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                 'This {{method}} payment for {{orderNumber}} was already recorded. Nothing was added.',
             }),
           );
-          setReportReloadVersion((current) => current + 1);
+          reloadAfterRecord();
           return;
         case 'recorded':
           setError(null);
@@ -633,7 +662,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
               method: methodLabel,
             }),
           );
-          setReportReloadVersion((current) => current + 1);
+          reloadAfterRecord();
       }
     },
     [t],
@@ -1536,6 +1565,47 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   // list. The builder now ships its findings with the report, so the break is
   // visible before anyone presses «Κλείσιμο».
   const integrity = zReport?.integrity;
+  const reviewReasons = useMemo(() => (
+    Array.isArray(integrity?.findingsByReason) ? integrity.findingsByReason : []
+  ).map((reason) => ({
+    ...reason,
+    label: /^[a-z0-9_]+$/.test(reason.reasonCode)
+      ? t(`modals.zReport.reconciliationReason.${reason.reasonCode}`, { defaultValue: '' })
+      : '',
+  })), [integrity?.findingsByReason, t]);
+  const reportedReviewReasons = useRef(new Set<string>());
+  const reportedReviewSources = useRef(new Set<string>());
+
+  useEffect(() => {
+    const sources = Array.isArray(integrity?.unclassifiedPlatforms) ? integrity.unclassifiedPlatforms : [];
+    const reconciliationVisible = isOpen && activeTab === 'review' && integrity && (
+      integrity.blockingFindings > 0
+      || Math.abs(integrity.unexplainedDifference ?? integrity.difference ?? 0) >= 0.01
+      || (integrity.refundedOrders?.orders ?? 0) > 0
+      || (integrity.carriedOverFromClosedDays?.orders ?? 0) > 0
+      || sources.length > 0
+    );
+    if (!reconciliationVisible) {
+      reportedReviewReasons.current.clear();
+      reportedReviewSources.current.clear();
+      return;
+    }
+    const currentReasons = new Set(reviewReasons.filter(({ label }) => !label).map(({ reasonCode }) => reasonCode));
+    const currentSources = new Set(sources.map(({ source }) => source));
+    for (const reasonCode of currentReasons) {
+      if (!reportedReviewReasons.current.has(reasonCode)) {
+        console.warn('[ZReportModal] Missing localized Review reason:', reasonCode);
+      }
+    }
+    for (const source of currentSources) {
+      if (!reportedReviewSources.current.has(source)) {
+        console.warn('[ZReportModal] Unclassified order source in Review:', source);
+      }
+    }
+    reportedReviewReasons.current = currentReasons;
+    reportedReviewSources.current = currentSources;
+  }, [activeTab, integrity, isOpen, reviewReasons]);
+
   const integrityFindings = useMemo(
     () => (Array.isArray(integrity?.findings) ? integrity.findings : []),
     [integrity],
@@ -2899,7 +2969,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                             </div>
                             <div className="min-w-0 pos-glass-form-card p-2.5!">
                               <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
-                                {t('modals.zReport.paymentCoverage', { defaultValue: 'Payment coverage' })}
+                                {t('modals.zReport.paymentCoverage')}
                               </div>
                               <div className={`mt-1 truncate text-sm font-bold ${moneyInTone}`}>
                                 {formatMoney(integrity.paymentCoverage ?? 0)}
@@ -2937,12 +3007,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           </div>
                           <AnimatePresence initial={false}>{Array.isArray(integrity.findingsByReason) && integrity.findingsByReason.length > 0 && (
                             <ZReportReveal as="div" key="z-reveal-22" {...revealMotion} className="mt-3 space-y-1">
-                              {integrity.findingsByReason.map((reason) => (
+                              {reviewReasons.map((reason) => (
                                 <div key={reason.reasonCode} className={`flex items-center justify-between text-xs font-semibold ${mutedTextClass}`}>
                                   <span className="truncate">
-                                    {t(`modals.zReport.reconciliationReason.${reason.reasonCode}`, {
-                                      defaultValue: reason.reasonCode.replace(/_/g, ' '),
-                                    })}
+                                    {reason.label || t('modals.zReport.reconciliationReasonFallback')}
                                   </span>
                                   <span className="shrink-0 tabular-nums">
                                     {reason.orders} · {formatMoney(reason.difference)}
@@ -2961,23 +3029,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               })}
                             </ZReportReveal>
                           )}</AnimatePresence>
-                          {/* Sources we could not name. Their money IS in the
-                              totals above -- only the platform attribution is
-                              withheld, because `plugin` shares its namespace
-                              with payment/analytics/e-commerce integrations and
-                              guessing one into ΠΛΑΤΦΟΡΜΕΣ would be a
-                              fabrication. Named here so it can be classified. */}
+                          {/* These totals include orders whose source is unrecognized.
+                              The payload supplies an internal identifier for diagnostics. */}
                           <AnimatePresence initial={false}>{(integrity.unclassifiedPlatforms?.length ?? 0) > 0 && (
                             <ZReportReveal as="div" key="z-reveal-24" {...revealMotion} className={`mt-3 text-xs font-semibold leading-5 ${mutedTextClass}`}>
                               <div>
-                                {t('modals.zReport.reconciliationUnclassifiedSources', {
-                                  defaultValue:
-                                    'Order sources not recognised as a platform. Their money is included in the totals above; only the platform attribution is withheld.',
-                                })}
+                                {t('modals.zReport.reconciliationUnclassifiedSources')}
                               </div>
                               {(integrity.unclassifiedPlatforms ?? []).map((entry) => (
                                 <div key={entry.source} className="mt-1 flex items-center justify-between">
-                                  <span className="truncate">{entry.source}</span>
+                                  <span className="truncate">{t('modals.zReport.reconciliationUnclassifiedSource')}</span>
                                   <span className="shrink-0 tabular-nums">
                                     ×{entry.orders} · {formatMoney(entry.amount)}
                                   </span>
@@ -3008,11 +3069,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                         <ZReportReveal as="div" key="payment-blockers" {...revealMotion}><UnsettledPaymentBlockersPanel
                           blockers={effectivePaymentBlockers}
                           title={t('modals.zReport.paymentIntegrityTitle', {
-                            defaultValue: 'Orders Blocking Z-Report Closeout',
+                            defaultValue: 'Orders to settle before the Z',
                           })}
                           helperText={t('modals.zReport.paymentIntegrityResolveHelper', {
                             defaultValue:
-                              'Resolve the missing balance here. The fix is recorded against the original business-day drawer before you retry the Z-report.',
+                              'Follow the instruction beside each order. Try closing the day again.',
                           })}
                           onResolveBlocker={handleResolveBlocker}
                           onResolveSetAsidePayment={setSetAsideConfirmation}

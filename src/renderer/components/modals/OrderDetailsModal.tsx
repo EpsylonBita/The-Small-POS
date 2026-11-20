@@ -12,6 +12,7 @@ import {
 } from '../../utils/orderNumberUtils';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { normalizeOrderTypeForDisplay } from '../../utils/orderDisplay';
+import { useCancellationPaymentText } from '../notices/CancellationNoticeManager';
 import { resolveTableServiceCustomerNumber } from '../../utils/tableOrderFlow';
 import { resolveStrikethroughSubtotal } from '../../utils/orderSummary';
 import {
@@ -23,7 +24,7 @@ import { UnsavedChargedPaymentBanner } from '../ui/UnsavedChargedPaymentBanner';
 import { useUnsavedChargedPayments } from '../../utils/unsavedPayments';
 import { SplitPaymentModal } from './SplitPaymentModal';
 import type { SplitPaymentResult } from './SplitPaymentModal';
-import { getBridge } from '../../../lib';
+import { getBridge, offEvent, onEvent } from '../../../lib';
 import { buildSplitPaymentItems } from '../../utils/splitPaymentItems';
 import { readPrintedVatAmount } from '../../utils/printedVat';
 import { menuService, type Ingredient, type MenuCategory, type MenuItem } from '../../services/MenuService';
@@ -330,6 +331,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const [orderData, setOrderData] = useState<any>(null);
   const [retainedPayment, setRetainedPayment] = useState<{ orderId: string; cents: number } | null>(null);
   const [orderPayments, setOrderPayments] = useState<any[]>([]);
+  const [cancellationPaymentGeneration, setCancellationPaymentGeneration] = useState(0);
   const [paidItems, setPaidItems] = useState<any[]>([]);
   const [customerOrders, setCustomerOrders] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -554,6 +556,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     const request = ++paymentReadRequestRef.current;
     const isCurrent = () =>
       paymentReadRequestRef.current === request && isCurrentView(epoch, targetOrderId);
+    if (isCurrent()) setCancellationPaymentGeneration(generation => generation + 1);
     try {
       const [paymentsResult, paidItemsResult, settlement] = await Promise.all([
         bridge.payments.getOrderPayments(targetOrderId),
@@ -892,6 +895,15 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   });
   const normalizedOrderStatus = String(displayOrder.status || 'pending').toLowerCase();
   const isCancelledOrder = normalizedOrderStatus === 'cancelled' || normalizedOrderStatus === 'canceled';
+  const cancelledPlatformOrderId = isOpen && displayOrder.id === orderId && isCancelledOrder &&
+    isExternalDeliveryPlatform(displayOrder.plugin ?? displayOrder.platform) ? orderId : null;
+  useEffect(() => {
+    if (!cancelledPlatformOrderId) return;
+    const onCredentialsChanged = () => setCancellationPaymentGeneration(generation => generation + 1);
+    onEvent('terminal-credentials-updated', onCredentialsChanged);
+    return () => offEvent('terminal-credentials-updated', onCredentialsChanged);
+  }, [cancelledPlatformOrderId]);
+  const cancellationPaymentText = useCancellationPaymentText(cancelledPlatformOrderId, cancellationPaymentGeneration);
   const displayStatus = isCancelledOrder ? 'cancelled' : normalizedOrderStatus;
   const displayStatusLabel = getOrderStatusLabel(displayStatus);
   const status = displayStatus;
@@ -1689,6 +1701,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       )}
                     </div>
                   </div>
+                  {cancellationPaymentText && (
+                    <p className="mt-2 text-sm liquid-glass-modal-text">{cancellationPaymentText}</p>
+                  )}
                   {/* Right under the status the operator reads before deciding
                       to collect. `payment_status` alone cannot say this: a
                       failed settlement leaves it `pending`, which looks

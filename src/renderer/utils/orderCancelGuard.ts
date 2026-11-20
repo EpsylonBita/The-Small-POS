@@ -20,6 +20,23 @@ export interface OrderCancelRefusals {
   notRecorded: string[];
 }
 
+export function isPlatformDriverCashAutoEnabled(raw: unknown): boolean {
+  try {
+    const features = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!features || typeof features !== 'object' || Array.isArray(features)) return false;
+    const read = (value: unknown): boolean | undefined => {
+      if (typeof value === 'boolean') return value;
+      const flag = typeof value === 'string' ? value.trim().toLowerCase() : value;
+      if (flag === 1 || flag === 'true' || flag === '1' || flag === 'yes' || flag === 'on') return true;
+      if (flag === 0 || flag === 'false' || flag === '0' || flag === 'no' || flag === 'off') return false;
+      return undefined;
+    };
+    return (read(features.platform_driver_cash_auto) ?? read(features.platformDriverCashAuto)) === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Whether an order belongs to the canonical table lifecycle: decided by table
  * evidence (a check session, a table, or a dine-in table number), as the till

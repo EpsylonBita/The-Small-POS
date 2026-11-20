@@ -1,6 +1,8 @@
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import i18next, { type TFunction } from 'i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { localeBundles } from '../../../../locales/bundles';
 import type {
   GiftFundingDrawerView,
   ShiftFinancialClosingRecoveryView,
@@ -14,10 +16,13 @@ const fixture = vi.hoisted(() => ({
   activeShift: null as any,
   getStatus: vi.fn(), setStaff: vi.fn(), setActiveShiftImmediate: vi.fn(), refreshActiveShift: vi.fn(), onClose: vi.fn(),
   t: (key: string, fallback?: string | { defaultValue?: string }) => typeof fallback === 'string' ? fallback : fallback?.defaultValue ?? key,
+  localizedT: undefined as TFunction | undefined,
   bridge: null as any,
 }));
-vi.mock('react-i18next', async (original) => ({ ...(await original<typeof import('react-i18next')>()), useTranslation: () => ({ t: fixture.t }) }));
-vi.mock('../../../contexts/i18n-context', () => ({ useI18n: () => ({ language: 'en', setLanguage: vi.fn(), t: fixture.t }) }));
+vi.mock('react-i18next', async (original) => ({ ...(await original<typeof import('react-i18next')>()), useTranslation: () => ({ t: fixture.localizedT ?? fixture.t }) }));
+vi.mock('../../../contexts/i18n-context', () => ({
+  useI18n: () => ({ language: fixture.localizedT ? 'el' : 'en', setLanguage: vi.fn(), t: fixture.localizedT ?? fixture.t }),
+}));
 vi.mock('../../../contexts/shift-context', () => ({ useShift: () => ({ staff: fixture.sessionStaff, activeShift: fixture.activeShift,
   isShiftActive: Boolean(fixture.activeShift), setStaff: fixture.setStaff, setActiveShiftImmediate: fixture.setActiveShiftImmediate,
   refreshActiveShift: fixture.refreshActiveShift }) }));
@@ -139,6 +144,11 @@ function makeBridge() {
 
 let bridge: any;
 const cents = (testId: string) => screen.getByTestId(testId).getAttribute('data-cents');
+const recordableBlocker = {
+  orderId: 'order-1', orderNumber: 'A-0120', totalAmount: 13, settledAmount: 0,
+  paymentStatus: 'pending', paymentMethod: 'cash', reasonCode: 'no_persisted_payment',
+  reasonText: 'Recorded payment missing.', suggestedFix: 'Record the missing payment.',
+};
 const count = (value: string) => fireEvent.change(screen.getByTestId('gift-close-count'), { target: { value } });
 async function renderReady(overrides: Record<string, unknown> = {}) {
   const view = render(<StaffShiftModal {...props} {...overrides} />);
@@ -156,6 +166,7 @@ async function recoveryState(state: string) {
 describe('StaffShiftModal ordinary cashier ledger and confirmation', { timeout: SLOW_RUNNER_TEST_TIMEOUT_MS }, () => {
   beforeEach(async () => {
     vi.resetAllMocks();
+    fixture.localizedT = undefined;
     fixture.scope.organizationId = '10000000-0000-4000-8000-000000000001';
     fixture.scope.branchId = '20000000-0000-4000-8000-000000000001'; fixture.scope.terminalId = 'register-public-01';
     fixture.sessionStaff = { staffId: '70000000-0000-4000-8000-000000000001', ...fixture.scope };
@@ -170,9 +181,225 @@ describe('StaffShiftModal ordinary cashier ledger and confirmation', { timeout: 
   });
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     __resetForTesting(); resetBridge(); localStorage.clear();
   });
 
+  it.each([
+    { role: 'driver', roleType: 'driver', paymentAmount: 0, countLabel: 'Cash Actually Handed Over' },
+    { role: 'cashier', roleType: 'cashier', paymentAmount: undefined, countLabel: 'modals.staffShift.closingCashLabel' },
+    { role: 'waiter', roleType: 'server', paymentAmount: undefined, countLabel: 'Cash Actually Handed Over' },
+  ])('sends the release Checkout request for a $role', async ({ roleType, paymentAmount, countLabel }) => {
+    fixture.sessionStaff = { ...fixture.sessionStaff, databaseStaffId: 's1' };
+    fixture.activeShift = shift({ id: 'sh1', staff_id: 's1', role_type: roleType, currency: 'EUR' });
+    bridge.shifts.getSummary.mockResolvedValue({
+      success: true, data: { ...summary(0), shift: fixture.activeShift, currency: 'EUR' },
+    });
+    bridge.shifts.close.mockResolvedValue({ success: true });
+    render(<StaffShiftModal {...props} />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: countLabel }), { target: { value: '2500' } });
+    const button = await screen.findByTestId('staff-checkout-confirm-button');
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(fixture.onClose).toHaveBeenCalledOnce());
+
+    // Strict literal snapshot of the call in 6fa259b66, including the undefined key.
+    expect(bridge.shifts.close.mock.calls).toStrictEqual([[
+      { shiftId: 'sh1', closingCash: 25, closedBy: 's1', paymentAmount },
+    ]]);
+  });
+
+  it('shows delivery rows without a Τα έφερε control', async () => {
+    const i18n = i18next.createInstance();
+    await i18n.init({ lng: 'el', resources: { el: { translation: localeBundles.el } } });
+    fixture.localizedT = i18n.getFixedT('el');
+    fixture.activeShift = shift({ id: 'sh1', role_type: 'driver', currency: 'EUR' });
+    bridge.shifts.getSummary.mockResolvedValue({
+      success: true, data: {
+        ...summary(0), shift: fixture.activeShift, currency: 'EUR',
+        driverDeliveries: [
+          { id: 'd1', order_id: 'o1', customer_name: 'Μαρία', payment_method: 'cash', status: 'delivered',
+            platform_cash_confirmable_cents: 1250, platform_cash_confirmable_currency: 'EUR' },
+          { id: 'd2', order_id: 'o2', customer_name: 'Λίνα', payment_method: 'card', status: 'delivered' },
+        ],
+      },
+    });
+    render(<StaffShiftModal {...props} />);
+    expect(await screen.findByText('Μαρία')).toBeInTheDocument();
+    expect(screen.getByText('Λίνα')).toBeInTheDocument();
+    expect(screen.queryByText(/Τα έφερε|modals\.staffShift\.platformCash/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Ο διανομέας έφερε|modals\.staffShift\.platformCash/ })).toBeNull();
+  });
+
+  it.each(['returned', 'thrown'] as const)('uses localized cashier refusal text for a %s response', async (kind) => {
+    const i18n = i18next.createInstance();
+    await i18n.init({
+      lng: 'el',
+      resources: { el: { translation: localeBundles.el } },
+      interpolation: { escapeValue: false },
+    });
+    const t = i18n.getFixedT('el');
+    fixture.localizedT = t;
+    bridge.shifts.getSummary.mockResolvedValue({
+      success: true, data: { ...summary(0), currency: 'EUR' },
+    });
+    const refusal = {
+      success: false, errorCode: 'UNSETTLED_PAYMENT_BLOCKER',
+      error: 'Native close error.', message: 'Native close message.',
+      blockers: [recordableBlocker],
+    };
+    const raw = kind === 'returned' ? refusal : new Error(JSON.stringify(refusal));
+    if (kind === 'returned') bridge.shifts.close.mockResolvedValueOnce(raw);
+    else bridge.shifts.close.mockRejectedValueOnce(raw);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    render(<StaffShiftModal {...props} />);
+
+    const close = await screen.findByTestId('staff-checkout-confirm-button');
+    await waitFor(() => expect(close).toBeEnabled());
+    fireEvent.click(close);
+    const zero = await screen.findByRole('dialog', { name: t('modals.staffShift.confirmZeroTitle') });
+    fireEvent.click(within(zero).getByRole('button', { name: t('common.actions.confirm') }));
+
+    const reason = 'Η παραγγελία A-0120 έκλεισε χωρίς να γραφτεί η πληρωμή της.';
+    const fix = 'Αν ο πελάτης έχει ήδη πληρώσει και βλέπετε το κουμπί, πατήστε το για να καταγράψετε την πληρωμή.';
+    expect(await screen.findByText(`A-0120: ${reason} ${fix}`)).toBeInTheDocument();
+    expect(screen.getByText(reason)).toBeInTheDocument();
+    expect(screen.getByText(fix)).toBeInTheDocument();
+    for (const value of [refusal.error, refusal.message, recordableBlocker.reasonText, recordableBlocker.suggestedFix]) {
+      expect(document.body).not.toHaveTextContent(value);
+    }
+    expect([...warn.mock.calls, ...log.mock.calls].filter(([, value]) => value === raw)).toEqual([
+      ['[StaffShiftModal] Cashier close refused:', raw],
+    ]);
+    expect(bridge.shifts.close).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    'SHIFT_CURRENCY_SETTLEMENT_REQUIRED: Settle active staff cash first.',
+    new Error('SHIFT_CURRENCY_SETTLEMENT_REQUIRED: Settle active staff cash first.'),
+    { code: 'SHIFT_CURRENCY_SETTLEMENT_REQUIRED' },
+  ])('shows the Greek settlement instruction for thrown cashier refusal %s', async (refusal) => {
+    const i18n = i18next.createInstance();
+    await i18n.init({
+      lng: 'el',
+      resources: { el: { translation: localeBundles.el } },
+      interpolation: { escapeValue: false },
+    });
+    const t = i18n.getFixedT('el');
+    fixture.localizedT = t;
+    bridge.shifts.getSummary.mockResolvedValue({
+      success: true, data: { ...summary(0), currency: 'EUR' },
+    });
+    bridge.shifts.close.mockRejectedValueOnce(refusal);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    render(<StaffShiftModal {...props} />);
+
+    const close = await screen.findByTestId('staff-checkout-confirm-button');
+    await waitFor(() => expect(close).toBeEnabled());
+    fireEvent.click(close);
+    const zero = await screen.findByRole('dialog', { name: t('modals.staffShift.confirmZeroTitle') });
+    fireEvent.click(within(zero).getByRole('button', { name: t('common.actions.confirm') }));
+
+    expect(await screen.findByText(
+      'Τακτοποιήστε και κλείστε τις βάρδιες προσωπικού στο αρχικό τους νόμισμα πριν κλείσετε αυτή τη βάρδια ταμείου.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText('Η βάρδια δεν έκλεισε. Ενημερώστε τον υπεύθυνο.')).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent('SHIFT_CURRENCY_SETTLEMENT_REQUIRED');
+    expect(bridge.shifts.close).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      name: 'a refusal without blockers',
+      respond: () => bridge.reports.resolvePaymentBlocker.mockResolvedValueOnce({
+        success: false, errorCode: 'UNSETTLED_PAYMENT_BLOCKER', error: 'raw record refusal',
+      }),
+      expected: 'Η πληρωμή δεν καταγράφηκε. Πατήστε ξανά «Καταγραφή πληρωμής μετρητών».',
+      raw: 'raw record refusal',
+    },
+    {
+      name: 'an expired sign-in after PIN approval',
+      respond: () => {
+        bridge.auth.confirmPrivilegedAction.mockResolvedValue({ success: true });
+        bridge.reports.resolvePaymentBlocker
+          .mockRejectedValueOnce({ code: 'REAUTH_REQUIRED', reason: 'Fresh PIN confirmation required' })
+          .mockRejectedValueOnce({ code: 'AUTH_SESSION_EXPIRED', reason: 'raw expired session' });
+      },
+      approval: true,
+      expected: 'Η σύνδεση του ταμείου έληξε. Πληκτρολογήστε ξανά το PIN του ταμείου.',
+      raw: 'raw expired session',
+    },
+    {
+      name: 'a missing store currency',
+      respond: () => bridge.reports.resolvePaymentBlocker.mockRejectedValueOnce('STORE_CURRENCY_UNAVAILABLE'),
+      expected: 'Η πληρωμή δεν καταγράφηκε. Ζητήστε από τον υπεύθυνο να ελέγξει τη χώρα του καταστήματος.',
+      raw: 'STORE_CURRENCY_UNAVAILABLE',
+    },
+    {
+      name: 'a stale refusal without blockers',
+      respond: () => bridge.reports.resolvePaymentBlocker.mockResolvedValueOnce({
+        success: false, errorCode: 'UNSETTLED_PAYMENT_BLOCKER', blockers: [],
+        error: 'This order no longer has a payment blocker. Refresh the payment blockers and try again.',
+      }),
+      expected: 'Η πληρωμή δεν καταγράφηκε. Πατήστε ξανά «Λήξη».',
+      raw: 'This order no longer has a payment blocker',
+    },
+    ...[
+      'This order no longer has a collectible outstanding balance.',
+      'The outstanding balance changed since it was confirmed.',
+    ].map(reason => ({
+      name: `${reason} (with the same blocker)`,
+      respond: () => bridge.reports.resolvePaymentBlocker.mockResolvedValueOnce({
+        success: false, errorCode: 'UNSETTLED_PAYMENT_BLOCKER', blockers: [recordableBlocker],
+        error: `${reason} Refresh the payment blockers and try again.`,
+      }),
+      expected: 'Η πληρωμή δεν καταγράφηκε. Πατήστε ξανά «Λήξη».',
+      raw: reason,
+    })),
+    {
+      name: 'an unknown failure',
+      respond: () => bridge.reports.resolvePaymentBlocker.mockRejectedValueOnce(new Error('SQLITE_BUSY: raw write error')),
+      expected: 'Η πληρωμή δεν καταγράφηκε. Πατήστε ξανά «Καταγραφή πληρωμής μετρητών».',
+      raw: 'SQLITE_BUSY',
+    },
+  ])('shows Greek record feedback for $name', async ({ respond, expected, raw, approval }) => {
+    const i18n = i18next.createInstance();
+    await i18n.init({
+      lng: 'el',
+      resources: { el: { translation: localeBundles.el } },
+      interpolation: { escapeValue: false },
+    });
+    const t = i18n.getFixedT('el');
+    fixture.localizedT = t;
+    bridge.shifts.getSummary.mockResolvedValue({
+      success: true, data: { ...summary(0), currency: 'EUR' },
+    });
+    bridge.shifts.close.mockResolvedValueOnce({
+      success: false, errorCode: 'UNSETTLED_PAYMENT_BLOCKER', error: 'Close held',
+      blockers: [recordableBlocker],
+    });
+    respond();
+    render(<StaffShiftModal {...props} />);
+
+    const close = await screen.findByTestId('staff-checkout-confirm-button');
+    await waitFor(() => expect(close).toBeEnabled());
+    fireEvent.click(close);
+    const zero = await screen.findByRole('dialog', { name: t('modals.staffShift.confirmZeroTitle') });
+    fireEvent.click(within(zero).getByRole('button', { name: t('common.actions.confirm') }));
+    fireEvent.click(await screen.findByRole('button', { name: /Καταγραφή πληρωμής μετρητών/ }));
+    fireEvent.click(screen.getByRole('button', { name: t('modals.zReport.recordConfirmAction') }));
+    if (approval) {
+      const pin = await screen.findByRole('dialog', { name: t('modals.zReport.recordApprovalTitle') });
+      for (const digit of '123456') fireEvent.click(within(pin).getByRole('button', { name: digit }));
+      fireEvent.click(within(pin).getByRole('button', { name: t('common.actions.confirm') }));
+    }
+
+    expect(await screen.findByText(expected)).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(raw);
+    expect(bridge.reports.resolvePaymentBlocker).toHaveBeenCalledTimes(approval ? 2 : 1);
+  });
 
   it('shows net collections with real tenders and tips, preserving expected cash', async () => {
     bridge.shifts.getSummary.mockResolvedValue({ success: true, data: {
