@@ -1223,8 +1223,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
 
   const resolveStaffReturnAmount = (staff: any): number => {
     const candidates = [
-      staff?.returnedToDrawerAmount,
       staff?.driver?.cashToReturn,
+      staff?.returnedToDrawerAmount,
       staff?.drawer?.expected,
     ];
     for (const candidate of candidates) {
@@ -2558,6 +2558,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 totalCents: number; refundedCents: number; tipsCents: number;
                                 tenders: Array<{ tender: string; receivedCents: number }>;
                               } }).netCollections;
+                              const driverCount = staff.driver && statusValue === 'closed'
+                                ? toFiniteNumberOrNull(staff.drawer?.closing ?? staff.returnedToDrawerAmount)
+                                : null;
+                              const driverVariance = staff.driver && statusValue === 'closed'
+                                ? toFiniteNumberOrNull(staff.drawer?.variance)
+                                : null;
                               const statRows = [
                                 { key: 'activity', label: activityLabel, value: resolveShiftActivityCount(staff), tone: strongTextClass },
                                 ...(collections ? [
@@ -2577,7 +2583,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 ...(staff.orders?.twintAmount ? [{ key: 'twint', label: 'TWINT', value: formatMoney(staff.orders.twintAmount), tone: strongTextClass }] : []),
                                 ]),
                                 { key: 'return', label: t('modals.zReport.cashToReturn'), value: formatMoney(resolveStaffReturnAmount(staff)), tone: strongTextClass },
+                                ...(driverCount === null ? [] : [
+                                  { key: 'count', label: t('modals.zReport.closing'), value: formatMoney(driverCount), tone: strongTextClass },
+                                ]),
+                                ...(driverVariance === null ? [] : [
+                                  { key: 'variance', label: t('modals.zReport.variance'), value: formatMoney(driverVariance), tone: strongTextClass },
+                                ]),
                               ];
+                              const keptTips = Number(staff.driver?.keptTips ?? 0);
+                              const drawerPayout = Number(staff.driver?.drawerPayout ?? 0);
                               return (
                                 <article key={staff.staffShiftId} className={`rounded-xl border p-4! ${dashboardTileClass}`}>
                                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -2601,6 +2615,18 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                       </div>
                                     ))}
                                   </div>
+                                  {keptTips > 0 && (
+                                    <p className={'mt-3 text-sm font-semibold ' + strongTextClass}>
+                                      <span>{t('modals.zReport.driverKeptTips', 'Tips kept by the driver')}:</span>{' '}
+                                      {formatMoney(keptTips)}
+                                    </p>
+                                  )}
+                                  {drawerPayout > 0 && (
+                                    <p className={'mt-1 text-sm font-semibold ' + strongTextClass}>
+                                      <span>{t('modals.staffShift.drawerPayout', 'Drawer payout')}:</span>{' '}
+                                      {formatMoney(drawerPayout)}
+                                    </p>
+                                  )}
                                 </article>
                               );
                             })}

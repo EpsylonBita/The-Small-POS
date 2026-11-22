@@ -170,7 +170,7 @@ fn amount_to_return(td: &TestDb) -> f64 {
 fn close_expected(td: &TestDb) -> Value {
     let closed = crate::shifts::close_shift(
         &td.state,
-        &json!({ "shiftId": DRIVER_SHIFT, "closingCash": OPENING }),
+        &json!({"shiftId": DRIVER_SHIFT, "closingCash": OPENING, "expectedDriverKeptTips": 0.0, "expectedDriverPayout": 0.0}),
     )
     .expect("close the courier shift");
     closed["expected"].clone()

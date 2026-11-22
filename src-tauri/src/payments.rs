@@ -3704,6 +3704,36 @@ pub(crate) fn platform_declares_store_driver_cash(conn: &Connection, order_id: &
         && platform_cash_is_store_collectable(conn, order_id, &food_delivery)
 }
 
+fn is_vendor_delivery(food_delivery: &serde_json::Map<String, Value>) -> bool {
+    food_delivery
+        .get("delivery_provider")
+        .and_then(Value::as_str)
+        == Some("vendor_delivery")
+}
+
+/// Read the declared fleet as in shared/platforms/order-cancellation.ts.
+pub(crate) fn platform_uses_store_driver(
+    platform: &str,
+    food_delivery: &serde_json::Map<String, Value>,
+) -> bool {
+    if crate::platforms::normalize_platform_slug(platform).as_deref() == Some("box") {
+        if let Some(daas) = food_delivery.get("box_daas").and_then(Value::as_bool) {
+            return !daas;
+        }
+    }
+    is_vendor_delivery(food_delivery)
+}
+
+pub(crate) fn platform_delivery_uses_store_driver(
+    platform: &str,
+    order_type: &str,
+    food_delivery: &serde_json::Map<String, Value>,
+) -> bool {
+    order_type == "delivery"
+        && crate::platforms::is_external_delivery_platform(platform)
+        && platform_uses_store_driver(platform, food_delivery)
+}
+
 pub(crate) fn platform_food_delivery(
     conn: &Connection,
     order_id: &str,

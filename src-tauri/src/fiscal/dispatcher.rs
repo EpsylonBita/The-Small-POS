@@ -369,6 +369,121 @@ mod tests {
         .expect("count queued fiscal rows")
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn fix_win8_imported_platform_tip_never_builds_or_queues_a_fiscal_receipt() {
+        use crate::{commands::orders, db, print::NoopPrintQueueInvalidator, sync};
+        use serde_json::json;
+
+        const ORG: &str = "0b46d417-38ab-4ec6-af7b-b0d1c4d5acbf";
+        const BRANCH: &str = "9eca2310-ca05-4d1b-aa20-64ccfbe6c504";
+        const TERMINAL: &str = "c9c52cd1-82d8-4bd0-9851-f8101f86e72a";
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let conn = migrated_conn();
+        for (key, value) in [
+            ("organization_id", ORG),
+            ("branch_id", BRANCH),
+            ("terminal_id", TERMINAL),
+        ] {
+            db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        active_cache::pin_for_test(BRANCH, active_cache::CacheVerdict::Active);
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: ":memory:".into(),
+        };
+        let fixture = |id: &str, short_code: &str| {
+            let mut row = sync::b449_list_row_for_test();
+            row["id"] = json!(id);
+            row["organization_id"] = json!(ORG);
+            row["branch_id"] = json!(BRANCH);
+            row["owner_terminal_id"] = json!(TERMINAL);
+            row["terminal_id"] = json!(TERMINAL);
+            row["version"] = json!(1);
+            row["order_number"] = json!(format!("BOX-1795286965261-{short_code}"));
+            row["ghost_metadata"]["food_delivery"]["reference"] = json!(short_code);
+            row["ghost_metadata"]["food_delivery"]["short_code"] = json!(short_code);
+            row["items"][0]["id"] = json!("c4c59b29-65ea-43e2-85ba-a98ec75de327");
+            row["items"][0]["unit_price"] = json!(6.90);
+            row["items"][0]["total_price"] = json!(6.90);
+            row
+        };
+        let builds =
+            || super::payload_builder::FISCAL_PAYLOAD_BUILD_COUNT.with(std::cell::Cell::get);
+        let before = builds();
+        let check = |path: &str, remote_id: &str| {
+            let conn = db.conn.lock().unwrap();
+            let (id, tip): (String, i64) = conn
+                .query_row(
+                    "SELECT id, tip_amount_cents FROM orders WHERE supabase_id = ?1",
+                    [remote_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap_or_else(|error| panic!("{path} did not materialize the order: {error}"));
+            assert_eq!(tip, 75, "{path}");
+            assert_eq!(
+                builds(),
+                before,
+                "{path} entered the fiscal payload builder"
+            );
+            assert_eq!(queued_fiscal_rows(&conn, &id), 0, "{path}");
+            let admissions: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM local_settings WHERE setting_category = 'fiscal_admission_owed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(admissions, 0, "{path}");
+            id
+        };
+
+        let list_id = "7e9185ea-c288-4c43-ad76-00811cb874fe";
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                sync::apply_remote_orders_page_for_test(&conn, vec![fixture(list_id, "B449")]),
+                None
+            );
+        }
+        let local_id = check("list pull", list_id);
+
+        // Realtime's order event refreshes orders.getAll, the native ledger
+        // read below. Missing local rows arrive through the list pull above.
+        let realtime_orders = sync::get_all_orders(&db).unwrap();
+        assert!(realtime_orders.iter().any(|row| row["id"] == local_id));
+        check("realtime refresh", list_id);
+
+        let lan_id = "f6ae6162-d436-4ebe-bfe0-5e5513a0a4b2";
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            sync::apply_lan_canonical_response(
+                &conn,
+                "/api/pos/orders",
+                &json!({"order": fixture(lan_id, "B450")}),
+            )
+            .unwrap();
+            conn.execute_batch("COMMIT").unwrap();
+        }
+        check("LAN materialization", lan_id);
+
+        let recovery_id = "046ce9a9-6e97-416c-9c9a-e2e01e5ebf8a";
+        let result = orders::save_remote_order(
+            Some(json!({
+                "orderData": fixture(recovery_id, "B451"),
+                "suppressAutoPrint": true,
+                "recoverySource": "orders_page_admin_recovery"
+            })),
+            &db,
+            &NoopPrintQueueInvalidator,
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["success"], true);
+        check("Orders-page recovery", recovery_id);
+    }
+
     fn whole_branch(branch_id: &str) -> FiscalCloseScope {
         FiscalCloseScope {
             branch_id: branch_id.to_string(),

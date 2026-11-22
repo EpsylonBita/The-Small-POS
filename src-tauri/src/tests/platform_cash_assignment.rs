@@ -227,6 +227,79 @@ fn checkout_blockers(
     .unwrap()
 }
 
+#[test]
+fn box_cash_driver_receipt_and_close_count_the_tip_once_like_phone_cash() {
+    let _keyring = crate::tests::fake_keyring::install_empty();
+    for platform in [Some("box"), None] {
+        let db = till();
+        let id = if platform.is_some() {
+            "box-cash"
+        } else {
+            "phone-cash"
+        };
+        {
+            let conn = db.conn.lock().unwrap();
+            enable_platform_cash(&conn);
+            order(
+                &conn,
+                id,
+                platform,
+                platform.map(|_| declaration()).as_ref(),
+                75,
+            );
+            conn.execute(
+                "UPDATE orders SET total_amount=7.65, total_amount_cents=765,
+                    delivery_fee=0.0, delivery_fee_cents=0 WHERE id=?1",
+                [id],
+            )
+            .unwrap();
+            pin_fiscal(false);
+            direct(&conn, id);
+        }
+        if platform.is_none() {
+            payments::record_payment(
+                &db,
+                &json!({
+                    "orderId": id, "amount": 7.65, "method": "cash", "currency": "EUR",
+                    "paymentOrigin": "manual", "staffId": DRIVER, "staffShiftId": SHIFT,
+                    "cashReceived": 7.65, "changeGiven": 0.0, "tipAmount": 0.75
+                }),
+            )
+            .unwrap();
+        }
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(counts(&conn, id), (1, i64::from(platform.is_some())));
+            let payment = payment_row(&conn, id);
+            assert_eq!(payment["method"], "cash");
+            assert_eq!(payment["amount"], 7.65);
+            assert_eq!(payment["amountCents"], 765);
+            assert_eq!(payment["tip"], 0.75);
+            assert_eq!(payment["tipCents"], 75);
+        }
+        let summary = crate::shifts::get_shift_summary(&db, SHIFT).unwrap();
+        assert_eq!(summary["amountToReturn"], 26.90);
+        let close =
+            crate::shifts::close_shift(&db, &json!({"shiftId": SHIFT, "closingCash": 26.90, "expectedDriverKeptTips": 0.75, "expectedDriverPayout": 0.0}))
+                .unwrap();
+        assert_eq!(close["success"], true, "{id}: {close}");
+        assert_eq!(close["expected"], 26.90);
+        assert_eq!(close["variance"], 0.0);
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT expected_cash_amount_cents FROM staff_shifts WHERE id=?1",
+                    [SHIFT],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2690
+        );
+    }
+}
+
 fn compare_phone(tip: i64) {
     let _keyring = crate::tests::fake_keyring::install_empty();
     let phone = till();
@@ -462,6 +535,8 @@ fn only_affirmative_store_driver_cash_declarations_are_eligible() {
         ("efood", "efood", &valid, 1),
         ("wolt", "wolt", &valid, 1),
         ("box", "box", &valid, 1),
+        ("box-gr", "BOX-GR", &valid, 1),
+        ("box-conflicting-fleet", "box", &rider, 0),
         ("missing", "box", &box_missing, 1),
         ("unreadable", "box", &unreadable, 0),
         ("courier", "box", &courier, 0),

@@ -267,6 +267,9 @@ pub struct OrderReceiptDoc {
     pub masked_card: Option<String>,
     #[serde(default)]
     pub order_notes: Vec<String>,
+    /// Legacy metadata can supply a platform comment on the ordinary layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_comment_note_count: Option<usize>,
     #[serde(default, skip_serializing_if = "box_notes_disabled")]
     pub preserve_box_customer_notes: bool,
     /// Set by order_completed_receipt / order_canceled_receipt entity types.
@@ -311,12 +314,25 @@ pub struct PlatformSlipInfo {
     /// the store's own driver.
     #[serde(default)]
     pub delivery_provider: Option<String>,
+    /// Customer notes precede any till-added notes, such as the VAT sale channel.
+    #[serde(
+        default,
+        alias = "box_customer_note_count",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub platform_customer_note_count: Option<usize>,
     #[serde(default)]
     pub is_test: bool,
     /// RFC3339 of the promised pickup/ready moment (accept time + the prep
     /// minutes the store gave) — the time the efood slip headlines.
     #[serde(default)]
     pub ready_at: Option<String>,
+}
+
+impl PlatformSlipInfo {
+    fn is_box(&self) -> bool {
+        crate::box_slip::is_box(&self.plugin, "")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -751,6 +767,10 @@ pub struct ShiftCheckoutDoc {
     pub tips_received: f64,
     #[serde(default)]
     pub amount_to_return: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) driver_kept_tip_lines: Vec<crate::shifts::DriverKeptTipLine>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) driver_drawer_payout: Option<f64>,
     #[serde(default)]
     pub total_sells: f64,
     #[serde(default)]
@@ -777,6 +797,10 @@ pub struct ZReportStaffEntry {
     pub staff_payment: f64,
     #[serde(default)]
     pub tips_received: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_kept_tips: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_drawer_payout: Option<f64>,
     #[serde(
         default,
         rename = "netCollections",
@@ -1142,6 +1166,48 @@ impl Default for LayoutConfig {
 /// Translate a receipt label to the given language.
 /// Returns the translated string for known keys, or the original key unchanged.
 pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
+    match (lang, key) {
+        ("el", "Driver tip") => return "Φιλοδώρημα διανομέα",
+        ("de", "Driver tip") => return "Trinkgeld Fahrer",
+        ("fr", "Driver tip") => return "Pourboire livreur",
+        ("it", "Driver tip") => return "Mancia fattorino",
+        ("sq", "Driver tip") => return "Bakshish për korrierin",
+        ("el", "Comments:") => return "Σχόλια:",
+        ("de", "Comments:") => return "Kommentare:",
+        ("fr", "Comments:") => return "Commentaires :",
+        ("it", "Comments:") => return "Commenti:",
+        ("sq", "Comments:") => return "Komente:",
+        _ => {}
+    }
+    match (lang, key) {
+        ("el", "Tips kept") => return "Φιλοδωρήματα που κρατά",
+        ("el", "Drawer payout") => return "Πληρωμή από το συρτάρι",
+        ("de", "Tips kept") => return "Einbehaltenes Trinkgeld",
+        ("de", "Drawer payout") => return "Auszahlung aus der Kasse",
+        ("fr", "Tips kept") => return "Pourboires gardés",
+        ("fr", "Drawer payout") => return "Paiement depuis la caisse",
+        ("it", "Tips kept") => return "Mance trattenute",
+        ("it", "Drawer payout") => return "Pagamento dalla cassa",
+        ("sq", "Tips kept") => return "Bakshishet që mban",
+        ("sq", "Drawer payout") => return "Pagesë nga arka",
+        ("el", "Tips kept by the driver") => return "Φιλοδωρήματα που κράτησε ο διανομέας",
+        ("de", "Tips kept by the driver") => return "Vom Fahrer einbehaltenes Trinkgeld",
+        ("fr", "Tips kept by the driver") => return "Pourboires gardés par le livreur",
+        ("it", "Tips kept by the driver") => return "Mance trattenute dal fattorino",
+        ("sq", "Tips kept by the driver") => return "Bakshishet që mbajti korrieri",
+        ("el", "Online") => return "Ηλεκτρονικά",
+        ("fr", "Online") => return "En ligne",
+        ("de", "Online") => return "Online bezahlt",
+        ("it", "Online") => return "Pagato online",
+        ("sq", "Online") => return "Pagesë online",
+        ("en", "Phone order source") => return "Phone",
+        ("el", "Phone order source") => return "Τηλέφωνο",
+        ("de", "Phone order source") => return "Telefon",
+        ("fr", "Phone order source") => return "Téléphone",
+        ("it", "Phone order source") => return "Telefono",
+        ("sq", "Phone order source") => return "Telefon",
+        _ => {}
+    }
     let collections_label = match (lang, key) {
         ("el", "Net collections") => Some("Καθαρές εισπράξεις"),
         ("el", "of which tips") => Some("εκ των οποίων φιλοδωρήματα"),
@@ -3636,6 +3702,20 @@ fn should_render_minimal_shift_checkout(doc: &ShiftCheckoutDoc) -> bool {
     crate::shifts::is_non_financial_shift_role(&doc.role_type)
 }
 
+fn z_report_shift_tip_rows(staff: &ZReportStaffEntry) -> impl Iterator<Item = (&'static str, f64)> {
+    let kept_tips = staff.driver_kept_tips.filter(|amount| *amount > 0.0);
+    let tips = kept_tips
+        .map(|amount| ("Tips kept by the driver", amount))
+        .or_else(|| {
+            has_print_money(staff.tips_received).then_some(("Tips Received", staff.tips_received))
+        });
+    let payout = staff
+        .driver_drawer_payout
+        .filter(|amount| *amount > 0.0)
+        .map(|amount| ("Drawer payout", amount));
+    tips.into_iter().chain(payout)
+}
+
 fn shift_checkout_tips_received(doc: &ShiftCheckoutDoc) -> f64 {
     if doc.tips_received > 0.0 {
         doc.tips_received
@@ -3645,9 +3725,10 @@ fn shift_checkout_tips_received(doc: &ShiftCheckoutDoc) -> f64 {
 }
 
 fn driver_shift_checkout_variance(doc: &ShiftCheckoutDoc) -> Option<f64> {
-    doc.closing_amount
-        .map(|closing| ((closing - doc.amount_to_return) * 100.0).round() / 100.0)
-        .or(doc.variance_amount)
+    doc.variance_amount.or_else(|| {
+        doc.closing_amount
+            .map(|closing| ((closing - doc.amount_to_return) * 100.0).round() / 100.0)
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -3666,6 +3747,27 @@ impl DriverShiftCheckoutSummaryRow {
             money(self.amount)
         }
     }
+}
+
+fn driver_kept_tip_label(lang: &str, line: &crate::shifts::DriverKeptTipLine) -> String {
+    let source = match line.source.as_str() {
+        "box" => "BOX",
+        "efood" => "efood",
+        "wolt" => "Wolt",
+        _ => receipt_label(lang, "Phone order source"),
+    };
+    let methods = line
+        .payment_methods
+        .iter()
+        .filter_map(|method| match method.as_str() {
+            "cash" => Some(receipt_label(lang, "Cash")),
+            "card" => Some(receipt_label(lang, "Card")),
+            "online" => Some(receipt_label(lang, "Online")),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" / ");
+    format!("{} · {source} · {methods}", line.order_number)
 }
 
 fn driver_shift_checkout_summary_rows(
@@ -3745,6 +3847,14 @@ fn driver_shift_checkout_summary_rows(
         });
     }
 
+    if !doc.driver_kept_tip_lines.is_empty() && has_print_money(doc.cancelled_or_refunded_total) {
+        rows.push(DriverShiftCheckoutSummaryRow {
+            label_key: "Canceled/Refunded",
+            amount: doc.cancelled_or_refunded_total,
+            emphasize: false,
+        });
+    }
+
     let tips_received = shift_checkout_tips_received(doc);
     if has_print_money(tips_received) {
         rows.push(DriverShiftCheckoutSummaryRow {
@@ -3754,7 +3864,7 @@ fn driver_shift_checkout_summary_rows(
         });
     }
 
-    if has_print_money(doc.cancelled_or_refunded_total) {
+    if doc.driver_kept_tip_lines.is_empty() && has_print_money(doc.cancelled_or_refunded_total) {
         rows.push(DriverShiftCheckoutSummaryRow {
             label_key: "Canceled/Refunded",
             amount: doc.cancelled_or_refunded_total,
@@ -3763,12 +3873,19 @@ fn driver_shift_checkout_summary_rows(
     }
 
     rows.push(DriverShiftCheckoutSummaryRow {
-        label_key: "Return",
-        amount: doc.amount_to_return,
+        label_key: if doc.driver_drawer_payout.is_some() {
+            "Drawer payout"
+        } else {
+            "Return"
+        },
+        amount: doc.driver_drawer_payout.unwrap_or(doc.amount_to_return),
         emphasize: true,
     });
 
-    if let Some(closing) = doc.closing_amount {
+    if let Some(closing) = doc
+        .closing_amount
+        .filter(|_| doc.driver_drawer_payout.is_none())
+    {
         rows.push(DriverShiftCheckoutSummaryRow {
             label_key: "Actual Returned",
             amount: closing,
@@ -4024,6 +4141,157 @@ fn order_note_lines(doc: &OrderReceiptDoc) -> Vec<String> {
         push_unique_line(&mut lines, Some(raw.as_str()));
     }
     lines
+}
+
+fn is_box_platform_slip(doc: &OrderReceiptDoc) -> bool {
+    doc.platform_slip
+        .as_ref()
+        .is_some_and(PlatformSlipInfo::is_box)
+}
+
+fn platform_comment(doc: &OrderReceiptDoc, lang: &str) -> Option<String> {
+    let comment = platform_order_level_notes(doc, lang).join("\n");
+    let first = comment.chars().next()?;
+    if first.is_lowercase() {
+        return Some(
+            first
+                .to_uppercase()
+                .chain(comment[first.len_utf8()..].chars())
+                .collect(),
+        );
+    }
+    Some(comment)
+}
+
+/// Limit the customer text across all paragraphs, after wrapping at the
+/// actual paper width. Reserve room on the final line for the cut marker.
+fn capped_platform_comment_lines(
+    comment: &str,
+    width: usize,
+    measure: impl Fn(&str) -> usize,
+    ellipsis: &str,
+) -> Vec<String> {
+    const MAX_LINES: usize = 6;
+    const MAX_CHARS: usize = 300;
+    let prefix: String = comment.chars().take(MAX_CHARS + 1).collect();
+    let wrap = |char_limit: usize| -> Vec<String> {
+        let text: String = prefix
+            .chars()
+            .take(char_limit)
+            .filter_map(|ch| match ch {
+                '\n' => Some(ch),
+                '\t' => Some(' '),
+                _ if ch.is_control() => None,
+                _ => Some(ch),
+            })
+            .collect();
+        text.lines()
+            .flat_map(|line| wrap_platform_comment_line(line, width, &measure))
+            .take(MAX_LINES + 1)
+            .map(str::to_owned)
+            .collect()
+    };
+    let mut lines = wrap(MAX_CHARS);
+    if prefix.chars().count() > MAX_CHARS || lines.len() > MAX_LINES {
+        lines = wrap(MAX_CHARS - ellipsis.chars().count());
+        lines.truncate(MAX_LINES);
+        if let Some(line) = lines.last_mut() {
+            line.truncate(line.trim_end().len());
+            while !line.is_empty() && measure(&format!("{line}{ellipsis}")) > width {
+                line.pop();
+            }
+            line.push_str(ellipsis);
+        } else {
+            lines.push(ellipsis.to_owned());
+        }
+    }
+    lines
+}
+
+fn reserve_raster_comment_height(image: &mut GrayImage, extra_height: i32) {
+    let width = image.width();
+    let height = image.height() + extra_height as u32;
+    let mut pixels = std::mem::replace(image, GrayImage::new(0, 0)).into_raw();
+    pixels.resize((width * height) as usize, 255);
+    *image = GrayImage::from_raw(width, height, pixels).expect("sized receipt canvas");
+}
+
+fn platform_remaining_order_notes<'a>(doc: &'a OrderReceiptDoc, lang: &str) -> Vec<&'a str> {
+    let Some(info) = &doc.platform_slip else {
+        return doc
+            .order_notes
+            .iter()
+            .skip(doc.platform_comment_note_count.unwrap_or_default())
+            .map(String::as_str)
+            .collect();
+    };
+    if let Some(count) = info.platform_customer_note_count {
+        doc.order_notes
+            .iter()
+            .skip(count)
+            .map(String::as_str)
+            .collect()
+    } else if info.is_box() {
+        Vec::new()
+    } else {
+        doc.order_notes
+            .iter()
+            .map(String::as_str)
+            .filter(|note| is_platform_order_code_note(doc, note.trim(), lang))
+            .collect()
+    }
+}
+
+fn order_notes_after_platform_comment(doc: &OrderReceiptDoc, lang: &str) -> Vec<String> {
+    if doc.platform_slip.is_none() && doc.platform_comment_note_count.is_none() {
+        return order_note_lines(doc);
+    }
+    let mut notes = Vec::new();
+    for note in platform_remaining_order_notes(doc, lang) {
+        if doc.preserve_box_customer_notes {
+            notes.push(note.to_owned());
+        } else {
+            push_unique_line(&mut notes, Some(note));
+        }
+    }
+    notes
+}
+
+fn append_platform_comment_html(
+    body: &mut String,
+    doc: &OrderReceiptDoc,
+    lang: &str,
+    width: usize,
+) {
+    if let Some(comment) = platform_comment(doc, lang) {
+        // The HTML preview has a fixed content width. Use fixed-width cells
+        // so the browser preserves the same number of lines as the cap.
+        let comment = capped_platform_comment_lines(
+            &comment,
+            width.min(42),
+            |text| text.chars().count(),
+            "…",
+        )
+        .join("\n");
+        body.push_str(&format!(
+            "<div class=\"note\" style=\"white-space:pre;font-family:monospace\"><strong>{}<br>{}</strong></div>",
+            esc(receipt_label(lang, "Comments:")),
+            esc(&comment)
+        ));
+    }
+}
+
+fn html_order_total_money(
+    doc: &OrderReceiptDoc,
+    cfg: &LayoutConfig,
+    amount: f64,
+    currency: &str,
+) -> String {
+    if doc.totals.iter().any(|total| total.label == "Driver tip") {
+        money_with_currency_locale(amount, currency, cfg.decimal_comma)
+    } else {
+        money_with_currency(amount, currency)
+    }
 }
 
 /// Founder 07/09/2026: on the kiosk slip the order-level note leads with `***`
@@ -5154,6 +5422,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     }
                 }
                 body.push_str("</div>"); // close meta-grid
+                append_platform_comment_html(&mut body, doc, lang, cfg.paper_width.chars());
 
                 // Delivery block (modern)
                 if render_delivery_block {
@@ -5172,7 +5441,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     }
                     body.push_str("</div>");
                 }
-                let order_notes = order_note_lines(doc);
+                let order_notes = order_notes_after_platform_comment(doc, lang);
                 if !order_notes.is_empty() {
                     body.push_str("<hr class=\"thin\">");
                     for note in &order_notes {
@@ -5243,13 +5512,13 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         body.push_str(&format!(
                             "<tr class=\"grand\"><td>{}</td><td class=\"r\">{}</td></tr>",
                             esc(&label),
-                            money_with_currency(total.amount, cur)
+                            html_order_total_money(doc, cfg, total.amount, cur)
                         ));
                     } else {
                         body.push_str(&format!(
                             "<tr><td class=\"dim\">{}</td><td class=\"r\">{}</td></tr>",
                             esc(&label),
-                            money_with_currency(total.amount, cur)
+                            html_order_total_money(doc, cfg, total.amount, cur)
                         ));
                     }
                 }
@@ -5381,6 +5650,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     }
                 }
                 body.push_str("</div>"); // close meta-line
+                append_platform_comment_html(&mut body, doc, lang, cfg.paper_width.chars());
 
                 // Delivery block (classic)
                 if render_delivery_block {
@@ -5394,7 +5664,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     }
                     body.push_str("</div>");
                 }
-                let order_notes = order_note_lines(doc);
+                let order_notes = order_notes_after_platform_comment(doc, lang);
                 if !order_notes.is_empty() {
                     body.push_str("<div class=\"meta-line\">");
                     for note in &order_notes {
@@ -5468,13 +5738,13 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         body.push_str(&format!(
                             "<tr class=\"grand\"><td>{}</td><td class=\"r\">{}</td></tr>",
                             esc(&label),
-                            money(total.amount)
+                            html_order_total_money(doc, cfg, total.amount, "")
                         ));
                     } else {
                         body.push_str(&format!(
                             "<tr><td class=\"dim\">{}</td><td class=\"r\">{}</td></tr>",
                             esc(&label),
-                            money(total.amount)
+                            html_order_total_money(doc, cfg, total.amount, "")
                         ));
                     }
                 }
@@ -5871,6 +6141,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(&format_datetime_human(&doc.created_at, cfg.store_time_zone)),
                 esc(&doc.order_type),
             ));
+            append_platform_comment_html(&mut body, doc, lang, cfg.paper_width.chars());
             // Delivery/customer info block
             body.push_str("<div class=\"section\">");
             for (label, value) in delivery_slip_info_lines(doc, lang) {
@@ -5881,7 +6152,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 ));
             }
             body.push_str("</div>");
-            let order_notes = order_note_lines(doc);
+            let order_notes = order_notes_after_platform_comment(doc, lang);
             if !order_notes.is_empty() {
                 body.push_str("<div class=\"section\">");
                 for note in &order_notes {
@@ -5954,14 +6225,14 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     body.push_str(&format!(
                         "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
                         esc(&label),
-                        money_with_currency(line.amount, cur)
+                        html_order_total_money(doc, cfg, line.amount, cur)
                     ));
                     body.push_str("</div>");
                 } else {
                     body.push_str(&format!(
                         "<div class=\"line\"><span>{}</span><span>{}</span></div>",
                         esc(&label),
-                        money_with_currency(line.amount, cur)
+                        html_order_total_money(doc, cfg, line.amount, cur)
                     ));
                 }
             }
@@ -6049,8 +6320,35 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     ));
                 }
                 if should_render_shift_checkout_driver_summary(doc) {
+                    let tip_money = |amount| money_locale(amount, cfg.decimal_comma);
                     for row in driver_shift_checkout_summary_rows(doc) {
-                        if row.emphasize {
+                        if row.label_key == "Tips Received" && !doc.driver_kept_tip_lines.is_empty()
+                        {
+                            body.push_str(&format!(
+                                "<div><strong>{}</strong></div>",
+                                esc(receipt_label(lang, "Tips kept"))
+                            ));
+                            for line in &doc.driver_kept_tip_lines {
+                                body.push_str(&format!(
+                                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                                    esc(&driver_kept_tip_label(lang, line)),
+                                    tip_money(line.amount),
+                                ));
+                            }
+                            body.push_str(&format!(
+                                "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
+                                esc(receipt_label(lang, "TOTAL")),
+                                row.format(tip_money),
+                            ));
+                            continue;
+                        }
+                        if row.label_key == "Drawer payout" {
+                            body.push_str(&format!(
+                                "<div class=\"line\"><strong>{}:</strong><strong>{}</strong></div>",
+                                esc(receipt_label(lang, row.label_key)),
+                                row.format(tip_money),
+                            ));
+                        } else if row.emphasize {
                             body.push_str(&format!(
                                 "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
                                 esc(receipt_label(lang, row.label_key)),
@@ -6343,11 +6641,18 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                             money(staff.staff_payment),
                         ));
                     }
-                    if has_print_money(staff.tips_received) {
+                    for (label, amount) in z_report_shift_tip_rows(staff) {
+                        let translated = esc(receipt_label(lang, label));
+                        let (label, amount) = if label == "Tips Received" {
+                            (translated, money(amount))
+                        } else {
+                            (
+                                format!("{translated}:"),
+                                money_locale(amount, cfg.decimal_comma),
+                            )
+                        };
                         body.push_str(&format!(
-                            "<div class=\"line\"><span>{}</span><span>{}</span></div>",
-                            esc(receipt_label(lang, "Tips Received")),
-                            money(staff.tips_received),
+                            "<div class=\"line\"><span>{label}</span><span>{amount}</span></div>",
                         ));
                     }
                 }
@@ -8982,6 +9287,21 @@ fn render_classic_customer_raster_exact_ttf(
     );
     canvas.draw_text_line(&meta_line, BitmapAlign::Left, preset.meta_style);
     canvas.draw_rule();
+    if let Some(comment) = platform_comment(doc, lang) {
+        let start = canvas.y;
+        draw_platform_comment_ttf(
+            &mut canvas,
+            &comment,
+            lang,
+            RasterTextStyle {
+                weight: RasterTextWeight::Bold,
+                ..preset.item_style
+            },
+        );
+        canvas.draw_rule();
+        let height = canvas.y - start;
+        reserve_raster_comment_height(&mut canvas.image, height);
+    }
     let kiosk_customer_lines = kiosk_customer_block_lines(doc, lang);
     let kiosk_covers_delivery = kiosk_block_covers_delivery(doc, lang);
     if !kiosk_customer_lines.is_empty() {
@@ -9015,7 +9335,7 @@ fn render_classic_customer_raster_exact_ttf(
             canvas.draw_rule();
         }
     }
-    let order_notes = order_note_lines(doc);
+    let order_notes = order_notes_after_platform_comment(doc, lang);
     // The kiosk slip prints this BELOW the items instead — see after the item
     // loop. The note is about the order the customer just read, not a preamble.
     if !doc.kiosk_slip {
@@ -9326,6 +9646,23 @@ fn render_classic_customer_raster_exact_bitmap(
     );
     canvas.draw_body_text_line(&meta_line, BitmapAlign::Left, false, canvas.normal_scale, 0);
     canvas.draw_rule();
+    let box_platform_slip = is_box_platform_slip(doc);
+    if let Some(comment) = platform_comment(doc, lang) {
+        let scale = canvas.normal_scale;
+        let start = canvas.y;
+        canvas.draw_left_wrapped_body(receipt_label(lang, "Comments:"), true, scale);
+        for line in capped_platform_comment_lines(
+            &comment,
+            canvas.chars_per_line(),
+            |text| text.chars().count(),
+            "...",
+        ) {
+            canvas.draw_body_text_line(&line, BitmapAlign::Left, true, scale, 0);
+        }
+        canvas.draw_rule();
+        let height = canvas.y - start;
+        reserve_raster_comment_height(&mut canvas.image, height);
+    }
     let kiosk_customer_lines = kiosk_customer_block_lines(doc, lang);
     let kiosk_covers_delivery = kiosk_block_covers_delivery(doc, lang);
     if !kiosk_customer_lines.is_empty() {
@@ -9361,7 +9698,7 @@ fn render_classic_customer_raster_exact_bitmap(
             canvas.draw_rule();
         }
     }
-    let order_notes = order_note_lines(doc);
+    let order_notes = order_notes_after_platform_comment(doc, lang);
     // See the TTF path: the kiosk slip prints this below the items.
     if !doc.kiosk_slip {
         for note in &order_notes {
@@ -10030,6 +10367,29 @@ fn render_classic_non_customer_raster_exact_ttf(
                 canvas.draw_rule();
                 if should_render_shift_checkout_driver_summary(doc) {
                     for row in driver_shift_checkout_summary_rows(doc) {
+                        if row.label_key == "Tips Received" && !doc.driver_kept_tip_lines.is_empty()
+                        {
+                            canvas.draw_wrapped(
+                                receipt_label(lang, "Tips kept"),
+                                BitmapAlign::Left,
+                                preset.section_style,
+                            );
+                            for line in &doc.driver_kept_tip_lines {
+                                canvas.draw_pair(
+                                    &driver_kept_tip_label(lang, line),
+                                    &money_with_currency_locale(line.amount, &cur, comma),
+                                    preset.item_style,
+                                );
+                            }
+                            canvas.draw_pair(
+                                &format!("{}:", receipt_label(lang, "TOTAL")),
+                                &row.format(|amount| {
+                                    money_with_currency_locale(amount, &cur, comma)
+                                }),
+                                preset.item_style,
+                            );
+                            continue;
+                        }
                         let style = if row.emphasize {
                             preset.total_style
                         } else {
@@ -10280,10 +10640,10 @@ fn render_classic_non_customer_raster_exact_ttf(
                             preset.item_style,
                         );
                     }
-                    if has_print_money(staff.tips_received) {
+                    for (label, amount) in z_report_shift_tip_rows(staff) {
                         canvas.draw_pair(
-                            &format!("  {}:", receipt_label(lang, "Tips Received")),
-                            &money_with_currency_locale(staff.tips_received, &cur, comma),
+                            &format!("  {}:", receipt_label(lang, label)),
+                            &money_with_currency_locale(amount, &cur, comma),
                             preset.item_style,
                         );
                     }
@@ -11014,19 +11374,99 @@ pub(crate) fn platform_uppercase(text: &str) -> String {
         .collect()
 }
 
+fn is_platform_order_code_note(doc: &OrderReceiptDoc, note: &str, lang: &str) -> bool {
+    note.starts_with("ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ")
+        || note.starts_with(&format!("{}:", receipt_label(lang, "Order Code")))
+        || doc
+            .platform_slip
+            .as_ref()
+            .and_then(|info| info.external_order_id.as_deref())
+            .is_some_and(|code| {
+                note.split_once(':').is_some_and(|(label, value)| {
+                    value.trim() == code
+                        && ["el", "en", "de", "fr", "it", "sq"]
+                            .iter()
+                            .any(|lang| label.trim() == receipt_label(lang, "Order Code"))
+                })
+            })
+}
+
 fn platform_order_level_notes<'a>(doc: &'a OrderReceiptDoc, lang: &str) -> Vec<&'a str> {
+    let Some(info) = &doc.platform_slip else {
+        return doc
+            .order_notes
+            .iter()
+            .take(doc.platform_comment_note_count.unwrap_or_default())
+            .map(String::as_str)
+            .filter(|note| !note.trim().is_empty())
+            .collect();
+    };
     doc.order_notes
         .iter()
-        .map(|note| note.trim())
-        // The long platform code prints at the foot; its note (written in the
-        // app language, or Greek on older documents) is not repeated here.
+        .take(
+            info.platform_customer_note_count
+                .unwrap_or(doc.order_notes.len()),
+        )
+        .map(|note| {
+            if info.is_box() {
+                note.as_str()
+            } else {
+                note.trim()
+            }
+        })
         .filter(|note| {
-            !note.is_empty()
-                && (doc.preserve_box_customer_notes
-                    || (!note.starts_with("ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ")
-                        && !note.starts_with(&format!("{}:", receipt_label(lang, "Order Code")))))
+            !note.trim().is_empty()
+                && (info.platform_customer_note_count.is_some()
+                    || info.is_box()
+                    || !is_platform_order_code_note(doc, note, lang))
         })
         .collect()
+}
+
+/// Keep the customer's spacing when wrapping a physical line.
+fn wrap_platform_comment_line<'a>(
+    mut line: &'a str,
+    width: usize,
+    measure: impl Fn(&str) -> usize,
+) -> Vec<&'a str> {
+    let mut wrapped = Vec::new();
+    while measure(line) > width {
+        let mut end = 0;
+        let mut word_break = 0;
+        for (index, ch) in line.char_indices() {
+            let next = index + ch.len_utf8();
+            if end != 0 && measure(&line[..next]) > width {
+                break;
+            }
+            end = next;
+            if ch.is_whitespace() {
+                word_break = end;
+            }
+        }
+        let split = if word_break > 0 { word_break } else { end };
+        wrapped.push(&line[..split]);
+        line = &line[split..];
+    }
+    wrapped.push(line);
+    wrapped
+}
+
+fn draw_platform_comment_ttf(
+    canvas: &mut TtfReceiptComposer,
+    comment: &str,
+    lang: &str,
+    style: RasterTextStyle,
+) {
+    let lines = capped_platform_comment_lines(
+        comment,
+        canvas.content_width as usize,
+        |text| canvas.text_width(text, style) as usize,
+        "…",
+    );
+    canvas.draw_wrapped(receipt_label(lang, "Comments:"), BitmapAlign::Left, style);
+    for line in lines {
+        canvas.draw_text_line(&line, BitmapAlign::Left, style);
+    }
 }
 
 fn draw_platform_slip_ttf(
@@ -11176,12 +11616,38 @@ fn draw_platform_slip_ttf(
     canvas.draw_rule();
     // The customer's order-level note gets its own block above the items,
     // exactly where efood prints it (slip #4583).
-    let order_level_notes = platform_order_level_notes(doc, lang);
-    if !order_level_notes.is_empty() {
-        for note in &order_level_notes {
-            canvas.draw_wrapped(&platform_uppercase(note), BitmapAlign::Left, bold_of(body));
-        }
+    let comment = platform_comment(doc, lang);
+    let other_notes = platform_remaining_order_notes(doc, lang)
+        .into_iter()
+        .map(str::trim)
+        .filter(|note| {
+            !note.is_empty()
+                && (is_box_platform_slip(doc) || !is_platform_order_code_note(doc, note, lang))
+        })
+        .collect::<Vec<_>>();
+    let comment_start = canvas.y;
+    if let Some(comment) = &comment {
+        draw_platform_comment_ttf(canvas, comment, lang, bold_of(body));
+    }
+    let comment_height = canvas.y - comment_start;
+    for note in &other_notes {
+        canvas.draw_wrapped(
+            &platform_uppercase(note.trim()),
+            BitmapAlign::Left,
+            bold_of(body),
+        );
+    }
+    if comment.is_some() || !other_notes.is_empty() {
+        let rule_start = canvas.y;
         canvas.draw_rule();
+        if comment.is_some() {
+            let extra_rule = if other_notes.is_empty() {
+                canvas.y - rule_start
+            } else {
+                0
+            };
+            reserve_raster_comment_height(&mut canvas.image, comment_height + extra_rule);
+        }
     }
 
     // Destination block (store-driven platform orders still need it).
@@ -11324,24 +11790,45 @@ fn draw_platform_slip_ttf(
 
 /// Faithful platform slip, ESC/POS text path (store header already emitted by
 /// the shared emit_header above the document body).
-#[allow(clippy::too_many_arguments)]
-fn emit_box_platform_order_notes(
+fn emit_platform_order_notes(
     builder: &mut EscPosBuilder,
     doc: &OrderReceiptDoc,
-    info: &PlatformSlipInfo,
     lang: &str,
     width: usize,
 ) {
-    if info.plugin.eq_ignore_ascii_case("box") {
-        let order_notes = platform_order_level_notes(doc, lang);
-        for note in &order_notes {
-            for line in note.lines() {
-                emit_wrapped(builder, line, width);
-            }
+    let comment = platform_comment(doc, lang);
+    let other_notes = if is_box_platform_slip(doc) {
+        platform_remaining_order_notes(doc, lang)
+            .into_iter()
+            .map(str::trim)
+            .filter(|note| !note.is_empty())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if let Some(comment) = &comment {
+        builder.with_platform_text(|builder| {
+            builder.with_bold(|builder| {
+                emit_wrapped(builder, receipt_label(lang, "Comments:"), width);
+                // The text printer code pages have no one-cell ellipsis.
+                for line in capped_platform_comment_lines(
+                    comment,
+                    width,
+                    |text| text.chars().count(),
+                    "...",
+                ) {
+                    builder.text(&line).lf();
+                }
+            });
+        });
+    }
+    for note in &other_notes {
+        for line in note.lines() {
+            emit_wrapped(builder, line, width);
         }
-        if !order_notes.is_empty() {
-            emit_rule(builder, width, '-');
-        }
+    }
+    if comment.is_some() || !other_notes.is_empty() {
+        emit_rule(builder, width, '-');
     }
 }
 
@@ -11476,7 +11963,7 @@ fn emit_platform_slip_escpos(
         &format!("#{}", platform_short_code(info, doc)),
     );
     emit_rule(builder, width, '-');
-    emit_box_platform_order_notes(builder, doc, info, lang, width);
+    emit_platform_order_notes(builder, doc, lang, width);
     let delivery_lines = platform_delivery_lines(doc, lang);
     if !delivery_lines.is_empty() {
         for (label, value) in &delivery_lines {
@@ -11528,12 +12015,13 @@ fn emit_platform_slip_escpos(
         if total.emphasize {
             builder.bold(true);
         }
-        emit_pair(
-            builder,
-            receipt_label(lang, &total.label),
-            &money_with_currency_locale(total.amount, cur, comma),
-            width,
-        );
+        let label = receipt_label(lang, &total.label);
+        let amount = money_with_currency_locale(total.amount, cur, comma);
+        if total.label == "Driver tip" {
+            builder.with_platform_text(|builder| emit_pair(builder, label, &amount, width));
+        } else {
+            emit_pair(builder, label, &amount, width);
+        }
         if total.emphasize {
             builder.bold(false);
         }
@@ -11974,7 +12462,10 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     }
                 }
             }
-            let order_notes = order_note_lines(doc);
+            if doc.platform_comment_note_count.is_some() {
+                emit_platform_order_notes(&mut builder, doc, lang, width);
+            }
+            let order_notes = order_notes_after_platform_comment(doc, lang);
             for note in &order_notes {
                 builder.underline(1);
                 emit_wrapped(
@@ -12107,7 +12598,13 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 }
                 // Non-emphasized totals (e.g. Υποσύνολο) never show currency symbol
                 let total_amount = money_locale(total.amount, comma);
-                emit_pair(&mut builder, label, &total_amount, width);
+                if total.label == "Driver tip" {
+                    builder.with_platform_text(|builder| {
+                        emit_pair(builder, label, &total_amount, width)
+                    });
+                } else {
+                    emit_pair(&mut builder, label, &total_amount, width);
+                }
                 if !style.modern {
                     if classic_customer_layout {
                         let next_is_emphasized = doc
@@ -12590,7 +13087,10 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             for (label, value) in delivery_slip_info_lines(doc, lang) {
                 emit_pair_bold(&mut builder, &label, &value, width);
             }
-            let order_notes = order_note_lines(doc);
+            if doc.platform_comment_note_count.is_some() {
+                emit_platform_order_notes(&mut builder, doc, lang, width);
+            }
+            let order_notes = order_notes_after_platform_comment(doc, lang);
             for note in &order_notes {
                 builder.underline(1);
                 emit_wrapped(
@@ -12660,6 +13160,9 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     if style.profile.framed_totals {
                         emit_rule(&mut builder, width, style.profile.block_rule);
                     }
+                } else if total.label == "Driver tip" {
+                    builder
+                        .with_platform_text(|builder| emit_pair(builder, &label_text, &val, width));
                 } else {
                     emit_pair(&mut builder, &label_text, &val, width);
                 }
@@ -12771,11 +13274,38 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             if !should_render_minimal_shift_checkout(doc) {
                 if should_render_shift_checkout_driver_summary(doc) {
                     for row in driver_shift_checkout_summary_rows(doc) {
+                        if row.label_key == "Tips Received" && !doc.driver_kept_tip_lines.is_empty()
+                        {
+                            builder.with_bold(|builder| {
+                                emit_wrapped(builder, receipt_label(lang, "Tips kept"), width)
+                            });
+                            for line in &doc.driver_kept_tip_lines {
+                                emit_pair(
+                                    &mut builder,
+                                    &driver_kept_tip_label(lang, line),
+                                    &money_locale(line.amount, comma),
+                                    width,
+                                );
+                            }
+                            emit_pair_bold(
+                                &mut builder,
+                                receipt_label(lang, "TOTAL"),
+                                &row.format(|amount| money_locale(amount, comma)),
+                                width,
+                            );
+                            continue;
+                        }
                         if row.emphasize {
+                            let label = receipt_label(lang, row.label_key);
+                            let payout_label = format!("{label}:");
                             emit_rule(&mut builder, width, '-');
                             emit_pair_bold(
                                 &mut builder,
-                                receipt_label(lang, row.label_key),
+                                if row.label_key == "Drawer payout" {
+                                    &payout_label
+                                } else {
+                                    label
+                                },
                                 &row.format(|amount| money_locale(amount, comma)),
                                 width,
                             );
@@ -13033,11 +13563,17 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                             width,
                         );
                     }
-                    if has_print_money(staff.tips_received) {
+                    for (label, amount) in z_report_shift_tip_rows(staff) {
+                        let translated = receipt_label(lang, label);
+                        let with_colon = format!("{translated}:");
                         emit_pair(
                             &mut builder,
-                            receipt_label(lang, "Tips Received"),
-                            &money_locale(staff.tips_received, comma),
+                            if label == "Tips Received" {
+                                translated
+                            } else {
+                                &with_colon
+                            },
+                            &money_locale(amount, comma),
                             width,
                         );
                     }
@@ -13442,6 +13978,10 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
         body_mode: EscPosBodyMode::Text,
     }
 }
+
+#[cfg(test)]
+#[path = "receipt_renderer/box_tip_slip_goldens.rs"]
+mod box_tip_slip_goldens;
 
 #[cfg(test)]
 mod tests {
@@ -15097,6 +15637,243 @@ mod tests {
     }
 
     #[test]
+    fn b449_box_comment_is_bold_labelled_once_and_keeps_its_case_and_lines() {
+        let cfg = LayoutConfig {
+            language: "el".into(),
+            character_set: "PC737_GREEK".into(),
+            decimal_comma: true,
+            ..LayoutConfig::default()
+        };
+        let mut doc = box_platform_receipt_fixture();
+        doc.order_number = "B449".into();
+        doc.platform_slip.as_mut().unwrap().short_code = Some("B449".into());
+
+        for (input, printed) in [
+            ("Όπως ανεβαίνετε αριστερά", "Όπως ανεβαίνετε αριστερά"),
+            ("όπως ανεβαίνετε αριστερά", "Όπως ανεβαίνετε αριστερά"),
+            ("όπως  ανεβαίνετε\nαριστερά", "Όπως  ανεβαίνετε\nαριστερά"),
+            ("«όπως ανεβαίνετε»", "«όπως ανεβαίνετε»"),
+        ] {
+            doc.order_notes = vec![input.into()];
+            let mut expected = EscPosBuilder::new().with_greek();
+            expected.bold(true).text("Σχόλια:").lf();
+            for line in printed.lines() {
+                expected.with_platform_text(|builder| {
+                    builder.text(line).lf();
+                });
+            }
+            expected
+                .bold(false)
+                .text(&"-".repeat(cfg.paper_width.chars()))
+                .lf();
+            let expected = expected.build();
+            for document in [
+                ReceiptDocument::OrderReceipt(doc.clone()),
+                ReceiptDocument::DeliverySlip(doc.clone()),
+            ] {
+                let bytes = render_escpos(&document, &cfg).bytes;
+                assert_eq!(count_sequence(&bytes, &expected), 1);
+                assert_eq!(platform_comment(&doc, "el").as_deref(), Some(printed));
+                for template in [ReceiptTemplate::Classic, ReceiptTemplate::Modern] {
+                    let html = render_html(
+                        &document,
+                        &LayoutConfig {
+                            template,
+                            ..cfg.clone()
+                        },
+                    );
+                    let block = format!("<strong>Σχόλια:<br>{printed}</strong>");
+                    assert_eq!(html.matches("Σχόλια:").count(), 1);
+                    assert!(html.contains(&block));
+                    assert!(html.find("B449").unwrap() < html.find(&block).unwrap());
+                    assert!(html.find(&block).unwrap() < html.find("Μυτιλήνης").unwrap());
+                }
+            }
+        }
+
+        // A caller that already uses bold retains it through the separator.
+        let mut builder = EscPosBuilder::new();
+        builder.bold(true);
+        doc.order_notes = vec!["ring".into()];
+        emit_platform_order_notes(&mut builder, &doc, "en", 12);
+        assert_eq!(
+            builder.build().as_slice(),
+            b"\x1bE\x01Comments:\nRing\n------------\n"
+        );
+    }
+
+    #[test]
+    fn fix_win9_large_platform_comment_keeps_last_item_and_total_on_every_path() {
+        let mut doc = box_platform_receipt_fixture();
+        doc.items.last_mut().unwrap().name = "Last item".into();
+        doc.totals.last_mut().unwrap().amount = 37.51;
+        // Exactly 2,000 characters. Repeated short lines also overflow an
+        // uncapped raster on wide paper.
+        doc.order_notes = vec!["α\n".repeat(1000)];
+        let mut without_comment = doc.clone();
+        without_comment.order_notes.clear();
+        let mut with_different_total = doc.clone();
+        with_different_total.totals.last_mut().unwrap().label = "Total marker".into();
+        let mut with_different_item = doc.clone();
+        with_different_item.items.last_mut().unwrap().name = "Different".into();
+        let document = ReceiptDocument::OrderReceipt(doc);
+        let baseline = ReceiptDocument::OrderReceipt(without_comment);
+        for paper_width in [PaperWidth::Mm58, PaperWidth::Mm80] {
+            let cfg = LayoutConfig {
+                paper_width,
+                printable_width_dots: default_printable_width_dots_for_paper(paper_width),
+                language: "el".into(),
+                character_set: "PC737_GREEK".into(),
+                decimal_comma: true,
+                ..Default::default()
+            };
+            for render in [
+                render_classic_customer_raster_exact_ttf,
+                render_classic_customer_raster_exact_bitmap,
+            ] {
+                let reference = render(&baseline, &cfg).unwrap();
+                let actual = render(&document, &cfg).unwrap();
+                assert!(actual.height() > reference.height());
+                assert!(actual.height() - reference.height() < 1000);
+                for changed in [&with_different_item, &with_different_total] {
+                    let changed =
+                        render(&ReceiptDocument::OrderReceipt(changed.clone()), &cfg).unwrap();
+                    assert_ne!(actual, changed, "the item and total both reach the paper");
+                }
+            }
+            let html = render_html(&document, &cfg);
+            assert!(html.contains("…</strong>"));
+            assert!(html.contains("Last item"));
+            assert!(html.contains("ΣΥΝΟΛΟ"));
+            let bytes = render_escpos(&document, &cfg).bytes;
+            assert!(count_sequence(&bytes, b"...\n") > 0);
+            assert!(count_sequence(&bytes, b"Last item") > 0);
+            let mut total = EscPosBuilder::new().with_greek();
+            total.text("ΣΥΝΟΛΟ");
+            assert!(count_sequence(&bytes, &total.build()) > 0);
+        }
+    }
+
+    #[test]
+    fn box_comment_raster_paths_preserve_case_and_lines_and_skip_empty_blocks() {
+        let cfg = LayoutConfig {
+            language: "el".into(),
+            ..LayoutConfig::default()
+        };
+        let doc = box_platform_receipt_fixture();
+        let receipt = |comment: Option<&str>| {
+            let mut doc = doc.clone();
+            doc.order_notes = comment.into_iter().map(str::to_owned).collect();
+            ReceiptDocument::OrderReceipt(doc)
+        };
+        for render in [
+            render_classic_customer_raster_exact_ttf,
+            render_classic_customer_raster_exact_bitmap,
+        ] {
+            let baseline = render(&receipt(None), &cfg).unwrap();
+            let empty = render(&receipt(Some("")), &cfg).unwrap();
+            assert_eq!(empty, baseline);
+            let one = render(&receipt(Some("όπως ανεβαίνετε")), &cfg).unwrap();
+            let capitalized = render(&receipt(Some("Όπως ανεβαίνετε")), &cfg).unwrap();
+            let uppercase = render(&receipt(Some("ΌΠΩΣ ΑΝΕΒΑΊΝΕΤΕ")), &cfg).unwrap();
+            assert_eq!(one, capitalized);
+            assert_ne!(one, uppercase);
+            assert!(one.height() > baseline.height());
+            let two = render(&receipt(Some("όπως ανεβαίνετε\nαριστερά")), &cfg).unwrap();
+            assert!(two.height() > one.height());
+        }
+
+        let mut builder = EscPosBuilder::new();
+        let empty_doc = match receipt(Some("")) {
+            ReceiptDocument::OrderReceipt(doc) => doc,
+            _ => unreachable!(),
+        };
+        emit_platform_order_notes(&mut builder, &empty_doc, "el", 42);
+        assert!(
+            builder.build().is_empty(),
+            "the original empty block emitted no bytes"
+        );
+        let mut doc_with_register_note = empty_doc.clone();
+        doc_with_register_note.order_notes = vec!["Till note".into()];
+        let info = doc_with_register_note.platform_slip.as_mut().unwrap();
+        info.platform_customer_note_count = Some(0);
+        let mut builder = EscPosBuilder::new();
+        emit_platform_order_notes(&mut builder, &doc_with_register_note, "en", 12);
+        assert_eq!(builder.build().as_slice(), b"Till note\n------------\n");
+        assert_eq!(
+            render_escpos(&receipt(None), &cfg).bytes,
+            render_escpos(&receipt(Some("")), &cfg).bytes,
+        );
+        assert_eq!(
+            render_html(&receipt(None), &cfg),
+            render_html(&receipt(Some("")), &cfg)
+        );
+    }
+
+    #[test]
+    fn box_slip_driver_tip_labels_and_greek_totals() {
+        for (lang, tip, comments) in [
+            ("el", "Φιλοδώρημα διανομέα", "Σχόλια:"),
+            ("en", "Driver tip", "Comments:"),
+            ("de", "Trinkgeld Fahrer", "Kommentare:"),
+            ("fr", "Pourboire livreur", "Commentaires :"),
+            ("it", "Mancia fattorino", "Commenti:"),
+            ("sq", "Bakshish për korrierin", "Komente:"),
+        ] {
+            assert_eq!(receipt_label(lang, "Driver tip"), tip);
+            assert_eq!(receipt_label(lang, "Comments:"), comments);
+        }
+        let mut doc = box_platform_receipt_fixture();
+        doc.totals = [("Subtotal", 6.90), ("Driver tip", 0.75), ("TOTAL", 7.65)]
+            .into_iter()
+            .map(|(label, amount)| TotalsLine {
+                label: label.into(),
+                amount,
+                emphasize: label == "TOTAL",
+                ..TotalsLine::default()
+            })
+            .collect();
+        let doc = ReceiptDocument::OrderReceipt(doc);
+        let cfg = LayoutConfig {
+            language: "el".into(),
+            character_set: "PC737_GREEK".into(),
+            decimal_comma: true,
+            ..LayoutConfig::default()
+        };
+        let escpos = render_escpos(&doc, &cfg);
+        let html = render_html(&doc, &cfg);
+        for (label, amount) in [
+            ("Υποσύνολο", "6,90"),
+            ("Φιλοδώρημα διανομέα", "0,75"),
+            ("ΣΥΝΟΛΟ", "7,65"),
+        ] {
+            let mut expected = EscPosBuilder::new().with_greek();
+            expected.text(label);
+            let expected = expected.build();
+            let at = escpos
+                .bytes
+                .windows(expected.len())
+                .position(|line| line == expected.as_slice())
+                .unwrap();
+            let printed_line = escpos.bytes[at..]
+                .split(|byte| *byte == b'\n')
+                .next()
+                .unwrap();
+            assert_eq!(count_sequence(printed_line, amount.as_bytes()), 1);
+            assert!(html.contains(&format!("{label}</td><td class=\"r\">{amount}")));
+        }
+        let mut builder = EscPosBuilder::new();
+        builder.code_page(0);
+        builder.with_platform_text(|builder| {
+            builder.text("Bakshish për korrierin").lf();
+        });
+        assert_eq!(
+            builder.build().as_slice(),
+            b"\x1bt\x00Bakshish p\x1bt\x13\x89r korrierin\x1bt\x00\n"
+        );
+    }
+
+    #[test]
     fn box_platform_receipt_prints_the_same_verbatim_note_for_each_item() {
         let mut doc = box_platform_receipt_fixture();
         doc.items[0].note = Some("Please Keep This Case".into());
@@ -15122,18 +15899,34 @@ mod tests {
     }
 
     #[test]
-    fn non_box_platform_note_section_matches_base_golden() {
-        // The base pickup slip goes straight from the order-code separator to the first item.
+    fn non_box_platform_comments_and_empty_base_golden() {
         const BASE_ORDER_NOTES: &[u8] = b"------------------------------------------\n1 Espresso\n";
-        let cfg = LayoutConfig::default();
+        let cfg = LayoutConfig {
+            language: "el".into(),
+            character_set: "PC737_GREEK".into(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            ..LayoutConfig::default()
+        };
         for provider in ["efood", "wolt"] {
             let mut doc = box_platform_receipt_fixture();
-            doc.platform_slip.as_mut().unwrap().plugin = provider.to_string();
-            doc.order_type = "pickup".to_string();
+            let info = doc.platform_slip.as_mut().unwrap();
+            info.plugin = provider.to_string();
+            info.delivery_provider = Some("platform_delivery".into());
+            doc.preserve_box_customer_notes = false;
+            doc.order_notes.clear();
+            let baseline = ReceiptDocument::OrderReceipt(doc.clone());
+            doc.order_notes = vec!["  ".into()];
+            let empty = ReceiptDocument::OrderReceipt(doc.clone());
+            assert_eq!(
+                render_escpos(&empty, &cfg).bytes,
+                render_escpos(&baseline, &cfg).bytes
+            );
+            assert_eq!(render_html(&empty, &cfg), render_html(&baseline, &cfg));
+
+            doc.order_notes.clear();
+            doc.order_type = "pickup".into();
             doc.customer_name = None;
             doc.delivery_address = None;
-            doc.preserve_box_customer_notes = true;
-            doc.order_notes = vec!["Ring twice".into(), "ring twice".into()];
             let mut builder = EscPosBuilder::new();
             emit_platform_slip_escpos(
                 &mut builder,
@@ -15147,10 +15940,62 @@ mod tests {
                 None,
                 &cfg,
             );
-            assert!(builder
-                .build()
-                .windows(BASE_ORDER_NOTES.len())
-                .any(|bytes| bytes == BASE_ORDER_NOTES));
+            assert_eq!(count_sequence(&builder.build(), BASE_ORDER_NOTES), 1);
+
+            let expected_comment = "Όπως ανεβαίνετε\nαριστερά";
+            let with_comment = |comment: &str| {
+                let mut doc = match &baseline {
+                    ReceiptDocument::OrderReceipt(doc) => doc.clone(),
+                    _ => unreachable!(),
+                };
+                doc.order_notes = vec![comment.into()];
+                ReceiptDocument::OrderReceipt(doc)
+            };
+            let actual = with_comment("όπως ανεβαίνετε\nαριστερά");
+            let expected = with_comment(expected_comment);
+            let mut expected_bytes = EscPosBuilder::new().with_greek();
+            expected_bytes.with_platform_text(|builder| {
+                builder.with_bold(|builder| {
+                    builder
+                        .text("Σχόλια:")
+                        .lf()
+                        .text("Όπως ανεβαίνετε")
+                        .lf()
+                        .text("αριστερά")
+                        .lf();
+                });
+            });
+            let comment_bytes = expected_bytes.build();
+            let bytes = render_escpos(&actual, &cfg).bytes;
+            assert_eq!(count_sequence(&bytes, &comment_bytes), 1);
+            let code = b"BOX-REFERENCE-123";
+            assert_eq!(count_sequence(&bytes, code), 1);
+            assert!(
+                bytes
+                    .windows(code.len())
+                    .position(|part| part == code)
+                    .unwrap()
+                    > bytes
+                        .windows(comment_bytes.len())
+                        .position(|part| part == comment_bytes.as_slice())
+                        .unwrap()
+            );
+            assert!(render_html(&actual, &cfg)
+                .contains("<strong>Σχόλια:<br>Όπως ανεβαίνετε\nαριστερά</strong>"));
+            for render in [
+                render_classic_customer_raster_exact_ttf,
+                render_classic_customer_raster_exact_bitmap,
+            ] {
+                let base = render(&baseline, &cfg).unwrap();
+                assert_eq!(render(&empty, &cfg).unwrap(), base);
+                let commented = render(&actual, &cfg).unwrap();
+                assert!(commented.height() > base.height());
+                assert_eq!(commented, render(&expected, &cfg).unwrap());
+                assert_ne!(
+                    commented,
+                    render(&with_comment("ΟΠΩΣ ΑΝΕΒΑΙΝΕΤΕ\nΑΡΙΣΤΕΡΑ"), &cfg).unwrap()
+                );
+            }
         }
     }
 
@@ -15267,6 +16112,7 @@ mod tests {
                 is_test: true,
                 // Accepted with 25' prep: the headline is the promised time.
                 ready_at: Some("2026-08-28T09:58:00+00:00".to_string()),
+                ..PlatformSlipInfo::default()
             }),
             ..OrderReceiptDoc::default()
         };
@@ -16522,7 +17368,7 @@ mod tests {
     }
 
     #[test]
-    fn driver_checkout_printed_variance_matches_return_and_actual_returned() {
+    fn fix_win6_closed_driver_checkout_prints_stored_variance() {
         let doc = ShiftCheckoutDoc {
             amount_to_return: 51.60,
             closing_amount: Some(51.60),
@@ -16536,7 +17382,7 @@ mod tests {
             .expect("driver variance row")
             .amount;
 
-        assert_eq!(variance, 0.0);
+        assert_eq!(variance, 7.20);
     }
 
     #[test]

@@ -59,3 +59,24 @@ describe('cashier checkout physical drawer cash across handovers', () => {
     expect(snapshot).toMatchObject({ expectedAmount: 100, varianceAmount: 0 });
   });
 });
+
+describe('driver checkout print figures', () => {
+  it('uses the live zero-tip due when cancelled-order cash is still held', () => {
+    const snapshot = buildShiftCheckoutPrintSnapshot({
+      shift: { role_type: 'driver', opening_cash_amount: 20 },
+      shiftSummary: { amountToReturn: 30, driverDeliveries: [{ status: 'cancelled', cash_collected: 10 }] },
+      driverActualCash: '29.50',
+    });
+    expect(snapshot).toMatchObject({ expectedAmount: 30, closingAmount: 29.50, varianceAmount: -0.50 });
+  });
+
+  it('fix_win6 uses the stored due, count and variance on a closed shift', () => {
+    const snapshot = buildShiftCheckoutPrintSnapshot({
+      shift: { role_type: 'driver', opening_cash_amount: 20, status: 'closed',
+        expected_cash_amount: 30, closing_cash_amount: 29.50, cash_variance: -0.50 },
+      shiftSummary: { amountToReturn: 20, driverDeliveries: [] },
+      driverActualCash: '20.00',
+    });
+    expect(snapshot).toMatchObject({ expectedAmount: 30, closingAmount: 29.50, varianceAmount: -0.50 });
+  });
+});

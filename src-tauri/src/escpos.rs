@@ -77,6 +77,8 @@ pub struct EscPosBuilder {
     /// instead of standard ESC/POS (ESC t n).
     star_line_mode: bool,
     euro_fallback: bool,
+    bold_enabled: bool,
+    preserve_platform_text: bool,
 }
 
 impl EscPosBuilder {
@@ -104,6 +106,8 @@ impl EscPosBuilder {
             active_code_page: 14, // CP737 (Greek)
             star_line_mode: false,
             euro_fallback: false,
+            bold_enabled: false,
+            preserve_platform_text: false,
         }
     }
 
@@ -137,6 +141,7 @@ impl EscPosBuilder {
     /// ESC @ — Initialize printer, reset to defaults.
     pub fn init(&mut self) -> &mut Self {
         self.buffer.extend_from_slice(&[ESC, 0x40]);
+        self.bold_enabled = false;
         self
     }
 
@@ -185,7 +190,19 @@ impl EscPosBuilder {
     pub fn bold(&mut self, on: bool) -> &mut Self {
         self.buffer
             .extend_from_slice(&[ESC, 0x45, if on { 1 } else { 0 }]);
+        self.bold_enabled = on;
         self
+    }
+
+    pub(crate) fn with_bold(&mut self, draw: impl FnOnce(&mut Self)) {
+        let was_bold = self.bold_enabled;
+        if !was_bold {
+            self.bold(true);
+        }
+        draw(self);
+        if self.bold_enabled != was_bold {
+            self.bold(was_bold);
+        }
     }
 
     /// ESC M 0 — Select Font A (larger default glyphs).
@@ -314,7 +331,9 @@ impl EscPosBuilder {
                 self.buffer.push(0xD5);
                 self.emit_code_page_cmd(self.active_code_page); // restore
             }
-            if self.greek_mode {
+            if self.preserve_platform_text {
+                self.append_platform_text(segment);
+            } else if self.greek_mode {
                 self.buffer.extend(encode_cp737(segment));
             } else {
                 for ch in segment.chars() {
@@ -330,6 +349,57 @@ impl EscPosBuilder {
             }
         }
         self
+    }
+
+    pub(crate) fn with_platform_text(&mut self, draw: impl FnOnce(&mut Self)) {
+        let previous = self.preserve_platform_text;
+        self.preserve_platform_text = true;
+        draw(self);
+        self.preserve_platform_text = previous;
+    }
+
+    fn append_platform_text(&mut self, text: &str) {
+        // CP858 carries Western European accents. Keep the configured Greek
+        // page on tills that already use CP737 (including custom page numbers).
+        const WESTERN: &str = concat!(
+            "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜø£Ø×ƒ",
+            "áíóúñÑªº¿®¬½¼¡«»░▒▓│┤ÁÂÀ©╣║╗╝¢¥┐",
+            "└┴┬├─┼ãÃ╚╔╩╦╠═╬¤ðÐÊËÈ€ÍÎÏ┘┌█▄¦Ì▀",
+            "ÓßÔÒõÕµþÞÚÛÙýÝ¯´\u{00ad}±‗¾¶§÷¸°¨·¹³²■\u{00a0}",
+        );
+        let greek_page = if self.greek_mode {
+            self.active_code_page
+        } else if self.star_line_mode {
+            15
+        } else {
+            14
+        };
+        let western_page = if self.star_line_mode { 4 } else { 19 };
+        let mut page = self.active_code_page;
+        for ch in text.chars() {
+            let (byte, target_page) = if ch.is_ascii() {
+                (ch as u8, page)
+            } else if let Some(byte) = greek_to_cp737(ch) {
+                (byte, greek_page)
+            } else if let Some(index) = WESTERN.chars().position(|letter| letter == ch) {
+                (0x80 + index as u8, western_page)
+            } else {
+                (
+                    unicode_fallback(ch)
+                        .or_else(|| latin_fold(ch))
+                        .unwrap_or(b'?'),
+                    page,
+                )
+            };
+            if target_page != page {
+                self.emit_code_page_cmd(target_page);
+                page = target_page;
+            }
+            self.buffer.push(byte);
+        }
+        if page != self.active_code_page {
+            self.emit_code_page_cmd(self.active_code_page);
+        }
     }
 
     /// Emit a code page switch using the correct command for the printer mode.

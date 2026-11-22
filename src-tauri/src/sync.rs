@@ -9935,6 +9935,48 @@ fn remote_payment_intentionally_excluded(
     Ok(false)
 }
 
+pub(crate) fn remote_order_insert_tip(
+    order: &Value,
+    total_amount: f64,
+    plugin: Option<&str>,
+    order_type: &str,
+    ghost_metadata: Option<&str>,
+) -> (f64, i64) {
+    let fields = [
+        "tip_amount",
+        "tipAmount",
+        "tip_amount_cents",
+        "tipAmountCents",
+    ];
+    let amount = if let Some(amount) = num_any(order, &fields[..2]) {
+        amount
+    } else if let Some(cents) = fields[2..]
+        .iter()
+        .find_map(|field| order.get(*field).and_then(Value::as_i64))
+    {
+        return (Cents::new(cents).to_f64_dp2(), cents);
+    } else if fields
+        .iter()
+        .any(|field| order.get(*field).is_some_and(|value| !value.is_null()))
+    {
+        0.0
+    } else {
+        ghost_metadata
+            .and_then(|metadata| payments::food_delivery_from_metadata(metadata.to_owned()))
+            .filter(|food| {
+                let platform = plugin
+                    .filter(|value| !value.trim().is_empty())
+                    .or_else(|| food.get("platform").and_then(Value::as_str))
+                    .unwrap_or_default();
+                payments::platform_delivery_uses_store_driver(platform, order_type, food)
+            })
+            .and_then(|food| food.get("tip").and_then(Value::as_f64))
+            .filter(|tip| tip.is_finite() && *tip >= 0.0 && *tip <= total_amount)
+            .unwrap_or(0.0)
+    };
+    (amount, Cents::round_half_even(amount).as_i64())
+}
+
 fn materialize_remote_order(
     conn: &rusqlite::Connection,
     remote_order: &Value,
@@ -10153,7 +10195,6 @@ fn materialize_remote_order_scoped(
         num_any(remote_order, &["discount_percentage", "discountPercentage"]).unwrap_or(0.0);
     let discount_amount =
         num_any(remote_order, &["discount_amount", "discountAmount"]).unwrap_or(0.0);
-    let tip_amount = num_any(remote_order, &["tip_amount", "tipAmount"]).unwrap_or(0.0);
     let version = remote_order
         .get("version")
         .and_then(Value::as_i64)
@@ -10176,6 +10217,13 @@ fn materialize_remote_order_scoped(
             .get("ghost_metadata")
             .or_else(|| remote_order.get("ghostMetadata")),
         payment_method.as_deref(),
+    );
+    let (tip_amount, tip_amount_cents) = remote_order_insert_tip(
+        remote_order,
+        total_amount,
+        plugin.as_deref(),
+        &order_type,
+        ghost_metadata.as_deref(),
     );
     // Sandbox/test platform orders must keep their marker through the normal
     // sync pull — it is what excludes them from the local Z and blocks
@@ -10208,7 +10256,7 @@ fn materialize_remote_order_scoped(
             tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
             delivery_address_id, delivery_latitude, delivery_longitude,
             delivery_address_fingerprint, delivery_zone_id,
-            integration_environment, is_test, notes
+            integration_environment, is_test, notes, tip_amount_cents
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7,
             ?8, ?9, ?10, ?11, ?12,
@@ -10221,7 +10269,7 @@ fn materialize_remote_order_scoped(
             ?39, ?40, ?41, ?42, ?43,
             ?44, ?45, ?46, ?47,
             ?48, ?49, ?50, ?51,
-            ?52, ?53, ?54
+            ?52, ?53, ?54, ?55
         )",
         params![
             local_id,
@@ -10278,6 +10326,7 @@ fn materialize_remote_order_scoped(
             integration_environment,
             if is_test { 1_i64 } else { 0_i64 },
             customer_notes,
+            tip_amount_cents,
         ],
     )
     .map_err(|e| format!("materialize remote order: {e}"))?;
@@ -13129,6 +13178,31 @@ pub(crate) fn sync_remote_payment_into_local_for_test(
     remote_payment: &Value,
 ) -> Result<usize, String> {
     sync_remote_payment_into_local(conn, remote_payment)
+}
+
+#[cfg(test)]
+pub(crate) fn b449_list_row_for_test() -> Value {
+    serde_json::json!({
+        "id": "b449-remote",
+        "order_number": "BOX-1795286965261-6122F7E0",
+        "platform": "box",
+        "order_type": "delivery",
+        "subtotal": 6.9,
+        "tax_amount": 1.34,
+        "total_amount": 7.65,
+        "currency": "EUR",
+        "status": "ready",
+        "payment_status": "paid",
+        "items": [{ "name": "Toast", "quantity": 1, "price": 6.9 }],
+        "created_at": "2026-11-21T12:00:00Z",
+        "special_instructions": "Όπως ανεβαίνετε αριστερά\n--- Order Items ---\n1x Toast",
+        "updated_at": "2026-11-21T12:00:00Z",
+        "ghost_metadata": { "food_delivery": {
+            "tip": 0.75, "prepaid": true, "box_daas": false, "box_daas_declared": "absent",
+            "delivery_provider": "vendor_delivery", "payment_method": "online",
+            "payment_type": "card", "currency": "EUR", "reference": "B449", "short_code": "B449"
+        }}
+    })
 }
 
 /// Test support (item D2): apply one pulled orders page; its error, if any.
@@ -30287,6 +30361,111 @@ mod tests {
             )
             .unwrap();
         assert_eq!(supabase_id, "remote-order-1");
+    }
+
+    #[test]
+    fn platform_driver_tip_import_writes_euros_and_cents_only_on_insert() {
+        for (case, expected) in [
+            ("original", (0.75, 75)),
+            ("explicit_zero", (0.0, 0)),
+            ("explicit_zero_cents", (0.0, 0)),
+            ("null_tip_fields", (0.75, 75)),
+            ("explicit_cents", (0.25, 25)),
+            ("courier", (0.0, 0)),
+            ("box_daas_wins", (0.75, 75)),
+            ("box_provider_fallback", (0.75, 75)),
+            ("efood", (0.75, 75)),
+            ("wolt", (0.75, 75)),
+            ("efood_courier", (0.0, 0)),
+            ("pickup", (0.0, 0)),
+            ("takeaway", (0.0, 0)),
+            ("missing_provider", (0.0, 0)),
+            ("string_metadata", (0.75, 75)),
+            ("negative", (0.0, 0)),
+            ("over_total", (0.0, 0)),
+        ] {
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let mut remote = b449_list_row_for_test();
+            match case {
+                "explicit_zero" => remote["tip_amount"] = serde_json::json!(0),
+                "explicit_zero_cents" => remote["tipAmountCents"] = serde_json::json!(0),
+                "null_tip_fields" => {
+                    for field in ["tip_amount", "tipAmount", "tip_amount_cents"] {
+                        remote[field] = Value::Null;
+                    }
+                }
+                "explicit_cents" => remote["tip_amount_cents"] = serde_json::json!(25),
+                "courier" => remote["ghost_metadata"]["food_delivery"]["box_daas"] = true.into(),
+                "box_daas_wins" => {
+                    remote["ghost_metadata"]["food_delivery"]["delivery_provider"] =
+                        "platform_delivery".into();
+                }
+                "box_provider_fallback" => {
+                    remote["ghost_metadata"]["food_delivery"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("box_daas");
+                }
+                "efood" | "wolt" | "efood_courier" | "missing_provider" => {
+                    let platform = if case == "wolt" { "wolt" } else { "efood" };
+                    remote["platform"] = platform.into();
+                    let food = &mut remote["ghost_metadata"]["food_delivery"];
+                    *food = serde_json::json!({
+                        "platform": platform,
+                        "prepaid": true,
+                        "payment_method": "online",
+                        "tip": 0.75
+                    });
+                    if case != "missing_provider" {
+                        food["delivery_provider"] = if case == "efood_courier" {
+                            "platform_delivery".into()
+                        } else {
+                            "vendor_delivery".into()
+                        };
+                    }
+                }
+                "pickup" | "takeaway" => remote["order_type"] = case.into(),
+                "string_metadata" => {
+                    remote["ghost_metadata"] = remote["ghost_metadata"].to_string().into();
+                }
+                "negative" => remote["ghost_metadata"]["food_delivery"]["tip"] = (-0.01).into(),
+                "over_total" => remote["ghost_metadata"]["food_delivery"]["tip"] = 7.66.into(),
+                _ => {}
+            }
+            let applied = apply_remote_orders_page(&conn, vec![remote.clone()]);
+            assert!(applied.error.is_none(), "{case}: {:?}", applied.error);
+            let local_id = &applied.newly_materialized_order_ids[0];
+            let read_tip = || {
+                conn.query_row(
+                    "SELECT tip_amount, tip_amount_cents FROM orders WHERE id = ?1",
+                    [local_id],
+                    |row| Ok((row.get::<_, f64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap()
+            };
+            assert_eq!(read_tip(), expected, "{case}");
+
+            let mut later = remote;
+            for field in [
+                "tip_amount",
+                "tipAmount",
+                "tip_amount_cents",
+                "tipAmountCents",
+            ] {
+                later.as_object_mut().unwrap().remove(field);
+            }
+            if let Some(encoded) = later["ghost_metadata"].as_str() {
+                later["ghost_metadata"] = serde_json::from_str(encoded).unwrap();
+            }
+            later["ghost_metadata"]["food_delivery"]["tip"] = 2.50.into();
+            later["status"] = "out_for_delivery".into();
+            later["version"] = 2.into();
+            later["updated_at"] = "2026-11-21T12:01:00Z".into();
+            let applied = apply_remote_orders_page(&conn, vec![later]);
+            assert!(applied.error.is_none(), "{case}: {:?}", applied.error);
+            assert_eq!(read_tip(), expected, "{case} on update");
+        }
     }
 
     #[test]

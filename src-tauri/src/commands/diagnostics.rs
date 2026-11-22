@@ -1066,6 +1066,12 @@ mod main_thread_command_audit {
     /// Calls whose closure argument runs on Tokio's blocking pool.
     const BLOCKING_POOL: [&str; 2] = ["run_blocking_command", "spawn_blocking"];
 
+    /// Plain async fns that run a command's whole body on the command's own
+    /// runtime worker (extracted so a test can call it without Tauri state):
+    /// (helper, command). Their locks count as the command's.
+    const COMMAND_BODY_HELPERS: &[(&str, &str)] =
+        &[("save_remote_order", "order_save_from_remote")];
+
     /// Commands that still lock `DbState.conn` on a runtime worker because they
     /// await between their database steps; moving them needs a split by hand.
     const RUNTIME_LOCK_ALLOWLIST: &[(&str, &str)] = &[
@@ -1340,6 +1346,21 @@ mod main_thread_command_audit {
         audit: &mut Audit,
     ) {
         let Some(attr) = command_attribute(attrs) else {
+            if signature.asyncness.is_some() {
+                if let Some((_, command)) = COMMAND_BODY_HELPERS
+                    .iter()
+                    .find(|(helper, _)| signature.ident == helper)
+                {
+                    record_runtime_locks(
+                        path,
+                        signature.ident.span().start().line,
+                        command,
+                        &format!("{} (the body of {command})", signature.ident),
+                        body,
+                        audit,
+                    );
+                }
+            }
             return;
         };
         audit.commands += 1;
@@ -1357,17 +1378,29 @@ mod main_thread_command_audit {
             ));
             return;
         }
+        let name = signature.ident.to_string();
+        record_runtime_locks(path, attr.span().start().line, &name, &name, body, audit);
+    }
+
+    fn record_runtime_locks(
+        path: &Path,
+        line: usize,
+        command: &str,
+        shown: &str,
+        body: &Block,
+        audit: &mut Audit,
+    ) {
         let mut locks = RuntimeLocks::default();
         locks.visit_block(body);
         if !locks.lines.is_empty() {
             let lines: Vec<String> = locks.lines.iter().map(usize::to_string).collect();
             audit.runtime_locks.push((
-                signature.ident.to_string(),
+                command.to_string(),
                 format!(
                     "{}:{}: fn {} locks DbState.conn on a runtime worker (line {})",
                     path.display(),
-                    attr.span().start().line,
-                    signature.ident,
+                    line,
+                    shown,
                     lines.join(", ")
                 ),
             ));

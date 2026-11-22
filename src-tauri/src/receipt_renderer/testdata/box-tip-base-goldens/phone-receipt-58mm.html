@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Order Receipt</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&amp;family=Courier+Prime:wght@400;700&amp;family=IBM+Plex+Mono:wght@400;500;700&amp;display=swap" rel="stylesheet"/>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #2a2a2a; display: flex; justify-content: center; padding: 32px 16px; min-height: 100vh; }
+.receipt { background: #fff; width: 300px; padding: 28px 22px 24px; box-shadow: 0 8px 40px rgba(0,0,0,0.5); color: #000; position: relative; }
+.receipt { font-weight: 400; }
+.receipt::before, .receipt::after { content: ''; position: absolute; left: 0; right: 0; height: 8px; background: repeating-linear-gradient(90deg, #fff 0 8px, transparent 8px 16px); }
+.receipt::before { top: -8px; }
+.receipt::after { bottom: -8px; }
+
+/* Logo */
+.logo-area { text-align: center; margin-bottom: 12px; }
+.logo-circle { width: 60px; height: 60px; border: 2px solid #000; border-radius: 50%; margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.logo-circle img { width: 100%; height: 100%; object-fit: contain; }
+.logo-circle .logo-text { font-size: 11px; font-weight: 700; text-transform: uppercase; text-align: center; line-height: 1.2; }
+
+/* Branch info (shared) */
+.branch-info { text-align: center; margin-bottom: 14px; }
+
+/* ── MODERN ── */
+.modern .branch-info .store-name { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 1px; }
+.modern .branch-info .store-sub { font-family: 'Playfair Display', Georgia, serif; font-size: 10px; font-style: italic; color: #555; margin-bottom: 5px; }
+.modern .branch-info .store-detail { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 8.5px; color: #555; line-height: 1.75; }
+.modern hr { border: none; border-top: 1px solid #000; margin: 12px 0; }
+.modern hr.thin { border-top: 1px dotted #bbb; margin: 10px 0; }
+.modern .order-type { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 9px; font-weight: 700; letter-spacing: 2px; border: 1.5px solid #000; display: inline-block; padding: 2px 10px; text-align: center; margin-bottom: 8px; }
+.modern .meta-grid { display: grid; grid-template-columns: auto 1fr; column-gap: 10px; row-gap: 2px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 9px; }
+.modern .meta-grid .k { color: #888; }
+.modern .meta-grid .v { text-align: right; font-weight: 500; }
+.modern .sec-head { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 9px; font-weight: 700; letter-spacing: 3px; text-transform: uppercase; text-align: center; margin-bottom: 10px; }
+.modern .item { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; margin-bottom: 8px; }
+.modern .item-row { display: flex; justify-content: space-between; }
+.modern .item-name { font-weight: 500; }
+.modern .item-price { font-weight: 700; }
+.modern .item-mods { font-size: 8.5px; color: #777; padding-left: 12px; margin-top: 2px; line-height: 1.6; }
+.modern table { width: 100%; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; border-collapse: collapse; }
+.modern table td { padding: 2px 0; }
+.modern table .r { text-align: right; }
+.modern table .dim { color: #777; }
+.modern .grand td { font-size: 13px; font-weight: 700; padding-top: 6px; }
+.modern .change td { font-size: 13px; font-weight: 700; padding-top: 6px; }
+.modern .footer { text-align: center; margin-top: 14px; font-family: 'Playfair Display', Georgia, serif; font-size: 11px; font-style: italic; color: #555; }
+
+/* ── CLASSIC ── */
+.classic { font-family: 'Courier Prime', 'Courier New', monospace; }
+.classic .branch-info .store-name { font-family: 'Courier Prime', 'Courier New', monospace; font-size: 15px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 1px; }
+.classic .branch-info .store-sub { font-family: 'Playfair Display', Georgia, serif; font-size: 12.5px; font-style: italic; color: #555; margin-bottom: 5px; }
+.classic .branch-info .store-detail { font-family: 'Courier Prime', 'Courier New', monospace; font-size: 11.25px; color: #444; line-height: 1.55; }
+.classic hr { border: none; border-top: 1px dashed #999; margin: 9px 0; }
+.classic hr.solid { border-top: 1px solid #000; margin: 9px 0; }
+.classic hr.double { border-top: 3px double #000; margin: 9px 0; }
+.classic .meta-line { font-size: 11.25px; line-height: 1.65; }
+.classic .meta-line b { font-weight: 700; }
+.classic .sec-head { background: #000; color: #fff; font-family: 'Courier Prime', 'Courier New', monospace; font-size: 11.25px; font-weight: 700; letter-spacing: 3px; text-align: center; padding: 3px 0; margin: 9px 0 7px; }
+.classic .item { font-size: 12.5px; margin-bottom: 5px; }
+.classic .item-row { display: flex; justify-content: space-between; }
+.classic .item-name { font-weight: 700; }
+.classic .item-price { font-weight: 700; }
+.classic .item-mods { font-size: 10.625px; color: #666; padding-left: 10px; margin-top: 1px; line-height: 1.55; }
+.classic table { width: 100%; font-family: 'Courier Prime', 'Courier New', monospace; font-size: 12.5px; border-collapse: collapse; }
+.classic table td { padding: 2px 0; }
+.classic table .r { text-align: right; }
+.classic table .dim { color: #555; }
+.classic .grand td { font-size: 16.25px; font-weight: 700; padding-top: 5px; }
+.classic .change td { font-size: 16.25px; font-weight: 700; padding-top: 5px; }
+.classic .footer { text-align: center; margin-top: 13px; font-family: 'Courier Prime', 'Courier New', monospace; font-size: 11.25px; color: #666; line-height: 1.7; letter-spacing: 1px; }
+
+/* Legacy compat classes */
+.line { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; font-size: 10px; }
+.line > span { min-width: 0; overflow-wrap: anywhere; }
+.line > span:last-child { text-align: right; }
+.line strong { font-size: 11px; }
+.payment-value { display: inline-flex; align-items: center; justify-content: flex-end; gap: 3px; white-space: nowrap; }
+.payment-icon { width: 14px; height: 14px; flex: 0 0 14px; }
+.section { margin-top: 8px; border-top: 1px dashed #999; padding-top: 6px; }
+.note { color: #666; font-size: 9px; }
+.center { text-align: center; }
+
+/* Status banner (completed / canceled receipts) */
+.status-banner { text-align: center; padding: 6px 0; margin-bottom: 10px; font-weight: 700; font-size: 13px; letter-spacing: 1px; border-radius: 4px; }
+.status-banner.completed { background: #e6f4ea; color: #1a7a34; border: 1px solid #a8d5b5; }
+.status-banner.canceled { background: #fce8e8; color: #b00020; border: 1px solid #f5b8b8; }
+.status-banner .cancel-reason { font-weight: 400; font-size: 10px; margin-top: 3px; }
+</style>
+</head>
+<body><div class="receipt classic"><div class="branch-info"><div class="store-name">ΤΟ ΜΙΚΡΟ ΠΑΡΙΣΙ</div></div><hr class="solid"><div class="meta-line"><b>Παραγγελία:</b> #ORD-20261121-00019<br><b>Τύπος:</b> ΠΑΡΑΔΟΣΗ &nbsp;&nbsp;&nbsp; <b>Ημ/νία:</b> 21/11/2026 14:00<br><b>Πελάτης:</b> Μαρία</div><div class="sec-head">[ ΠΑΡΑΔΟΣΗ ]</div><div class="meta-line"><b>Διεύθυνση:</b> Μυτιλήνης 4<br><b>Τηλ:</b> 6900000000<br></div><div class="meta-line"><u><b>Σημείωση:</b> Χτυπήστε το κουδούνι</u><br></div><div class="sec-head">[ ΕΙΔΗ ]</div><div class="item"><div class="item-row"><span class="item-name">1x Τοστ</span><span class="item-price">4.40</span></div><div class="item-mods"><u>Σημείωση: χωρίς ντομάτα</u></div></div><div class="item"><div class="item-row"><span class="item-name">1x Καφές</span><span class="item-price">2.50</span></div><div class="item-mods"><u>Σημείωση: λίγη ζάχαρη</u></div></div><div class="sec-head">[ ΣΥΝΟΛΑ ]</div><table><tr><td class="dim">Υποσύνολο</td><td class="r">6.90</td></tr><tr class="grand"><td>ΣΥΝΟΛΟ</td><td class="r">6.90</td></tr></table><div class="sec-head">[ ΠΛΗΡΩΜΗ ]</div><table><tr><td class="dim">Δεν καταγράφηκε πληρωμή</td><td></td></tr></table><div class="footer">Ευχαριστούμε</div></div></body>
+</html>

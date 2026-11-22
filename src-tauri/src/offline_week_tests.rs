@@ -230,10 +230,10 @@ async fn run_offline_day(db: &DbState, day: u32, per_day: u32, line: &DeadLine, 
     for shift_id in &drivers {
         let cash_cents = driver_cash_to_return_cents(db, shift_id);
         returned_cents += cash_cents;
-        check_out(db, shift_id, cash_cents);
+        check_out(db, shift_id, cash_cents, true);
     }
     let drawer_cents = 10_000 + cashier_cash_sales_cents(db, &cashier) + returned_cents;
-    check_out(db, &cashier, drawer_cents);
+    check_out(db, &cashier, drawer_cents, false);
     if day == TRANSIENT_DAY {
         week.transient_close_shift = Some(cashier.clone());
     }
@@ -476,12 +476,14 @@ fn cashier_cash_sales_cents(db: &DbState, shift_id: &str) -> i64 {
         .expect("the cashier's cash sales")
 }
 
-fn check_out(db: &DbState, shift_id: &str, counted_cents: i64) {
-    let closed = crate::shifts::close_shift(
-        db,
-        &json!({ "shiftId": shift_id, "closingCash": counted_cents as f64 / 100.0 }),
-    )
-    .unwrap_or_else(|error| panic!("check-out of {shift_id}: {error}"));
+fn check_out(db: &DbState, shift_id: &str, counted_cents: i64, driver: bool) {
+    let mut payload = json!({"shiftId": shift_id, "closingCash": counted_cents as f64 / 100.0});
+    if driver {
+        payload["expectedDriverKeptTips"] = json!(0.0);
+        payload["expectedDriverPayout"] = json!(0.0);
+    }
+    let closed = crate::shifts::close_shift(db, &payload)
+        .unwrap_or_else(|error| panic!("check-out of {shift_id}: {error}"));
     assert_eq!(closed["success"], true, "check-out of {shift_id}: {closed}");
 }
 

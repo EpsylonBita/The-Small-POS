@@ -5614,6 +5614,18 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         receipt_renderer::receipt_label(&language, "Without")
     });
     let plugin = if is_box { "box".to_owned() } else { plugin };
+    // The release's plugin controls the layout, tender and carrier. Legacy
+    // metadata can additionally identify a platform for comments and tips.
+    let comment_and_tip_food = crate::payments::food_delivery_from_metadata(ghost_metadata.clone());
+    let comment_and_tip_platform = if plugin.trim().is_empty() {
+        comment_and_tip_food
+            .as_ref()
+            .and_then(|food| food.get("platform"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    } else {
+        &plugin
+    };
     let (order_branch_id, tax_amount_cents): (Option<String>, Option<i64>) = conn
         .query_row(
             "SELECT branch_id, tax_amount_cents FROM orders WHERE id = ?1",
@@ -5663,8 +5675,10 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         })
         .collect();
 
+    let is_platform = is_food_delivery_plugin(&plugin);
+    let has_platform_comment_format = is_food_delivery_plugin(comment_and_tip_platform);
     let mut order_notes = if is_box {
-        box_customer_notes([&customer_note, &delivery_notes, &special_instructions])
+        box_receipt_customer_notes([&customer_note, &delivery_notes, &special_instructions])
     } else {
         let mut notes = Vec::new();
         push_unique_trimmed_note(&mut notes, Some(&customer_note));
@@ -5674,12 +5688,23 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
             push_unique_trimmed_note(&mut notes, kiosk_context_note.as_deref());
         }
         push_unique_trimmed_note(&mut notes, Some(&delivery_notes));
-        let instructions = strip_platform_items_fallback(&special_instructions, !items.is_empty());
+        let instructions = strip_platform_items_fallback(
+            &special_instructions,
+            has_platform_comment_format || !items.is_empty(),
+        );
         if !(is_kiosk_order && is_internal_kiosk_routing_note(&instructions)) {
             push_unique_trimmed_note(&mut notes, Some(&instructions));
         }
         notes
     };
+    let platform_customer_note_count = has_platform_comment_format.then_some(order_notes.len());
+    if has_platform_comment_format && !is_box && items.is_empty() {
+        // Older imports can have an item list in this field but no item rows.
+        // Keep that list in its original note style, outside the comment.
+        if let Some(start) = special_instructions.find("--- Order Items ---") {
+            push_unique_trimmed_note(&mut order_notes, Some(&special_instructions[start..]));
+        }
+    }
 
     // THE-434 faithful slip: platform orders headline the rider's short code
     // (efood's own receipt prints «#4545» as the biggest element), so the big
@@ -5691,7 +5716,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
             &order_number,
             &raw_order_number,
         ))
-    } else if is_food_delivery_plugin(&plugin) {
+    } else if is_platform {
         food_delivery_short_code(&ghost_metadata)
     } else {
         None
@@ -5871,9 +5896,20 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
             discount_percent: None,
         });
     }
-    if tip_amount > 0.0 {
+    let driver_tip = comment_and_tip_food.as_ref().is_some_and(|food| {
+        crate::payments::platform_delivery_uses_store_driver(
+            comment_and_tip_platform,
+            &order_type,
+            food,
+        )
+    });
+    if tip_amount > 0.0
+        && (!has_platform_comment_format
+            || driver_tip
+            || matches!(order_type.as_str(), "pickup" | "takeaway"))
+    {
         totals.push(TotalsLine {
-            label: "Tip".to_string(),
+            label: if driver_tip { "Driver tip" } else { "Tip" }.into(),
             amount: tip_amount,
             emphasize: false,
             discount_percent: None,
@@ -6027,6 +6063,8 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         adjustments,
         masked_card,
         order_notes,
+        platform_comment_note_count: platform_customer_note_count
+            .filter(|count| !is_platform && *count > 0),
         // Platform orders print who they belong to, the rider's short code,
         // and the handoff payment line; the completed/canceled variants
         // overwrite this with their own label downstream.
@@ -6055,7 +6093,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         // THE-434 v2: food-delivery orders switch the renderer to the faithful
         // platform slip (modeled on the real efood slip #4579, 27/08/2026).
         preserve_box_customer_notes: is_box,
-        platform_slip: if crate::print::is_food_delivery_plugin(&plugin) {
+        platform_slip: if is_platform {
             let food_delivery = serde_json::from_str::<serde_json::Value>(&ghost_metadata)
                 .ok()
                 .and_then(|metadata| metadata.get("food_delivery").cloned())
@@ -6079,6 +6117,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
                 delivery_provider: field("delivery_provider"),
+                platform_customer_note_count,
                 is_test: is_test != 0,
                 // The slip headlines the PROMISED time: accept moment + the
                 // prep minutes the store gave. estimated_time is minutes when
@@ -6413,6 +6452,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         adjustments: Vec::new(),
         masked_card,
         order_notes,
+        platform_comment_note_count: None,
         status_label: None,
         cancellation_reason: None,
         preserve_box_customer_notes: is_box,
@@ -6482,7 +6522,7 @@ fn food_item_display_name(item: &Value) -> Option<&str> {
 
 /// The rider-facing 4-digit code from ghost_metadata.food_delivery — the
 /// number efood's own slip prints huge («#4545») and riders match orders by.
-fn food_delivery_short_code(ghost_metadata_json: &str) -> Option<String> {
+pub(crate) fn food_delivery_short_code(ghost_metadata_json: &str) -> Option<String> {
     serde_json::from_str::<Value>(ghost_metadata_json)
         .ok()?
         .get("food_delivery")?
@@ -6597,6 +6637,39 @@ fn box_customer_notes(fields: [&str; 3]) -> Vec<String> {
         }
     }
     notes
+}
+
+fn box_receipt_customer_notes(fields: [&str; 3]) -> Vec<String> {
+    let mut notes = Vec::new();
+    for field in fields {
+        let mut end = 0;
+        for line in field.split_inclusive('\n') {
+            if line
+                .trim()
+                .strip_prefix("---")
+                .and_then(|line| line.strip_suffix("---"))
+                .is_some_and(|line| {
+                    line.trim_matches([' ', '\t'])
+                        .eq_ignore_ascii_case("Order Items")
+                })
+            {
+                break;
+            }
+            end += line.len();
+        }
+        let note = &field[..end];
+        let note = if end < field.len() {
+            note.strip_suffix("\r\n")
+                .or_else(|| note.strip_suffix('\n'))
+                .unwrap_or(note)
+        } else {
+            note
+        };
+        if !note.trim().is_empty() && !notes.contains(&note) {
+            notes.push(note);
+        }
+    }
+    notes.into_iter().map(str::to_owned).collect()
 }
 
 fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicketDoc, String> {
@@ -7063,6 +7136,13 @@ fn build_shift_checkout_doc(
         tips_received: number_from_paths(&summary, &["/tipsReceived", "/tips_received"])
             .unwrap_or(0.0),
         amount_to_return: 0.0,
+        driver_kept_tip_lines: summary
+            .get("driverKeptTipLines")
+            .map(|lines| serde_json::from_value(lines.clone()))
+            .transpose()
+            .map_err(|e| format!("read checkout tip lines: {e}"))?
+            .unwrap_or_default(),
+        driver_drawer_payout: number_from_paths(&summary, &["/driverDrawerPayout"]),
         total_sells: 0.0,
         cancelled_or_refunded_total: 0.0,
         cancelled_or_refunded_count: 0,
@@ -7090,7 +7170,7 @@ fn build_shift_checkout_doc(
         .unwrap_or(0.0);
         let mut lines = Vec::new();
         let mut fees_total = 0.0_f64;
-        let mut tips_total = 0.0_f64;
+        let mut cancelled_or_refunded_cash = 0.0_f64;
         let mut cancelled_or_refunded_total = 0.0_f64;
         let mut cancelled_or_refunded_count = 0_i64;
 
@@ -7111,13 +7191,13 @@ fn build_shift_checkout_doc(
                 let is_cancelled_or_refunded = is_cancelled_or_refunded_status(status);
 
                 if is_cancelled_or_refunded {
+                    cancelled_or_refunded_cash += cash;
                     cancelled_or_refunded_total += total;
                     cancelled_or_refunded_count += 1;
                 } else {
                     delivery_cash_total += cash;
                     delivery_card_total += card;
                     fees_total += fee;
-                    tips_total += tip;
                 }
 
                 lines.push(crate::receipt_renderer::DriverDeliveryLine {
@@ -7151,26 +7231,40 @@ fn build_shift_checkout_doc(
         }
 
         if let Ok(ref mut doc) = doc {
-            let opening = doc.opening_amount;
-            let expenses = doc.total_expenses;
             doc.driver_deliveries = lines;
-            doc.total_cash_collected = cash_total;
             doc.total_card_collected = card_total;
             doc.total_delivery_fees = fees_total;
-            doc.total_tips = if doc.tips_received > 0.0 {
-                doc.tips_received
-            } else {
-                tips_total
-            };
+            doc.total_tips = doc.tips_received;
             doc.total_sells = cash_total + card_total;
             doc.cancelled_or_refunded_total = cancelled_or_refunded_total;
             doc.cancelled_or_refunded_count = cancelled_or_refunded_count;
-            doc.amount_to_return = crate::shifts::calculate_driver_return(
-                opening,
-                cash_total,
-                expenses,
-                doc.total_tips,
-            );
+            doc.amount_to_return = number_from_paths(&summary, &["/amountToReturn"]).unwrap_or(0.0);
+            // Cash from cancelled sales can still be in the driver's hands.
+            // Include it in the cash breakdown when it reconciles to the hand-in.
+            let all_cash = cash_total + cancelled_or_refunded_cash;
+            doc.total_cash_collected = if cancelled_or_refunded_cash > 0.0
+                && crate::shifts::calculate_driver_return(
+                    doc.opening_amount,
+                    all_cash,
+                    doc.total_expenses,
+                    doc.total_tips,
+                ) == doc.amount_to_return
+            {
+                all_cash
+            } else {
+                cash_total
+            };
+            if shift["status"] == "closed" || shift["check_out_time"].is_string() {
+                doc.expected_amount = number_from_paths(&shift, &["/expected_cash_amount"]);
+                doc.closing_amount = number_from_paths(&shift, &["/closing_cash_amount"]);
+                doc.variance_amount = number_from_paths(&shift, &["/cash_variance"]);
+            } else if let Some(closing) = doc.closing_amount {
+                doc.variance_amount = Some(
+                    (crate::money::Cents::round_half_even(closing)
+                        - crate::money::Cents::round_half_even(doc.amount_to_return))
+                    .to_f64_dp2(),
+                );
+            }
         }
     }
 
@@ -7862,6 +7956,10 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
                             .pointer("/driver/tips")
                             .and_then(Value::as_f64)
                             .unwrap_or(0.0),
+                        driver_kept_tips: s.pointer("/driver/keptTips").and_then(Value::as_f64),
+                        driver_drawer_payout: s
+                            .pointer("/driver/drawerPayout")
+                            .and_then(Value::as_f64),
                     })
                     .collect()
             })
@@ -8190,6 +8288,10 @@ fn build_z_report_doc_with_conn(
                             .pointer("/driver/tips")
                             .and_then(Value::as_f64)
                             .unwrap_or(0.0),
+                        driver_kept_tips: s.pointer("/driver/keptTips").and_then(Value::as_f64),
+                        driver_drawer_payout: s
+                            .pointer("/driver/drawerPayout")
+                            .and_then(Value::as_f64),
                     })
                     .collect()
             })
@@ -11410,6 +11512,13 @@ pub fn start_print_worker(
 
 #[cfg(test)]
 mod tests {
+    mod box_tip_checkout_base_goldens {
+        include!("box_tip_checkout_base_goldens.rs");
+    }
+
+    mod box_tip_cash_breakdown_base_probe {
+        include!("box_tip_cash_breakdown_base_probe.rs");
+    }
     // CI patience convention (print-concurrency flake family, 2026-08-26..28):
     // test-side liveness waits (recv_timeout, condvar wait_*, tokio timeouts)
     // get 30s; success-path bounds handed to the function under test get 10s
@@ -20063,6 +20172,7 @@ mod tests {
             &serde_json::json!({
                 "shiftId": driver_shift_id.as_str(),
                 "closingCash": 20.0,
+                "expectedDriverKeptTips": 0.0, "expectedDriverPayout": 0.0,
             }),
         )
         .expect("close driver shift");
@@ -20087,8 +20197,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_document_for_job_driver_shift_checkout_payload_overrides_manual_snapshot_values()
-    {
+    fn fix_win6_closed_driver_checkout_uses_stored_amounts_over_print_snapshot() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         seed_print_store_currency(&db);
@@ -20123,6 +20232,7 @@ mod tests {
             &serde_json::json!({
                 "shiftId": driver_shift_id.as_str(),
                 "closingCash": 20.0,
+                "expectedDriverKeptTips": 0.0, "expectedDriverPayout": 0.0,
             }),
         )
         .expect("close driver shift");
@@ -20147,17 +20257,17 @@ mod tests {
             ReceiptDocument::ShiftCheckout(doc) => {
                 assert_eq!(doc.role_type, "driver");
                 assert_eq!(doc.check_out, "2026-03-24T12:15:00Z");
-                assert_eq!(doc.expected_amount, Some(60.0));
-                assert_eq!(doc.closing_amount, Some(62.0));
-                assert_eq!(doc.variance_amount, Some(2.0));
+                assert_eq!(doc.expected_amount, Some(25.0));
+                assert_eq!(doc.amount_to_return, 25.0);
+                assert_eq!(doc.closing_amount, Some(20.0));
+                assert_eq!(doc.variance_amount, Some(-5.0));
             }
             _ => panic!("expected shift checkout document"),
         }
     }
 
     #[test]
-    fn test_build_document_for_job_driver_shift_checkout_uses_driver_totals_instead_of_shift_expected(
-    ) {
+    fn fix_win6_released_driver_checkout_does_not_recalculate_saved_due_or_tips() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         seed_print_store_currency(&db);
@@ -20233,7 +20343,15 @@ mod tests {
                     ],
                 )
                 .expect("insert driver order");
-                let _ = payment_method; // W6: method now derives from order_payments only
+                if status == "completed" {
+                    conn.execute(
+                        "INSERT INTO order_payments (
+                            id, order_id, method, amount, amount_cents, status, currency, created_at, updated_at
+                         ) VALUES (?1, ?1, ?2, ?3, ?4, 'completed', 'EUR', ?5, ?5)",
+                        params![order_id, payment_method, total_amount, total_amount_cents, now],
+                    )
+                    .unwrap();
+                }
             }
 
             for (earning_id, order_id, payment_method, cash_collected, card_amount, tip_amount) in [
@@ -20257,7 +20375,7 @@ mod tests {
                     "earning-driver-refund",
                     "order-driver-refund",
                     "cash",
-                    9.0,
+                    0.0,
                     0.0,
                     1.0,
                 ),
@@ -20320,11 +20438,14 @@ mod tests {
                 assert_eq!(doc.expected_amount, Some(26.60));
                 assert!((doc.total_cash_collected - 67.75).abs() < f64::EPSILON);
                 assert!((doc.total_card_collected - 83.85).abs() < f64::EPSILON);
-                assert!((doc.total_tips - 2.5).abs() < f64::EPSILON);
+                assert_eq!(doc.total_tips, 0.0);
+                assert!(doc.driver_kept_tip_lines.is_empty());
                 assert!((doc.total_sells - 151.60).abs() < 0.0001);
                 assert_eq!(doc.cancelled_or_refunded_count, 1);
                 assert!((doc.cancelled_or_refunded_total - 9.0).abs() < f64::EPSILON);
-                assert!((doc.amount_to_return - 80.25).abs() < 0.0001);
+                assert_eq!(doc.amount_to_return, 26.60);
+                assert_eq!(doc.closing_amount, Some(87.75));
+                assert_eq!(doc.variance_amount, Some(61.15));
                 assert_eq!(
                     doc.driver_deliveries[0].delivery_address.as_deref(),
                     Some("Αλεξανδρείας 24")
@@ -20332,6 +20453,850 @@ mod tests {
             }
             _ => panic!("expected shift checkout document"),
         }
+    }
+
+    #[test]
+    fn fix_win7_metadata_only_efood_keeps_the_regular_slip() {
+        let db = test_db();
+        let ordinary = {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "legacy-efood", "ORDER-123", 7.65);
+            conn.execute(
+                "UPDATE orders SET order_type = 'delivery', plugin = '', items = ?1
+                 WHERE id = 'legacy-efood'",
+                [r#"[{"name":"Toast","quantity":1,"price":7.65,"notes":"χωρίς αλάτι"}]"#],
+            )
+            .unwrap();
+            drop(conn);
+            build_order_receipt_doc(&db, "legacy-efood").unwrap()
+        };
+        db.conn.lock().unwrap().execute(
+            "UPDATE orders SET ghost_metadata = ?1 WHERE id = 'legacy-efood'",
+            [r#"{"food_delivery":{"platform":"efood","short_code":"1234","delivery_provider":"vendor_delivery"}}"#],
+        ).unwrap();
+        let actual = build_order_receipt_doc(&db, "legacy-efood").unwrap();
+        assert!(actual.platform_slip.is_none());
+        assert_eq!(actual.order_number, ordinary.order_number);
+        assert_eq!(actual.status_label, ordinary.status_label);
+        let cfg = receipt_renderer::LayoutConfig {
+            language: "el".into(),
+            ..Default::default()
+        };
+        let actual = ReceiptDocument::OrderReceipt(actual);
+        let ordinary = ReceiptDocument::OrderReceipt(ordinary);
+        assert_eq!(
+            receipt_renderer::render_escpos(&actual, &cfg).bytes,
+            receipt_renderer::render_escpos(&ordinary, &cfg).bytes
+        );
+        assert_eq!(
+            receipt_renderer::render_html(&actual, &cfg),
+            receipt_renderer::render_html(&ordinary, &cfg)
+        );
+
+        let metadata = serde_json::json!({"food_delivery": serde_json::json!({
+            "platform": "efood",
+            "delivery_provider": "vendor_delivery",
+            "payment_method": "online",
+            "prepaid": true,
+        }).to_string()});
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE orders SET ghost_metadata = ?1,
+                    tip_amount = 0.75, tip_amount_cents = 75,
+                    special_instructions = 'χτυπήστε το κουδούνι'
+                 WHERE id = 'legacy-efood'",
+                [metadata.to_string()],
+            )
+            .unwrap();
+        }
+        let legacy = build_order_receipt_doc(&db, "legacy-efood").unwrap();
+        assert!(legacy.platform_slip.is_none());
+        let html = receipt_renderer::render_html(&ReceiptDocument::OrderReceipt(legacy), &cfg);
+        assert!(html.contains("<strong>Σχόλια:<br>Χτυπήστε το κουδούνι</strong>"));
+        assert!(html.contains("Φιλοδώρημα διανομέα"));
+
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE orders SET plugin = 'efood' WHERE id = 'legacy-efood'",
+                [],
+            )
+            .unwrap();
+        let canonical = build_order_receipt_doc(&db, "legacy-efood").unwrap();
+        let slip = canonical.platform_slip.unwrap();
+        assert!(slip.delivery_provider.is_none());
+        assert!(slip.payment_method.is_none());
+        assert!(!slip.prepaid);
+    }
+
+    #[test]
+    fn platform_slips_show_only_store_driver_tips_and_zero_is_byte_identical() {
+        for (platform, provider, daas, expected_tip) in [
+            ("efood", "vendor_delivery", None, 0.65),
+            ("wolt", "vendor_delivery", None, 0.90),
+            ("efood", "platform_delivery", None, 0.0),
+            ("box", "vendor_delivery", Some(true), 0.0),
+        ] {
+            let db = test_db();
+            let local_id = {
+                let conn = db.conn.lock().unwrap();
+                let mut row = crate::sync::b449_list_row_for_test();
+                row["platform"] = platform.into();
+                row["ghost_metadata"]["food_delivery"] = serde_json::json!({
+                    "platform": platform,
+                    "delivery_provider": provider,
+                    "prepaid": true,
+                    "payment_method": "online",
+                    "tip": if expected_tip > 0.0 { expected_tip } else { 0.75 },
+                });
+                if let Some(daas) = daas {
+                    row["ghost_metadata"]["food_delivery"]["box_daas"] = daas.into();
+                }
+                assert!(crate::sync::apply_remote_orders_page_for_test(&conn, vec![row]).is_none());
+                conn.query_row(
+                    "SELECT id FROM orders WHERE supabase_id='b449-remote'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+            };
+            let receipt = build_order_receipt_doc(&db, &local_id).unwrap();
+            let tips: Vec<_> = receipt
+                .totals
+                .iter()
+                .filter(|line| line.label == "Driver tip" || line.label == "Tip")
+                .map(|line| (line.label.as_str(), line.amount))
+                .collect();
+            if expected_tip > 0.0 {
+                assert_eq!(tips, vec![("Driver tip", expected_tip)]);
+            } else {
+                assert!(tips.is_empty());
+            }
+
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE orders SET tip_amount = 0.0, tip_amount_cents = 0,
+                        ghost_metadata = json_set(ghost_metadata, '$.food_delivery.tip', 0)
+                     WHERE id = ?1",
+                    [&local_id],
+                )
+                .unwrap();
+            let zero_receipt = build_order_receipt_doc(&db, &local_id).unwrap();
+            assert!(zero_receipt
+                .totals
+                .iter()
+                .all(|line| !line.label.contains("tip")));
+            // Metadata with no tip and an explicit zero produce identical slips.
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE orders SET ghost_metadata = json_remove(ghost_metadata, '$.food_delivery.tip')
+                     WHERE id = ?1",
+                    [&local_id],
+                )
+                .unwrap();
+            let baseline = build_order_receipt_doc(&db, &local_id).unwrap();
+
+            let cfg = receipt_renderer::LayoutConfig {
+                language: "el".into(),
+                character_set: "PC737_GREEK".into(),
+                decimal_comma: true,
+                ..Default::default()
+            };
+            let mut label = crate::escpos::EscPosBuilder::new().with_greek();
+            label.text("Φιλοδώρημα διανομέα");
+            let label = label.build();
+            for make_doc in [
+                ReceiptDocument::OrderReceipt as fn(OrderReceiptDoc) -> ReceiptDocument,
+                ReceiptDocument::DeliverySlip,
+            ] {
+                let document = make_doc(receipt.clone());
+                let zero = make_doc(zero_receipt.clone());
+                let baseline = make_doc(baseline.clone());
+                let html = receipt_renderer::render_html(&document, &cfg);
+                assert_eq!(
+                    html.matches("Φιλοδώρημα διανομέα").count(),
+                    usize::from(expected_tip > 0.0)
+                );
+                assert_eq!(html.matches("Σχόλια:").count(), 1);
+                assert!(html.contains("<strong>Σχόλια:<br>Όπως ανεβαίνετε αριστερά</strong>"));
+                assert_eq!(
+                    receipt_renderer::render_html(&zero, &cfg),
+                    receipt_renderer::render_html(&baseline, &cfg)
+                );
+                assert_eq!(
+                    receipt_renderer::render_escpos(&zero, &cfg).bytes,
+                    receipt_renderer::render_escpos(&baseline, &cfg).bytes
+                );
+                assert_eq!(
+                    receipt_renderer::render_escpos(&document, &cfg)
+                        .bytes
+                        .windows(label.len())
+                        .filter(|bytes| *bytes == label.as_slice())
+                        .count(),
+                    usize::from(expected_tip > 0.0)
+                );
+                let raster = |doc| {
+                    receipt_renderer::render_classic_raster_exact_preview_data_url(doc, &cfg)
+                        .unwrap()
+                        .0
+                };
+                assert_eq!(raster(&zero), raster(&baseline));
+                if expected_tip > 0.0 {
+                    assert_ne!(raster(&document), raster(&baseline));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn b449_and_phone_tips_reconcile_driver_checkout_cashier_and_z() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        seed_print_store_currency(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            // A real till knows its organization and its own terminal id. Without
+            // them the open-notice check cannot read its scope, and the
+            // assignment keeps the order 'ready' instead of moving it to
+            // 'delivered' (order_ownership::assign_order_to_driver_shift).
+            db::set_setting(&conn, "terminal", "organization_id", "org-1").unwrap();
+            db::set_setting(&conn, "terminal", "terminal_id", "term-1").unwrap();
+            insert_active_cashier_fixture(&conn, "b449-cashier", "b449-drawer");
+            let opened_at = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+            conn.execute(
+                "UPDATE staff_shifts SET check_in_time=?1 WHERE id='b449-cashier'",
+                [&opened_at],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE cash_drawer_sessions SET opened_at=?1 WHERE id='b449-drawer'",
+                [&opened_at],
+            )
+            .unwrap();
+            db::set_setting(&conn, "tax", "vat_print_on_receipt", "false").unwrap();
+        }
+        let driver = crate::shifts::open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "b449-driver", "branchId": "branch-1", "terminalId": "term-1",
+                "roleType": "driver", "openingCash": 20.0
+            }),
+        )
+        .unwrap();
+        let shift_id = driver["shiftId"].as_str().unwrap();
+        let now = chrono::Utc::now();
+        let entered_at = now.to_rfc3339();
+        let local_id: String = {
+            let conn = db.conn.lock().unwrap();
+            let mut row = crate::sync::b449_list_row_for_test();
+            row["branch_id"] = "branch-1".into();
+            row["terminal_id"] = "term-1".into();
+            row["created_at"] = entered_at.clone().into();
+            row["updated_at"] = entered_at.clone().into();
+            assert!(crate::sync::apply_remote_orders_page_for_test(&conn, vec![row]).is_none());
+            let local_id: String = conn
+                .query_row(
+                    "SELECT id FROM orders WHERE supabase_id='b449-remote'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, remote_payment_id, method, amount, amount_cents,
+                    tip_amount, tip_amount_cents, status, sync_status, currency, transaction_ref,
+                    created_at, updated_at
+                 ) VALUES ('b449-settlement', ?1, 'b449-settlement-remote', 'other', 7.65, 765,
+                    0.0, 0, 'completed', 'synced', 'EUR', 'platform_settlement:online:b449', ?2, ?2)",
+                params![local_id, entered_at],
+            )
+            .unwrap();
+            crate::commands::orders::assign_driver_locally(
+                &conn,
+                &local_id,
+                "b449-driver",
+                None,
+                &entered_at,
+            )
+            .unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT de.tip_amount, de.total_earning, de.cash_collected, o.status
+                     FROM driver_earnings de JOIN orders o ON o.id = de.order_id
+                     WHERE de.order_id=?1",
+                    [&local_id],
+                    |row| Ok((
+                        row.get::<_, f64>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, String>(3)?,
+                    )),
+                )
+                .unwrap(),
+                (0.75, 0.75, 0.0, "delivered".to_owned())
+            );
+            assert!(
+                crate::payment_integrity::load_order_payment_blockers(&conn, &local_id)
+                    .unwrap()
+                    .is_empty()
+            );
+            local_id
+        };
+        let mut phone_card_payment_id = None;
+        for (id, method, amount, amount_cents, tip, tip_cents) in [
+            ("phone-card", "card", 15.0, 1500, 1.0, 100),
+            ("phone-cash", "cash", 10.0, 1000, 0.50, 50),
+            ("unpaid-delivery", "", 0.0, 0, 2.0, 200),
+        ] {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO orders (
+                    id, order_number, order_type, items, status, payment_status, total_amount,
+                    total_amount_cents, tip_amount, tip_amount_cents, branch_id, terminal_id,
+                    currency, created_at, updated_at
+                 ) VALUES (?1, ?1, 'delivery', '[]', 'ready', 'pending', ?2, ?3, ?4, ?5,
+                    'branch-1', 'term-1', 'EUR', ?6, ?6)",
+                    params![id, amount, amount_cents, tip, tip_cents, entered_at],
+                )
+                .unwrap();
+            if !method.is_empty() {
+                let mut payload = serde_json::json!({
+                    "orderId": id, "method": method, "amount": amount,
+                    "tipAmount": tip, "tipRecipientRole": "driver",
+                });
+                if method == "cash" {
+                    payload["cashReceived"] = serde_json::json!(amount);
+                    payload["changeGiven"] = serde_json::json!(0.0);
+                }
+                let payment = crate::payments::record_payment(&db, &payload).unwrap();
+                if method == "card" {
+                    phone_card_payment_id = payment["paymentId"].as_str().map(str::to_owned);
+                    let conn = db.conn.lock().unwrap();
+                    assert_eq!(
+                        conn.query_row(
+                            "SELECT tip_recipient_staff_shift_id FROM order_payments WHERE id=?1",
+                            [phone_card_payment_id.as_deref().unwrap()],
+                            |row| row.get::<_, Option<String>>(0),
+                        )
+                        .unwrap(),
+                        None
+                    );
+                }
+            }
+            crate::commands::orders::assign_driver_locally(
+                &db.conn.lock().unwrap(),
+                id,
+                "b449-driver",
+                None,
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .unwrap();
+        }
+
+        let receipt = build_order_receipt_doc(&db, &local_id).unwrap();
+        assert_eq!(receipt.order_notes, vec!["Όπως ανεβαίνετε αριστερά"]);
+        assert_eq!(
+            receipt
+                .totals
+                .iter()
+                .map(|line| (line.label.as_str(), line.amount))
+                .collect::<Vec<_>>(),
+            vec![("Subtotal", 6.90), ("Driver tip", 0.75), ("TOTAL", 7.65)]
+        );
+
+        let screen = crate::shifts::get_shift_summary(&db, shift_id).unwrap();
+        assert_eq!(screen["driverDeliveries"].as_array().unwrap().len(), 4);
+        assert_eq!(screen["tipsReceived"], 2.25);
+        assert_eq!(screen["amountToReturn"], 27.75);
+        let tip_lines: Vec<crate::shifts::DriverKeptTipLine> =
+            serde_json::from_value(screen["driverKeptTipLines"].clone()).unwrap();
+        let mut listed: Vec<_> = tip_lines
+            .iter()
+            .map(|line| {
+                (
+                    line.order_number.as_str(),
+                    line.source.as_str(),
+                    line.payment_methods.join("/"),
+                    line.amount,
+                )
+            })
+            .collect();
+        listed.sort_by_key(|line| line.0);
+        assert_eq!(
+            listed,
+            vec![
+                ("#B449", "box", "online".into(), 0.75),
+                ("phone-card", "phone", "card".into(), 1.00),
+                ("phone-cash", "phone", "cash".into(), 0.50),
+            ]
+        );
+        let cashier_screen = crate::shifts::get_shift_summary(&db, "b449-cashier").unwrap();
+        assert_eq!(cashier_screen["driverDeliveries"][0]["tips_received"], 2.25);
+        assert_eq!(
+            cashier_screen["driverDeliveries"][0]["amount_to_return"],
+            27.75
+        );
+        let printed = build_shift_checkout_doc(&db, shift_id, None).unwrap();
+        assert_eq!(printed.total_cash_collected, 10.0);
+        assert_eq!(printed.total_tips, 2.25);
+        assert_eq!(printed.amount_to_return, 27.75);
+        assert_eq!(printed.driver_kept_tip_lines, tip_lines);
+        let print_cfg = receipt_renderer::LayoutConfig {
+            language: "el".into(),
+            decimal_comma: true,
+            ..Default::default()
+        };
+        let html =
+            receipt_renderer::render_html(&ReceiptDocument::ShiftCheckout(printed), &print_cfg);
+        let tips_label = "Φιλοδωρήματα που κρατά";
+        assert_eq!(html.matches(tips_label).count(), 1);
+        let tips_block = html
+            .split_once(tips_label)
+            .unwrap()
+            .1
+            .split_once(receipt_renderer::receipt_label("el", "Return"))
+            .unwrap()
+            .0;
+        for (label, amount) in [
+            ("#B449 · BOX · Ηλεκτρονικά", "0,75"),
+            ("phone-card · Τηλέφωνο · Κάρτα", "1,00"),
+            ("phone-cash · Τηλέφωνο · Μετρητά", "0,50"),
+        ] {
+            let row = tips_block
+                .lines()
+                .find(|part| part.contains(label))
+                .unwrap();
+            assert!(
+                row.split_once(label)
+                    .unwrap()
+                    .1
+                    .split_once("</div>")
+                    .unwrap()
+                    .0
+                    .contains(amount),
+                "{label}: {row}"
+            );
+        }
+        assert!(!tips_block.contains("unpaid-delivery"));
+        assert!(tips_block.contains("-2,25"));
+        let z_payload = serde_json::json!({
+            "branchId": "branch-1", "date": now.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string()
+        });
+        let z = crate::zreport::preview_z_report_for_date(&db, &z_payload).unwrap();
+        let live_driver = z["report"]["reportJson"]["staffReports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["staffShiftId"] == shift_id)
+            .unwrap();
+        assert_eq!(live_driver["driver"]["cashToReturn"], 27.75);
+        let close = crate::shifts::close_shift(
+            &db,
+            &serde_json::json!({"shiftId": shift_id, "closingCash": 27.75, "expectedDriverKeptTips": 2.25, "expectedDriverPayout": 0.0}),
+        )
+        .unwrap();
+        assert_eq!(close["success"], true, "{close}");
+        assert_eq!(close["expected"], 27.75);
+        assert_eq!(close["variance"], 0.0);
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT expected_cash_amount_cents FROM staff_shifts WHERE id=?1",
+                    [shift_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2775
+        );
+        let cashier = crate::shifts::close_shift(
+            &db,
+            &serde_json::json!({"shiftId": "b449-cashier", "closingCash": 207.75}),
+        )
+        .unwrap();
+        assert_eq!(cashier["success"], true, "{cashier}");
+        assert_eq!(cashier["expected"], 207.75);
+        assert_eq!(cashier["variance"], 0.0);
+        let cashier_screen = crate::shifts::get_shift_summary(&db, "b449-cashier").unwrap();
+        assert_eq!(cashier_screen["cashDrawer"]["driver_cash_returned"], 27.75);
+        assert!(crate::zreport::unsettled_payment_blockers(&db, &z_payload)
+            .unwrap()
+            .is_empty());
+        let z = crate::zreport::preview_z_report_for_date(&db, &z_payload).unwrap();
+        let report = &z["report"]["reportJson"];
+        assert_eq!(report["sales"]["platformOnlineSales_cents"], 765);
+        assert_eq!(report["sales"]["cashSales_cents"], 1000);
+        assert_eq!(report["daySummary"]["total_cents"], 3265);
+        let closed_driver = report["staffReports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["staffShiftId"] == shift_id)
+            .unwrap();
+        assert_eq!(closed_driver["driver"]["cashToReturn"], 27.75);
+        assert_eq!(closed_driver["returnedToDrawerAmount"], 27.75);
+        assert_eq!(closed_driver["driver"]["keptTips"], 2.25);
+        assert_eq!(report["integrity"]["unexplainedDifference_cents"], 0);
+        assert_eq!(report["integrity"]["blockingFindings"], 0);
+        assert_eq!(report["integrity"]["findings"], serde_json::json!([]));
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE order_payments SET status='voided' WHERE id=?1",
+                [phone_card_payment_id.as_deref().unwrap()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                    tip_amount, tip_amount_cents, status, tip_recipient_staff_shift_id,
+                    currency, created_at, updated_at)
+                 VALUES ('late-tip', 'phone-cash', 'card', 1.25, 125, 1.25, 125, 'completed',
+                    ?1, 'EUR', ?2, ?2)",
+                params![shift_id, chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+        let reprint = build_shift_checkout_doc(&db, shift_id, None).unwrap();
+        assert_eq!(reprint.amount_to_return, 27.75);
+        assert_eq!(reprint.driver_kept_tip_lines, tip_lines);
+        let report_after = crate::zreport::preview_z_report_for_date(&db, &z_payload).unwrap();
+        let driver_after = report_after["report"]["reportJson"]["staffReports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["staffShiftId"] == shift_id)
+            .unwrap();
+        assert_eq!(driver_after["driver"]["keptTips"], 2.25);
+        assert_eq!(driver_after["driver"]["cashToReturn"], 27.75);
+    }
+
+    #[test]
+    fn prepaid_box_tip_without_float_is_paid_from_drawer_and_balances() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        seed_print_store_currency(&db);
+        let now = chrono::Utc::now();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_active_cashier_fixture(&conn, "payout-cashier", "payout-drawer");
+            let opened_at = (now - chrono::Duration::minutes(1)).to_rfc3339();
+            conn.execute(
+                "UPDATE staff_shifts SET check_in_time=?1 WHERE id='payout-cashier'",
+                [&opened_at],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE cash_drawer_sessions SET opened_at=?1 WHERE id='payout-drawer'",
+                [&opened_at],
+            )
+            .unwrap();
+        }
+        let driver = crate::shifts::open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "payout-driver", "branchId": "branch-1", "terminalId": "term-1",
+                "roleType": "driver", "openingCash": 0.0
+            }),
+        )
+        .unwrap();
+        let shift_id = driver["shiftId"].as_str().unwrap();
+        let entered_at = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = db.conn.lock().unwrap();
+            let mut row = crate::sync::b449_list_row_for_test();
+            row["branch_id"] = "branch-1".into();
+            row["terminal_id"] = "term-1".into();
+            row["created_at"] = entered_at.clone().into();
+            row["updated_at"] = entered_at.clone().into();
+            assert!(crate::sync::apply_remote_orders_page_for_test(&conn, vec![row]).is_none());
+            let order_id: String = conn
+                .query_row(
+                    "SELECT id FROM orders WHERE supabase_id='b449-remote'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, remote_payment_id, method, amount, amount_cents,
+                    tip_amount, tip_amount_cents, status, sync_status, currency, transaction_ref,
+                    created_at, updated_at
+                 ) VALUES ('payout-settlement', ?1, 'payout-settlement-remote', 'other', 7.65, 765,
+                    0.0, 0, 'completed', 'synced', 'EUR', 'platform_settlement:online:b449', ?2, ?2)",
+                params![order_id, entered_at],
+            ).unwrap();
+            crate::commands::orders::assign_driver_locally(
+                &conn,
+                &order_id,
+                "payout-driver",
+                None,
+                &entered_at,
+            )
+            .unwrap();
+        }
+        let before = crate::shifts::get_shift_summary(&db, "payout-cashier").unwrap();
+        assert_eq!(before["shift"]["opening_cash_amount"], 200.0);
+        assert_eq!(before["cashDrawer"]["driver_cash_returned"], 0.0);
+        let summary = crate::shifts::get_shift_summary(&db, shift_id).unwrap();
+        assert_eq!(summary["amountToReturn"], -0.75);
+        assert_eq!(summary["driverDrawerPayout"], 0.75);
+        assert_eq!(summary["tipsReceived"], 0.75);
+        let close = crate::shifts::close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": shift_id, "closingCash": 0.0, "expectedDriverKeptTips": 0.75, "expectedDriverPayout": 0.75,
+            }),
+        )
+        .unwrap();
+        assert_eq!(close["success"], true, "{close}");
+        assert_eq!(close["expected"], -0.75);
+        assert_eq!(close["closing"], -0.75);
+        assert_eq!(close["variance"], 0.0);
+        {
+            let conn = db.conn.lock().unwrap();
+            let cash: (i64, i64, i64) = conn.query_row(
+                "SELECT closing_cash_amount_cents, expected_cash_amount_cents, cash_variance_cents
+                 FROM staff_shifts WHERE id=?1", [shift_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            assert_eq!(cash, (-75, -75, 0));
+            let payload: String = conn
+                .query_row(
+                    "SELECT data FROM parity_sync_queue WHERE table_name='staff_shifts'
+                 AND record_id=?1 AND operation='UPDATE' ORDER BY created_at DESC LIMIT 1",
+                    [shift_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let payload: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(payload["returnedCashTargetDrawerId"], "payout-drawer");
+            assert_eq!(payload["returnedCashAmount"], -0.75);
+            assert_eq!(payload["closingCash"], -0.75);
+            assert_eq!(payload["expectedCash"], -0.75);
+            assert_eq!(payload["variance"], 0.0);
+        }
+        let print_cfg = receipt_renderer::LayoutConfig {
+            language: "el".into(),
+            decimal_comma: true,
+            ..Default::default()
+        };
+        let checkout = build_shift_checkout_doc(&db, shift_id, None).unwrap();
+        assert_eq!(checkout.driver_drawer_payout, Some(0.75));
+        let html =
+            receipt_renderer::render_html(&ReceiptDocument::ShiftCheckout(checkout), &print_cfg);
+        assert_eq!(html.matches("Πληρωμή από το συρτάρι").count(), 1);
+        assert!(html.contains("Πληρωμή από το συρτάρι:</strong><strong>0,75"));
+
+        let cashier = crate::shifts::close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": "payout-cashier", "closingCash": 199.25
+            }),
+        )
+        .unwrap();
+        assert_eq!(cashier["success"], true, "{cashier}");
+        assert_eq!(cashier["expected"], 199.25);
+        assert_eq!(cashier["closing"], 199.25);
+        assert_eq!(cashier["variance"], 0.0);
+        let summary = crate::shifts::get_shift_summary(&db, "payout-cashier").unwrap();
+        assert_eq!(summary["cashDrawer"]["driver_cash_returned"], -0.75);
+        let cashier_payload: String = db.conn.lock().unwrap().query_row(
+            "SELECT data FROM parity_sync_queue WHERE table_name='staff_shifts'
+             AND record_id='payout-cashier' AND operation='UPDATE' ORDER BY created_at DESC LIMIT 1",
+            [], |row| row.get(0),
+        ).unwrap();
+        let cashier_payload: Value = serde_json::from_str(&cashier_payload).unwrap();
+        assert_eq!(cashier_payload["cashDrawer"]["driverCashReturned"], -0.75);
+        assert_eq!(
+            cashier_payload["cashDrawer"]["driver_cash_returned_cents"],
+            -75
+        );
+
+        let z_payload = serde_json::json!({
+            "branchId": "branch-1", "date": now.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string()
+        });
+        let z = crate::zreport::preview_z_report_for_date(&db, &z_payload).unwrap();
+        let report = &z["report"]["reportJson"];
+        let driver = report["staffReports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["staffShiftId"] == shift_id)
+            .unwrap();
+        assert_eq!(driver["driver"]["cashToReturn"], -0.75);
+        assert_eq!(driver["returnedToDrawerAmount"], -0.75);
+        assert_eq!(driver["drawer"]["variance"], 0.0);
+        assert_eq!(report["cashDrawer"]["driverCashReturned"], -0.75);
+        assert_eq!(report["cashDrawer"]["expected"], 199.25);
+        assert_eq!(report["cashDrawer"]["closing"], 199.25);
+        assert_eq!(report["integrity"]["unexplainedDifference_cents"], 0);
+    }
+
+    #[test]
+    fn driver_checkout_without_kept_tips_preserves_hand_in_and_variance() {
+        assert_cash_only_driver_checkout(false);
+    }
+
+    #[test]
+    fn fix2_win_item4_cancelled_cash_line_explains_the_stored_due() {
+        assert_cash_only_driver_checkout(true);
+    }
+
+    fn assert_cash_only_driver_checkout(cancel_order: bool) {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        seed_print_store_currency(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_active_cashier_fixture(&conn, "cash-only-cashier", "cash-only-drawer");
+        }
+        let driver = crate::shifts::open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "cash-only-driver", "branchId": "branch-1", "terminalId": "term-1",
+                "roleType": "driver", "openingCash": 20.0
+            }),
+        )
+        .unwrap();
+        let shift_id = driver["shiftId"].as_str().unwrap();
+        let at = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, order_type, status, payment_status,
+                  total_amount, total_amount_cents, branch_id, terminal_id, currency, created_at, updated_at)
+                 VALUES ('cash-only-order', '#301', '[]', 'delivery', 'ready', 'paid',
+                  10.0, 1000, 'branch-1', 'term-1', 'EUR', ?1, ?1)", [&at],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                    status, staff_shift_id, currency, created_at, updated_at)
+                 VALUES ('cash-only-payment', 'cash-only-order', 'cash', 10.0, 1000,
+                    'completed', ?1, 'EUR', ?2, ?2)",
+                params![shift_id, at],
+            )
+            .unwrap();
+            crate::commands::orders::assign_driver_locally(
+                &conn,
+                "cash-only-order",
+                "cash-only-driver",
+                None,
+                &at,
+            )
+            .unwrap();
+            if cancel_order {
+                conn.execute(
+                    "UPDATE orders SET status='cancelled' WHERE id='cash-only-order'",
+                    [],
+                )
+                .unwrap();
+            }
+        }
+        let close = crate::shifts::close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": shift_id, "closingCash": 29.50, "expectedDriverKeptTips": 0.0, "expectedDriverPayout": 0.0,
+            }),
+        )
+        .unwrap();
+        assert_eq!(close["success"], true, "{close}");
+        assert_eq!(close["expected"], 30.0);
+        assert_eq!(close["closing"], 29.50);
+        assert_eq!(close["variance"], -0.50);
+        let summary = crate::shifts::get_shift_summary(&db, shift_id).unwrap();
+        assert!(summary["driverKeptTipLines"]
+            .as_array()
+            .is_none_or(Vec::is_empty));
+        assert_eq!(summary["tipsReceived"], 0.0);
+        assert_eq!(summary["shift"]["closing_cash_amount"], 29.50);
+        let checkout = build_shift_checkout_doc(&db, shift_id, None).unwrap();
+        assert_eq!(checkout.amount_to_return, 30.0);
+        assert_eq!(checkout.total_cash_collected, 10.0);
+        assert_eq!(
+            checkout.opening_amount + checkout.total_cash_collected
+                - checkout.total_expenses
+                - checkout.total_tips,
+            checkout.amount_to_return
+        );
+        assert_eq!(checkout.closing_amount, Some(29.50));
+        assert_eq!(checkout.variance_amount, Some(-0.50));
+        assert!(checkout.driver_kept_tip_lines.is_empty());
+        assert_eq!(checkout.driver_drawer_payout, None);
+        let html = receipt_renderer::render_html(
+            &ReceiptDocument::ShiftCheckout(checkout),
+            &receipt_renderer::LayoutConfig::default(),
+        );
+        let return_label = receipt_renderer::receipt_label("en", "Return");
+        let return_row_start = format!("<strong>{return_label}</strong><strong>");
+        let return_amount = html
+            .split_once(return_row_start.as_str())
+            .and_then(|(_, rest)| rest.split_once("</strong>"))
+            .map(|(amount, _)| amount)
+            .unwrap();
+        assert!(return_amount.contains("30.00"), "{return_amount}");
+        assert!(!html.contains("Tips kept"));
+        assert!(!html.contains("Drawer payout"));
+    }
+
+    #[test]
+    fn z_staff_print_shows_kept_tips_and_payout_only_when_present() {
+        let db = test_db();
+        let mut payload = serde_json::json!({
+            "date": "2026-11-21", "generatedAt": "2026-11-21T12:00:00Z",
+            "presentation": { "deliveryModuleEnabled": true },
+            "staffReports": [{
+                "role": "driver", "staffName": "Driver",
+                "orders": { "count": 1 },
+                "driver": { "tips": 0.75, "cashToReturn": -0.75 }
+            }],
+            "cashDrawer": { "expected": 199.25, "closing": 199.25, "totalVariance": 0.0 }
+        });
+        let cfg = receipt_renderer::LayoutConfig {
+            language: "el".into(),
+            decimal_comma: true,
+            ..Default::default()
+        };
+        let render_doc = |payload: &Value| {
+            ReceiptDocument::ZReport(build_z_report_doc_from_payload(&db, payload, "z-payout"))
+        };
+        let baseline = render_doc(&payload);
+        payload["staffReports"][0]["driver"]["keptTips"] = 0.0.into();
+        payload["staffReports"][0]["driver"]["drawerPayout"] = 0.0.into();
+        let zero = render_doc(&payload);
+        let html = |doc| receipt_renderer::render_html(doc, &cfg);
+        let bytes = |doc| receipt_renderer::render_escpos(doc, &cfg).bytes;
+        let raster = |doc| {
+            receipt_renderer::render_classic_raster_exact_preview_data_url(doc, &cfg)
+                .unwrap()
+                .0
+        };
+        assert_eq!(bytes(&baseline), bytes(&zero));
+        assert_eq!(html(&baseline), html(&zero));
+        assert_eq!(raster(&baseline), raster(&zero));
+
+        payload["staffReports"][0]["driver"]["keptTips"] = 0.75.into();
+        payload["staffReports"][0]["driver"]["drawerPayout"] = 0.75.into();
+        let with_payout = render_doc(&payload);
+        let printed = html(&with_payout);
+        for caption in [
+            "Φιλοδωρήματα που κράτησε ο διανομέας",
+            "Πληρωμή από το συρτάρι",
+        ] {
+            assert_eq!(printed.matches(caption).count(), 1);
+            assert!(printed.contains(&format!("{caption}:</span><span>0,75")));
+        }
+        assert_ne!(bytes(&with_payout), bytes(&baseline));
+        assert_ne!(raster(&with_payout), raster(&baseline));
     }
 
     #[test]

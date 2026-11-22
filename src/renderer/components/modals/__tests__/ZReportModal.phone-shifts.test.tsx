@@ -233,6 +233,34 @@ describe('ZReportModal phone shifts', () => {
     expect(within(section).queryByText('modals.zReport.cash')).toBeNull();
   });
 
+  it('shows the driver’s kept tips and drawer payout, and leaves zero-tip staff cards unchanged', async () => {
+    serveReport(liveReport({
+      presentation: { deliveryModuleEnabled: true },
+      staffReports: [
+        { staffShiftId: 'box', staffName: 'BOX Driver', role: 'driver', returnedToDrawerAmount: -0.75,
+          orders: { count: 1 }, driver: { keptTips: 0.75, drawerPayout: 0.75, cashToReturn: -0.75 } },
+        { staffShiftId: 'phone', staffName: 'Phone Driver', role: 'driver', shiftStatus: 'closed',
+          returnedToDrawerAmount: 29.50, orders: { count: 1 }, driver: { cashToReturn: 30 },
+          drawer: { expected: 30, closing: 29.50, variance: -0.50 } },
+      ],
+    }));
+    renderModal();
+    await waitFor(() => expect(mocks.bridge.reports.generateZReport).toHaveBeenCalled());
+    openStaffTab();
+    const box = (await screen.findByText('BOX Driver')).closest('article')!;
+    for (const label of ['Tips kept by the driver:', 'Drawer payout:']) {
+      expect(within(box).getByText(label).parentElement?.textContent).toContain(formatCurrency(0.75, 'EUR'));
+    }
+    expect(box.textContent).toContain(formatCurrency(-0.75, 'EUR'));
+    const phone = (await screen.findByText('Phone Driver')).closest('article')!;
+    expect(within(phone).queryByText('Tips kept by the driver:')).toBeNull();
+    expect(within(phone).queryByText('Drawer payout:')).toBeNull();
+    for (const [label, value] of [['cashToReturn', 30], ['closing', 29.50], ['variance', -0.50]] as const) {
+      const row = within(phone).getByText(`modals.zReport.${label}`).parentElement;
+      expect(row?.textContent).toContain(formatCurrency(value, 'EUR'));
+    }
+  });
+
   it('keeps a staff card without the block on its stored legacy figures', async () => {
     serveReport(liveReport({ staffReports: [{ staffShiftId: 'a', staffId: 'a', staffName: 'Legacy A', role: 'cashier',
       orders: { count: 1, totalAmount: 100, cashAmount: 40, cardAmount: 60 } }] }));

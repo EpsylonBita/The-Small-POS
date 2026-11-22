@@ -33,6 +33,11 @@ interface BuildShiftCheckoutPrintSnapshotParams {
     opening_cash_amount?: number | null;
     calculation_version?: number | null;
     payment_amount?: number | null;
+    status?: string | null;
+    check_out_time?: string | null;
+    expected_cash_amount?: number | null;
+    closing_cash_amount?: number | null;
+    cash_variance?: number | null;
   } | null;
   shiftSummary?: any;
   closingCash?: string;
@@ -191,18 +196,30 @@ function buildSnapshotValues(
   }
 
   if (role === 'driver') {
+    const storedShift = shiftSummary?.shift ?? shift;
+    if (storedShift.status === 'closed' || storedShift.check_out_time) {
+      return {
+        expectedAmount: finiteNumberOrNull(storedShift.expected_cash_amount) ?? undefined,
+        closingAmount: finiteNumberOrNull(storedShift.closing_cash_amount) ?? undefined,
+        varianceAmount: finiteNumberOrNull(storedShift.cash_variance) ?? undefined,
+      };
+    }
     const deliveries = Array.isArray(shiftSummary?.driverDeliveries) ? shiftSummary.driverDeliveries : [];
     const completedDeliveries = deliveries.filter((delivery: any) => {
       const status = String(delivery?.status || delivery?.order_status || '').toLowerCase();
       return status !== 'cancelled' && status !== 'canceled' && status !== 'refunded';
     });
-    const expectedAmount =
+    const legacyExpectedAmount =
       getEffectiveOpeningAmount(shift, shiftSummary) +
       completedDeliveries.reduce(
         (sum: number, delivery: any) => sum + Number(delivery?.cash_collected || 0),
         0,
       ) -
       Number(shiftSummary?.totalExpenses || 0);
+    const expectedAmount = finiteNumberOrNull(shiftSummary?.amountToReturn) ?? legacyExpectedAmount;
+    if (Number(shiftSummary?.driverDrawerPayout) > 0) {
+      return { expectedAmount };
+    }
     if (!hasManualCashInput(params.driverActualCash)) {
       return { expectedAmount };
     }

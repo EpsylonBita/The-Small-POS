@@ -419,6 +419,10 @@ export interface ZReportData {
       cashCollected: number;
       cardAmount: number;
       cashToReturn: number;
+      /** Tips the driver kept from the cash he handed in (display only). */
+      keptTips?: number;
+      /** What the drawer paid him when his tips exceeded his cash. */
+      drawerPayout?: number;
     };
     drawer?: {
       opening: number;

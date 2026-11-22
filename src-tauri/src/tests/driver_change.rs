@@ -643,7 +643,7 @@ fn the_tills_own_checkout_payment_follows_the_driver_change() {
     // The wrong driver checks out with only their float.
     let closed = crate::shifts::close_shift(
         db,
-        &serde_json::json!({ "shiftId": wrong_shift, "closingCash": OPENING }),
+        &serde_json::json!({"shiftId": wrong_shift, "closingCash": OPENING, "expectedDriverKeptTips": 0.0, "expectedDriverPayout": 0.0}),
     )
     .expect("the wrong driver checks out");
     assert_eq!(closed["success"], true, "{closed}");

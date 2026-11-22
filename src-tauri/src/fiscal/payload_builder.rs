@@ -109,6 +109,8 @@ pub fn build_fiscal_receipt_input(
     order_id: &str,
     branch_id: &str,
 ) -> Result<Value, String> {
+    #[cfg(test)]
+    FISCAL_PAYLOAD_BUILD_COUNT.with(|count| count.set(count.get() + 1));
     let header = read_order_header(conn, order_id)?;
     let order_vat = order_vat_for_receipt(conn, &header);
     let tips_in_turnover = order_vat.as_ref().is_some_and(|vat| {
@@ -240,6 +242,12 @@ pub fn build_fiscal_receipt_input(
     });
 
     Ok(payload)
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static FISCAL_PAYLOAD_BUILD_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// The server's immutable fiscal snapshot contains revenue only, including the

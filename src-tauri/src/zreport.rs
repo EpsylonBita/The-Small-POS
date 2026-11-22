@@ -2999,17 +2999,56 @@ fn build_staff_cash_breakdown_row(
         .unwrap_or(0.0)
     };
 
-    Ok(serde_json::json!({
+    let (cash_to_return, kept_tips) = if role_type == "driver" {
+        let (check_in, check_out, saved_expected): (String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT check_in_time, check_out_time,
+                        CASE WHEN status = 'closed' OR check_out_time IS NOT NULL THEN
+                            COALESCE(expected_cash_amount_cents, CAST(ROUND(expected_cash_amount * 100) AS INTEGER))
+                        END
+                 FROM staff_shifts WHERE id = ?1",
+                [staff_shift_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|e| format!("load driver checkout window: {e}"))?;
+        let tips = crate::shifts::compute_driver_shift_tip_total_in_window(
+            conn,
+            staff_shift_id,
+            Some(&check_in),
+            check_out.as_deref(),
+        )?;
+        let due = match saved_expected {
+            Some(cents) => Cents::new(cents).to_f64_dp2(),
+            None => crate::shifts::calculate_driver_return(
+                opening_amount,
+                cash_collected,
+                expenses + cash_refunds,
+                tips,
+            ),
+        };
+        (due, tips)
+    } else {
+        (
+            opening_amount + cash_collected - expenses - cash_refunds,
+            0.0,
+        )
+    };
+
+    let mut row = serde_json::json!({
         "roleType": role_type,
         "driverName": staff_name.unwrap_or_default(),
         "driverShiftId": staff_shift_id,
         "startingAmount": opening_amount,
         "cashCollected": cash_collected,
         "cardAmount": card_amount,
-        "cashToReturn": opening_amount + cash_collected - expenses - cash_refunds,
+        "cashToReturn": cash_to_return,
         "cashRefunds": cash_refunds,
         "expenses": expenses,
-    }))
+    });
+    if kept_tips > 0.0 {
+        row["keptTips"] = serde_json::json!(kept_tips);
+    }
+    Ok(row)
 }
 
 fn shift_summary_row_to_cash_breakdown(row: &Value) -> Value {
@@ -4423,13 +4462,54 @@ fn build_staff_report(
             card_amount,
             total_amount,
         ) = load_driver_order_totals(conn, &shift.id)?;
-        let cash_to_return = cash_breakdown_row
-            .and_then(|row| row.get("cashToReturn"))
-            .and_then(Value::as_f64)
-            .or(shift.expected_cash)
-            .unwrap_or(shift.opening_cash + cash_collected - expenses_total);
+        let fallback;
+        let breakdown = match cash_breakdown_row {
+            Some(row) => row,
+            None => {
+                fallback = build_staff_cash_breakdown_row(
+                    conn,
+                    &shift.id,
+                    shift.staff_name.as_deref(),
+                    "driver",
+                    shift.opening_cash,
+                )?;
+                &fallback
+            }
+        };
+        let closed = shift.status == "closed" || shift.check_out_time.is_some();
+        let cash_to_return = shift
+            .expected_cash
+            .filter(|_| closed)
+            .or_else(|| breakdown["cashToReturn"].as_f64())
+            .unwrap_or_default();
+        let kept_tips = breakdown["keptTips"].as_f64().unwrap_or_default();
+        let returned = if closed {
+            shift.closing_cash.unwrap_or_default()
+        } else {
+            cash_to_return
+        };
+        let mut driver = serde_json::json!({
+            "deliveries": deliveries,
+            "completedDeliveries": completed_deliveries,
+            "cancelledDeliveries": cancelled_deliveries,
+            "earnings": earnings,
+            "tips": tips,
+            "cashCollected": cash_collected,
+            "cardAmount": card_amount,
+            "cashToReturn": cash_to_return,
+        });
+        if kept_tips > 0.0 {
+            driver["keptTips"] = serde_json::json!(kept_tips);
+            if let Some(payout) = shift
+                .closing_cash
+                .filter(|_| closed)
+                .and_then(|actual| crate::shifts::driver_drawer_payout(actual, kept_tips))
+            {
+                driver["drawerPayout"] = serde_json::json!(payout);
+            }
+        }
 
-        let drawer_value = drawer_snapshot.unwrap_or_else(|| {
+        let mut drawer_value = drawer_snapshot.unwrap_or_else(|| {
             serde_json::json!({
                 "opening": shift.opening_cash,
                 "expected": shift.expected_cash.unwrap_or(cash_to_return),
@@ -4438,10 +4518,16 @@ fn build_staff_report(
                 "cashSales": cash_collected,
                 "cardSales": card_amount,
                 "drops": 0.0,
-                "driverCashReturned": cash_to_return,
+                "driverCashReturned": returned,
                 "driverCashGiven": 0.0,
             })
         });
+        if closed {
+            drawer_value["expected"] = serde_json::json!(cash_to_return);
+            drawer_value["closing"] = serde_json::json!(shift.closing_cash);
+            drawer_value["variance"] = serde_json::json!(shift.cash_variance);
+            drawer_value["driverCashReturned"] = serde_json::json!(returned);
+        }
 
         (
             serde_json::json!({
@@ -4452,17 +4538,8 @@ fn build_staff_report(
             }),
             details,
             truncated,
-            Some(serde_json::json!({
-                "deliveries": deliveries,
-                "completedDeliveries": completed_deliveries,
-                "cancelledDeliveries": cancelled_deliveries,
-                "earnings": earnings,
-                "tips": tips,
-                "cashCollected": cash_collected,
-                "cardAmount": card_amount,
-                "cashToReturn": cash_to_return,
-            })),
-            cash_to_return,
+            Some(driver),
+            returned,
             drawer_value,
         )
     } else {
@@ -5737,8 +5814,16 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             let driver_rows = staff_rows
                 .iter()
                 .filter(|row| row["role_type"].as_str() == Some("driver"))
-                .map(shift_summary_row_to_cash_breakdown)
-                .collect::<Vec<Value>>();
+                .map(|row| {
+                    build_staff_cash_breakdown_row(
+                        &conn,
+                        row["shift_id"].as_str().unwrap_or_default(),
+                        row["driver_name"].as_str(),
+                        "driver",
+                        row["starting_amount"].as_f64().unwrap_or_default(),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let waiter_rows = staff_rows
                 .iter()
                 .filter(|row| row["role_type"].as_str() == Some("server"))
@@ -15464,6 +15549,39 @@ mod tests {
         assert_eq!(report_json["cashDrawer"]["openingTotal"], 200.0);
         assert_eq!(report_json["cashDrawer"]["cashSales"], 60.0);
         assert_eq!(report_json["drawers"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fix_win6_released_driver_z_uses_saved_amounts_without_live_tips() {
+        let db = test_db();
+        seed_cashier_driver_zreport_day(&db);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE staff_shifts SET expected_cash_amount = 27.75, expected_cash_amount_cents = 2775,
+                    closing_cash_amount = 27.50, closing_cash_amount_cents = 2750,
+                    cash_variance = -0.25, cash_variance_cents = -25
+                 WHERE id = 'driver-zr-day'",
+                [],
+            )
+            .unwrap();
+        let report = generate_z_report_for_date(
+            &db,
+            &serde_json::json!({"branchId": "branch-1", "date": "2026-03-06"}),
+        )
+        .unwrap();
+        let driver = report["report"]["reportJson"]["staffReports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["staffShiftId"] == "driver-zr-day")
+            .unwrap();
+        assert_eq!(driver["driver"]["cashToReturn"], 27.75);
+        assert_eq!(driver["returnedToDrawerAmount"], 27.50);
+        assert_eq!(driver["drawer"]["variance"], -0.25);
+        assert!(driver["driver"].get("keptTips").is_none());
+        assert!(driver["driver"].get("drawerPayout").is_none());
     }
 
     #[test]

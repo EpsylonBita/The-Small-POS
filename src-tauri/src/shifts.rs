@@ -863,6 +863,10 @@ pub(crate) fn close_shift_with_support(
     let closed_by = sanitize_database_uuid(raw_closed_by.clone());
     let payment_amount =
         num_field(payload, "paymentAmount").or_else(|| num_field(payload, "payment_amount"));
+    let shown_driver_tips =
+        num_field(payload, "expectedDriverKeptTips").map(Cents::round_half_even);
+    let shown_driver_payout =
+        num_field(payload, "expectedDriverPayout").map(Cents::round_half_even);
 
     if raw_closed_by.is_some() && closed_by.is_none() {
         warn!(
@@ -1100,7 +1104,10 @@ pub(crate) fn close_shift_with_support(
         }
     }
 
-    let result = (|| -> Result<(f64, f64, Option<crate::gift_financial_closing::ClosingOriginal>), String> {
+    let mut changed_driver_checkout = None;
+    let result = (|| -> Result<(f64, f64, f64, Option<crate::gift_financial_closing::ClosingOriginal>), String> {
+        let mut drawer_payout = None;
+        let mut payout_drawer = None;
         #[allow(clippy::needless_late_init)]
         let expected: f64;
         let mut returned_cash_target: Option<(String, String, f64)> = None;
@@ -1322,13 +1329,52 @@ pub(crate) fn close_shift_with_support(
             );
             let _legacy_payment_amount = payment_amount.unwrap_or(0.0);
             expected = if role_type == "driver" {
-                let tips = compute_driver_shift_tip_total_in_window(
+                let tips = compute_driver_shift_kept_tips_in_window(
                     &conn,
                     &shift_id,
                     Some(shift_check_in_time.as_str()),
                     Some(now.as_str()),
                 )?;
-                calculate_driver_return(opening_cash, cash_collected, expenses, tips)
+                let due = calculate_driver_return(opening_cash, cash_collected, expenses, tips.total);
+                drawer_payout = driver_drawer_payout(due, tips.total);
+                let payout_to_confirm = drawer_payout.unwrap_or(0.0);
+                // A manual cash count cannot represent a drawer payout.
+                let invalid_count = closing_cash < 0.0 && drawer_payout.is_none();
+                // The checkout screen always sends the two figures it showed. A
+                // caller without a preview (support's confirmed close of a stuck
+                // shift) sends neither and keeps the rule it had: a signed count
+                // must match the payout.
+                let screen_confirmed = shown_driver_tips.is_some() || shown_driver_payout.is_some();
+                let changed_figures = screen_confirmed
+                    && (shown_driver_tips != Some(Cents::round_half_even(tips.total))
+                        || shown_driver_payout != Some(Cents::round_half_even(payout_to_confirm)));
+                let stale_count = !screen_confirmed
+                    && closing_cash < 0.0
+                    && Cents::round_half_even(closing_cash) != Cents::round_half_even(due);
+                if changed_figures || invalid_count || stale_count {
+                    changed_driver_checkout = Some(json!({
+                        "amountToReturn": due,
+                        "tipsReceived": tips.total,
+                        "driverKeptTipLines": tips.lines,
+                        "driverDrawerPayout": payout_to_confirm,
+                    }));
+                    return Err("DRIVER_CHECKOUT_CHANGED".to_string());
+                }
+                if drawer_payout.is_some() {
+                    payout_drawer = resolve_cashier_drawer_for_staff_return(
+                        &conn, &shift_id, &shift_branch_id, &shift_terminal_id,
+                    )?;
+                    if payout_drawer.is_none() {
+                        return Err(missing_staff_return_drawer(&role_type));
+                    }
+                }
+                // Preserve the exact deduction and its orders for checkout reprints and the Z.
+                conn.execute(
+                    "INSERT INTO local_settings(setting_category,setting_key,setting_value,updated_at)
+                     VALUES('shift_driver_kept_tips',?1,?2,?3)",
+                    params![shift_id, serde_json::to_string(&tips).map_err(|e| e.to_string())?, now],
+                ).map_err(|e| format!("freeze driver tips: {e}"))?;
+                due
             } else {
                 opening_cash + cash_collected - expenses
             };
@@ -1351,7 +1397,7 @@ pub(crate) fn close_shift_with_support(
                     Cents::new(preparation.counted_cents).to_f64_dp2(),
                 )
             }
-            None => (expected, closing_cash_to_persist),
+            None => (expected, drawer_payout.map_or(closing_cash_to_persist, |amount| -amount)),
         };
 
         let variance = if is_non_financial_role {
@@ -1506,12 +1552,13 @@ pub(crate) fn close_shift_with_support(
         }
 
         if role_returns_cash(&role_type) {
-            match resolve_cashier_drawer_for_staff_return(
-                &conn,
-                &shift_id,
-                &shift_branch_id,
-                &shift_terminal_id,
-            )? {
+            let receiving_drawer = match payout_drawer {
+                Some(drawer) => Some(drawer),
+                None => resolve_cashier_drawer_for_staff_return(
+                    &conn, &shift_id, &shift_branch_id, &shift_terminal_id,
+                )?,
+            };
+            match receiving_drawer {
                 Some((cashier_shift_id, drawer_id)) => {
                     require_same_recorded_shift_currency(&conn, &shift_id, &cashier_shift_id)?;
                     if recorded_operating_currency(&conn, "cash_drawer_sessions", &drawer_id)?
@@ -1522,7 +1569,8 @@ pub(crate) fn close_shift_with_support(
                     conn.execute(
                         "UPDATE cash_drawer_sessions SET
                             driver_cash_returned = COALESCE(driver_cash_returned, 0) + ?1,
-                            driver_cash_returned_cents = COALESCE(driver_cash_returned_cents, 0) + ?2,
+                            driver_cash_returned_cents = COALESCE(driver_cash_returned_cents,
+                                CAST(ROUND(driver_cash_returned * 100) AS INTEGER), 0) + ?2,
                             updated_at = ?3
                          WHERE id = ?4",
                         params![
@@ -1549,9 +1597,7 @@ pub(crate) fn close_shift_with_support(
                 }
                 None => {
                     if closing_cash_to_persist_cents > 0 {
-                        return Err(format!(
-                            "Cannot close {role_type} shift with returned cash but no active cashier drawer"
-                        ));
+                        return Err(missing_staff_return_drawer(&role_type));
                     }
                     warn!(
                         staff_shift = %shift_id,
@@ -1627,6 +1673,9 @@ pub(crate) fn close_shift_with_support(
             (order_count, shift_cash_sales, shift_card_sales, total_sales),
             cash_drawer_snapshot,
         );
+        if drawer_payout.is_some() {
+            sync_payload["returnedCashAmount"] = json!(closing_cash_to_persist);
+        }
         if let Some((cashier_shift_id, drawer_id, returned_amount)) = returned_cash_target {
             sync_payload["returnedCashTargetCashierShiftId"] =
                 Value::String(cashier_shift_id.clone());
@@ -1683,11 +1732,11 @@ pub(crate) fn close_shift_with_support(
             )?;
         }
 
-        Ok((expected, variance, gift_original))
+        Ok((expected, variance, drawer_payout.map_or(closing_cash, |amount| -amount), gift_original))
     })();
 
     match result {
-        Ok((expected, variance, gift_original)) => {
+        Ok((expected, variance, closing_cash_to_persist, gift_original)) => {
             if let Some(check) = support {
                 if let Err(e) = check(&conn, true) {
                     let _ = conn.execute_batch("ROLLBACK");
@@ -1718,7 +1767,7 @@ pub(crate) fn close_shift_with_support(
                 "shiftId": shift_id,
                 "variance": variance,
                 "expected": expected,
-                "closing": closing_cash,
+                "closing": closing_cash_to_persist,
                 "currency": shift_summary_currency(&conn, &shift_id)?,
                 "message": format!("Shift closed. Variance: {:.2}", variance)
             });
@@ -1729,6 +1778,13 @@ pub(crate) fn close_shift_with_support(
         }
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
+            if let Some(checkout) = changed_driver_checkout {
+                return Ok(json!({
+                    "success": false,
+                    "code": "DRIVER_CHECKOUT_CHANGED",
+                    "driverCheckout": checkout,
+                }));
+            }
             if e == GIFT_TERMS_CHANGED {
                 return Ok(gift_closing_refusal(
                     GIFT_TERMS_CHANGED,
@@ -1738,6 +1794,10 @@ pub(crate) fn close_shift_with_support(
             Err(e)
         }
     }
+}
+
+fn missing_staff_return_drawer(role_type: &str) -> String {
+    format!("Cannot close {role_type} shift with returned cash but no active cashier drawer")
 }
 
 /// Refusal code of a gift-bound close whose reconciled ordinary cash drifted
@@ -3113,55 +3173,28 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     let overall = &breakdown["overall"];
     let orders_count = overall["totalCount"].as_i64().unwrap_or(0);
     let sales_amount = overall["totalAmount"].as_f64().unwrap_or(0.0);
-    let resolved_tips_received = if tips_received > 0.0 || role_type != "driver" {
-        tips_received
+    let driver_shift_closed =
+        role_type == "driver" && (shift["status"] == "closed" || shift_end_param.is_some());
+    let kept_tips = if role_type == "driver" {
+        compute_driver_shift_kept_tips_in_window(
+            &conn,
+            shift_id,
+            Some(&check_in_time),
+            shift_end_param,
+        )?
     } else {
-        // Founder's rule (30/09/2026): the courier's settlement comes only
-        // from payment rows. A delivery tip leaves the drawer only when the
-        // courier holds that delivery's cash, the same test the shift close
-        // applies (`compute_driver_shift_tip_total_in_window`): a delivery
-        // whose money was never recorded, was set aside or was given back
-        // holds none.
-        driver_deliveries
-            .iter()
-            .filter(|delivery| {
-                delivery
-                    .get("cash_collected")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    > 0.0
-            })
-            .filter(|delivery| {
-                !matches!(
-                    delivery
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .trim()
-                        .to_ascii_lowercase()
-                        .as_str(),
-                    "cancelled" | "canceled" | "refunded"
-                )
-            })
-            .map(|delivery| {
-                delivery
-                    .get("tip_amount")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-            })
-            .sum::<f64>()
+        DriverKeptTips::default()
     };
-    let amount_to_return = if role_type == "driver" {
+    let resolved_tips_received = if role_type == "driver" {
+        kept_tips.total
+    } else {
+        tips_received
+    };
+    let amount_to_return = if driver_shift_closed {
+        shift["expected_cash_amount"].as_f64()
+    } else if role_type == "driver" {
         let opening = shift["opening_cash_amount"].as_f64().unwrap_or(0.0);
-        let cash_collected = driver_deliveries
-            .iter()
-            .map(|delivery| {
-                delivery
-                    .get("cash_collected")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-            })
-            .sum::<f64>();
+        let cash_collected = compute_shift_cash_collected(&conn, shift_id, "driver")?;
         Some(calculate_driver_return(
             opening,
             cash_collected,
@@ -3190,6 +3223,20 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         "ordersCount": orders_count,
         "salesAmount": sales_amount,
     });
+
+    if role_type == "driver" && kept_tips.total > 0.0 {
+        result["driverKeptTipLines"] = json!(kept_tips.lines);
+        let settled_return = if driver_shift_closed {
+            shift["closing_cash_amount"].as_f64()
+        } else {
+            amount_to_return
+        };
+        if let Some(payout) =
+            settled_return.and_then(|due| driver_drawer_payout(due, kept_tips.total))
+        {
+            result["driverDrawerPayout"] = json!(payout);
+        }
+    }
 
     if !transferred_drivers.is_empty() {
         result["transferredDrivers"] = serde_json::json!(transferred_drivers);
@@ -4593,76 +4640,217 @@ pub(crate) fn calculate_driver_return(
     .to_f64_dp2()
 }
 
-// Z-17/08 forensics, defect 3: this total is DEDUCTED from a driver's
-// expected cash return — so it must count only tips the driver actually
-// holds in cash. A card tip never passes through the driver's hands (live
-// case: Τάσος returned 19,00 of a 20,00 float against a 1,00 tip paid by
-// card), yet the old query deducted it. Gate: the payment-attributed tip
-// sum takes only cash payments, and the order-level tip fallbacks count
-// only when the delivery was cash-handled: a completed cash payment on the
-// order. A mixed cash+card order still attributes its order-level tip as
-// cash — the simple shapes dominate and the payment-attributed path is
-// exact.
+// Z-17/08 forensics, defect 3: the founder decided on 21/11/2026
+// («Το κρατά από τα μετρητά»). Deduct cash, card and platform settlement tips
+// from the cash the store driver hands in.
 //
 // Founder's rule (30/09/2026): a courier's settlement comes only from payment
-// rows. The earning's own `payment_method = 'cash'` used to count as well,
-// for the COD path that recorded cash without any payment row; that path is
-// gone, and an order whose money was set aside, given back or never recorded
-// no longer hands its tip to the courier out of the drawer.
-fn compute_driver_shift_tip_total_in_window(
+// rows. An order whose money was set aside, given back or never recorded
+// gives no tip from the drawer.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DriverKeptTipLine {
+    pub order_id: String,
+    pub order_number: String,
+    pub source: String,
+    pub payment_methods: Vec<String>,
+    pub amount: f64,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DriverKeptTips {
+    pub total: f64,
+    pub lines: Vec<DriverKeptTipLine>,
+}
+
+pub(crate) fn driver_drawer_payout(expected_return: f64, kept_tips: f64) -> Option<f64> {
+    (expected_return < 0.0 && kept_tips > 0.0).then_some(-expected_return)
+}
+
+pub(crate) fn compute_driver_shift_tip_total_in_window(
     conn: &rusqlite::Connection,
     shift_id: &str,
     window_start: Option<&str>,
     window_end: Option<&str>,
 ) -> Result<f64, String> {
+    Ok(compute_driver_shift_kept_tips_in_window(conn, shift_id, window_start, window_end)?.total)
+}
+
+fn compute_driver_shift_kept_tips_in_window(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+    window_start: Option<&str>,
+    window_end: Option<&str>,
+) -> Result<DriverKeptTips, String> {
+    if let Some(saved) = crate::db::get_setting(conn, "shift_driver_kept_tips", shift_id) {
+        return serde_json::from_str(&saved).map_err(|e| format!("read frozen driver tips: {e}"));
+    }
+    let closed: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM staff_shifts WHERE id = ?1
+                AND (status = 'closed' OR check_out_time IS NOT NULL))",
+            [shift_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read driver shift status: {e}"))?;
+    if closed {
+        return Ok(DriverKeptTips::default());
+    }
+    // The tips follow the cash. `compute_shift_cash_collected` counts the
+    // driver's unsettled, untransferred earnings; when he has none (all of them
+    // transferred to the next cashier, or settled) it counts the cash payments
+    // of his whole shift instead. The kept tips use the same population, so the
+    // summary, the list and the close deduct exactly the tips whose cash they
+    // count (the released summary kept the transferred window equal to the
+    // active one: tests::driver_cash_from_payment_rows).
+    let whole_shift = compute_driver_shift_earning_totals(conn, shift_id)?.0 == 0;
     let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let counted = crate::payments::counted_financial_payment_sql(conn, "op")?;
+    let settlement = crate::payments::platform_settlement_row_sql("op");
+    let payment_tip =
+        "MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0)";
+    let card_methods = "('card', 'credit_card', 'debit_card')";
     let sql = format!(
-        "SELECT COALESCE(SUM(MAX(
-                    CASE WHEN EXISTS (
-                        SELECT 1 FROM order_payments opc
-                        WHERE opc.order_id = o.id
-                          AND (opc.status = 'completed' AND NOT (COALESCE(opc.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(opc.remote_payment_id, '')) = ''))
-                          AND opc.method = 'cash'
-                    ) THEN COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0) ELSE 0 END,
-                    CASE WHEN EXISTS (
-                        SELECT 1 FROM order_payments opc
-                        WHERE opc.order_id = o.id
-                          AND (opc.status = 'completed' AND NOT (COALESCE(opc.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(opc.remote_payment_id, '')) = ''))
-                          AND opc.method = 'cash'
-                    ) THEN COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0) ELSE 0 END,
-                    COALESCE((
-                        SELECT SUM(COALESCE(
-                            op.tip_amount_cents,
-                            CAST(ROUND(op.tip_amount * 100) AS INTEGER),
-                            0
-                        ))
-                        FROM order_payments op
-                        WHERE op.order_id = o.id
-                          AND op.tip_recipient_staff_shift_id = ?1
-                          AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
-                          AND op.method = 'cash'
-                    ), 0)
-                )), 0)
-         FROM orders o
-         LEFT JOIN driver_earnings de
-           ON de.order_id = o.id
-          AND de.staff_shift_id = ?1
-         WHERE (de.staff_shift_id IS NOT NULL OR o.staff_shift_id = ?1)
-           AND COALESCE(o.is_ghost, 0) = 0
-           AND COALESCE(o.order_type, 'dine-in') = 'delivery'
-           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-           AND (de.id IS NULL OR (
-                COALESCE(de.settled, 0) = 0
-                AND COALESCE(de.is_transferred, 0) = 0
-           ))
-           AND (?2 IS NULL OR {financial_expr} >= ?2)
-           AND (?3 IS NULL OR {financial_expr} <= ?3)"
+        "WITH candidates AS (
+            SELECT o.id, o.display_order_number, o.order_number, o.plugin, o.ghost_metadata,
+                {financial_expr} AS financial_at,
+                EXISTS (
+                    SELECT 1 FROM order_payments history
+                    WHERE history.order_id = o.id
+                      AND COALESCE(history.tip_amount_cents,
+                          CAST(ROUND(history.tip_amount * 100) AS INTEGER), 0) <> 0
+                ) AS has_payment_tip,
+                MAX(
+                    COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0),
+                    COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0)
+                ) AS fallback_tip
+            FROM orders o
+            LEFT JOIN driver_earnings de ON de.order_id = o.id
+            WHERE COALESCE(o.is_ghost, 0) = 0
+              AND o.order_type = 'delivery'
+              AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+              AND (
+                  (de.staff_shift_id = ?1
+                    AND (?4 = 1 OR (COALESCE(de.settled, 0) = 0
+                        AND COALESCE(de.is_transferred, 0) = 0)))
+                  OR (de.id IS NULL AND o.staff_shift_id = ?1
+                    AND (?2 IS NULL OR {financial_expr} >= ?2)
+                    AND (?3 IS NULL OR {financial_expr} <= ?3))
+              )
+         ), receipts AS (
+            SELECT c.*, op.tip_recipient_staff_shift_id, {payment_tip} AS payment_tip,
+                COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) -
+                    (SELECT COALESCE(SUM(COALESCE(pa.amount_cents,
+                        CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
+                     FROM payment_adjustments pa
+                     WHERE pa.payment_id = op.id AND pa.adjustment_type = 'refund') AS retained_cents,
+                CASE
+                    WHEN LOWER(TRIM(op.method)) = 'cash'
+                         OR op.transaction_ref LIKE 'platform_settlement:cod:%' THEN 'cash'
+                    WHEN LOWER(TRIM(op.method)) IN {card_methods} THEN 'card'
+                    ELSE 'online'
+                END AS tender
+            FROM candidates c
+            JOIN order_payments op ON op.order_id = c.id
+            WHERE {counted}
+              AND (LOWER(TRIM(op.method)) = 'cash' OR LOWER(TRIM(op.method)) IN {card_methods}
+                   OR {settlement})
+         )
+         SELECT id, display_order_number, order_number, plugin, ghost_metadata,
+            CASE WHEN has_payment_tip THEN SUM(CASE
+                WHEN tip_recipient_staff_shift_id = ?1 THEN MIN(payment_tip, retained_cents)
+                ELSE 0 END)
+                ELSE fallback_tip
+            END AS kept_cents,
+            GROUP_CONCAT(DISTINCT CASE
+                WHEN has_payment_tip AND
+                     (tip_recipient_staff_shift_id IS NOT ?1 OR payment_tip = 0) THEN NULL
+                ELSE tender
+            END)
+         FROM receipts
+         WHERE retained_cents > 0
+         GROUP BY id
+         HAVING kept_cents > 0
+         ORDER BY financial_at, id"
     );
-    conn.query_row(&sql, params![shift_id, window_start, window_end], |row| {
-        row.get::<_, i64>(0)
-    })
-    .map(|cents| Cents::new(cents).to_f64_dp2())
-    .map_err(|e| format!("query driver tip total: {e}"))
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare driver tips: {e}"))?;
+    let rows = stmt
+        .query_map(
+            params![shift_id, window_start, window_end, whole_shift as i64],
+            |row| {
+                let order_id = row.get::<_, String>(0)?;
+                let display = row.get::<_, Option<String>>(1)?;
+                let raw = row.get::<_, Option<String>>(2)?;
+                let plugin = row.get::<_, Option<String>>(3)?;
+                let metadata = row.get::<_, Option<String>>(4)?;
+                let box_number = crate::box_slip::checkout_number(
+                    plugin.as_deref(),
+                    display.as_deref(),
+                    metadata.as_deref(),
+                    raw.as_deref(),
+                );
+                let food_delivery = metadata
+                    .clone()
+                    .and_then(crate::payments::food_delivery_from_metadata);
+                let platform = plugin
+                    .as_deref()
+                    .filter(|platform| crate::platforms::is_external_delivery_platform(platform))
+                    .or_else(|| food_delivery.as_ref()?.get("platform")?.as_str())
+                    .filter(|platform| crate::platforms::is_external_delivery_platform(platform))
+                    .and_then(crate::platforms::normalize_platform_slug);
+                if let Some(platform) = platform.as_deref() {
+                    if !food_delivery.as_ref().is_some_and(|delivery| {
+                        crate::payments::platform_uses_store_driver(platform, delivery)
+                    }) {
+                        return Ok(None);
+                    }
+                }
+                let source = platform.as_deref().unwrap_or("phone");
+                let order_number = box_number
+                    .or_else(|| {
+                        (source != "phone")
+                            .then(|| {
+                                crate::print::food_delivery_short_code(
+                                    metadata.as_deref().unwrap_or_default(),
+                                )
+                            })
+                            .flatten()
+                    })
+                    .or_else(|| display.filter(|number| !number.trim().is_empty()))
+                    .or(raw)
+                    .unwrap_or_else(|| "—".to_string());
+                let cents = row.get::<_, i64>(5)?;
+                let methods = row.get::<_, String>(6)?;
+                let payment_methods = ["cash", "card", "online"]
+                    .into_iter()
+                    .filter(|method| methods.split(',').any(|value| value == *method))
+                    .map(str::to_owned)
+                    .collect();
+                Ok(Some((
+                    cents,
+                    DriverKeptTipLine {
+                        order_id,
+                        order_number,
+                        source: source.to_string(),
+                        payment_methods,
+                        amount: Cents::new(cents).to_f64_dp2(),
+                    },
+                )))
+            },
+        )
+        .map_err(|e| format!("query driver tips: {e}"))?;
+    let mut tips = DriverKeptTips::default();
+    let mut cents = 0;
+    for row in rows {
+        if let Some((amount, line)) = row.map_err(|e| format!("read driver tip: {e}"))? {
+            cents += amount;
+            tips.lines.push(line);
+        }
+    }
+    tips.total = Cents::new(cents).to_f64_dp2();
+    Ok(tips)
 }
 
 fn role_order_type_filter_sql(role_type: &str, order_alias: &str) -> String {
@@ -5649,7 +5837,21 @@ fn build_inherited_cash_staff_rows(
             Some(check_in_time.as_str()),
             None,
         );
-        let net_cash_amount = opening_amount + cash_collected - expenses;
+        let tips_received = if role_type == "driver" {
+            compute_driver_shift_tip_total_in_window(
+                conn,
+                &staff_shift_id,
+                Some(&check_in_time),
+                None,
+            )?
+        } else {
+            0.0
+        };
+        let net_cash_amount = if role_type == "driver" {
+            calculate_driver_return(opening_amount, cash_collected, expenses, tips_received)
+        } else {
+            opening_amount + cash_collected - expenses
+        };
         let display_name = staff_name.clone().unwrap_or_else(|| staff_id.clone());
 
         result.push(serde_json::json!({
@@ -5665,6 +5867,7 @@ fn build_inherited_cash_staff_rows(
             "card_amount": card_amount,
             "total_amount": total_amount,
             "expenses": expenses,
+            "tips_received": tips_received,
             "net_cash_amount": net_cash_amount,
         }));
     }
@@ -5963,6 +6166,10 @@ mod tests {
     use rusqlite::{params, Connection};
     use serde_json::Value;
 
+    mod box_tip_driver_scenarios {
+        include!("box_tip_driver_scenarios.rs");
+    }
+
     const TEST_MANAGER_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
     fn rule10_fixture() -> (DbState, String, String) {
@@ -6213,11 +6420,12 @@ mod tests {
         // The ordinary input closes both roles as before: no gift result and
         // no closing key in the queued close.
         for (shift_id, closing_cash) in [(&driver, 20.0), (&cashier, 100.0)] {
-            let result = close_shift(
-                &db,
-                &serde_json::json!({ "shiftId": shift_id, "closingCash": closing_cash }),
-            )
-            .unwrap();
+            let mut payload = json!({"shiftId": shift_id, "closingCash": closing_cash});
+            if shift_id == &driver {
+                payload["expectedDriverKeptTips"] = json!(0.0);
+                payload["expectedDriverPayout"] = json!(0.0);
+            }
+            let result = close_shift(&db, &payload).unwrap();
             assert_eq!(result["success"], true, "{result}");
             assert!(result.get("giftFinancialClosing").is_none());
             let queued = queued_closes(shift_id.as_str());
@@ -6284,7 +6492,7 @@ mod tests {
             );
         }
         let returned =
-            close_shift(&db, &serde_json::json!({"shiftId":driver,"closingCash":20})).unwrap();
+            close_shift(&db, &serde_json::json!({"shiftId":driver,"closingCash":20,"expectedDriverKeptTips":0.0,"expectedDriverPayout":0.0})).unwrap();
         assert_eq!(returned["success"], true);
         assert_eq!(returned["currency"], "CHF");
         let closed = close_shift(
@@ -6716,6 +6924,7 @@ mod tests {
         let payload = serde_json::json!({
             "shiftId": "driver-shift",
             "closingCash": 78.5,
+            "expectedDriverKeptTips": 1.5, "expectedDriverPayout": 0.0,
         });
         let result = close_shift(&db, &payload).unwrap();
         assert_eq!(result["success"], true);
@@ -6737,81 +6946,605 @@ mod tests {
         );
     }
 
-    /// Z-17/08 forensics defect 3: a CARD tip never passes through the
-    /// driver's hands — deducting it from the expected cash return (as the
-    /// old query did) makes an honest driver look short. Live case: Τάσος,
-    /// 20,00 float, card order, 1,00 card tip — owed 20,00, system said 19,00.
+    fn open_driver_with_tip(db: &DbState, float: f64, method: &str) -> String {
+        let (_, shift_id) = box_tip_driver_scenarios::open_driver_till(db, float);
+        box_tip_driver_scenarios::seed_phone_order(db, "ord-ct1", 1500, 100);
+        let mut payload = json!({
+            "orderId": "ord-ct1", "method": method, "amount": 15.0,
+            "tipAmount": 1.0, "tipRecipientRole": "driver",
+        });
+        if method == "cash" {
+            payload["cashReceived"] = json!(15.0);
+            payload["changeGiven"] = json!(0.0);
+        }
+        crate::payments::record_payment(db, &payload).unwrap();
+        box_tip_driver_scenarios::assign(db, "ord-ct1");
+        shift_id
+    }
+
+    fn open_driver_with_card_tip(db: &DbState, float: f64) -> String {
+        open_driver_with_tip(db, float, "card")
+    }
+
     #[test]
-    fn test_driver_card_tip_is_not_deducted_from_expected_cash_return() {
+    fn fix_win3_courier_tip_is_never_deducted() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        let shift_id = open_driver_with_card_tip(&db, 20.0);
         {
             let conn = db.conn.lock().unwrap();
-            // The driver's cash goes back to a responsible cashier drawer —
-            // same shape as test_driver_close_returns_cash_to_cashier.
             conn.execute(
-                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
-                    status, calculation_version, sync_status, created_at, updated_at)
-                 VALUES ('ct-cashier', 'cashier-ct', 'cashier', 'branch-ct', 'term-ct',
-                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), 500.0, 50000, 'active', 2, 'pending',
-                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                r#"UPDATE orders SET plugin='BOX', ghost_metadata='{"food_delivery":{"box_daas":true,"delivery_provider":"vendor_delivery"}}'
+                   WHERE id='ord-ct1'"#,
                 [],
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                    opening_amount, opening_amount_cents, driver_cash_given, driver_cash_given_cents,
-                    opened_at, created_at, updated_at)
-                 VALUES ('ct-drawer', 'ct-cashier', 'cashier-ct', 'branch-ct', 'term-ct',
-                    500.0, 50000, 20.0, 2000,
-                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
-                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
-                    status, calculation_version, sync_status, created_at, updated_at)
-                 VALUES ('card-tip-driver', 'driver-ct', 'driver', 'branch-ct', 'term-ct',
-                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), 20.0, 2000, 'active', 2, 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO orders (
-                    id, items, order_type, total_amount, total_amount_cents,
-                    tip_amount, tip_amount_cents, status, sync_status, created_at, updated_at
-                 ) VALUES (
-                    'ord-ct1', '[]', 'delivery', 72.9, 7290,
-                    1.0, 100, 'completed', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                 )",
-                [],
-            )
-            .unwrap();
-            // Card delivery: no cash collected, the tip rode on the card.
-            conn.execute(
-                "INSERT INTO driver_earnings (id, driver_id, staff_shift_id, order_id, branch_id,
-                    tip_amount, tip_amount_cents, total_earning, total_earning_cents,
-                    payment_method, cash_collected, cash_collected_cents,
-                    created_at, updated_at)
-                 VALUES ('de-ct1', 'driver-ct', 'card-tip-driver', 'ord-ct1', 'branch-ct',
-                    1.0, 100, 1.0, 100, 'card', 0.0, 0, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                "UPDATE order_payments SET method='other', transaction_ref='platform_settlement:online:ct'
+                 WHERE order_id='ord-ct1' AND tip_recipient_role='driver'",
                 [],
             )
             .unwrap();
         }
+        let summary = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(summary["tipsReceived"], 0.0);
+        assert_eq!(summary["amountToReturn"], 20.0);
+    }
 
-        // The driver holds only the 20,00 float — the card tip is settled on
-        // the card side, never from the wallet.
-        let payload = serde_json::json!({
-            "shiftId": "card-tip-driver",
-            "closingCash": 20.0,
-        });
-        let result = close_shift(&db, &payload).unwrap();
+    #[test]
+    fn fix_win4_earning_includes_prepayment_before_check_in() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let (_, shift_id) = box_tip_driver_scenarios::open_driver_till(&db, 20.0);
+        box_tip_driver_scenarios::seed_phone_order(&db, "ord-ct1", 765, 75);
+        let entered_at = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        {
+            let conn = db.conn.lock().unwrap();
+            // Historical attribution to this shift with no earning yet.
+            conn.execute(
+                r#"UPDATE orders SET plugin='box', order_number='#B449', staff_shift_id=?2,
+                    ghost_metadata='{"food_delivery":{"box_daas":false,"prepaid":true}}',
+                    created_at=?1, updated_at=?1 WHERE id='ord-ct1'"#,
+                params![entered_at, shift_id],
+            )
+            .unwrap();
+            assert!(crate::payments::auto_settle_platform_order(&conn, "ord-ct1").unwrap());
+            conn.execute(
+                "UPDATE order_payments SET created_at=?1, updated_at=?1 WHERE order_id='ord-ct1'",
+                [&entered_at],
+            )
+            .unwrap();
+        }
+        let attributed_only = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(attributed_only["tipsReceived"], 0.0);
+        assert_eq!(attributed_only["amountToReturn"], 20.0);
+        box_tip_driver_scenarios::assign(&db, "ord-ct1");
+        let summary = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(summary["tipsReceived"], 0.75);
+        assert_eq!(summary["amountToReturn"], 19.25);
+        let close = close_shift(&db, &json!({"shiftId": shift_id, "closingCash": 19.25, "expectedDriverKeptTips": 0.75, "expectedDriverPayout": 0.0})).unwrap();
+        assert_eq!(close["expected"], 19.25);
+    }
+
+    #[test]
+    fn fix_win5_payment_history_overrides_header_and_earning_tips() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = open_driver_with_card_tip(&db, 20.0);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE orders SET tip_amount=2.0, tip_amount_cents=200 WHERE id='ord-ct1'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                     status, currency, created_at, updated_at)
+                 SELECT 'pay-ct2', order_id, 'card', 5.0, 500, 'completed', 'EUR', created_at, updated_at
+                 FROM order_payments WHERE order_id='ord-ct1' AND tip_recipient_role='driver'",
+                [],
+            )
+            .unwrap();
+        }
+        for (status, recipient) in [
+            ("voided", shift_id.as_str()),
+            ("refunded", shift_id.as_str()),
+            ("completed", "cashier-shift"),
+            ("completed", shift_id.as_str()),
+        ] {
+            db.conn.lock().unwrap().execute(
+                "UPDATE order_payments SET status=?1, tip_recipient_staff_shift_id=?2 WHERE order_id='ord-ct1' AND tip_recipient_role='driver'",
+                params![status, recipient],
+            ).unwrap();
+            let expected_tip = if status == "completed" && recipient == shift_id.as_str() {
+                1.0
+            } else {
+                0.0
+            };
+            let summary = get_shift_summary(&db, &shift_id).unwrap();
+            assert_eq!(
+                summary["tipsReceived"], expected_tip,
+                "{status} {recipient}"
+            );
+            assert_eq!(summary["amountToReturn"], 20.0 - expected_tip);
+        }
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, created_at, updated_at
+             ) SELECT 'refund-ct1', id, order_id, 'refund', 14.75, 1475, 'returned',
+                      created_at, updated_at
+               FROM order_payments WHERE order_id='ord-ct1' AND tip_recipient_role='driver'", [],
+        ).unwrap();
+        let summary = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(summary["tipsReceived"], 0.25);
+        assert_eq!(summary["amountToReturn"], 19.75);
+    }
+
+    #[test]
+    fn fix_win_handover_lists_only_tips_in_the_close_population() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = open_driver_with_tip(&db, 20.0, "cash");
+        // The tips follow the cash: with the only earning transferred or settled
+        // the cash comes from the shift's payments, and so does its tip.
+        for (transferred, settled, kept) in [(1, 0, 1.0), (0, 0, 1.0), (0, 1, 1.0)] {
+            db.conn.lock().unwrap().execute(
+                "UPDATE driver_earnings SET is_transferred=?1, settled=?2 WHERE order_id='ord-ct1'",
+                params![transferred, settled],
+            ).unwrap();
+            let summary = get_shift_summary(&db, &shift_id).unwrap();
+            let listed: f64 = summary["driverKeptTipLines"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|line| line["amount"].as_f64().unwrap())
+                .sum();
+            assert_eq!(listed, kept);
+            assert_eq!(summary["tipsReceived"], kept);
+            assert_eq!(summary["amountToReturn"], 35.0 - kept);
+        }
+        let close = close_shift(&db, &json!({"shiftId": shift_id, "closingCash": 34.0, "expectedDriverKeptTips": 1.0, "expectedDriverPayout": 0.0})).unwrap();
+        assert_eq!(close["expected"], 34.0);
+    }
+
+    #[test]
+    fn fix2_win_item3_caller_without_preview_keeps_the_signed_count_rule() {
+        // Support's confirmed close of a stuck shift has no checkout preview and
+        // sends neither figure: its signed count must match the payout, as before.
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let (_cashier, shift_id) = box_tip_driver_scenarios::open_driver_till(&db, 0.0);
+        box_tip_driver_scenarios::seed_phone_order(&db, "support-card-tip", 1075, 75);
+        crate::payments::record_payment(
+            &db,
+            &json!({
+                "orderId": "support-card-tip", "method": "card", "amount": 10.75,
+                "tipAmount": 0.75, "tipRecipientRole": "driver",
+            }),
+        )
+        .unwrap();
+        box_tip_driver_scenarios::assign(&db, "support-card-tip");
+        let wrong = close_shift(&db, &json!({"shiftId": shift_id, "closingCash": -0.5})).unwrap();
+        assert_eq!(wrong["code"], "DRIVER_CHECKOUT_CHANGED", "{wrong}");
+        let closed = close_shift(&db, &json!({"shiftId": shift_id, "closingCash": -0.75})).unwrap();
+        assert_eq!(closed["success"], true, "{closed}");
+        assert_eq!(closed["closing"], -0.75);
+        assert_eq!(closed["variance"], 0.0);
+    }
+
+    #[test]
+    fn fix2_win_item3_caller_without_preview_and_a_zero_count_closes_with_the_live_payout() {
+        // Pins Windows today: a caller without figures and a count of 0 is not
+        // refused; the close takes the live payout (Android refuses this case:
+        // its signed count 0 does not match the 0,75 payout). Decision pending.
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let (_cashier, shift_id) = box_tip_driver_scenarios::open_driver_till(&db, 0.0);
+        box_tip_driver_scenarios::seed_phone_order(&db, "support-zero-tip", 1075, 75);
+        crate::payments::record_payment(
+            &db,
+            &json!({
+                "orderId": "support-zero-tip", "method": "card", "amount": 10.75,
+                "tipAmount": 0.75, "tipRecipientRole": "driver",
+            }),
+        )
+        .unwrap();
+        box_tip_driver_scenarios::assign(&db, "support-zero-tip");
+        let closed = close_shift(&db, &json!({"shiftId": shift_id, "closingCash": 0.0})).unwrap();
+        assert_eq!(closed["success"], true, "{closed}");
+        assert_eq!(closed["closing"], -0.75, "{closed}");
+        assert_eq!(closed["variance"], 0.0, "{closed}");
+    }
+
+    #[test]
+    fn fix2_win_item3_late_tip_requires_confirmation_before_drawer_payout() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let (cashier, shift_id) = box_tip_driver_scenarios::open_driver_till(&db, 0.0);
+        let preview = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(preview["amountToReturn"], 0.0);
+        assert_eq!(preview["tipsReceived"], 0.0);
+        box_tip_driver_scenarios::seed_phone_order(&db, "late-card-tip", 1075, 75);
+        crate::payments::record_payment(
+            &db,
+            &json!({
+                "orderId": "late-card-tip", "method": "card", "amount": 10.75,
+                "tipAmount": 0.75, "tipRecipientRole": "driver",
+            }),
+        )
+        .unwrap();
+        box_tip_driver_scenarios::assign(&db, "late-card-tip");
+
+        // The checkout screen now always sends both figures, zero included.
+        let close = close_shift(
+            &db,
+            &json!({
+                "shiftId": shift_id, "closingCash": 0.0,
+                "expectedDriverKeptTips": 0.0, "expectedDriverPayout": 0.0,
+            }),
+        )
+        .unwrap();
+        assert_eq!(close["code"], "DRIVER_CHECKOUT_CHANGED");
+        let live = &close["driverCheckout"];
+        assert_eq!(live["amountToReturn"], -0.75);
+        assert_eq!(live["tipsReceived"], 0.75);
+        assert_eq!(live["driverDrawerPayout"], 0.75);
+        assert_eq!(
+            live["driverKeptTipLines"][0]["orderNumber"],
+            "late-card-tip"
+        );
+        assert_eq!(live["driverKeptTipLines"][0]["amount"], 0.75);
+        let drawer = || {
+            get_shift_summary(&db, &cashier).unwrap()["cashDrawer"]["driver_cash_returned"].clone()
+        };
+        assert_eq!(drawer(), 0.0);
+        assert_eq!(
+            get_shift_summary(&db, &shift_id).unwrap()["shift"]["status"],
+            "active"
+        );
+        assert!(db::get_setting(
+            &db.conn.lock().unwrap(),
+            "shift_driver_kept_tips",
+            &shift_id
+        )
+        .is_none());
+
+        let confirmed = close_shift(&db, &json!({
+            "shiftId": shift_id, "closingCash": -0.75,
+            "expectedDriverKeptTips": live["tipsReceived"], "expectedDriverPayout": live["driverDrawerPayout"],
+        })).unwrap();
+        assert_eq!(confirmed["success"], true, "{confirmed}");
+        assert_eq!(confirmed["expected"], -0.75);
+        assert_eq!(confirmed["variance"], 0.0);
+        assert_eq!(drawer(), -0.75);
+    }
+
+    #[test]
+    fn fix2_win_item3_disappearing_tip_requires_confirmation_even_without_payout() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = open_driver_with_card_tip(&db, 20.0);
+        let preview = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(preview["tipsReceived"], 1.0);
+        assert_eq!(preview["amountToReturn"], 19.0);
+        let id: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM order_payments WHERE order_id='ord-ct1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        crate::payments::void_payment(&db, &id, "fixture void", None, None).unwrap();
+        let close = close_shift(
+            &db,
+            &json!({
+                "shiftId": shift_id, "closingCash": 19.0,
+                "expectedDriverKeptTips": 1.0, "expectedDriverPayout": 0.0,
+            }),
+        )
+        .unwrap();
+        assert_eq!(close["code"], "DRIVER_CHECKOUT_CHANGED");
+        assert_eq!(
+            close["driverCheckout"],
+            json!({
+                "tipsReceived": 0.0, "driverKeptTipLines": [], "driverDrawerPayout": 0.0,
+                "amountToReturn": 20.0,
+            })
+        );
+        assert_eq!(
+            get_shift_summary(&db, &shift_id).unwrap()["shift"]["status"],
+            "active"
+        );
+    }
+
+    #[test]
+    fn fix2_win_item3_no_tips_closes_on_first_confirmation() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let (_, shift_id) = box_tip_driver_scenarios::open_driver_till(&db, 0.0);
+        let close = close_shift(
+            &db,
+            &json!({
+                "shiftId": shift_id, "closingCash": 0.0,
+                "expectedDriverKeptTips": 0.0, "expectedDriverPayout": 0.0,
+            }),
+        )
+        .unwrap();
+        assert_eq!(close["success"], true, "{close}");
+        assert_eq!(close["expected"], 0.0);
+        assert_eq!(close["variance"], 0.0);
+    }
+
+    #[test]
+    fn fix2_win_item3_payout_changes_even_when_kept_tips_stay_the_same() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = open_driver_with_card_tip(&db, 1.0);
+        let preview = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(preview["tipsReceived"], 1.0);
+        assert_eq!(preview["amountToReturn"], 0.0);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE staff_shifts SET opening_cash_amount=0.25, opening_cash_amount_cents=25
+             WHERE id=?1",
+                [&shift_id],
+            )
+            .unwrap();
+        let close = close_shift(
+            &db,
+            &json!({
+                "shiftId": shift_id, "closingCash": 0.0,
+                "expectedDriverKeptTips": 1.0, "expectedDriverPayout": 0.0,
+            }),
+        )
+        .unwrap();
+        assert_eq!(close["code"], "DRIVER_CHECKOUT_CHANGED");
+        assert_eq!(close["driverCheckout"]["tipsReceived"], 1.0);
+        assert_eq!(close["driverCheckout"]["driverDrawerPayout"], 0.75);
+        assert_eq!(
+            get_shift_summary(&db, &shift_id).unwrap()["shift"]["status"],
+            "active"
+        );
+    }
+
+    #[test]
+    fn fix2_win_item3_accepts_a_changed_due_with_unchanged_tip_and_payout() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = open_driver_with_card_tip(&db, 20.0);
+        let preview = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(preview["amountToReturn"], 19.0);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE staff_shifts SET opening_cash_amount=21.0, opening_cash_amount_cents=2100
+             WHERE id=?1",
+                [&shift_id],
+            )
+            .unwrap();
+        let close = close_shift(&db, &json!({
+            "shiftId": shift_id, "closingCash": 19.0,
+            "expectedDriverReturn": 19.0, "expectedDriverKeptTips": 1.0, "expectedDriverPayout": 0.0,
+        })).unwrap();
+        assert_eq!(close["success"], true, "{close}");
+        assert_eq!(close["expected"], 20.0);
+        assert_eq!(close["variance"], -1.0);
+    }
+
+    #[test]
+    fn fix_win2_payout_without_receiving_drawer_rolls_back() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = open_driver_with_card_tip(&db, 0.0);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE cash_drawer_sessions SET closed_at=opened_at", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE staff_shifts SET status='closed' WHERE role_type='cashier'",
+                [],
+            )
+            .unwrap();
+        }
+        let close = close_shift(
+            &db,
+            &json!({
+                "shiftId": shift_id, "closingCash": -1.0, "expectedDriverKeptTips": 1.0, "expectedDriverPayout": 1.0,
+            }),
+        );
+        assert_eq!(
+            close.unwrap_err(),
+            "Cannot close driver shift with returned cash but no active cashier drawer"
+        );
+        let conn = db.conn.lock().unwrap();
+        assert!(crate::db::get_setting(&conn, "shift_driver_kept_tips", &shift_id).is_none());
+        let (status, count): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, closing_cash_amount_cents FROM staff_shifts WHERE id=?1",
+                [&shift_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "active");
+        assert_eq!(count, None);
+        let drawer_return: i64 = conn
+            .query_row(
+                "SELECT COALESCE(driver_cash_returned_cents, 0) FROM cash_drawer_sessions",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(drawer_return, 0);
+    }
+
+    #[test]
+    fn fix_win2_void_changes_payout_and_requires_new_confirmation() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = open_driver_with_card_tip(&db, 0.0);
+        let summary = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(summary["amountToReturn"], -1.0);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE order_payments SET status='voided' WHERE order_id='ord-ct1' AND tip_recipient_role='driver'",
+                [],
+            )
+            .unwrap();
+        let close = close_shift(
+            &db,
+            &json!({
+                "shiftId": shift_id, "closingCash": -1.0, "expectedDriverKeptTips": 1.0, "expectedDriverPayout": 1.0,
+            }),
+        )
+        .unwrap();
+        assert_eq!(close["success"], false);
+        assert_eq!(close["driverCheckout"]["amountToReturn"], 0.0);
+        assert_eq!(close["driverCheckout"]["tipsReceived"], 0.0);
+        assert_eq!(
+            get_shift_summary(&db, &shift_id).unwrap()["shift"]["status"],
+            "active"
+        );
+        assert!(crate::db::get_setting(
+            &db.conn.lock().unwrap(),
+            "shift_driver_kept_tips",
+            &shift_id
+        )
+        .is_none());
+        let close = close_shift(
+            &db,
+            &json!({
+                "shiftId": shift_id, "closingCash": 0.0, "expectedDriverKeptTips": 0.0, "expectedDriverPayout": 0.0,
+            }),
+        )
+        .unwrap();
+        assert_eq!(close["closing"], 0.0);
+        assert_eq!(close["variance"], 0.0);
+    }
+
+    /// Z-17/08, defect 3: the founder decided on 21/11/2026
+    /// («Το κρατά από τα μετρητά»). The driver keeps the card tip from the float.
+    #[test]
+    fn test_driver_card_tip_is_deducted_from_expected_cash_return() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = open_driver_with_card_tip(&db, 20.0);
+        let summary = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(summary["tipsReceived"], 1.0);
+        assert_eq!(summary["amountToReturn"], 19.0);
+
+        let result = close_shift(&db, &json!({"shiftId": shift_id, "closingCash": 19.0, "expectedDriverKeptTips": 1.0, "expectedDriverPayout": 0.0})).unwrap();
         assert_eq!(result["success"], true);
-        assert_eq!(result["expected"], 20.0);
+        assert_eq!(result["expected"], 19.0);
         assert_eq!(result["variance"], 0.0);
+    }
+
+    #[test]
+    fn negative_driver_return_records_drawer_payout_even_with_zero_counted_input() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = open_driver_with_card_tip(&db, 0.0);
+        let summary = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(summary["tipsReceived"], 1.0);
+        assert_eq!(summary["amountToReturn"], -1.0);
+
+        let result = close_shift(&db, &json!({
+            "shiftId": shift_id, "closingCash": 0.0, "expectedDriverKeptTips": 1.0, "expectedDriverPayout": 1.0,
+        })).unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["expected"], -1.0);
+        assert_eq!(result["variance"], 0.0);
+        assert_eq!(result["closing"], -1.0);
+        let summary = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(summary["shift"]["closing_cash_amount"], -1.0);
+        assert_eq!(summary["driverDrawerPayout"], 1.0);
+    }
+
+    #[test]
+    fn driver_tips_require_retained_receipts_and_sum_only_credited_payment_tips() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = open_driver_with_card_tip(&db, 20.0);
+        let conn = db.conn.lock().unwrap();
+        let at = chrono::Utc::now().to_rfc3339();
+        for (id, method, status, origin, metadata) in [
+            ("other", "other", "completed", "manual", None),
+            ("voided", "cash", "voided", "manual", None),
+            ("refund", "card", "refunded", "manual", None),
+            ("net-zero", "cash", "completed", "manual", None),
+            ("review", "cash", "duplicate_review", "manual", None),
+            (
+                "platform-held",
+                "card",
+                "duplicate_review",
+                "manual",
+                Some(r#"{"duplicate_review":{"reason":"platform_held"}}"#),
+            ),
+            (
+                "placeholder",
+                "cash",
+                "completed",
+                "sync_reconstructed",
+                None,
+            ),
+            (
+                "remote-return",
+                "card",
+                "completed",
+                "manual",
+                Some(r#"{"canonical_return_status":"refunded"}"#),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO orders (id, items, order_type, total_amount, total_amount_cents,
+                    tip_amount, tip_amount_cents, status, payment_status, staff_shift_id,
+                    created_at, updated_at)
+                 VALUES (?1, '[]', 'delivery', 10.0, 1000, 2.0, 200, 'delivered', 'paid',
+                    ?2, ?3, ?3)",
+                params![id, shift_id, at],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                    tip_amount, tip_amount_cents, status, payment_origin, metadata,
+                    tip_recipient_staff_shift_id, currency, created_at, updated_at)
+                 VALUES (?1, ?1, ?2, 10.0, 1000, 2.0, 200, ?3, ?4, ?5, ?6, 'EUR', ?7, ?7)",
+                params![id, method, status, origin, metadata, shift_id, at],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, created_at, updated_at
+             ) VALUES ('refund-net-zero', 'net-zero', 'net-zero', 'refund', 10.0, 1000, 'returned', ?1, ?1)",
+            [&at],
+        )
+        .unwrap();
+        for (id, credited_to) in [
+            ("extra-credited", Some(shift_id.as_str())),
+            ("uncredited", None),
+        ] {
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, tip_amount, tip_amount_cents,
+                    status, tip_recipient_staff_shift_id, currency, created_at, updated_at
+                 ) VALUES (?1, 'ord-ct1', 'card', 2.0, 200, 0.25, 25, 'completed', ?2, 'EUR', ?3, ?3)",
+                params![id, credited_to, at],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            compute_driver_shift_tip_total_in_window(&conn, &shift_id, None, None).unwrap(),
+            1.25
+        );
     }
 
     /// A cancelled sale with no recorded return still represents held cash.
@@ -9461,6 +10194,7 @@ mod tests {
         let payload = serde_json::json!({
             "shiftId": "driver-solo",
             "closingCash": 50.0,
+            "expectedDriverKeptTips": 0.0, "expectedDriverPayout": 0.0,
         });
         let result = close_shift(&db, &payload).unwrap_err();
         assert!(result.contains("no active cashier drawer"));
@@ -9656,13 +10390,23 @@ mod tests {
     }
 
     fn handover_close(db: &DbState, id: &str, counted_cents: i64, at: &str) -> Value {
-        let closed = close_shift(
-            db,
-            &serde_json::json!({
-                "shiftId": id, "closingCash": Cents::new(counted_cents).to_f64_dp2(),
-            }),
-        )
-        .unwrap();
+        let mut payload =
+            json!({"shiftId": id, "closingCash": Cents::new(counted_cents).to_f64_dp2()});
+        let role: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT role_type FROM staff_shifts WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if role == "driver" {
+            payload["expectedDriverKeptTips"] = json!(0.0);
+            payload["expectedDriverPayout"] = json!(0.0);
+        }
+        let closed = close_shift(db, &payload).unwrap();
         assert_eq!(closed["success"], true, "{closed}");
         let conn = db.conn.lock().unwrap();
         conn.execute(
@@ -9876,6 +10620,7 @@ mod tests {
             &serde_json::json!({
                 "shiftId": "driver-sync-target",
                 "closingCash": 80.0,
+                "expectedDriverKeptTips": 0.0, "expectedDriverPayout": 0.0,
             }),
         )
         .expect("driver close should succeed");
@@ -10090,6 +10835,7 @@ mod tests {
             &serde_json::json!({
                 "shiftId": driver_shift_id,
                 "closingCash": 67.20,
+                "expectedDriverKeptTips": 0.0, "expectedDriverPayout": 0.0,
             }),
         )
         .expect("close inherited driver shift");
@@ -10431,7 +11177,9 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "UPDATE orders SET plugin = 'efood' WHERE id = 'order-delivery'",
+            r#"UPDATE orders SET plugin = 'efood',
+                ghost_metadata = '{"food_delivery":{"delivery_provider":"vendor_delivery"}}'
+               WHERE id = 'order-delivery'"#,
             [],
         )
         .unwrap();

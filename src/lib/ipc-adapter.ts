@@ -1528,6 +1528,8 @@ export interface CloseShiftParams {
   closingCash: number;
   closedBy?: string;
   paymentAmount?: number;
+  expectedDriverKeptTips?: number;
+  expectedDriverPayout?: number;
 }
 
 export type ShiftCloseResult = IpcResult<ShiftCloseFigures> & ShiftCloseFigures;

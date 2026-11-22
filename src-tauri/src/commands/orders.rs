@@ -8743,6 +8743,18 @@ pub async fn order_save_from_remote(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    save_remote_order(arg0, &db, &app, |order| {
+        let _ = app.emit("order_created", order);
+    })
+    .await
+}
+
+pub(crate) async fn save_remote_order(
+    arg0: Option<Value>,
+    db: &db::DbState,
+    print_invalidator: &dyn print::PrintQueueInvalidator,
+    publish_order: impl FnOnce(Value) + Send,
+) -> Result<Value, String> {
     let payload = arg0.ok_or("Missing order payload")?;
     let order_data = payload
         .get("orderData")
@@ -8799,7 +8811,7 @@ pub async fn order_save_from_remote(
             // canonical receipts through the existing ledger mirror owner.
             tokio::time::timeout(
                 Duration::from_secs(15),
-                sync::repair_local_payment_mirrors_for_orders(&db, &[local_id.clone()]),
+                sync::repair_local_payment_mirrors_for_orders(db, &[local_id.clone()]),
             )
             .await
             .map_err(|_| "PAYMENT_MIRROR_PENDING".to_string())?
@@ -8890,7 +8902,6 @@ pub async fn order_save_from_remote(
         value_f64(&order_data, &["discount_percentage", "discountPercentage"]).unwrap_or(0.0);
     let discount_amount =
         value_f64(&order_data, &["discount_amount", "discountAmount"]).unwrap_or(0.0);
-    let tip_amount = value_f64(&order_data, &["tip_amount", "tipAmount"]).unwrap_or(0.0);
     let tax_rate = value_f64(&order_data, &["tax_rate", "taxRate"]);
     let delivery_fee = value_f64(&order_data, &["delivery_fee", "deliveryFee"]).unwrap_or(0.0);
     let branch_id = value_str(&order_data, &["branch_id", "branchId"])
@@ -8953,6 +8964,13 @@ pub async fn order_save_from_remote(
             .or_else(|| order_data.get("ghostMetadata")),
         payment_method.as_deref(),
     );
+    let (tip_amount, tip_amount_cents) = sync::remote_order_insert_tip(
+        &order_data,
+        total_amount,
+        plugin.as_deref(),
+        &order_type,
+        ghost_metadata.as_deref(),
+    );
     let created_at = value_str(&order_data, &["created_at", "createdAt"]).unwrap_or(now.clone());
     let updated_at = value_str(&order_data, &["updated_at", "updatedAt"]).unwrap_or(now.clone());
 
@@ -8963,7 +8981,6 @@ pub async fn order_save_from_remote(
         let tax_amount_cents = Cents::round_half_even(tax_amount).as_i64();
         let subtotal_cents = Cents::round_half_even(subtotal).as_i64();
         let discount_amount_cents = Cents::round_half_even(discount_amount).as_i64();
-        let tip_amount_cents = Cents::round_half_even(tip_amount).as_i64();
         let delivery_fee_cents = Cents::round_half_even(delivery_fee).as_i64();
         conn.execute(
             "INSERT INTO orders (
@@ -9092,17 +9109,19 @@ pub async fn order_save_from_remote(
         sync::stamp_remote_folio_charge(&conn, &local_id, &order_data)?;
     }
 
-    if let Ok(order_json) = sync::get_order_by_id(&db, &local_id) {
-        let _ = app.emit("order_created", order_json);
+    if let Ok(order_json) = sync::get_order_by_id(db, &local_id) {
+        publish_order(order_json);
     }
 
     // Skip auto-print for ghost orders and pending/split payment orders (receipt
     // will be printed after split payments are individually recorded).
     let skip_auto_print =
         suppress_auto_print || is_ghost || payment_method.as_deref() == Some("pending");
-    if !skip_auto_print && crate::print::is_print_action_enabled(&db, "after_order") {
+    if !skip_auto_print && crate::print::is_print_action_enabled(db, "after_order") {
         for entity_type in print::auto_print_entity_types_for_order_type(&order_type) {
-            if let Err(error) = print::enqueue_print_job(&db, entity_type, &local_id, None, &app) {
+            if let Err(error) =
+                print::enqueue_print_job(db, entity_type, &local_id, None, print_invalidator)
+            {
                 tracing::warn!(
                     order_id = %local_id,
                     entity_type = %entity_type,
@@ -15374,6 +15393,28 @@ mod box_order_mutation_tests {
                 BoxOrderMutation::Generic
             )
             .is_err());
+        }
+    }
+
+    #[test]
+    fn fix_win_p0_box_gr_cancellation_uses_released_provider_decision() {
+        for (daas, provider, allowed) in [
+            (true, "vendor_delivery", true),
+            (false, "platform_delivery", false),
+        ] {
+            let metadata = serde_json::json!({
+                "food_delivery": {"box_daas": daas, "delivery_provider": provider}
+            })
+            .to_string();
+            let conn = connection("BOX-GR", "confirmed", &metadata);
+            let outcome = ensure_platform_cancellation_allowed(&conn, "box-order");
+            if allowed {
+                assert!(outcome.is_ok(), "{outcome:?}");
+            } else {
+                assert!(outcome
+                    .unwrap_err()
+                    .starts_with("PLATFORM_COURIER_CANCELLATION_ONLY"));
+            }
         }
     }
 

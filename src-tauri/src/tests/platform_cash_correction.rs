@@ -199,8 +199,12 @@ fn void(db: &TestDb) {
 }
 
 fn close(db: &TestDb, shift: &str, count: f64) -> Value {
-    let answer =
-        shifts::close_shift(&db.state, &json!({"shiftId":shift,"closingCash":count})).unwrap();
+    let mut payload = json!({"shiftId": shift, "closingCash": count});
+    if shift == DRIVER_SHIFT {
+        payload["expectedDriverKeptTips"] = json!(0.0);
+        payload["expectedDriverPayout"] = json!(0.0);
+    }
+    let answer = shifts::close_shift(&db.state, &payload).unwrap();
     assert_eq!(answer["success"], true, "{answer}");
     answer
 }

@@ -186,10 +186,12 @@ describe('StaffShiftModal ordinary cashier ledger and confirmation', { timeout: 
   });
 
   it.each([
-    { role: 'driver', roleType: 'driver', paymentAmount: 0, countLabel: 'Cash Actually Handed Over' },
-    { role: 'cashier', roleType: 'cashier', paymentAmount: undefined, countLabel: 'modals.staffShift.closingCashLabel' },
-    { role: 'waiter', roleType: 'server', paymentAmount: undefined, countLabel: 'Cash Actually Handed Over' },
-  ])('sends the release Checkout request for a $role', async ({ roleType, paymentAmount, countLabel }) => {
+    // A driver's close also confirms the kept tips and payout it showed, zero included (review round 2).
+    { role: 'driver', roleType: 'driver', paymentAmount: 0, countLabel: 'Cash Actually Handed Over',
+      confirmation: { expectedDriverKeptTips: 0, expectedDriverPayout: 0 } },
+    { role: 'cashier', roleType: 'cashier', paymentAmount: undefined, countLabel: 'modals.staffShift.closingCashLabel', confirmation: {} },
+    { role: 'waiter', roleType: 'server', paymentAmount: undefined, countLabel: 'Cash Actually Handed Over', confirmation: {} },
+  ])('sends the release Checkout request for a $role', async ({ roleType, paymentAmount, countLabel, confirmation }) => {
     fixture.sessionStaff = { ...fixture.sessionStaff, databaseStaffId: 's1' };
     fixture.activeShift = shift({ id: 'sh1', staff_id: 's1', role_type: roleType, currency: 'EUR' });
     bridge.shifts.getSummary.mockResolvedValue({
@@ -204,9 +206,10 @@ describe('StaffShiftModal ordinary cashier ledger and confirmation', { timeout: 
     fireEvent.click(button);
     await waitFor(() => expect(fixture.onClose).toHaveBeenCalledOnce());
 
-    // Strict literal snapshot of the call in 6fa259b66, including the undefined key.
+    // Strict literal snapshot of the call in 6fa259b66, including the undefined key; only the
+    // driver adds the two confirmed figures.
     expect(bridge.shifts.close.mock.calls).toStrictEqual([[
-      { shiftId: 'sh1', closingCash: 25, closedBy: 's1', paymentAmount },
+      { shiftId: 'sh1', closingCash: 25, closedBy: 's1', paymentAmount, ...confirmation },
     ]]);
   });
 
@@ -421,6 +424,195 @@ describe('StaffShiftModal ordinary cashier ledger and confirmation', { timeout: 
     for (const label of screen.getAllByText('Expected In Drawer')) {
       expect(label.parentElement).toHaveTextContent(/30[,.]00/);
     }
+  });
+
+  it('shows a 0,75 drawer payout and closes without asking for a driver count', async () => {
+    const i18n = i18next.createInstance();
+    await i18n.init({ lng: 'el', resources: { el: { translation: localeBundles.el } } });
+    const t = i18n.getFixedT('el');
+    fixture.localizedT = t;
+    const driver = shift({ role_type: 'driver', calculation_version: 2 });
+    fixture.activeShift = driver;
+    bridge.shifts.getSummary.mockResolvedValue({ success: true, data: {
+      ...summary(0), shift: driver, currency: 'EUR', tipsReceived: 0.75, amountToReturn: -0.75,
+      driverDrawerPayout: 0.75,
+      driverKeptTipLines: [{ orderId: 'b449', orderNumber: '#B449', source: 'box', paymentMethods: ['online'], amount: 0.75 }],
+    } });
+    bridge.shifts.close.mockResolvedValue({ success: true, expected: -0.75, closing: -0.75, variance: 0 });
+
+    render(<StaffShiftModal {...props} />);
+    const payout = await screen.findByText('Πληρωμή από το συρτάρι:');
+    expect(payout.parentElement).toHaveTextContent(/0[,.]75/);
+    expect(screen.queryByRole('textbox', { name: t('modals.staffShift.cashActuallyHandedOver') })).toBeNull();
+    const tips = screen.getByTestId('driver-kept-tips');
+    expect(tips).toHaveTextContent('Φιλοδωρήματα που κρατά');
+    expect(tips).toHaveTextContent('#B449 · BOX · Ηλεκτρονικά');
+    expect(tips).toHaveTextContent(/Σύνολο\s*-\s*€?\s*0[,.]75/);
+
+    const closeButton = screen.getByTestId('staff-checkout-confirm-button');
+    await waitFor(() => expect(closeButton).toBeEnabled());
+    fireEvent.click(closeButton);
+    await waitFor(() => expect(bridge.shifts.close).toHaveBeenCalledWith(expect.objectContaining({
+      shiftId: SHIFT_ID, closingCash: -0.75,
+    })));
+    expect(screen.queryByRole('dialog', { name: t('modals.staffShift.confirmZeroTitle') })).toBeNull();
+  });
+
+  it('shows every deducted tip with its tender, then the 2,25 total', async () => {
+    const i18n = i18next.createInstance();
+    await i18n.init({ lng: 'el', resources: { el: { translation: localeBundles.el } } });
+    fixture.localizedT = i18n.getFixedT('el');
+    const driver = shift({ role_type: 'driver', calculation_version: 2, opening_cash_amount: 20 });
+    fixture.activeShift = driver;
+    bridge.shifts.getSummary.mockResolvedValue({ success: true, data: {
+      ...summary(0), shift: driver, currency: 'EUR', tipsReceived: 2.25, amountToReturn: 27.75,
+      driverDeliveries: [{ id: 'cash', cash_collected: 10 }, { id: 'unpaid', tip_amount: 2 }],
+      driverKeptTipLines: [
+        { orderId: 'b449', orderNumber: '#B449', source: 'box', paymentMethods: ['online'], amount: 0.75 },
+        { orderId: 'card', orderNumber: '#101', source: 'phone', paymentMethods: ['card'], amount: 1 },
+        { orderId: 'cash', orderNumber: '#102', source: 'phone', paymentMethods: ['cash'], amount: 0.50 },
+      ],
+    } });
+    render(<StaffShiftModal {...props} />);
+
+    const tips = await screen.findByTestId('driver-kept-tips');
+    const rows = within(tips).getAllByRole('listitem');
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toHaveTextContent(/#B449 · BOX · Ηλεκτρονικά\s*€?\s*0[,.]75/);
+    expect(rows[1]).toHaveTextContent(/#101 · Τηλέφωνο · Κάρτα\s*€?\s*1[,.]00/);
+    expect(rows[2]).toHaveTextContent(/#102 · Τηλέφωνο · Μετρητά\s*€?\s*0[,.]50/);
+    expect(tips).toHaveTextContent(/Σύνολο\s*-\s*€?\s*2[,.]25/);
+    expect(tips).not.toHaveTextContent(/2[,.]00/);
+  });
+
+  it('fix_win2 shows the revised payout and waits for a second confirmation', async () => {
+    const driver = shift({ role_type: 'driver', calculation_version: 2 });
+    fixture.activeShift = driver;
+    const tip = { orderId: 'b449', orderNumber: '#B449', source: 'box', paymentMethods: ['online'], amount: 0.75 };
+    bridge.shifts.getSummary.mockResolvedValue({ success: true, data: {
+      ...summary(0), shift: driver, currency: 'EUR', tipsReceived: 0.75, amountToReturn: -0.75,
+      driverDrawerPayout: 0.75, driverKeptTipLines: [tip],
+    } });
+    bridge.shifts.close.mockResolvedValueOnce({
+      success: false, code: 'DRIVER_CHECKOUT_CHANGED',
+      driverCheckout: {
+        amountToReturn: -0.50, tipsReceived: 0.50, driverDrawerPayout: 0.50,
+        driverKeptTipLines: [{ ...tip, amount: 0.50 }],
+      },
+    }).mockResolvedValueOnce({ success: true, expected: -0.50, closing: -0.50, variance: 0 });
+
+    render(<StaffShiftModal {...props} />);
+    const payout = await screen.findByText('Drawer payout:');
+    expect(payout.parentElement).toHaveTextContent(/0[,.]75/);
+    const confirm = screen.getByTestId('staff-checkout-confirm-button');
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(payout.parentElement).toHaveTextContent(/0[,.]50/));
+    expect(bridge.shifts.close).toHaveBeenCalledTimes(1);
+    expect(bridge.shifts.close).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      closingCash: -0.75, expectedDriverKeptTips: 0.75, expectedDriverPayout: 0.75,
+    }));
+    fireEvent.click(confirm);
+    await waitFor(() => expect(bridge.shifts.close).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      expectedDriverKeptTips: 0.50, expectedDriverPayout: 0.50,
+    })));
+  });
+
+  it('fix2_win_item3_applies_a_late_payout_from_the_refusal_when_summary_refresh_fails', async () => {
+    const driver = shift({ role_type: 'driver', calculation_version: 2 });
+    fixture.activeShift = driver;
+    bridge.shifts.getSummary.mockImplementation(async (_shiftId: string, options?: { skipBackfill?: boolean }) => {
+      if (options?.skipBackfill === false) throw new Error('Summary unavailable');
+      return { success: true, data: {
+        ...summary(0), shift: driver, currency: 'EUR', tipsReceived: 0, amountToReturn: 0,
+      } };
+    });
+    bridge.shifts.close.mockResolvedValueOnce({
+      success: false, code: 'DRIVER_CHECKOUT_CHANGED',
+      driverCheckout: {
+        amountToReturn: -0.75, tipsReceived: 0.75, driverDrawerPayout: 0.75,
+        driverKeptTipLines: [{ orderId: 'late', orderNumber: '#101', source: 'phone', paymentMethods: ['card'], amount: 0.75 }],
+      },
+    }).mockResolvedValueOnce({ success: true, expected: -0.75, closing: -0.75, variance: 0 });
+
+    render(<StaffShiftModal {...props} />);
+    const confirm = await screen.findByTestId('staff-checkout-confirm-button');
+    await screen.findByRole('textbox', { name: 'Cash Actually Handed Over' });
+    fireEvent.click(confirm);
+    // A zero hand-in asks the released zero-cash confirmation first.
+    const zero = await screen.findByRole('dialog', { name: 'Confirm Zero Closing Cash' });
+    fireEvent.click(within(zero).getByRole('button', { name: 'common.actions.confirm' }));
+    const payout = await screen.findByText('Drawer payout:');
+    expect(payout.parentElement).toHaveTextContent(/0[,.]75/);
+    expect(screen.getByTestId('driver-kept-tips')).toHaveTextContent('#101');
+    expect(bridge.shifts.close).toHaveBeenCalledTimes(1);
+    expect(bridge.shifts.close).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      closingCash: 0, expectedDriverKeptTips: 0, expectedDriverPayout: 0,
+    }));
+    expect(bridge.shifts.getSummary).toHaveBeenCalledWith(SHIFT_ID, { skipBackfill: false });
+    expect(fixture.onClose).not.toHaveBeenCalled();
+
+    fireEvent.click(confirm);
+    await waitFor(() => expect(bridge.shifts.close).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      closingCash: -0.75, expectedDriverKeptTips: 0.75, expectedDriverPayout: 0.75,
+    })));
+    await waitFor(() => expect(fixture.onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it('fix2_win_item3_shows_a_disappearing_tip_and_resubmits_the_zero_figures', async () => {
+    const driver = shift({ role_type: 'driver', calculation_version: 2, opening_cash_amount: 20 });
+    fixture.activeShift = driver;
+    bridge.shifts.getSummary.mockResolvedValue({ success: true, data: {
+      ...summary(0), shift: driver, currency: 'EUR', tipsReceived: 1, amountToReturn: 19,
+      driverKeptTipLines: [{ orderId: 'gone', orderNumber: '#101', source: 'phone', paymentMethods: ['card'], amount: 1 }],
+    } });
+    bridge.shifts.close.mockResolvedValueOnce({
+      success: false, code: 'DRIVER_CHECKOUT_CHANGED',
+      driverCheckout: { amountToReturn: 20, tipsReceived: 0, driverDrawerPayout: 0, driverKeptTipLines: [] },
+    }).mockResolvedValueOnce({ success: true, expected: 20, closing: 20, variance: 0 });
+
+    render(<StaffShiftModal {...props} />);
+    const input = await screen.findByRole('textbox', { name: 'Cash Actually Handed Over' });
+    expect(screen.getByTestId('driver-kept-tips')).toHaveTextContent('#101');
+    fireEvent.change(input, { target: { value: '1900' } });
+    const confirm = screen.getByTestId('staff-checkout-confirm-button');
+    fireEvent.click(confirm);
+    await waitFor(() => expect(screen.queryByTestId('driver-kept-tips')).toBeNull());
+    expect(screen.getAllByText('Return').some(label => /20[,.]00/.test(label.parentElement?.textContent ?? ''))).toBe(true);
+    expect(bridge.shifts.close).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      closingCash: 19, expectedDriverKeptTips: 1, expectedDriverPayout: 0,
+    }));
+    expect(fixture.onClose).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: '2000' } });
+    fireEvent.click(confirm);
+    await waitFor(() => expect(bridge.shifts.close).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      closingCash: 20, expectedDriverKeptTips: 0, expectedDriverPayout: 0,
+    })));
+  });
+
+  it('fix2_win_item3_stable_zero_tips_confirm_on_the_first_press_with_the_manual_count', async () => {
+    const driver = shift({ role_type: 'driver', calculation_version: 2, opening_cash_amount: 20 });
+    fixture.activeShift = driver;
+    bridge.shifts.getSummary.mockResolvedValue({ success: true, data: {
+      ...summary(0), shift: driver, currency: 'EUR', tipsReceived: 0, amountToReturn: 30,
+      driverDeliveries: [{ id: 'cash', cash_collected: 10 }], driverKeptTipLines: [],
+    } });
+    bridge.shifts.close.mockResolvedValue({ success: true, expected: 30, closing: 29.50, variance: -0.50 });
+    render(<StaffShiftModal {...props} />);
+
+    const input = await screen.findByRole('textbox', { name: 'Cash Actually Handed Over' });
+    expect(screen.queryByTestId('driver-kept-tips')).toBeNull();
+    expect(screen.queryByText('Drawer payout:')).toBeNull();
+    expect(screen.getAllByText('Return').some((label) => /30[,.]00/.test(label.parentElement?.textContent ?? ''))).toBe(true);
+    fireEvent.change(input, { target: { value: '2950' } });
+    const closeButton = screen.getByTestId('staff-checkout-confirm-button');
+    await waitFor(() => expect(closeButton).toBeEnabled());
+    fireEvent.click(closeButton);
+    await waitFor(() => expect(bridge.shifts.close).toHaveBeenCalledWith(expect.objectContaining({
+      shiftId: SHIFT_ID, closingCash: 29.50, expectedDriverKeptTips: 0, expectedDriverPayout: 0,
+    })));
+    await waitFor(() => expect(fixture.onClose).toHaveBeenCalledTimes(1));
+    expect(bridge.shifts.close).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a zero-count confirmation above the recovery checkout, without closing before confirmation', async () => {

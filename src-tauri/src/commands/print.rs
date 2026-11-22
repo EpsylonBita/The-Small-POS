@@ -4587,6 +4587,7 @@ fn build_sample_receipt_doc() -> receipt_renderer::OrderReceiptDoc {
     receipt_renderer::OrderReceiptDoc {
         vat_legend: Vec::new(),
         currency: None,
+        platform_comment_note_count: None,
         order_id: "preview-000".to_string(),
         order_number: "ORD-0042".to_string(),
         order_type: "dine_in".to_string(),

@@ -1,0 +1,84 @@
+{
+  "amountToReturn": 30.0,
+  "breakdown": {
+    "delivery": {
+      "cardCount": 0,
+      "cardTotal": -0.0,
+      "cashCount": 1,
+      "cashTotal": 10.0
+    },
+    "instore": {
+      "cardCount": 0,
+      "cardTotal": -0.0,
+      "cashCount": 0,
+      "cashTotal": -0.0
+    },
+    "overall": {
+      "cardTotal": -0.0,
+      "cashTotal": 10.0,
+      "totalAmount": 10.0,
+      "totalCount": 1
+    }
+  },
+  "canceledOrders": {
+    "cardCount": 0,
+    "cardTotal": 0.0,
+    "cashCount": 0,
+    "cashTotal": 0.0
+  },
+  "cashDrawer": null,
+  "cashRefunds": 0.0,
+  "currency": "EUR",
+  "driverDeliveries": [
+    {
+      "card_amount": 0.0,
+      "cash_collected": 10.0,
+      "cash_returned_to_cashier": 0.0,
+      "cash_to_return": 10.0,
+      "customer_name": null,
+      "customer_phone": null,
+      "delivery_address": null,
+      "delivery_fee": 0.0,
+      "id": "golden-earning",
+      "order_id": "golden-order",
+      "order_number": "#301",
+      "order_status": "delivered",
+      "original_cash_collected": 10.0,
+      "payment_method": "cash",
+      "status": "delivered",
+      "tip_amount": 0.0,
+      "total_amount": 10.0,
+      "total_earning": 0.0
+    }
+  ],
+  "expenses": [],
+  "ordersCount": 1,
+  "salesAmount": 10.0,
+  "shift": {
+    "branch_id": "branch-1",
+    "calculation_version": 2,
+    "cash_variance": -0.5,
+    "check_in_time": "2026-03-15T08:00:00Z",
+    "check_out_time": "2026-03-15T16:00:00Z",
+    "closing_cash_amount": 29.5,
+    "currency": "EUR",
+    "expected_cash_amount": 30.0,
+    "id": "golden-driver",
+    "opening_cash_amount": 20.0,
+    "payment_amount": 0.0,
+    "role_type": "driver",
+    "staff_id": "staff-1",
+    "staff_name": "Maria",
+    "status": "closed",
+    "terminal_id": "term-1",
+    "total_card_sales": 0.0,
+    "total_cash_sales": 10.0,
+    "total_orders_count": 1,
+    "total_sales_amount": 10.0
+  },
+  "staffPayments": [],
+  "tipAllocations": [],
+  "tipsReceived": 0.0,
+  "totalExpenses": -0.0,
+  "waiterTables": []
+}
