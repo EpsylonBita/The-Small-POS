@@ -1153,6 +1153,7 @@ export interface RecordPaymentParams {
   terminalDeviceId?: string;
   staffId?: string;
   staffShiftId?: string;
+  tableCollectorShiftId?: string;
   collectedBy?: "cashier_drawer" | "driver_shift";
   tipAmount?: number;
   tip_amount?: number;
@@ -1530,6 +1531,8 @@ export interface CloseShiftParams {
   paymentAmount?: number;
   expectedDriverKeptTips?: number;
   expectedDriverPayout?: number;
+  expectedWaiterKeptTips?: number;
+  expectedWaiterPayout?: number;
 }
 
 export type ShiftCloseResult = IpcResult<ShiftCloseFigures> & ShiftCloseFigures;
@@ -2265,6 +2268,7 @@ export interface PlatformBridge {
     remoteCheckout(params: {
       shiftId: string;
       action: "preview" | "close";
+      sourceRole?: "waiter" | "server";
       countedCash?: number;
       closedBy?: string | null;
     }): Promise<any>;
@@ -2274,6 +2278,7 @@ export interface PlatformBridge {
       satelliteShiftId: string;
       openingCash: number;
       countedCash: number;
+      figuresVersion?: 2;
       currency: string;
       closedBy?: string | null;
     }): Promise<any>;
@@ -4097,16 +4102,27 @@ export class TauriBridge implements PlatformBridge {
       ),
     // Satellite remote checkout (v1.4.84): server close via admin API, then
     // the local drawer credit so the received cash enters day math here.
-    remoteCheckout: (p: {
+    remoteCheckout: async (p: {
       shiftId: string;
       action: "preview" | "close";
+      sourceRole?: "waiter" | "server";
       countedCash?: number;
       closedBy?: string | null;
-    }) =>
-      this.adminFetch<{
+    }) => {
+      const waiter = p.sourceRole === "waiter" || p.sourceRole === "server";
+      const captured = waiter
+        ? await this.inv("shift:satellite-handover-recovery", {
+            action: "figures_version",
+            satelliteShiftId: p.shiftId,
+          })
+        : null;
+      return this.adminFetch<{
         success: boolean;
         already_closed?: boolean;
         figures?: {
+          version?: number;
+          payoutCents?: number;
+          keptTips?: import("../renderer/utils/kept-tips").KeptTips | null;
           currency: string | null;
           total_orders_count: number;
           total_sales_amount: number;
@@ -4128,16 +4144,19 @@ export class TauriBridge implements PlatformBridge {
         body: {
           shift_id: p.shiftId,
           action: p.action,
+          ...(waiter && captured?.figuresVersion !== 1 ? { figuresVersion: 2 } : {}),
           ...(p.countedCash !== undefined ? { counted_cash: p.countedCash } : {}),
           ...(p.closedBy ? { closed_by: p.closedBy } : {}),
         },
-      }),
+      });
+    },
     recordSatelliteHandover: (p: {
       branchId: string;
       terminalId: string;
       satelliteShiftId: string;
       openingCash: number;
       countedCash: number;
+      figuresVersion?: 2;
       currency: string;
       closedBy?: string | null;
     }) => this.inv("shift:record-satellite-handover", p),

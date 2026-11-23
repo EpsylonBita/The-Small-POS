@@ -1,0 +1,833 @@
+{
+  "existing": false,
+  "report": {
+    "branchId": "branch",
+    "cardSales": 60.75,
+    "cashSales": 47.0,
+    "cashVariance": 0.0,
+    "closingCash": 145.25,
+    "currency": "EUR",
+    "discountsTotal": 0.0,
+    "expectedCash": 145.25,
+    "expensesTotal": 0.0,
+    "generatedAt": "@time",
+    "grossSales": 104.75,
+    "id": "day-z",
+    "netSales": 99.75,
+    "openingCash": 100.0,
+    "paymentsBreakdown": {
+      "card": {
+        "count": 5,
+        "total": 60.75
+      },
+      "cash": {
+        "count": 3,
+        "total": 47.0
+      },
+      "other": {
+        "count": 0,
+        "total": 0.0
+      },
+      "platform_cod": {
+        "count": 0,
+        "total": 0.0
+      },
+      "platform_online": {
+        "count": 0,
+        "total": 0.0
+      },
+      "twint": {
+        "count": 0,
+        "total": 0.0
+      }
+    },
+    "refundsTotal": 5.0,
+    "reportDate": "@business-date",
+    "reportJson": {
+      "businessDayStartAt": "@time",
+      "cashDrawer": {
+        "cardSales": 47.0,
+        "cashSales": 32.0,
+        "closing": 145.25,
+        "closing_cents": 14525,
+        "driverCashBreakdown": [
+          {
+            "cardAmount": 13.75,
+            "cashCollected": 15.0,
+            "cashRefunds": 0.0,
+            "cashToReturn": 33.25,
+            "driverName": "D",
+            "driverShiftId": "D-shift",
+            "expenses": 0.0,
+            "keptTips": 1.75,
+            "roleType": "driver",
+            "startingAmount": 20.0
+          }
+        ],
+        "driverCashGiven": 20.0,
+        "driverCashReturned": 33.25,
+        "expected": 145.25,
+        "expected_cents": 14525,
+        "moneyInDrawer": 145.25,
+        "moneyInDrawer_cents": 14525,
+        "openingTotal": 100.0,
+        "openingTotal_cents": 10000,
+        "staffPaymentsTotal": 0.0,
+        "totalCashDrops": 0.0,
+        "totalExpenses": 0.0,
+        "totalRefunds": 0.0,
+        "totalVariance": 0.0,
+        "totalVariance_cents": 0,
+        "unreconciledCount": 0,
+        "waiterCashBreakdown": []
+      },
+      "closedOrderClientIds": [
+        "order-1",
+        "order-2",
+        "order-3",
+        "order-4",
+        "order-5",
+        "order-6",
+        "order-7",
+        "order-8"
+      ],
+      "countedMovements": {
+        "adjustmentIds": [
+          "refund-2",
+          "void-1"
+        ],
+        "paymentIds": [
+          "receipt-1-cash",
+          "receipt-2-card",
+          "receipt-3-card",
+          "receipt-3-cash",
+          "receipt-4-cash",
+          "receipt-5-card",
+          "receipt-6-card",
+          "receipt-7-cash",
+          "receipt-8-card"
+        ]
+      },
+      "currency": "EUR",
+      "date": "@business-date",
+      "dayOrders": [
+        {
+          "amount": 16.5,
+          "createdAt": "@time",
+          "currency": "EUR",
+          "deliveryAddress": null,
+          "id": "order-2",
+          "orderNumber": "#2",
+          "orderType": "pickup",
+          "paymentMethod": "card",
+          "paymentStatus": "paid",
+          "platform": null,
+          "platformFleet": false,
+          "staffName": "C",
+          "staffShiftId": "C-shift",
+          "status": "completed",
+          "tableNumber": null
+        },
+        {
+          "amount": 19.0,
+          "createdAt": "@time",
+          "currency": "EUR",
+          "deliveryAddress": null,
+          "id": "order-3",
+          "orderNumber": "#3",
+          "orderType": "pickup",
+          "paymentMethod": "split",
+          "paymentStatus": "paid",
+          "platform": null,
+          "platformFleet": false,
+          "staffName": "C",
+          "staffShiftId": "C-shift",
+          "status": "completed",
+          "tableNumber": null
+        },
+        {
+          "amount": 20.0,
+          "createdAt": "@time",
+          "currency": "EUR",
+          "deliveryAddress": null,
+          "id": "order-4",
+          "orderNumber": "#4",
+          "orderType": "dine-in",
+          "paymentMethod": "cash",
+          "paymentStatus": "paid",
+          "platform": null,
+          "platformFleet": false,
+          "staffName": "C",
+          "staffShiftId": "C-shift",
+          "status": "completed",
+          "tableNumber": "1"
+        },
+        {
+          "amount": 11.0,
+          "createdAt": "@time",
+          "currency": "EUR",
+          "deliveryAddress": null,
+          "id": "order-5",
+          "orderNumber": "#5",
+          "orderType": "dine-in",
+          "paymentMethod": "card",
+          "paymentStatus": "paid",
+          "platform": null,
+          "platformFleet": false,
+          "staffName": "C",
+          "staffShiftId": "C-shift",
+          "status": "completed",
+          "tableNumber": "1"
+        },
+        {
+          "amount": 9.5,
+          "createdAt": "@time",
+          "currency": "EUR",
+          "deliveryAddress": null,
+          "id": "order-6",
+          "orderNumber": "#6",
+          "orderType": "dine-in",
+          "paymentMethod": "card",
+          "paymentStatus": "paid",
+          "platform": null,
+          "platformFleet": false,
+          "staffName": "C",
+          "staffShiftId": "C-shift",
+          "status": "completed",
+          "tableNumber": null
+        },
+        {
+          "amount": 15.0,
+          "createdAt": "@time",
+          "currency": "EUR",
+          "deliveryAddress": null,
+          "id": "order-7",
+          "orderNumber": "#7",
+          "orderType": "delivery",
+          "paymentMethod": "cash",
+          "paymentStatus": "paid",
+          "platform": null,
+          "platformFleet": false,
+          "staffName": "D",
+          "staffShiftId": "D-shift",
+          "status": "delivered",
+          "tableNumber": null
+        },
+        {
+          "amount": 13.75,
+          "createdAt": "@time",
+          "currency": "EUR",
+          "deliveryAddress": null,
+          "id": "order-8",
+          "orderNumber": "#8",
+          "orderType": "delivery",
+          "paymentMethod": "card",
+          "paymentStatus": "paid",
+          "platform": null,
+          "platformFleet": false,
+          "staffName": "D",
+          "staffShiftId": "D-shift",
+          "status": "delivered",
+          "tableNumber": null
+        }
+      ],
+      "dayOrdersTruncated": false,
+      "daySummary": {
+        "cardTotal": 60.75,
+        "cardTotal_cents": 6075,
+        "cashTotal": 47.0,
+        "cashTotal_cents": 4700,
+        "platformCodTotal": 0.0,
+        "platformCodTotal_cents": 0,
+        "platformOnlineTotal": 0.0,
+        "platformOnlineTotal_cents": 0,
+        "total": 107.75,
+        "totalOrders": 7,
+        "total_cents": 10775,
+        "twintTotal": 0.0,
+        "twintTotal_cents": 0
+      },
+      "discardedCorrections": [],
+      "drawers": [
+        {
+          "cardSales": 47.0,
+          "cashSales": 32.0,
+          "closedAt": "@time",
+          "closing": 145.25,
+          "driverCashGiven": 20.0,
+          "driverCashReturned": 33.25,
+          "drops": 0.0,
+          "expected": 145.25,
+          "id": "C-drawer",
+          "openedAt": "@time",
+          "opening": 100.0,
+          "reconciled": true,
+          "staffName": "C",
+          "staffPayments": 0.0,
+          "staffShiftId": "C-shift",
+          "terminalId": "main-till",
+          "variance": 0.0
+        }
+      ],
+      "driverEarnings": {
+        "breakdown": [
+          {
+            "cardAmount": 13.75,
+            "cashCollected": 15.0,
+            "cashToReturn": 33.25,
+            "deliveries": 2,
+            "driverId": "D",
+            "earnings": 1.75,
+            "name": "D",
+            "tips": 1.75,
+            "unsettled": true
+          }
+        ],
+        "cancelledDeliveries": 0,
+        "cardAmountTotal": 13.75,
+        "cashCollectedTotal": 15.0,
+        "cashToReturnTotal": 33.25,
+        "completedDeliveries": 2,
+        "totalDeliveries": 2,
+        "totalEarnings": 1.75,
+        "totalTips": 1.75,
+        "unsettledCount": 2
+      },
+      "expenses": {
+        "items": [],
+        "pendingCount": 0,
+        "staffPaymentsTotal": 0.0,
+        "staffPaymentsTotal_cents": 0,
+        "total": 0.0,
+        "total_cents": 0
+      },
+      "hotel": {
+        "accommodationTax": 0.0,
+        "accommodationTax_cents": 0,
+        "chargedToRoom": 0.0,
+        "chargedToRoomCount": 0,
+        "chargedToRoom_cents": 0,
+        "roomChargesCollected": 0.0,
+        "roomChargesCollected_cents": 0,
+        "transferGross": 0.0,
+        "transferGross_cents": 0,
+        "transferRefundsTotal": 0.0,
+        "transferRefundsTotal_cents": 0,
+        "transferVoidsTotal": 0.0,
+        "transferVoidsTotal_cents": 0
+      },
+      "integrity": {
+        "blockingFindings": 0,
+        "carriedOverFromClosedDays": {
+          "amount": 0.0,
+          "amount_cents": 0,
+          "orders": 0
+        },
+        "difference": -3.0,
+        "difference_cents": -300,
+        "excessAmount": 0.0,
+        "excessAmount_cents": 0,
+        "explainedDifference": 0.0,
+        "explainedDifference_cents": 0,
+        "findings": [],
+        "findingsByReason": [],
+        "olderOrderPayments": {
+          "amount": 0.0,
+          "amount_cents": 0
+        },
+        "orderTurnover": 104.75,
+        "orderTurnover_cents": 10475,
+        "paymentCoverage": 107.75,
+        "paymentCoverage_cents": 10775,
+        "reconciled": false,
+        "refundedOrders": {
+          "amount": 0.0,
+          "amount_cents": 0,
+          "orders": 0
+        },
+        "unclassifiedPlatforms": [],
+        "uncoveredAmount": 0.0,
+        "uncoveredAmount_cents": 0,
+        "unexplainedDifference": -3.0,
+        "unexplainedDifference_cents": -300,
+        "warningFindings": 0
+      },
+      "paymentsBreakdown": {
+        "card": {
+          "count": 5,
+          "total": 60.75
+        },
+        "cash": {
+          "count": 3,
+          "total": 47.0
+        },
+        "other": {
+          "count": 0,
+          "total": 0.0
+        },
+        "platform_cod": {
+          "count": 0,
+          "total": 0.0
+        },
+        "platform_online": {
+          "count": 0,
+          "total": 0.0
+        },
+        "twint": {
+          "count": 0,
+          "total": 0.0
+        }
+      },
+      "period": {
+        "end": "@time",
+        "start": "@time"
+      },
+      "periodEnd": "@time",
+      "periodStart": "@time",
+      "presentation": {
+        "deliveryModuleEnabled": true,
+        "driveThroughModuleEnabled": false,
+        "guestBillingModuleEnabled": false,
+        "roomsModuleEnabled": false,
+        "tablesModuleEnabled": true,
+        "twintPluginEnabled": false
+      },
+      "sales": {
+        "byType": {
+          "delivery": {
+            "card": {
+              "count": 1,
+              "total": 13.75
+            },
+            "cash": {
+              "count": 1,
+              "total": 15.0
+            }
+          },
+          "instore": {
+            "card": {
+              "count": 4,
+              "total": 47.0
+            },
+            "cash": {
+              "count": 2,
+              "total": 32.0
+            }
+          },
+          "repair": {
+            "card": 0.0,
+            "cash": 0.0,
+            "count": 0,
+            "other": 0.0,
+            "total": 0.0
+          }
+        },
+        "cardSales": 60.75,
+        "cardSales_cents": 6075,
+        "cashSales": 47.0,
+        "cashSales_cents": 4700,
+        "deliveryOrders": 2,
+        "deliverySales": 28.75,
+        "deliverySales_cents": 2875,
+        "dineInOrders": 3,
+        "dineInSales": 40.5,
+        "dineInSales_cents": 4050,
+        "discountsTotal": 0.0,
+        "discountsTotal_cents": 0,
+        "driveThroughOrders": 0,
+        "driveThroughSales": 0.0,
+        "driveThroughSales_cents": 0,
+        "grossSales": 104.75,
+        "grossSales_cents": 10475,
+        "netSales": 99.75,
+        "netSales_cents": 9975,
+        "platformCodSales": 0.0,
+        "platformCodSales_cents": 0,
+        "platformOnlineSales": 0.0,
+        "platformOnlineSales_cents": 0,
+        "platforms": [],
+        "refundsTotal": 5.0,
+        "refundsTotal_cents": 500,
+        "repairOrders": 0,
+        "repairSales": 0.0,
+        "repairSales_cents": 0,
+        "retainedTwintSales": 0.0,
+        "retainedTwintSalesCents": 0,
+        "revenueRefundsTotal": 5.0,
+        "revenueRefundsTotal_cents": 500,
+        "revenueVoidsTotal": 0.0,
+        "revenueVoidsTotal_cents": 0,
+        "roomServiceOrders": 0,
+        "roomServiceSales": 0.0,
+        "roomServiceSales_cents": 0,
+        "takeawayOrders": 2,
+        "takeawaySales": 35.5,
+        "takeawaySales_cents": 3550,
+        "taxTotal": 0.0,
+        "taxTotal_cents": 0,
+        "totalOrders": 7,
+        "totalSales": 104.75,
+        "totalSales_cents": 10475,
+        "twintPaymentCount": 0,
+        "twintSales": 0.0,
+        "twintSalesCents": 0,
+        "twint_sales_cents": 0,
+        "voidsTotal": 0.0,
+        "voidsTotal_cents": 0
+      },
+      "shifts": {
+        "cashier": 1,
+        "driver": 1,
+        "kitchen": 0,
+        "total": 2
+      },
+      "staffPayments": {
+        "total": 0.0,
+        "total_cents": 0
+      },
+      "staffReports": [
+        {
+          "checkIn": "@time",
+          "checkOut": "@time",
+          "currency": "EUR",
+          "drawer": {
+            "cardSales": 47.0,
+            "cashSales": 32.0,
+            "closing": 145.25,
+            "driverCashGiven": 20.0,
+            "driverCashReturned": 33.25,
+            "drops": 0.0,
+            "expected": 145.25,
+            "opening": 100.0,
+            "staffPayments": 0.0,
+            "variance": 0.0
+          },
+          "driver": null,
+          "expenses": {
+            "items": [],
+            "total": -0.0
+          },
+          "netCollections": {
+            "paymentCount": 7,
+            "received": 91.0,
+            "receivedCents": 9100,
+            "refundCount": 2,
+            "refunded": 17.0,
+            "refundedCents": 1700,
+            "tenders": [
+              {
+                "kept": 32.0,
+                "keptCents": 3200,
+                "received": 44.0,
+                "receivedCents": 4400,
+                "refunded": 12.0,
+                "refundedCents": 1200,
+                "tender": "cash"
+              },
+              {
+                "kept": 42.0,
+                "keptCents": 4200,
+                "received": 47.0,
+                "receivedCents": 4700,
+                "refunded": 5.0,
+                "refundedCents": 500,
+                "tender": "card"
+              }
+            ],
+            "tips": 6.0,
+            "tipsCents": 600,
+            "total": 74.0,
+            "totalCents": 7400,
+            "version": 1
+          },
+          "orders": {
+            "cardAmount": 47.0,
+            "cashAmount": 32.0,
+            "count": 5,
+            "totalAmount": 76.0,
+            "twintAmount": 0.0
+          },
+          "ordersDetails": [
+            {
+              "amount": 12.0,
+              "createdAt": "@time",
+              "deliveryAddress": null,
+              "id": "order-1",
+              "orderNumber": "#1",
+              "orderType": "pickup",
+              "paymentMethod": "pending",
+              "paymentStatus": "pending",
+              "status": "cancelled",
+              "tableNumber": null
+            },
+            {
+              "amount": 16.5,
+              "createdAt": "@time",
+              "deliveryAddress": null,
+              "id": "order-2",
+              "orderNumber": "#2",
+              "orderType": "pickup",
+              "paymentMethod": "card",
+              "paymentStatus": "paid",
+              "status": "completed",
+              "tableNumber": null
+            },
+            {
+              "amount": 19.0,
+              "createdAt": "@time",
+              "deliveryAddress": null,
+              "id": "order-3",
+              "orderNumber": "#3",
+              "orderType": "pickup",
+              "paymentMethod": "split",
+              "paymentStatus": "paid",
+              "status": "completed",
+              "tableNumber": null
+            },
+            {
+              "amount": 20.0,
+              "createdAt": "@time",
+              "deliveryAddress": null,
+              "id": "order-4",
+              "orderNumber": "#4",
+              "orderType": "dine-in",
+              "paymentMethod": "cash",
+              "paymentStatus": "paid",
+              "status": "completed",
+              "tableNumber": "1"
+            },
+            {
+              "amount": 11.0,
+              "createdAt": "@time",
+              "deliveryAddress": null,
+              "id": "order-5",
+              "orderNumber": "#5",
+              "orderType": "dine-in",
+              "paymentMethod": "card",
+              "paymentStatus": "paid",
+              "status": "completed",
+              "tableNumber": "1"
+            },
+            {
+              "amount": 9.5,
+              "createdAt": "@time",
+              "deliveryAddress": null,
+              "id": "order-6",
+              "orderNumber": "#6",
+              "orderType": "dine-in",
+              "paymentMethod": "card",
+              "paymentStatus": "paid",
+              "status": "completed",
+              "tableNumber": null
+            }
+          ],
+          "ordersTruncated": false,
+          "payments": {
+            "list": [],
+            "staffPayments": -0.0
+          },
+          "returnedToDrawerAmount": 145.25,
+          "role": "cashier",
+          "shiftStatus": "closed",
+          "staffId": "C",
+          "staffName": "C",
+          "staffShiftId": "C-shift"
+        },
+        {
+          "checkIn": "@time",
+          "checkOut": "@time",
+          "currency": "EUR",
+          "drawer": {
+            "cardSales": 13.75,
+            "cashSales": 15.0,
+            "closing": 33.25,
+            "driverCashGiven": 0.0,
+            "driverCashReturned": 33.25,
+            "drops": 0.0,
+            "expected": 33.25,
+            "opening": 20.0,
+            "variance": 0.0
+          },
+          "driver": {
+            "cancelledDeliveries": 0,
+            "cardAmount": 13.75,
+            "cashCollected": 15.0,
+            "cashToReturn": 33.25,
+            "completedDeliveries": 2,
+            "deliveries": 2,
+            "earnings": 1.75,
+            "keptTips": 1.75,
+            "tips": 1.75
+          },
+          "expenses": {
+            "items": [],
+            "total": -0.0
+          },
+          "netCollections": {
+            "paymentCount": 2,
+            "received": 28.75,
+            "receivedCents": 2875,
+            "refundCount": 0,
+            "refunded": 0.0,
+            "refundedCents": 0,
+            "tenders": [
+              {
+                "kept": 15.0,
+                "keptCents": 1500,
+                "received": 15.0,
+                "receivedCents": 1500,
+                "refunded": 0.0,
+                "refundedCents": 0,
+                "tender": "cash"
+              },
+              {
+                "kept": 13.75,
+                "keptCents": 1375,
+                "received": 13.75,
+                "receivedCents": 1375,
+                "refunded": 0.0,
+                "refundedCents": 0,
+                "tender": "card"
+              }
+            ],
+            "tips": 1.75,
+            "tipsCents": 175,
+            "total": 28.75,
+            "totalCents": 2875,
+            "version": 1
+          },
+          "orders": {
+            "cardAmount": 13.75,
+            "cashAmount": 15.0,
+            "count": 2,
+            "totalAmount": 28.75,
+            "twintAmount": 0.0
+          },
+          "ordersDetails": [
+            {
+              "amount": 15.0,
+              "createdAt": "@time",
+              "deliveryAddress": null,
+              "id": "order-7",
+              "orderNumber": "#7",
+              "orderType": "delivery",
+              "paymentMethod": "cash",
+              "paymentStatus": "paid",
+              "status": "delivered"
+            },
+            {
+              "amount": 13.75,
+              "createdAt": "@time",
+              "deliveryAddress": null,
+              "id": "order-8",
+              "orderNumber": "#8",
+              "orderType": "delivery",
+              "paymentMethod": "card",
+              "paymentStatus": "paid",
+              "status": "delivered"
+            }
+          ],
+          "ordersTruncated": false,
+          "payments": {
+            "list": [],
+            "staffPayments": -0.0
+          },
+          "returnedToDrawerAmount": 33.25,
+          "role": "driver",
+          "shiftStatus": "closed",
+          "staffId": "D",
+          "staffName": "D",
+          "staffShiftId": "D-shift"
+        }
+      ],
+      "staffTips": [],
+      "tenderReconciliation": {
+        "lines": [
+          {
+            "kept": 47.0,
+            "keptCents": 4700,
+            "received": 59.0,
+            "receivedCents": 5900,
+            "receivedCount": 4,
+            "refunded": 12.0,
+            "refundedCents": 1200,
+            "refundedCount": 1,
+            "tender": "cash"
+          },
+          {
+            "kept": 55.75,
+            "keptCents": 5575,
+            "received": 60.75,
+            "receivedCents": 6075,
+            "receivedCount": 5,
+            "refunded": 5.0,
+            "refundedCents": 500,
+            "refundedCount": 1,
+            "tender": "card"
+          }
+        ],
+        "totals": {
+          "kept": 102.75,
+          "keptCents": 10275,
+          "received": 119.75,
+          "receivedCents": 11975,
+          "refunded": 17.0,
+          "refundedCents": 1700
+        },
+        "version": 1
+      },
+      "tips": {
+        "total": 4.75,
+        "total_cents": 475
+      },
+      "vatBreakdown": {
+        "byChannel": [
+          {
+            "channel": "dine_in",
+            "grossCents": 4000,
+            "netCents": 4000,
+            "orders": 3,
+            "vatCents": 0
+          },
+          {
+            "channel": "takeaway",
+            "grossCents": 3300,
+            "netCents": 3300,
+            "orders": 2,
+            "vatCents": 0
+          },
+          {
+            "channel": "own_delivery",
+            "grossCents": 2700,
+            "netCents": 2700,
+            "orders": 2,
+            "vatCents": 0
+          }
+        ],
+        "byRate": [
+          {
+            "grossCents": 10000,
+            "netCents": 10000,
+            "vatCategoryCode": "unknown",
+            "vatCents": 0,
+            "vatRatePercent": null
+          }
+        ],
+        "tipsCents": 475,
+        "vatCents": 0,
+        "version": 1
+      }
+    },
+    "shiftCount": 2,
+    "shiftId": "C-shift",
+    "syncState": "pending",
+    "terminalId": "main-till",
+    "terminalName": null,
+    "tipsTotal": 4.75,
+    "totalOrders": 7,
+    "twintSales": 0.0,
+    "voidsTotal": 0.0
+  },
+  "success": true,
+  "zReportId": "day-z"
+}

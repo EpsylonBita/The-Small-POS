@@ -403,6 +403,12 @@ pub(crate) fn phone_shifts_for_z_window(
             ] {
                 money_pair(&mut entry, target, number(shift, source));
             }
+            if let Some(tips) = shift
+                .get("keptTips")
+                .and_then(crate::kept_tips::Snapshot::read_wire)
+            {
+                entry.insert("keptTips".into(), serde_json::json!(tips));
+            }
             Value::Object(entry)
         })
         .collect()
@@ -459,6 +465,27 @@ mod tests {
             "pending_returns": [],
             "terminals": [],
         })
+    }
+
+    #[test]
+    fn wt_z_preserves_phone_kept_tips_and_omits_unknown_history() {
+        let raw: Value = serde_json::from_str(include_str!(
+            "../../../shared/pos/waiter-tips/__fixtures__/waiter-tips-wire.json"
+        ))
+        .unwrap();
+        let mut tipped = json!({
+            "id": "with-tips", "check_out_time": "2026-10-14T16:00:00Z",
+            "keptTips": raw["keptTips"]["valid"][0],
+        });
+        let legacy = json!({"id": "legacy", "check_out_time": "2026-10-14T17:00:00Z"});
+        let window = |shifts: &[Value]| {
+            phone_shifts_for_z_window(shifts, "2026-10-14T00:00:00Z", "2026-10-15T00:00:00Z")
+        };
+        let rows = window(&[tipped.clone(), legacy]);
+        assert_eq!(rows[0]["keptTips"], tipped["keptTips"]);
+        assert!(rows[1].get("keptTips").is_none());
+        tipped["keptTips"] = raw["keptTips"]["invalid"][0].clone();
+        assert!(window(&[tipped])[0].get("keptTips").is_none());
     }
 
     #[test]

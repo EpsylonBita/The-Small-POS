@@ -1,3 +1,4 @@
+import { isWaiterRole, readKeptTips } from './kept-tips';
 import { parseMoneyInputValue } from './moneyInput';
 import { fromCents, toCents } from '@shared/utils/money';
 
@@ -237,7 +238,7 @@ function buildSnapshotValues(
     };
   }
 
-  if (role === 'server') {
+  if (isWaiterRole(role)) {
     const waiterTables = Array.isArray(shiftSummary?.waiterTables) ? shiftSummary.waiterTables : [];
     const opening = getEffectiveOpeningAmount(shift, shiftSummary);
     const cashFromTables = waiterTables.reduce(
@@ -247,9 +248,11 @@ function buildSnapshotValues(
     const expensesTotal = Number(shiftSummary?.totalExpenses || 0);
     const calculationVersion = Number(shift?.calculation_version ?? 1);
     const paymentAmount = Number(shift?.payment_amount || 0);
-    const expectedAmount = calculationVersion >= 2
+    const expectedAmount = finiteNumberOrNull(shiftSummary?.amountToReturn) ?? (calculationVersion >= 2
       ? opening + cashFromTables - expensesTotal
-      : opening + cashFromTables - expensesTotal - paymentAmount;
+      : opening + cashFromTables - expensesTotal - paymentAmount);
+    const payout = readKeptTips(shiftSummary?.keptTips)?.payoutCents ?? 0;
+    if (payout > 0) return { expectedAmount, closingAmount: -payout / 100, varianceAmount: 0 };
     if (!hasManualCashInput(params.closingCash)) {
       return { expectedAmount };
     }

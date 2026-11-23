@@ -771,6 +771,8 @@ pub struct ShiftCheckoutDoc {
     pub(crate) driver_kept_tip_lines: Vec<crate::shifts::DriverKeptTipLine>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) driver_drawer_payout: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) waiter_kept_tips: Option<crate::kept_tips::Snapshot>,
     #[serde(default)]
     pub total_sells: f64,
     #[serde(default)]
@@ -801,6 +803,8 @@ pub struct ZReportStaffEntry {
     pub driver_kept_tips: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver_drawer_payout: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) waiter_kept_tips: Option<crate::kept_tips::Snapshot>,
     #[serde(
         default,
         rename = "netCollections",
@@ -836,7 +840,8 @@ pub struct ZReportPhoneShiftEntry {
     pub expected_cash: Option<f64>,
     #[serde(default)]
     pub cash_variance: Option<f64>,
-    /// `received`, `pending`, `none` or `not_counted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) kept_tips: Option<crate::kept_tips::Snapshot>,
     #[serde(default)]
     pub handover: String,
 }
@@ -2341,6 +2346,12 @@ fn z_report_phone_shift_rows(
             signed_money(variance, money),
         ));
     }
+    for (key, amount) in kept_tip_totals(shift.kept_tips.as_ref())
+        .into_iter()
+        .flatten()
+    {
+        rows.push((receipt_label(lang, key).to_string(), money(amount)));
+    }
     rows.push((
         receipt_label(lang, "Handover").to_string(),
         z_report_phone_handover_label(lang, &shift.handover).to_string(),
@@ -3702,6 +3713,48 @@ fn should_render_minimal_shift_checkout(doc: &ShiftCheckoutDoc) -> bool {
     crate::shifts::is_non_financial_shift_role(&doc.role_type)
 }
 
+fn kept_tip_totals(tips: Option<&crate::kept_tips::Snapshot>) -> [Option<(&'static str, f64)>; 2] {
+    let money = |cents| crate::money::Cents::new(cents).to_f64_dp2();
+    [
+        tips.filter(|tips| tips.total_cents > 0)
+            .map(|tips| ("Tips kept", money(tips.total_cents))),
+        tips.filter(|tips| tips.payout_cents > 0)
+            .map(|tips| ("Drawer payout", money(tips.payout_cents))),
+    ]
+}
+
+fn waiter_checkout_tip_rows(
+    lang: &str,
+    tips: Option<&crate::kept_tips::Snapshot>,
+) -> Vec<(String, f64)> {
+    let Some(tips) = tips else {
+        return Vec::new();
+    };
+    let mut rows: Vec<_> = tips
+        .lines
+        .iter()
+        .map(|line| {
+            let label = line
+                .table_code
+                .as_ref()
+                .or(line.order_number.as_ref())
+                .map(String::as_str)
+                .unwrap_or("—");
+            (
+                label.to_owned(),
+                crate::money::Cents::new(line.cents).to_f64_dp2(),
+            )
+        })
+        .collect();
+    rows.extend(
+        kept_tip_totals(Some(tips))
+            .into_iter()
+            .flatten()
+            .map(|(key, amount)| (receipt_label(lang, key).to_string(), amount)),
+    );
+    rows
+}
+
 fn z_report_shift_tip_rows(staff: &ZReportStaffEntry) -> impl Iterator<Item = (&'static str, f64)> {
     let kept_tips = staff.driver_kept_tips.filter(|amount| *amount > 0.0);
     let tips = kept_tips
@@ -3713,7 +3766,11 @@ fn z_report_shift_tip_rows(staff: &ZReportStaffEntry) -> impl Iterator<Item = (&
         .driver_drawer_payout
         .filter(|amount| *amount > 0.0)
         .map(|amount| ("Drawer payout", amount));
-    tips.into_iter().chain(payout)
+    tips.into_iter().chain(payout).chain(
+        kept_tip_totals(staff.waiter_kept_tips.as_ref())
+            .into_iter()
+            .flatten(),
+    )
 }
 
 fn shift_checkout_tips_received(doc: &ShiftCheckoutDoc) -> f64 {
@@ -6379,6 +6436,15 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         }
                     }
                 } else {
+                    for (label, amount) in
+                        waiter_checkout_tip_rows(lang, doc.waiter_kept_tips.as_ref())
+                    {
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                            esc(&label),
+                            money(amount)
+                        ));
+                    }
                     for row in shift_checkout_summary_rows(doc) {
                         body.push_str(&format!(
                             "<div class=\"line\"><span>{}</span><span>{}</span></div>",
@@ -10422,6 +10488,15 @@ fn render_classic_non_customer_raster_exact_ttf(
                         }
                     }
                 } else {
+                    for (label, amount) in
+                        waiter_checkout_tip_rows(lang, doc.waiter_kept_tips.as_ref())
+                    {
+                        canvas.draw_pair(
+                            &label,
+                            &money_with_currency_locale(amount, &cur, comma),
+                            preset.item_style,
+                        );
+                    }
                     for row in shift_checkout_summary_rows(doc) {
                         canvas.draw_pair(
                             &format!("{}:", receipt_label(lang, row.label_key)),
@@ -13341,6 +13416,11 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         emit_rule(&mut builder, width, '-');
                     }
                 } else {
+                    for (label, amount) in
+                        waiter_checkout_tip_rows(lang, doc.waiter_kept_tips.as_ref())
+                    {
+                        emit_pair(&mut builder, &label, &money_locale(amount, comma), width);
+                    }
                     for row in shift_checkout_summary_rows(doc) {
                         emit_pair(
                             &mut builder,
@@ -20341,6 +20421,7 @@ mod tests {
                 expected_cash: Some(42.50),
                 cash_variance: Some(-2.50),
                 handover: "pending".into(),
+                kept_tips: None,
             },
             ZReportPhoneShiftEntry {
                 name: "Eleni".into(),
@@ -20354,6 +20435,46 @@ mod tests {
             },
         ];
         z
+    }
+
+    #[test]
+    fn wt_print_checkout_and_z_use_frozen_waiter_tips() {
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../shared/pos/waiter-tips/__fixtures__/waiter-tips-wire.json"
+        ))
+        .unwrap();
+        let tips = crate::kept_tips::Snapshot::read_wire(&wire["keptTips"]["valid"][0]).unwrap();
+        let cfg = slip_cfg("en", "CHF");
+        let checkout = ShiftCheckoutDoc {
+            role_type: "server".into(),
+            expected_amount: Some(-3.0),
+            closing_amount: Some(-3.0),
+            waiter_kept_tips: Some(tips.clone()),
+            ..ShiftCheckoutDoc::default()
+        };
+        for output in html_and_text(&ReceiptDocument::ShiftCheckout(checkout), &cfg) {
+            assert!(output.contains("T1"));
+            assert!(output.contains("T2"));
+            assert!(output.contains("Tips kept"));
+            assert!(output.contains("Drawer payout"));
+        }
+        let mut z = tomikro_z_report();
+        z.staff_reports = vec![ZReportStaffEntry {
+            role: "server".into(),
+            name: "Local waiter".into(),
+            waiter_kept_tips: Some(tips.clone()),
+            ..ZReportStaffEntry::default()
+        }];
+        z.phone_shifts = vec![ZReportPhoneShiftEntry {
+            role: "server".into(),
+            name: "Phone waiter".into(),
+            kept_tips: Some(tips),
+            ..ZReportPhoneShiftEntry::default()
+        }];
+        for output in html_and_text(&ReceiptDocument::ZReport(z), &cfg) {
+            assert_eq!(output.matches("Tips kept").count(), 2);
+            assert_eq!(output.matches("Drawer payout").count(), 2);
+        }
     }
 
     #[test]

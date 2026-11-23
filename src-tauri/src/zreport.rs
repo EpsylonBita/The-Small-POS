@@ -4429,6 +4429,11 @@ fn build_staff_report(
     period_start: &str,
     period_end: &str,
 ) -> Result<Value, String> {
+    let waiter_tips = if crate::shifts::is_waiter_role(&shift.role_type) {
+        crate::shifts::load_frozen_waiter_kept_tips(conn, &shift.id)?
+    } else {
+        None
+    };
     let display_name = display_staff_name(shift);
     let expense_items = load_staff_expense_items(conn, &shift.id)?;
     let expenses_total = expense_items
@@ -4557,6 +4562,14 @@ fn build_staff_report(
             })
             .or(shift.expected_cash)
             .unwrap_or(shift.opening_cash + cash_amount - expenses_total);
+        let returned_to_drawer_amount = if waiter_tips
+            .as_ref()
+            .is_some_and(|tips| tips.total_cents > 0 || tips.payout_cents > 0)
+        {
+            shift.closing_cash.unwrap_or(returned_to_drawer_amount)
+        } else {
+            returned_to_drawer_amount
+        };
 
         let drawer_value = drawer_snapshot.unwrap_or_else(|| {
             serde_json::json!({
@@ -4625,6 +4638,9 @@ fn build_staff_report(
         "drawer": drawer_value,
         "returnedToDrawerAmount": returned_to_drawer_amount,
     });
+    if let Some(tips) = waiter_tips {
+        report["keptTips"] = serde_json::json!(tips);
+    }
     let frozen = if shift.status == "closed" || shift.check_out_time.is_some() {
         crate::shifts::load_frozen_net_collections(conn, &shift.id)?
     } else {

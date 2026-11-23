@@ -25,6 +25,8 @@ import {
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { paymentRefusalMessage } from '../../utils/paymentRefusalMessage';
+import { isWaiterRole } from '../../utils/kept-tips';
+import { useOptionalShift } from '../../contexts/shift-context';
 import { emitCompatEvent, getBridge, type RecordPaymentParams } from '../../../lib';
 import { useI18n } from '../../contexts/i18n-context';
 import { useCashierPortalProps } from '../../contexts/cashier-gate-context';
@@ -1239,6 +1241,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     () => (session?.metadata && typeof session.metadata === 'object' ? session.metadata : {}),
     [session?.metadata],
   );
+  const activeShift = useOptionalShift()?.activeShift;
   const currentWaiterId = String(
     session?.opened_by_waiter_id ||
       sessionMetadata.current_waiter_id ||
@@ -2091,6 +2094,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       tipAmount: tipValue,
       tip_amount: tipValue,
       tip_amount_cents: Math.round(tipValue * 100),
+      tableCollectorShiftId: isWaiterRole(activeShift?.role_type) ? activeShift?.id : undefined,
       tableSessionId: session.id,
       table_session_id: session.id,
       seatNumber: !requiresBalanceSettlement && seatNumber ? Number(seatNumber) : undefined,

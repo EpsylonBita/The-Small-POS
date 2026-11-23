@@ -139,3 +139,5 @@ mod round3_review_fixes;
 // never waits for a Health scan; the scans stay cheap as orders and the
 // parity queue grow.
 mod health_checkout_scaling;
+
+mod no_waiter_baseline;

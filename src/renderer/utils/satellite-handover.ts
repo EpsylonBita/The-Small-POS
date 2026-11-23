@@ -4,6 +4,7 @@ export interface SatelliteHandoverInput {
   satelliteShiftId: string;
   openingCash: number;
   countedCash: number;
+  figuresVersion?: 2;
   currency: string;
   closedBy?: string | null;
 }

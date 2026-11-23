@@ -1,3 +1,4 @@
+import { readKeptTips, type KeptTips } from './kept-tips';
 /**
  * Phone shifts of this Main's unit (founder rule 13/10/2026: phones always
  * hand over to the Main).
@@ -51,6 +52,7 @@ export interface UnitShift {
 export type UnitShiftSettle = 'receive' | 'needs_cashier' | 'manager' | null;
 
 export interface UnitClosedShift extends UnitShift {
+  keptTips?: KeptTips;
   status: 'closed' | 'abandoned';
   check_out_time: string | null;
   closing_cash_amount: number | null;
@@ -157,8 +159,10 @@ function parseClosedShift(value: unknown): UnitClosedShift {
   if (!handover) {
     throw new MalformedReadiness('handover');
   }
+  const keptTips = readKeptTips(record.keptTips);
   return {
     ...shift,
+    ...(keptTips ? { keptTips } : {}),
     status: record.status === 'abandoned' ? 'abandoned' : 'closed',
     check_out_time: optionalString(record.check_out_time),
     closing_cash_amount: optionalNumber(record.closing_cash_amount),

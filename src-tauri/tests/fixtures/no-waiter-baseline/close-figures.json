@@ -1,0 +1,84 @@
+{
+  "cashier": {
+    "countedCents": 14525,
+    "expectedCents": 14525,
+    "keptTipsCents": null,
+    "netCollections": {
+      "paymentCount": 7,
+      "received": 91.0,
+      "receivedCents": 9100,
+      "refundCount": 2,
+      "refunded": 17.0,
+      "refundedCents": 1700,
+      "tenders": [
+        {
+          "kept": 32.0,
+          "keptCents": 3200,
+          "received": 44.0,
+          "receivedCents": 4400,
+          "refunded": 12.0,
+          "refundedCents": 1200,
+          "tender": "cash"
+        },
+        {
+          "kept": 42.0,
+          "keptCents": 4200,
+          "received": 47.0,
+          "receivedCents": 4700,
+          "refunded": 5.0,
+          "refundedCents": 500,
+          "tender": "card"
+        }
+      ],
+      "tips": 6.0,
+      "tipsCents": 600,
+      "total": 74.0,
+      "totalCents": 7400,
+      "version": 1
+    },
+    "payoutCents": 0,
+    "tipsReceivedCents": 600,
+    "varianceCents": 0
+  },
+  "driver": {
+    "countedCents": 3325,
+    "expectedCents": 3325,
+    "keptTipsCents": 175,
+    "netCollections": {
+      "paymentCount": 2,
+      "received": 28.75,
+      "receivedCents": 2875,
+      "refundCount": 0,
+      "refunded": 0.0,
+      "refundedCents": 0,
+      "tenders": [
+        {
+          "kept": 15.0,
+          "keptCents": 1500,
+          "received": 15.0,
+          "receivedCents": 1500,
+          "refunded": 0.0,
+          "refundedCents": 0,
+          "tender": "cash"
+        },
+        {
+          "kept": 13.75,
+          "keptCents": 1375,
+          "received": 13.75,
+          "receivedCents": 1375,
+          "refunded": 0.0,
+          "refundedCents": 0,
+          "tender": "card"
+        }
+      ],
+      "tips": 1.75,
+      "tipsCents": 175,
+      "total": 28.75,
+      "totalCents": 2875,
+      "version": 1
+    },
+    "payoutCents": 0,
+    "tipsReceivedCents": 175,
+    "varianceCents": 0
+  }
+}

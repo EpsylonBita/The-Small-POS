@@ -13356,6 +13356,23 @@ fn merge_recorded_payment_metadata(payload: &Value, trace: Value) -> Value {
             metadata.insert(field.into(), Value::String(value.into()));
         }
     }
+    if payload.get("tip_recipient_role").and_then(Value::as_str) == Some("waiter") {
+        if let (Some(staff), Some(shift)) = (
+            payload
+                .get("tip_recipient_staff_id")
+                .and_then(Value::as_str),
+            payload
+                .get("tip_recipient_staff_shift_id")
+                .and_then(Value::as_str),
+        ) {
+            metadata.insert("tip_recipient_role".into(), Value::String("waiter".into()));
+            metadata.insert("tip_recipient_staff_id".into(), Value::String(staff.into()));
+            metadata.insert(
+                "tip_recipient_staff_shift_id".into(),
+                Value::String(shift.into()),
+            );
+        }
+    }
     Value::Object(metadata)
 }
 
@@ -25486,6 +25503,21 @@ pub(crate) mod tests {
                 currency
             );
         }
+    }
+
+    #[test]
+    fn wt_payment_sync_preserves_the_waiter_receipt_stamp() {
+        let raw: Value = serde_json::from_str(include_str!(
+            "../../../shared/pos/waiter-tips/__fixtures__/waiter-tips-wire.json"
+        ))
+        .unwrap();
+        let mut payload = raw["receiptStamp"]["valid"][0].clone();
+        payload["metadata"] = json!({"receipt_note": "keep this"});
+        let metadata = merge_recorded_payment_metadata(&payload, json!({}));
+        for (key, expected) in raw["receiptStamp"]["valid"][0].as_object().unwrap() {
+            assert_eq!(metadata[key], *expected);
+        }
+        assert_eq!(metadata["receipt_note"], "keep this");
     }
 
     #[test]

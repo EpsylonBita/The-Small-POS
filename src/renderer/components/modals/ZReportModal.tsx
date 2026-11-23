@@ -2590,8 +2590,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                   { key: 'variance', label: t('modals.zReport.variance'), value: formatMoney(driverVariance), tone: strongTextClass },
                                 ]),
                               ];
-                              const keptTips = Number(staff.driver?.keptTips ?? 0);
-                              const drawerPayout = Number(staff.driver?.drawerPayout ?? 0);
+                              const keptTips = Number(staff.driver?.keptTips ?? (staff.keptTips?.totalCents ?? 0) / 100);
+                              const drawerPayout = Number(staff.driver?.drawerPayout ?? (staff.keptTips?.payoutCents ?? 0) / 100);
                               return (
                                 <article key={staff.staffShiftId} className={`rounded-xl border p-4! ${dashboardTileClass}`}>
                                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -2617,7 +2617,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                   </div>
                                   {keptTips > 0 && (
                                     <p className={'mt-3 text-sm font-semibold ' + strongTextClass}>
-                                      <span>{t('modals.zReport.driverKeptTips', 'Tips kept by the driver')}:</span>{' '}
+                                      <span>{staff.keptTips ? t('modals.staffShift.driverTipsKept', 'Tips kept') : t('modals.zReport.driverKeptTips', 'Tips kept by the driver')}:</span>{' '}
                                       {formatMoney(keptTips)}
                                     </p>
                                   )}
@@ -2705,6 +2705,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                         </div>
                                       ))}
                                     </div>
+                                    {row.keptTips && row.keptTips.totalCents > 0 && (
+                                      <p className={'mt-3 text-sm font-semibold ' + strongTextClass}>
+                                        {t('modals.staffShift.driverTipsKept', 'Tips kept')} · {money(row.keptTips.totalCents / 100)}
+                                      </p>
+                                    )}
+                                    {row.keptTips && row.keptTips.payoutCents > 0 && (
+                                      <p className={'mt-1 text-sm font-semibold ' + strongTextClass}>
+                                        {t('modals.staffShift.drawerPayout', 'Drawer payout')} · {money(row.keptTips.payoutCents / 100)}
+                                      </p>
+                                    )}
                                   </article>
                                 );
                               })}

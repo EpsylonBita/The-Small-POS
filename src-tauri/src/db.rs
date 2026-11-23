@@ -298,7 +298,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
         conn,
         &query_main_database_path,
         &crate::recovery::create_pre_migration_snapshot,
-    )
+    )?;
+    // Older version 110 databases may still have the v1 handover journal.
+    crate::satellite_handover::ensure_schema(conn)
 }
 
 fn query_main_database_path(conn: &Connection) -> Result<PathBuf, String> {

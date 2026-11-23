@@ -1,3 +1,4 @@
+import type { KeptTips } from '../utils/kept-tips';
 // Report-related types for the POS renderer
 
 import type { ZReportIntegrity } from '../../lib/ipc-contracts';
@@ -67,6 +68,7 @@ export type ZReportPhoneShiftHandover = 'received' | 'pending' | 'none' | 'not_c
  * may be null; `<name>_cents` is authoritative when present.
  */
 export interface ZReportPhoneShift {
+  keptTips?: KeptTips;
   staffShiftId: string;
   staffId?: string | null;
   staffName?: string | null;
@@ -370,6 +372,7 @@ export interface ZReportData {
   }>;
   // Added: per-staff personal Z and day summary
   staffReports?: Array<{
+    keptTips?: KeptTips;
     staffShiftId: string;
     staffId: string;
     staffName: string;

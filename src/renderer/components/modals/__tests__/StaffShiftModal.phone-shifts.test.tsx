@@ -222,7 +222,9 @@ describe('StaffShiftModal phone shifts hand over to the Main', () => {
       expect(receive).toHaveTextContent('Phone 2');
       fireEvent.click(receive);
 
-      await waitFor(() => expect(bridge.shifts.remoteCheckout).toHaveBeenCalledWith({ shiftId: 'phone-close-1', action: 'preview' }));
+      await waitFor(() => expect(bridge.shifts.remoteCheckout).toHaveBeenCalledWith({
+        shiftId: 'phone-close-1', action: 'preview', sourceRole: 'waiter',
+      }));
       const pane = await screen.findByTestId('satellite-checkout-section');
       for (const label of ['Orders', 'Total sales', 'Cash sales', 'Card sales', 'Opening float', 'Expected cash']) {
         expect(within(pane).getByText(label)).toBeInTheDocument();
@@ -239,6 +241,9 @@ describe('StaffShiftModal phone shifts hand over to the Main', () => {
       await waitFor(() => expect(bridge.shifts.recordSatelliteHandover).toHaveBeenCalledWith(expect.objectContaining({
         satelliteShiftId: 'phone-close-1', countedCash: 10.5, currency: 'EUR', openingCash: 0,
       })));
+      expect(bridge.shifts.recordSatelliteHandover).not.toHaveBeenCalledWith(
+        expect.objectContaining({ figuresVersion: 2 }),
+      );
       expect(await screen.findByTestId('satellite-checkout-success')).toBeInTheDocument();
       // The receipt is read again so the till leaves the list.
       await waitFor(() => expect(bridge.shifts.unitReadiness).toHaveBeenCalledTimes(2));

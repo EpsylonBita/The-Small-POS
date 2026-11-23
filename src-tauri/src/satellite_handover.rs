@@ -24,6 +24,7 @@ struct Handover {
     currency: String,
     opening_cents: i64,
     counted_cents: i64,
+    figures_version: i64,
     closed_by: Option<String>,
     applied: bool,
     /// `pending`, `applied`, `refused` or `released`.
@@ -83,6 +84,24 @@ pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("satellite handover schema: {e}"))?;
     upgrade_states(conn)?;
     upgrade_live_claim(conn)?;
+    for (column, definition) in [
+        ("figures_version", "INTEGER NOT NULL DEFAULT 1"),
+        (
+            "payout_cents",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(payout_cents >= 0)",
+        ),
+    ] {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('satellite_cash_handovers') WHERE name=?1)",
+            [column], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !exists {
+            conn.execute_batch(&format!(
+                "ALTER TABLE satellite_cash_handovers ADD COLUMN {column} {definition}"
+            ))
+            .map_err(|e| format!("upgrade satellite handover figures: {e}"))?;
+        }
+    }
     conn.execute_batch(LIVE_CLAIM_INDEX)
         .map_err(|e| format!("satellite handover live claim index: {e}"))
 }
@@ -170,11 +189,11 @@ fn upgrade_states(conn: &Connection) -> Result<(), String> {
 }
 
 fn read(conn: &Connection, source: &str) -> Result<Option<Handover>, String> {
-    conn.query_row("SELECT id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,closed_by,state,refusal_code FROM satellite_cash_handovers WHERE satellite_shift_id=?1 AND state<>'released'",[source],|row| {
+    conn.query_row("SELECT id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents-payout_cents,closed_by,state,refusal_code,figures_version FROM satellite_cash_handovers WHERE satellite_shift_id=?1 AND state<>'released'",[source],|row| {
         let state: String = row.get(10)?;
         Ok(Handover {
             id:row.get(0)?,source:row.get(1)?,branch:row.get(2)?,terminal:row.get(3)?,cashier:row.get(4)?,drawer:row.get(5)?,currency:row.get(6)?,opening_cents:row.get(7)?,counted_cents:row.get(8)?,closed_by:row.get(9)?,applied:state=="applied",
-            state, refusal_code: row.get(11)?,
+            state, refusal_code: row.get(11)?, figures_version: row.get(12)?,
         })
     }).optional().map_err(|e|format!("read satellite handover: {e}"))
 }
@@ -211,12 +230,20 @@ fn capture(conn: &Connection, payload: &Value) -> Result<Handover, String> {
             .and_then(Value::as_f64)
             .ok_or("SATELLITE_HANDOVER_OPENING_REQUIRED")?,
     )?;
-    let counted_cents = money(
-        payload
-            .get("countedCash")
-            .and_then(Value::as_f64)
-            .ok_or("SATELLITE_HANDOVER_COUNTED_REQUIRED")?,
-    )?;
+    let figures_version = if payload.get("figuresVersion").and_then(Value::as_i64) == Some(2) {
+        2
+    } else {
+        1
+    };
+    let counted = payload
+        .get("countedCash")
+        .and_then(Value::as_f64)
+        .ok_or("SATELLITE_HANDOVER_COUNTED_REQUIRED")?;
+    let counted_cents = if counted < 0.0 && figures_version == 2 {
+        -money(-counted)?
+    } else {
+        money(counted)?
+    };
     let closed_by = payload
         .get("closedBy")
         .and_then(Value::as_str)
@@ -240,6 +267,7 @@ fn capture(conn: &Connection, payload: &Value) -> Result<Handover, String> {
                     .to_string(),
             );
         }
+        // The same journal entry always uses its original protocol version.
         return Ok(original);
     }
     if crate::db::get_setting(conn, "terminal", "terminal_id").as_deref() != Some(terminal.as_str())
@@ -262,12 +290,13 @@ fn capture(conn: &Connection, payload: &Value) -> Result<Handover, String> {
         currency,
         opening_cents,
         counted_cents,
+        figures_version,
         closed_by,
         applied: false,
         state: "pending".to_string(),
         refusal_code: None,
     };
-    conn.execute("INSERT INTO satellite_cash_handovers(id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,closed_by,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![intent.id,intent.source,intent.branch,intent.terminal,intent.cashier,intent.drawer,intent.currency,intent.opening_cents,intent.counted_cents,intent.closed_by,chrono::Utc::now().to_rfc3339()]).map_err(|e|format!("capture satellite handover: {e}"))?;
+    conn.execute("INSERT INTO satellite_cash_handovers(id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,closed_by,created_at,figures_version,payout_cents) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![intent.id,intent.source,intent.branch,intent.terminal,intent.cashier,intent.drawer,intent.currency,intent.opening_cents,intent.counted_cents.max(0),intent.closed_by,chrono::Utc::now().to_rfc3339(),intent.figures_version,(-intent.counted_cents).max(0)]).map_err(|e|format!("capture satellite handover: {e}"))?;
     Ok(intent)
 }
 
@@ -277,7 +306,6 @@ fn capture(conn: &Connection, payload: &Value) -> Result<Handover, String> {
 /// `SATELLITE_HANDOVER_REFUSED: <server code>`) for the shift screen to say in
 /// till language.
 pub(crate) fn ensure_receiver_can_close(conn: &Connection, shift: &str) -> Result<(), String> {
-    ensure_schema(conn)?;
     let blocking: Option<(String, Option<String>)> = conn
         .query_row(
             "SELECT state, refusal_code FROM satellite_cash_handovers
@@ -302,7 +330,11 @@ pub(crate) fn ensure_receiver_can_close(conn: &Connection, shift: &str) -> Resul
 }
 
 fn request(intent: &Handover) -> Value {
-    json!({"shift_id":intent.source,"action":"close","handover_id":intent.id,"receiving_cashier_shift_id":intent.cashier,"currency":intent.currency,"counted_cash_cents":intent.counted_cents,"closed_by":intent.closed_by})
+    let mut request = json!({"shift_id":intent.source,"action":"close","handover_id":intent.id,"receiving_cashier_shift_id":intent.cashier,"currency":intent.currency,"counted_cash_cents":intent.counted_cents,"closed_by":intent.closed_by});
+    if intent.figures_version == 2 {
+        request["figuresVersion"] = json!(2);
+    }
+    request
 }
 
 fn outcome(intent: &Handover, applied: bool, error: Option<&str>) -> Value {
@@ -450,7 +482,16 @@ fn apply_proof(conn: &Connection, intent: &Handover, response: &Value) -> Result
     let expected = proof
         .get("expected_cash_cents")
         .and_then(Value::as_i64)
-        .filter(|value| *value >= 0)
+        .filter(|value| {
+            if intent.counted_cents >= 0 {
+                *value >= 0
+            } else {
+                intent.figures_version == 2
+                    && response.pointer("/figures/version").and_then(Value::as_i64) == Some(2)
+                    && *value == intent.counted_cents
+                    && proof.get("payoutCents").and_then(Value::as_i64) == value.checked_neg()
+            }
+        })
         .ok_or("SATELLITE_HANDOVER_EXPECTED_PROOF_MISSING")?;
     let variance = proof
         .get("cash_variance_cents")
@@ -567,7 +608,6 @@ async fn send(
 pub(crate) async fn record(db: &DbState, payload: &Value) -> Result<Value, String> {
     let intent = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        ensure_schema(&conn)?;
         capture(&conn, payload)?
     };
     if intent.applied {
@@ -608,7 +648,6 @@ pub(crate) async fn recover_pending(
 ) -> Result<(), String> {
     let intents = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        ensure_schema(&conn)?;
         // Refused and released claims are final: only pending ones retry.
         let mut stmt=conn.prepare("SELECT satellite_shift_id FROM satellite_cash_handovers WHERE state='pending' ORDER BY created_at LIMIT 20").map_err(|e|e.to_string())?;
         let sources = stmt
@@ -635,10 +674,9 @@ pub(crate) fn blocking_handovers(
     conn: &Connection,
     cashier_shift: &str,
 ) -> Result<Vec<Value>, String> {
-    ensure_schema(conn)?;
     let mut statement = conn
         .prepare(
-            "SELECT id, satellite_shift_id, currency, opening_cents, counted_cents, state,
+            "SELECT id, satellite_shift_id, currency, opening_cents, counted_cents-payout_cents, state,
                     refusal_code, refusal_status, refused_at, created_at
              FROM satellite_cash_handovers
              WHERE cashier_shift_id = ?1 AND state IN ('pending', 'refused')
@@ -698,7 +736,7 @@ fn release_refused_claim(conn: &Connection, release: &ClaimRelease<'_>) -> Resul
             "SELECT json_object('handoverId', id, 'satelliteShiftId', satellite_shift_id,
                  'branchId', branch_id, 'terminalId', terminal_id, 'cashierShiftId', cashier_shift_id,
                  'drawerId', drawer_id, 'currency', currency, 'openingCents', opening_cents,
-                 'countedCents', counted_cents, 'closedBy', closed_by, 'refusalCode', refusal_code,
+                 'countedCents', counted_cents-payout_cents, 'closedBy', closed_by, 'refusalCode', refusal_code,
                  'refusalStatus', refusal_status, 'refusedAt', refused_at, 'lastError', last_error,
                  'capturedAt', created_at)
              FROM satellite_cash_handovers WHERE id = ?1",
@@ -783,7 +821,6 @@ pub(crate) fn release(
         .filter(|note| !note.is_empty())
         .map(|note| note.chars().take(200).collect::<String>());
     let check = |conn: &Connection| -> Result<Option<(String, Option<String>)>, String> {
-        ensure_schema(conn)?;
         let row: Option<(String, String, Option<String>)> = conn
             .query_row(
                 "SELECT cashier_shift_id, state, refusal_code FROM satellite_cash_handovers WHERE id = ?1",
@@ -874,7 +911,6 @@ pub(crate) fn release(
 /// holds the cashier's close once its claim was released. A new claim of that
 /// shift (pending, refused or applied) makes it count again.
 pub(crate) fn released_sources(conn: &Connection) -> Result<Vec<String>, String> {
-    ensure_schema(conn)?;
     let mut statement = conn
         .prepare(
             "SELECT DISTINCT released.satellite_shift_id
@@ -1025,7 +1061,6 @@ async fn close_without_handover_at(
     // still prove and stays as it is.
     let refused_claim: Option<(String, Option<String>)> = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        ensure_schema(&conn)?;
         conn.query_row(
             "SELECT id, refusal_code FROM satellite_cash_handovers
              WHERE satellite_shift_id = ?1 AND state = 'refused'",
@@ -1137,6 +1172,16 @@ pub async fn shift_satellite_handover_recovery(
 ) -> Result<Value, crate::auth::GuardedCommandError> {
     let input = arg0.ok_or("Missing satellite handover recovery payload")?;
     match input.get("action").and_then(Value::as_str) {
+        Some("figures_version") => {
+            let source = required_text(
+                &input,
+                "satelliteShiftId",
+                "SATELLITE_HANDOVER_SHIFT_REQUIRED",
+            )?;
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let version = read(&conn, &source)?.map(|handover| handover.figures_version);
+            Ok(json!({"figuresVersion": version}))
+        }
         Some("list") => {
             let shift = required_text(
                 &input,
@@ -1193,6 +1238,68 @@ mod tests {
     }
     fn totals(conn: &Connection) -> (i64, i64) {
         conn.query_row("SELECT COALESCE(driver_cash_given_cents,0),COALESCE(driver_cash_returned_cents,0) FROM cash_drawer_sessions WHERE id='drawer'",[],|row|Ok((row.get(0)?,row.get(1)?))).unwrap()
+    }
+
+    #[test]
+    fn wt_remote_waiter_recapture_keeps_the_original_v1_request() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed(&conn);
+        let mut payload = payload();
+        let original = capture(&conn, &payload).unwrap();
+        let original_request = request(&original);
+        assert!(original_request.get("figuresVersion").is_none());
+
+        payload["figuresVersion"] = json!(2);
+        let recaptured = capture(&conn, &payload).unwrap();
+        assert_eq!(recaptured.id, original.id);
+        assert_eq!(request(&recaptured), original_request);
+        apply_proof(&conn, &recaptured, &proof(&recaptured)).unwrap();
+        assert_eq!(totals(&conn), (2000, 5525));
+    }
+
+    #[test]
+    fn wt_remote_waiter_schema_setup_upgrades_existing_v1_claims() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed(&conn);
+        let original = capture(&conn, &payload()).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE satellite_cash_handovers DROP COLUMN figures_version;
+             ALTER TABLE satellite_cash_handovers DROP COLUMN payout_cents;",
+        )
+        .unwrap();
+
+        crate::db::run_migrations_for_test(&conn);
+        let restored = read(&conn, SOURCE).unwrap().unwrap();
+        assert_eq!(request(&restored), request(&original));
+        assert_eq!(blocking_handovers(&conn, CASHIER).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn wt_remote_waiter_v2_payout_debits_the_drawer_once_and_replays_the_same_count() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed(&conn);
+        let mut payload = payload();
+        payload["openingCash"] = json!(0);
+        payload["countedCash"] = json!(-3);
+        assert!(capture(&conn, &payload).is_err());
+        payload["figuresVersion"] = json!(2);
+        let intent = capture(&conn, &payload).unwrap();
+        let replay = capture(&conn, &payload).unwrap();
+        assert_eq!(intent.id, replay.id);
+        assert_eq!(request(&replay)["figuresVersion"], 2);
+        assert_eq!(request(&replay)["counted_cash_cents"], -300);
+        let mut server = proof(&replay);
+        server["handover"]["expected_cash_cents"] = json!(-300);
+        server["handover"]["cash_variance_cents"] = json!(0);
+        assert!(apply_proof(&conn, &replay, &server).is_err());
+        assert_eq!(totals(&conn), (0, 0));
+        server["handover"]["payoutCents"] = json!(300);
+        assert!(apply_proof(&conn, &replay, &server).is_err());
+        assert_eq!(totals(&conn), (0, 0));
+        server["figures"] = json!({"version": 2});
+        apply_proof(&conn, &replay, &server).unwrap();
+        apply_proof(&conn, &replay, &server).unwrap();
+        assert_eq!(totals(&conn), (0, -300));
     }
 
     #[test]

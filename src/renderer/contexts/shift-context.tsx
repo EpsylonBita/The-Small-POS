@@ -586,3 +586,7 @@ export function useShift() {
   }
   return context;
 }
+
+export function useOptionalShift() {
+  return useContext(ShiftContext);
+}

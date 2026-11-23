@@ -16,6 +16,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::db::DbState;
+use crate::kept_tips::{Line as KeptTipLine, Role as KeptTipRole, Snapshot as KeptTipSnapshot};
 use crate::money::Cents;
 use crate::offline_check_in::CheckInAdmission;
 use crate::{business_day, order_ownership, payment_integrity, storage, sync_queue};
@@ -853,6 +854,63 @@ pub(crate) fn close_shift_with_support(
     payload: &Value,
     support: Option<&dyn Fn(&rusqlite::Connection, bool) -> Result<(), String>>,
 ) -> Result<Value, String> {
+    match close_shift_attempt(db, payload, support, true) {
+        Err(error) if error == KEPT_TIPS_WRITE_ROLLED_BACK => {
+            close_shift_attempt(db, payload, support, false)
+        }
+        result => result,
+    }
+}
+
+const KEPT_TIPS_WRITE_ROLLED_BACK: &str = "KEPT_TIPS_WRITE_ROLLED_BACK";
+
+/// Keep an optional snapshot in the close transaction, while isolating even
+/// partial statement writes. If SQLite aborts the whole transaction, the
+/// caller retries the ordinary close once with snapshots disabled.
+fn freeze_optional_kept_tips(
+    conn: &Connection,
+    category: &str,
+    shift_id: &str,
+    value: &Value,
+    now: &str,
+) -> Result<bool, String> {
+    if let Err(error) = conn.execute_batch("SAVEPOINT kept_tips_close") {
+        warn!(%error, %category, "Could not start kept tips snapshot write");
+        return if conn.is_autocommit() {
+            Err(KEPT_TIPS_WRITE_ROLLED_BACK.into())
+        } else {
+            Ok(false)
+        };
+    }
+    let write = conn.execute(
+        "INSERT INTO local_settings(setting_category,setting_key,setting_value,updated_at)
+         VALUES(?1,?2,?3,?4)",
+        params![category, shift_id, value.to_string(), now],
+    );
+    if matches!(&write, Ok(1)) && conn.execute_batch("RELEASE kept_tips_close").is_ok() {
+        return Ok(true);
+    }
+    warn!(?write, %category, "Could not store kept tips snapshot");
+    if conn.is_autocommit()
+        || conn
+            .execute_batch("ROLLBACK TO kept_tips_close; RELEASE kept_tips_close")
+            .is_err()
+    {
+        if !conn.is_autocommit() {
+            conn.execute_batch("ROLLBACK")
+                .map_err(|e| format!("rollback close: {e}"))?;
+        }
+        return Err(KEPT_TIPS_WRITE_ROLLED_BACK.into());
+    }
+    Ok(false)
+}
+
+fn close_shift_attempt(
+    db: &DbState,
+    payload: &Value,
+    support: Option<&dyn Fn(&rusqlite::Connection, bool) -> Result<(), String>>,
+    capture_kept_tips: bool,
+) -> Result<Value, String> {
     let shift_id = str_field(payload, "shiftId")
         .or_else(|| str_field(payload, "shift_id"))
         .ok_or("Missing shiftId")?;
@@ -867,6 +925,11 @@ pub(crate) fn close_shift_with_support(
         num_field(payload, "expectedDriverKeptTips").map(Cents::round_half_even);
     let shown_driver_payout =
         num_field(payload, "expectedDriverPayout").map(Cents::round_half_even);
+
+    let shown_waiter_tips =
+        num_field(payload, "expectedWaiterKeptTips").map(Cents::round_half_even);
+    let shown_waiter_payout =
+        num_field(payload, "expectedWaiterPayout").map(Cents::round_half_even);
 
     if raw_closed_by.is_some() && closed_by.is_none() {
         warn!(
@@ -1104,9 +1167,10 @@ pub(crate) fn close_shift_with_support(
         }
     }
 
-    let mut changed_driver_checkout = None;
+    let mut changed_checkout = None;
     let result = (|| -> Result<(f64, f64, f64, Option<crate::gift_financial_closing::ClosingOriginal>), String> {
         let mut drawer_payout = None;
+        let mut kept_tips_for_sync = None;
         let mut payout_drawer = None;
         #[allow(clippy::needless_late_init)]
         let expected: f64;
@@ -1307,7 +1371,7 @@ pub(crate) fn close_shift_with_support(
         } else {
             // Driver / server cash return. Driver tips are kept by the driver,
             // so they are removed from the cash handed back to the cashier.
-            let cash_collected = if role_type == "driver" || role_type == "server" {
+            let cash_collected = if role_returns_cash(&role_type) {
                 compute_shift_cash_collected(&conn, &shift_id, &role_type)?
             } else {
                 let (_, cash_collected, _, _) = compute_shift_payment_totals_in_window(
@@ -1329,7 +1393,7 @@ pub(crate) fn close_shift_with_support(
             );
             let _legacy_payment_amount = payment_amount.unwrap_or(0.0);
             expected = if role_type == "driver" {
-                let tips = compute_driver_shift_kept_tips_in_window(
+                let mut tips = compute_driver_shift_kept_tips_in_window(
                     &conn,
                     &shift_id,
                     Some(shift_check_in_time.as_str()),
@@ -1352,32 +1416,101 @@ pub(crate) fn close_shift_with_support(
                     && closing_cash < 0.0
                     && Cents::round_half_even(closing_cash) != Cents::round_half_even(due);
                 if changed_figures || invalid_count || stale_count {
-                    changed_driver_checkout = Some(json!({
+                    changed_checkout = Some(("DRIVER_CHECKOUT_CHANGED", "driverCheckout", json!({
                         "amountToReturn": due,
                         "tipsReceived": tips.total,
                         "driverKeptTipLines": tips.lines,
                         "driverDrawerPayout": payout_to_confirm,
-                    }));
+                    })));
                     return Err("DRIVER_CHECKOUT_CHANGED".to_string());
                 }
-                if drawer_payout.is_some() {
-                    payout_drawer = resolve_cashier_drawer_for_staff_return(
-                        &conn, &shift_id, &shift_branch_id, &shift_terminal_id,
-                    )?;
-                    if payout_drawer.is_none() {
-                        return Err(missing_staff_return_drawer(&role_type));
+                if capture_kept_tips && tips.total > 0.0 {
+                    let wire_value = compute_live_driver_kept_tips_in_window(
+                        &conn, &shift_id, Some(&shift_check_in_time), Some(&now), true,
+                    ).ok()
+                    .and_then(|wire_tips| KeptTipSnapshot::try_new(KeptTipRole::Driver, wire_tips.wire_lines))
+                    .filter(|snapshot| snapshot.total_cents == Cents::round_half_even(tips.total).as_i64())
+                    .and_then(|mut snapshot| {
+                        snapshot.payout_cents = Cents::round_half_even(payout_to_confirm).as_i64();
+                        snapshot.wire_value()
+                    });
+                    if let Some(value) = wire_value {
+                        if freeze_optional_kept_tips(&conn, "shift_driver_kept_tips_wire", &shift_id, &value, &now)? {
+                            kept_tips_for_sync = Some(value);
+                        }
                     }
                 }
-                // Preserve the exact deduction and its orders for checkout reprints and the Z.
+                // Freeze the same delivery rows as the checkout preview, inside the close.
+                tips.checkout_deliveries = Some(read_driver_checkout_deliveries(
+                    &conn,
+                    &shift_id,
+                    tips.checkout_earning_ids.as_ref(),
+                )?);
                 conn.execute(
                     "INSERT INTO local_settings(setting_category,setting_key,setting_value,updated_at)
                      VALUES('shift_driver_kept_tips',?1,?2,?3)",
                     params![shift_id, serde_json::to_string(&tips).map_err(|e| e.to_string())?, now],
                 ).map_err(|e| format!("freeze driver tips: {e}"))?;
                 due
+            } else if is_waiter_role(&role_type) {
+                let mut due = opening_cash + cash_collected - expenses;
+                let mut confirmed_tips = KeptTipSnapshot::empty(KeptTipRole::Waiter);
+                if let Some(mut tips) = capture_kept_tips
+                    .then(|| read_waiter_kept_tips(&conn, &shift_id).ok())
+                    .flatten()
+                {
+                    let tipped_due =
+                        waiter_cash_due(opening_cash, cash_collected, expenses, &mut tips);
+                    // Local checkout and reports keep every receipt in the snapshot.
+                    if freeze_optional_kept_tips(
+                        &conn,
+                        "shift_waiter_kept_tips",
+                        &shift_id,
+                        &json!(&tips),
+                        &now,
+                    )? {
+                        due = tipped_due;
+                        confirmed_tips = tips;
+                    }
+                }
+                drawer_payout = (confirmed_tips.payout_cents > 0)
+                    .then(|| Cents::new(confirmed_tips.payout_cents).to_f64_dp2());
+                let screen_confirmed = shown_waiter_tips.is_some() || shown_waiter_payout.is_some();
+                let changed_figures = screen_confirmed
+                    && (shown_waiter_tips != Some(Cents::new(confirmed_tips.total_cents))
+                        || shown_waiter_payout != Some(Cents::new(confirmed_tips.payout_cents)));
+                let invalid_count = closing_cash < 0.0 && drawer_payout.is_none();
+                let stale_count = !screen_confirmed
+                    && closing_cash < 0.0
+                    && Cents::round_half_even(closing_cash) != Cents::round_half_even(due);
+                if changed_figures || invalid_count || stale_count {
+                    changed_checkout = Some((
+                        "WAITER_CHECKOUT_CHANGED",
+                        "waiterCheckout",
+                        json!({
+                            "amountToReturn": due,
+                            "tipsReceived": Cents::new(confirmed_tips.total_cents).to_f64_dp2(),
+                            "keptTips": confirmed_tips,
+                        }),
+                    ));
+                    return Err("WAITER_CHECKOUT_CHANGED".to_string());
+                }
+                if confirmed_tips.total_cents > 0 {
+                    kept_tips_for_sync = confirmed_tips.wire_value();
+                }
+                due
             } else {
                 opening_cash + cash_collected - expenses
             };
+        }
+
+        if drawer_payout.is_some() {
+            payout_drawer = resolve_cashier_drawer_for_staff_return(
+                &conn, &shift_id, &shift_branch_id, &shift_terminal_id,
+            )?;
+            if payout_drawer.is_none() {
+                return Err(missing_staff_return_drawer(&role_type));
+            }
         }
 
         // A gift-bound close keeps the ordinary reconciliation, which must
@@ -1461,6 +1594,7 @@ pub(crate) fn close_shift_with_support(
                 "closedBy": closed_by,
                 "paymentAmount": persisted_payment_amount,
             });
+            if let Some(tips) = &kept_tips_for_sync { sync_payload["keptTips"] = tips.clone(); }
             if let Some(currency) = &shift_currency { sync_payload["currency"] = Value::String(currency.clone()); }
             if let Some(collections) = &net_collections { sync_payload["netCollections"] = collections.clone(); }
             if let Some(drawer_snapshot) = cash_drawer {
@@ -1732,7 +1866,12 @@ pub(crate) fn close_shift_with_support(
             )?;
         }
 
-        Ok((expected, variance, drawer_payout.map_or(closing_cash, |amount| -amount), gift_original))
+        let closing = if is_waiter_role(&role_type) {
+            closing_cash_to_persist
+        } else {
+            drawer_payout.map_or(closing_cash, |amount| -amount)
+        };
+        Ok((expected, variance, closing, gift_original))
     })();
 
     match result {
@@ -1778,12 +1917,10 @@ pub(crate) fn close_shift_with_support(
         }
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
-            if let Some(checkout) = changed_driver_checkout {
-                return Ok(json!({
-                    "success": false,
-                    "code": "DRIVER_CHECKOUT_CHANGED",
-                    "driverCheckout": checkout,
-                }));
+            if let Some((code, key, checkout)) = changed_checkout {
+                let mut response = json!({"success": false, "code": code});
+                response[key] = checkout;
+                return Ok(response);
             }
             if e == GIFT_TERMS_CHANGED {
                 return Ok(gift_closing_refusal(
@@ -2899,6 +3036,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     let mut waiter_tables: Vec<Value> = Vec::new();
     let mut staff_payments: Vec<Value> = Vec::new();
     let mut cashier_orders: Vec<Value> = Vec::new();
+    let mut kept_tips = DriverKeptTips::default();
 
     if role_type == "cashier" || role_type == "manager" {
         cashier_orders =
@@ -3063,109 +3201,26 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
             }
         }
 
-        // For driver checkout: get individual delivery records
-        let mut de_stmt = conn
-            .prepare(
-                // W4b-ii: cents-with-real-fallback shim on 7 monetary cols.
-                "SELECT de.id, de.order_id,
-                        COALESCE(de.delivery_fee_cents, CAST(ROUND(de.delivery_fee * 100) AS INTEGER), 0),
-                        MAX(
-                            COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
-                            COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0)
-                        ),
-                        COALESCE(de.total_earning_cents, CAST(ROUND(de.total_earning * 100) AS INTEGER), 0)
-                            + MAX(
-                                COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0)
-                                    - COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
-                                0
-                            ),
-                        de.payment_method,
-                        COALESCE(de.cash_collected_cents, CAST(ROUND(de.cash_collected * 100) AS INTEGER), 0),
-                        COALESCE(de.card_amount_cents, CAST(ROUND(de.card_amount * 100) AS INTEGER), 0),
-                        COALESCE(de.cash_to_return_cents, CAST(ROUND(de.cash_to_return * 100) AS INTEGER), 0),
-                        COALESCE(
-                            NULLIF(TRIM(o.display_order_number), ''),
-                            o.order_number
-                        ),
-                        o.delivery_address,
-                        COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER)),
-                        o.status, o.customer_name, o.customer_phone, o.plugin, o.ghost_metadata, o.order_number
-                 FROM driver_earnings de
-                 LEFT JOIN orders o ON de.order_id = o.id
-                 WHERE de.staff_shift_id = ?1
-                   AND (o.id IS NULL OR COALESCE(o.is_ghost, 0) = 0)
-                   AND (o.id IS NULL OR o.order_type = 'delivery')
-                 ORDER BY de.created_at DESC",
-            )
-            .map_err(|e| format!("prepare driver earnings: {e}"))?;
+        kept_tips = compute_driver_shift_kept_tips_in_window(
+            &conn,
+            shift_id,
+            Some(&check_in_time),
+            shift_end_param,
+        )?;
 
-        driver_deliveries = de_stmt
-            .query_map(params![shift_id], |row| {
-                let status: String = row.get::<_, Option<String>>(12)?.unwrap_or_default();
-                let number: Option<String> = row.get(9)?;
-                let box_label = crate::box_slip::checkout_number(
-                    row.get::<_, Option<String>>(15)?.as_deref(),
-                    number.as_deref(),
-                    row.get::<_, Option<String>>(16)?.as_deref(),
-                    row.get::<_, Option<String>>(17)?.as_deref(),
-                );
-                let mut detail = serde_json::json!({
-                    "id": row.get::<_, String>(0)?,
-                    "order_id": row.get::<_, String>(1)?,
-                    "delivery_fee": Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
-                    "tip_amount": Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
-                    "total_earning": Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
-                    "payment_method": row.get::<_, String>(5)?,
-                    "cash_collected": Cents::new(row.get::<_, i64>(6)?).to_f64_dp2(),
-                    "card_amount": Cents::new(row.get::<_, i64>(7)?).to_f64_dp2(),
-                    "cash_to_return": Cents::new(row.get::<_, i64>(8)?).to_f64_dp2(),
-                    "order_number": box_label.as_ref().or(number.as_ref()),
-                    "delivery_address": row.get::<_, Option<String>>(10)?,
-                    "total_amount": row.get::<_, Option<i64>>(11)?
-                        .map(|c| Cents::new(c).to_f64_dp2()),
-                    "status": &status,
-                    "order_status": &status,
-                    "customer_name": row.get::<_, Option<String>>(13)?,
-                    "customer_phone": row.get::<_, Option<String>>(14)?,
-                });
-                if let Some(label) = box_label {
-                    detail["box_order_label"] = Value::String(label);
-                }
-                Ok(detail)
-            })
-            .map_err(|e| format!("query driver earnings: {e}"))?
-            .filter_map(|r| r.ok())
+        let checkout_deliveries = match kept_tips.checkout_deliveries.take() {
+            Some(deliveries) => deliveries,
+            None => read_driver_checkout_deliveries(
+                &conn,
+                shift_id,
+                kept_tips.checkout_earning_ids.as_ref(),
+            )?,
+        };
+        driver_deliveries = checkout_deliveries
+            .into_iter()
+            .map(DriverCheckoutDelivery::into_summary)
             .collect();
-        for delivery in &mut driver_deliveries {
-            let (cash, card) = driver_earning_tender_cents(
-                &conn,
-                delivery["id"].as_str().unwrap_or_default(),
-                Cents::round_half_even(delivery["cash_collected"].as_f64().unwrap_or(0.0)).as_i64(),
-                Cents::round_half_even(delivery["card_amount"].as_f64().unwrap_or(0.0)).as_i64(),
-            )?;
-            delivery["cash_collected"] = json!(Cents::new(cash).to_f64_dp2());
-            delivery["card_amount"] = json!(Cents::new(card).to_f64_dp2());
-            delivery["payment_method"] = json!(if cash > 0 && card > 0 {
-                "mixed"
-            } else if card > 0 {
-                "card"
-            } else {
-                "cash"
-            });
-            let returned = crate::staff_cash_returns::sum(
-                &conn,
-                delivery["order_id"].as_str(),
-                Some(shift_id),
-            )?;
-            let original =
-                Cents::round_half_even(delivery["cash_collected"].as_f64().unwrap_or(0.0)).as_i64();
-            delivery["original_cash_collected"] = delivery["cash_collected"].clone();
-            delivery["cash_returned_to_cashier"] = json!(Cents::new(returned).to_f64_dp2());
-            delivery["cash_collected"] =
-                json!(Cents::new((original - returned).max(0)).to_f64_dp2());
-            delivery["cash_to_return"] = delivery["cash_collected"].clone();
-        }
-    } else if role_type == "server" {
+    } else if is_waiter_role(&role_type) {
         waiter_tables = build_waiter_tables(&conn, shift_id)?;
     }
 
@@ -3175,18 +3230,19 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     let sales_amount = overall["totalAmount"].as_f64().unwrap_or(0.0);
     let driver_shift_closed =
         role_type == "driver" && (shift["status"] == "closed" || shift_end_param.is_some());
-    let kept_tips = if role_type == "driver" {
-        compute_driver_shift_kept_tips_in_window(
-            &conn,
-            shift_id,
-            Some(&check_in_time),
-            shift_end_param,
-        )?
+    let waiter_shift_closed =
+        is_waiter_role(&role_type) && (shift["status"] == "closed" || shift_end_param.is_some());
+    let mut waiter_tips = if waiter_shift_closed {
+        load_frozen_waiter_kept_tips(&conn, shift_id)?
+    } else if is_waiter_role(&role_type) {
+        read_waiter_kept_tips(&conn, shift_id).ok()
     } else {
-        DriverKeptTips::default()
+        None
     };
     let resolved_tips_received = if role_type == "driver" {
         kept_tips.total
+    } else if let Some(tips) = &waiter_tips {
+        Cents::new(tips.total_cents).to_f64_dp2()
     } else {
         tips_received
     };
@@ -3201,6 +3257,14 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
             total_expenses,
             resolved_tips_received,
         ))
+    } else if waiter_shift_closed {
+        waiter_tips
+            .as_ref()
+            .and_then(|_| shift["expected_cash_amount"].as_f64())
+    } else if let Some(tips) = &mut waiter_tips {
+        let opening = shift["opening_cash_amount"].as_f64().unwrap_or(0.0);
+        let cash = compute_shift_cash_collected(&conn, shift_id, &role_type)?;
+        Some(waiter_cash_due(opening, cash, total_expenses, tips))
     } else {
         None
     };
@@ -3223,6 +3287,10 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         "ordersCount": orders_count,
         "salesAmount": sales_amount,
     });
+
+    if let Some(tips) = waiter_tips {
+        result["keptTips"] = json!(tips);
+    }
 
     if role_type == "driver" && kept_tips.total > 0.0 {
         result["driverKeptTipLines"] = json!(kept_tips.lines);
@@ -4064,6 +4132,23 @@ fn build_shift_update_sync_payload_from_db(
     if let Some(collections) = load_frozen_net_collections(conn, shift_id)? {
         payload["netCollections"] = collections;
     }
+    if check_out_time.is_some() {
+        let tips = if is_waiter_role(&role_type) {
+            load_frozen_waiter_kept_tips(conn, shift_id)
+                .ok()
+                .flatten()
+                .filter(|tips| tips.total_cents > 0)
+                .and_then(|tips| tips.wire_value())
+        } else if role_type == "driver" {
+            crate::db::get_setting(conn, "shift_driver_kept_tips_wire", shift_id)
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+        } else {
+            None
+        };
+        if let Some(tips) = tips {
+            payload["keptTips"] = tips;
+        }
+    }
     Ok(payload.to_string())
 }
 
@@ -4519,7 +4604,11 @@ pub fn is_non_financial_shift_role(role_type: &str) -> bool {
 }
 
 fn role_returns_cash(role_type: &str) -> bool {
-    matches!(role_type, "driver" | "server")
+    role_type == "driver" || is_waiter_role(role_type)
+}
+
+pub(crate) fn is_waiter_role(role_type: &str) -> bool {
+    matches!(role_type, "server" | "waiter")
 }
 
 /// Only a still-open first cashier in the current Z window may cause an
@@ -4661,6 +4750,160 @@ pub(crate) struct DriverKeptTipLine {
 pub(crate) struct DriverKeptTips {
     pub total: f64,
     pub lines: Vec<DriverKeptTipLine>,
+    #[serde(skip)]
+    wire_lines: Vec<KeptTipLine>,
+    // None means use the whole window, including snapshots from older tills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkout_earning_ids: Option<std::collections::BTreeSet<String>>,
+    // An empty list is a frozen close. Missing lines use the older readers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkout_deliveries: Option<Vec<DriverCheckoutDelivery>>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DriverCheckoutDelivery {
+    id: String,
+    order_id: String,
+    order_number: Option<String>,
+    box_order_label: Option<String>,
+    status: String,
+    delivery_address: Option<String>,
+    customer_name: Option<String>,
+    customer_phone: Option<String>,
+    total_amount_cents: Option<i64>,
+    delivery_fee_cents: i64,
+    tip_amount_cents: i64,
+    total_earning_cents: i64,
+    cash_collected_cents: i64,
+    card_amount_cents: i64,
+    original_cash_collected_cents: i64,
+    cash_returned_to_cashier_cents: i64,
+}
+
+impl DriverCheckoutDelivery {
+    fn into_summary(self) -> Value {
+        let amount = |cents| Cents::new(cents).to_f64_dp2();
+        let payment_method = if self.original_cash_collected_cents > 0 && self.card_amount_cents > 0
+        {
+            "mixed"
+        } else if self.card_amount_cents > 0 {
+            "card"
+        } else {
+            "cash"
+        };
+        let cash = amount(self.cash_collected_cents);
+        let mut detail = json!({
+            "id": self.id,
+            "order_id": self.order_id,
+            "order_number": self.order_number,
+            "status": &self.status,
+            "order_status": &self.status,
+            "delivery_address": self.delivery_address,
+            "customer_name": self.customer_name,
+            "customer_phone": self.customer_phone,
+            "total_amount": self.total_amount_cents.map(amount),
+            "delivery_fee": amount(self.delivery_fee_cents),
+            "tip_amount": amount(self.tip_amount_cents),
+            "total_earning": amount(self.total_earning_cents),
+            "payment_method": payment_method,
+            "cash_collected": cash,
+            "card_amount": amount(self.card_amount_cents),
+            "original_cash_collected": amount(self.original_cash_collected_cents),
+            "cash_returned_to_cashier": amount(self.cash_returned_to_cashier_cents),
+            "cash_to_return": cash,
+        });
+        if let Some(label) = self.box_order_label {
+            detail["box_order_label"] = Value::String(label);
+        }
+        detail
+    }
+}
+
+fn read_driver_checkout_deliveries(
+    conn: &Connection,
+    shift_id: &str,
+    earning_ids: Option<&std::collections::BTreeSet<String>>,
+) -> Result<Vec<DriverCheckoutDelivery>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT de.id, de.order_id,
+                COALESCE(de.delivery_fee_cents, CAST(ROUND(de.delivery_fee * 100) AS INTEGER), 0),
+                MAX(
+                    COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
+                    COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0)
+                ),
+                COALESCE(de.total_earning_cents, CAST(ROUND(de.total_earning * 100) AS INTEGER), 0)
+                    + MAX(
+                        COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0)
+                            - COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
+                        0
+                    ),
+                COALESCE(de.cash_collected_cents, CAST(ROUND(de.cash_collected * 100) AS INTEGER), 0),
+                COALESCE(de.card_amount_cents, CAST(ROUND(de.card_amount * 100) AS INTEGER), 0),
+                COALESCE(
+                    NULLIF(TRIM(o.display_order_number), ''),
+                    o.order_number
+                ),
+                o.delivery_address,
+                COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER)),
+                o.status, o.customer_name, o.customer_phone, o.plugin, o.ghost_metadata, o.order_number
+         FROM driver_earnings de
+         LEFT JOIN orders o ON de.order_id = o.id
+         WHERE de.staff_shift_id = ?1
+           AND (o.id IS NULL OR COALESCE(o.is_ghost, 0) = 0)
+           AND (o.id IS NULL OR o.order_type = 'delivery')
+         ORDER BY de.created_at DESC",
+        )
+        .map_err(|e| format!("prepare driver earnings: {e}"))?;
+    let mut deliveries: Vec<DriverCheckoutDelivery> = stmt
+        .query_map([shift_id], |row| {
+            let number: Option<String> = row.get(7)?;
+            let box_order_label = crate::box_slip::checkout_number(
+                row.get::<_, Option<String>>(13)?.as_deref(),
+                number.as_deref(),
+                row.get::<_, Option<String>>(14)?.as_deref(),
+                row.get::<_, Option<String>>(15)?.as_deref(),
+            );
+            Ok(DriverCheckoutDelivery {
+                id: row.get(0)?,
+                order_id: row.get(1)?,
+                order_number: box_order_label.clone().or(number),
+                box_order_label,
+                status: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                delivery_address: row.get(8)?,
+                customer_name: row.get(11)?,
+                customer_phone: row.get(12)?,
+                total_amount_cents: row.get(9)?,
+                delivery_fee_cents: row.get(2)?,
+                tip_amount_cents: row.get(3)?,
+                total_earning_cents: row.get(4)?,
+                cash_collected_cents: row.get(5)?,
+                card_amount_cents: row.get(6)?,
+                original_cash_collected_cents: 0,
+                cash_returned_to_cashier_cents: 0,
+            })
+        })
+        .map_err(|e| format!("query driver earnings: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    if let Some(ids) = earning_ids {
+        deliveries.retain(|delivery| ids.contains(&delivery.id));
+    }
+    for delivery in &mut deliveries {
+        let (cash, card) = driver_earning_tender_cents(
+            conn,
+            &delivery.id,
+            delivery.cash_collected_cents,
+            delivery.card_amount_cents,
+        )?;
+        let returned =
+            crate::staff_cash_returns::sum(conn, Some(&delivery.order_id), Some(shift_id))?;
+        delivery.cash_collected_cents = (cash - returned).max(0);
+        delivery.card_amount_cents = card;
+        delivery.original_cash_collected_cents = cash;
+        delivery.cash_returned_to_cashier_cents = returned;
+    }
+    Ok(deliveries)
 }
 
 pub(crate) fn driver_drawer_payout(expected_return: f64, kept_tips: f64) -> Option<f64> {
@@ -4685,6 +4928,16 @@ fn compute_driver_shift_kept_tips_in_window(
     if let Some(saved) = crate::db::get_setting(conn, "shift_driver_kept_tips", shift_id) {
         return serde_json::from_str(&saved).map_err(|e| format!("read frozen driver tips: {e}"));
     }
+    compute_live_driver_kept_tips_in_window(conn, shift_id, window_start, window_end, false)
+}
+
+fn compute_live_driver_kept_tips_in_window(
+    conn: &Connection,
+    shift_id: &str,
+    window_start: Option<&str>,
+    window_end: Option<&str>,
+    include_wire: bool,
+) -> Result<DriverKeptTips, String> {
     let closed: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM staff_shifts WHERE id = ?1
@@ -4696,14 +4949,20 @@ fn compute_driver_shift_kept_tips_in_window(
     if closed {
         return Ok(DriverKeptTips::default());
     }
-    // The tips follow the cash. `compute_shift_cash_collected` counts the
-    // driver's unsettled, untransferred earnings; when he has none (all of them
-    // transferred to the next cashier, or settled) it counts the cash payments
-    // of his whole shift instead. The kept tips use the same population, so the
-    // summary, the list and the close deduct exactly the tips whose cash they
-    // count (the released summary kept the transferred window equal to the
-    // active one: tests::driver_cash_from_payment_rows).
-    let whole_shift = compute_driver_shift_earning_totals(conn, shift_id)?.0 == 0;
+    // Match the active population in compute_shift_cash_collected. When it
+    // is empty, cash, tips and the delivery list use the whole shift.
+    let mut earnings = conn
+        .prepare(
+            "SELECT id FROM driver_earnings WHERE staff_shift_id = ?1
+               AND COALESCE(settled, 0) = 0 AND COALESCE(is_transferred, 0) = 0",
+        )
+        .map_err(|e| format!("prepare driver checkout earnings: {e}"))?;
+    let earning_ids = earnings
+        .query_map([shift_id], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query driver checkout earnings: {e}"))?
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(|e| format!("read driver checkout earnings: {e}"))?;
+    let whole_shift = earning_ids.is_empty();
     let financial_expr = business_day::order_financial_timestamp_expr("o");
     let counted = crate::payments::counted_financial_payment_sql(conn, "op")?;
     let settlement = crate::payments::platform_settlement_row_sql("op");
@@ -4738,7 +4997,7 @@ fn compute_driver_shift_kept_tips_in_window(
                     AND (?3 IS NULL OR {financial_expr} <= ?3))
               )
          ), receipts AS (
-            SELECT c.*, op.tip_recipient_staff_shift_id, {payment_tip} AS payment_tip,
+            SELECT c.*, {wire_payment_id} op.tip_recipient_staff_shift_id, {payment_tip} AS payment_tip,
                 COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) -
                     (SELECT COALESCE(SUM(COALESCE(pa.amount_cents,
                         CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
@@ -4766,12 +5025,21 @@ fn compute_driver_shift_kept_tips_in_window(
                 WHEN has_payment_tip AND
                      (tip_recipient_staff_shift_id IS NOT ?1 OR payment_tip = 0) THEN NULL
                 ELSE tender
-            END)
+            END){wire_receipts}
          FROM receipts
          WHERE retained_cents > 0
          GROUP BY id
          HAVING kept_cents > 0
-         ORDER BY financial_at, id"
+         ORDER BY financial_at, id",
+        wire_payment_id = if include_wire { "op.id AS payment_id," } else { "" },
+        wire_receipts = if include_wire {
+            ", CASE WHEN has_payment_tip THEN JSON_GROUP_ARRAY(JSON_OBJECT(
+                 'paymentId', payment_id, 'orderId', id, 'orderNumber', NULL, 'tableCode', NULL,
+                 'method', CASE WHEN tender = 'online' THEN 'platform_settlement' ELSE tender END,
+                 'cents', MIN(payment_tip, retained_cents)
+             )) FILTER (WHERE tip_recipient_staff_shift_id = ?1 AND payment_tip > 0)
+             ELSE NULL END"
+        } else { "" },
     );
     let mut stmt = conn
         .prepare(&sql)
@@ -4828,8 +5096,10 @@ fn compute_driver_shift_kept_tips_in_window(
                     .filter(|method| methods.split(',').any(|value| value == *method))
                     .map(str::to_owned)
                     .collect();
+                let wire_receipts: Option<String> = if include_wire { row.get(7)? } else { None };
                 Ok(Some((
                     cents,
+                    wire_receipts,
                     DriverKeptTipLine {
                         order_id,
                         order_number,
@@ -4841,16 +5111,105 @@ fn compute_driver_shift_kept_tips_in_window(
             },
         )
         .map_err(|e| format!("query driver tips: {e}"))?;
-    let mut tips = DriverKeptTips::default();
+    let mut tips = DriverKeptTips {
+        checkout_earning_ids: (!whole_shift).then_some(earning_ids),
+        ..DriverKeptTips::default()
+    };
     let mut cents = 0;
     for row in rows {
-        if let Some((amount, line)) = row.map_err(|e| format!("read driver tip: {e}"))? {
+        if let Some((amount, receipts, line)) = row.map_err(|e| format!("read driver tip: {e}"))? {
+            if include_wire {
+                let mut wire_lines: Vec<KeptTipLine> = match receipts {
+                    Some(raw) => serde_json::from_str(&raw)
+                        .map_err(|error| format!("read driver tip snapshot lines: {error}"))?,
+                    None => vec![KeptTipLine {
+                        payment_id: None,
+                        order_id: line.order_id.clone(),
+                        order_number: None,
+                        table_code: None,
+                        method: "platform_settlement".to_string(),
+                        cents: amount,
+                    }],
+                };
+                for receipt in &mut wire_lines {
+                    receipt.order_number = Some(line.order_number.clone());
+                }
+                tips.wire_lines.extend(wire_lines);
+            }
             cents += amount;
             tips.lines.push(line);
         }
     }
     tips.total = Cents::new(cents).to_f64_dp2();
     Ok(tips)
+}
+
+pub(crate) fn load_frozen_waiter_kept_tips(
+    conn: &Connection,
+    shift_id: &str,
+) -> Result<Option<KeptTipSnapshot>, String> {
+    crate::db::get_setting(conn, "shift_waiter_kept_tips", shift_id)
+        .map(|saved| {
+            serde_json::from_str(&saved).map_err(|e| format!("read frozen waiter tips: {e}"))
+        })
+        .transpose()
+}
+
+fn read_waiter_kept_tips(conn: &Connection, shift_id: &str) -> Result<KeptTipSnapshot, String> {
+    let counted = crate::payments::counted_financial_payment_sql(conn, "op")?;
+    let sql = format!(
+        "WITH tips AS (
+             SELECT op.id AS payment_id, o.id AS order_id,
+                 COALESCE(NULLIF(TRIM(o.display_order_number), ''), o.order_number) AS order_number,
+                 NULLIF(TRIM(o.table_number), '') AS table_code,
+                 LOWER(TRIM(op.method)) AS method, op.created_at,
+                 MIN(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0),
+                     COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) -
+                     (SELECT COALESCE(SUM(COALESCE(pa.amount_cents,
+                         CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
+                      FROM payment_adjustments pa
+                      WHERE pa.payment_id = op.id AND pa.adjustment_type = 'refund')) AS cents
+             FROM order_payments op JOIN orders o ON o.id = op.order_id
+             WHERE op.tip_recipient_staff_shift_id = ?1 AND op.tip_recipient_role = 'waiter'
+                 AND {counted} AND LOWER(TRIM(op.method)) IN ('cash', 'card')
+                 AND COALESCE(o.is_ghost, 0) = 0 AND COALESCE(o.is_test, 0) = 0
+                 AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+         )
+         SELECT payment_id, order_id, order_number, table_code, method, cents
+         FROM tips WHERE cents > 0 ORDER BY created_at, payment_id"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare waiter tips: {e}"))?;
+    let rows = stmt
+        .query_map([shift_id], |row| {
+            Ok(KeptTipLine {
+                payment_id: row.get(0)?,
+                order_id: row.get(1)?,
+                order_number: row.get(2)?,
+                table_code: row.get(3)?,
+                method: row.get(4)?,
+                cents: row.get(5)?,
+            })
+        })
+        .map_err(|e| format!("query waiter tips: {e}"))?;
+    let lines = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read waiter tips: {e}"))?;
+    KeptTipSnapshot::try_new(KeptTipRole::Waiter, lines)
+        .ok_or_else(|| "Waiter tip total exceeds the supported range".to_string())
+}
+
+fn waiter_cash_due(opening: f64, collected: f64, expenses: f64, tips: &mut KeptTipSnapshot) -> f64 {
+    let released_due = opening + collected - expenses;
+    if tips.total_cents == 0 {
+        return released_due;
+    }
+    let due = Cents::round_half_even(released_due)
+        .as_i64()
+        .saturating_sub(tips.total_cents);
+    tips.payout_cents = due.saturating_neg().max(0);
+    Cents::new(due).to_f64_dp2()
 }
 
 fn role_order_type_filter_sql(role_type: &str, order_alias: &str) -> String {
@@ -5223,7 +5582,7 @@ fn compute_shift_cash_collected(
     shift_id: &str,
     role_type: &str,
 ) -> Result<f64, String> {
-    if role_type == "server" {
+    if is_waiter_role(role_type) {
         return crate::staff_cash_returns::waiter_cash(conn, shift_id, None)
             .map(|cents| Cents::new(cents).to_f64_dp2());
     }
@@ -7445,6 +7804,60 @@ mod tests {
         assert_eq!(result["success"], true);
         assert_eq!(result["expected"], 19.0);
         assert_eq!(result["variance"], 0.0);
+    }
+
+    #[test]
+    fn wt_close_driver_wire_write_failure_preserves_released_checkout() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        for action in [None, Some("ABORT"), Some("ROLLBACK")] {
+            let db = test_db();
+            let (_, shift_id) = box_tip_driver_scenarios::open_driver_till(&db, 20.0);
+            let order_id = uuid::Uuid::new_v4().to_string();
+            box_tip_driver_scenarios::seed_phone_order(&db, &order_id, 1500, 100);
+            crate::payments::record_payment(
+                &db,
+                &json!({
+                    "orderId": order_id, "method": "card", "amount": 15.0,
+                    "tipAmount": 1.0, "tipRecipientRole": "driver",
+                }),
+            )
+            .unwrap();
+            box_tip_driver_scenarios::assign(&db, &order_id);
+            if let Some(action) = action {
+                db.conn
+                    .lock()
+                    .unwrap()
+                    .execute_batch(&format!(
+                        "CREATE TEMP TRIGGER fail_driver_wire BEFORE INSERT ON local_settings
+                     WHEN NEW.setting_category='shift_driver_kept_tips_wire'
+                     BEGIN SELECT RAISE({action}, 'cannot store driver sync snapshot'); END;"
+                    ))
+                    .unwrap();
+            }
+
+            let close = close_shift(
+                &db,
+                &json!({
+                    "shiftId": shift_id, "closingCash": 19.0,
+                    "expectedDriverKeptTips": 1.0, "expectedDriverPayout": 0.0,
+                }),
+            )
+            .unwrap();
+            assert_eq!(close["success"], true);
+            assert_eq!(close["expected"], 19.0);
+            assert_eq!(close["closing"], 19.0);
+            assert_eq!(close["variance"], 0.0);
+            let summary = get_shift_summary(&db, &shift_id).unwrap();
+            assert_eq!(summary["shift"]["status"], "closed");
+            assert_eq!(summary["tipsReceived"], 1.0);
+            assert_eq!(summary["driverKeptTipLines"][0]["amount"], 1.0);
+            let queued = load_latest_shift_sync_payload(&db, "UPDATE", &shift_id);
+            assert_eq!(queued.get("keptTips").is_some(), action.is_none());
+            let conn = db.conn.lock().unwrap();
+            let frozen_wire =
+                crate::db::get_setting(&conn, "shift_driver_kept_tips_wire", &shift_id);
+            assert_eq!(frozen_wire.is_some(), action.is_none());
+        }
     }
 
     #[test]

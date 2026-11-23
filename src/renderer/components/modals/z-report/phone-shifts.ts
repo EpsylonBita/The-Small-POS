@@ -1,3 +1,4 @@
+import type { KeptTips } from '../../../utils/kept-tips';
 /**
  * Phone shifts in the Z modal (founder rule 13/10/2026: phones always hand
  * over to the Main). Pure helpers for `ZReportModal`:
@@ -85,6 +86,7 @@ export function phoneShiftCurrency(currency: string | null | undefined, fallback
 
 /** One phone shift in the Z Staff tab. */
 export interface PhoneShiftStaffRow {
+  keptTips?: KeptTips;
   id: string;
   staffName: string;
   role: string | null;
@@ -121,6 +123,7 @@ export function phoneShiftRowFromReadiness(shift: UnitClosedShift): PhoneShiftSt
     countedCash: shift.closing_cash_amount,
     cashVariance: shift.cash_variance,
     handover: shift.handover,
+    ...(shift.keptTips ? { keptTips: shift.keptTips } : {}),
   };
 }
 
@@ -145,6 +148,7 @@ export function phoneShiftRowFromStoredZ(entry: ZReportPhoneShift): PhoneShiftSt
     countedCash: entry.countedCash ?? null,
     cashVariance: entry.cashVariance ?? null,
     handover: entry.handover ?? null,
+    ...(entry.keptTips ? { keptTips: entry.keptTips } : {}),
   };
 }
 

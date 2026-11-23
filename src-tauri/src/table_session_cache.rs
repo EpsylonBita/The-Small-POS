@@ -483,6 +483,50 @@ pub(crate) fn save_scoped(
     Ok(changed > 0)
 }
 
+/// Current waiter assignment from the scoped snapshot of the order's check.
+pub(crate) fn cached_waiter_for_order(
+    conn: &Connection,
+    branch: &str,
+    terminal: &str,
+    order_id: &str,
+) -> Option<String> {
+    let setting = |key| crate::db::get_setting(conn, "terminal", key);
+    let scope = Scope {
+        organization: setting("organization_id")?,
+        branch: branch.to_owned(),
+        terminal: setting("terminal_id").unwrap_or_else(|| terminal.to_owned()),
+        owner: setting("owner_terminal_db_id")
+            .or_else(|| setting("owner_terminal_id"))
+            .or_else(|| setting("parent_terminal_id"))
+            .or_else(|| setting("terminal_id"))
+            .unwrap_or_else(|| terminal.to_owned()),
+    };
+    let (session, table, order): (String, String, String) = conn
+        .query_row(
+            "SELECT table_session_id, table_id, COALESCE(supabase_id, id)
+         FROM orders WHERE id = ?1 AND branch_id = ?2",
+            params![order_id, branch],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok()?;
+    // This optional lookup may run on a legacy ledger without a snapshot table.
+    // Read only: do not create or upgrade the cache while recording money.
+    let snapshot = read_scoped(
+        conn,
+        &scope,
+        &json!({
+            "sessionId": session, "tableId": table, "orderId": order,
+        }),
+    )
+    .ok()?;
+    snapshot
+        .pointer("/session/metadata/current_waiter_id")?
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
 pub(crate) fn load(conn: &Connection, request: &Value) -> Result<Value, String> {
     let scope = current_scope(conn)?;
     load_scoped(conn, &scope, request)
@@ -490,6 +534,10 @@ pub(crate) fn load(conn: &Connection, request: &Value) -> Result<Value, String> 
 
 fn load_scoped(conn: &Connection, scope: &Scope, request: &Value) -> Result<Value, String> {
     schema(conn)?;
+    read_scoped(conn, scope, request)
+}
+
+fn read_scoped(conn: &Connection, scope: &Scope, request: &Value) -> Result<Value, String> {
     let session_id = text(request, "sessionId")?;
     let row: Option<(String, String, i64)> = conn
         .query_row(

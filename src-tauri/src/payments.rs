@@ -411,6 +411,7 @@ pub(crate) struct PaymentRecordInput {
     pub seat_number: Option<i64>,
     pub requested_staff_id: Option<String>,
     pub requested_staff_shift_id: Option<String>,
+    pub table_collector_shift_id: Option<String>,
     pub requested_tip_recipient_role: Option<String>,
     pub requested_tip_recipient_staff_id: Option<String>,
     pub requested_tip_recipient_staff_shift_id: Option<String>,
@@ -958,6 +959,8 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
             .or_else(|| str_field(payload, "staff_id")),
         requested_staff_shift_id: str_field(payload, "staffShiftId")
             .or_else(|| str_field(payload, "staff_shift_id")),
+        table_collector_shift_id: str_field(payload, "tableCollectorShiftId")
+            .or_else(|| str_field(payload, "tipCollectorShiftId")),
         requested_tip_recipient_role,
         requested_tip_recipient_staff_id: str_field(payload, "tipRecipientStaffId")
             .or_else(|| str_field(payload, "tip_recipient_staff_id")),
@@ -2271,6 +2274,104 @@ fn order_lines_name_staff(
     }))
 }
 
+/// Payment attribution is optional. Read the existing transaction's local
+/// shift rows, and treat any absent or unreadable context as no recipient.
+fn active_waiter_tip_shift(
+    conn: &Connection,
+    branch_id: &str,
+    shift_id: Option<&str>,
+    staff_id: Option<&str>,
+) -> Option<(String, String)> {
+    if shift_id.is_none() && staff_id.is_none() {
+        return None;
+    }
+    conn.query_row(
+        "SELECT id, staff_id FROM staff_shifts
+         WHERE branch_id = ?1 AND status = 'active' AND role_type IN ('server', 'waiter')
+           AND (?2 IS NULL OR id = ?2) AND (?3 IS NULL OR staff_id = ?3)
+         ORDER BY check_in_time DESC LIMIT 1",
+        params![branch_id, shift_id, staff_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .ok()
+}
+
+fn active_table_waiter_collector(
+    conn: &Connection,
+    input: &PaymentRecordInput,
+    branch_id: &str,
+    currency: &str,
+) -> Option<(String, String)> {
+    if input.collected_by.as_deref() == Some("cashier_drawer") {
+        return None;
+    }
+    let requested = input.table_collector_shift_id.as_deref()?;
+    let (shift, staff) = active_waiter_tip_shift(conn, branch_id, Some(requested), None)?;
+    (crate::shifts::recorded_operating_currency(conn, "staff_shifts", &shift)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some(currency))
+    .then_some((shift, staff))
+}
+
+fn may_stamp_waiter_tip(input: &PaymentRecordInput) -> bool {
+    Cents::round_half_even(input.tip_amount).as_i64() > 0
+        && input.payment_origin != "sync_reconstructed"
+        && !matches!(
+            input.requested_tip_recipient_role.as_deref(),
+            Some("driver" | "staff")
+        )
+}
+
+fn resolve_waiter_tip_recipient(
+    conn: &Connection,
+    input: &PaymentRecordInput,
+    branch_id: &str,
+    terminal_id: &str,
+    collector: &str,
+    is_table_check: bool,
+) -> Option<(String, String)> {
+    let (role, staff, collector_terminal): (String, String, String) = conn
+        .query_row(
+            "SELECT collector.role_type, collector.staff_id, collector.terminal_id
+             FROM staff_shifts collector
+             WHERE collector.id = ?1 AND collector.branch_id = ?2 AND collector.status = 'active'
+               AND (collector.role_type IN ('waiter', 'server')
+                 OR (?3 AND collector.role_type IN ('cashier', 'manager') AND EXISTS (
+                     SELECT 1 FROM staff_shifts waiter
+                     WHERE waiter.branch_id = collector.branch_id
+                       AND waiter.terminal_id = collector.terminal_id
+                       AND waiter.status = 'active' AND waiter.role_type IN ('waiter', 'server')
+                 )))",
+            params![collector, branch_id, is_table_check],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok()?;
+    let local_terminal = crate::db::get_setting(conn, "terminal", "terminal_id")?;
+    if collector_terminal != local_terminal {
+        return None;
+    }
+    if matches!(role.as_str(), "waiter" | "server") {
+        return Some((collector.to_owned(), staff));
+    }
+    let assigned = crate::table_session_cache::cached_waiter_for_order(
+        conn,
+        branch_id,
+        terminal_id,
+        &input.order_id,
+    )?;
+    conn.query_row(
+        "SELECT id, staff_id FROM staff_shifts
+         WHERE branch_id = ?1 AND terminal_id = ?2 AND staff_id = ?3
+           AND status = 'active' AND role_type IN ('waiter', 'server')
+         ORDER BY check_in_time DESC LIMIT 1",
+        params![branch_id, local_terminal, assigned],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .ok()
+}
+
 fn resolve_tip_recipient(
     conn: &Connection,
     input: &PaymentRecordInput,
@@ -2683,7 +2784,13 @@ fn resolve_local_payment_currency_and_collector(
     let drawer_collection_without_collector = input.payment_origin == "manual"
         && input.collected_by.as_deref() == Some("cashier_drawer")
         && input.requested_staff_shift_id.is_none();
-    let current_terminal = (fresh_table_collection || drawer_collection_without_collector)
+    let table_waiter = if fresh_table_collection {
+        active_table_waiter_collector(conn, input, &order_branch, &currency)
+    } else {
+        None
+    };
+    let current_terminal = ((fresh_table_collection && table_waiter.is_none())
+        || drawer_collection_without_collector)
         .then(|| crate::terminal_helpers::resolve_canonical_terminal_identity_in_connection(conn))
         .flatten();
     let current_cashier = match current_terminal.as_deref() {
@@ -2692,7 +2799,9 @@ fn resolve_local_payment_currency_and_collector(
         }
         None => None,
     };
-    let payment_shift = if fresh_table_collection {
+    let payment_shift = if let Some((shift, _)) = &table_waiter {
+        Some(shift.clone())
+    } else if fresh_table_collection {
         match input.requested_staff_shift_id.as_deref() {
             Some(id) => Some(id.to_string()),
             None => current_cashier.as_ref().map(|(shift, _)| shift.clone()),
@@ -2710,7 +2819,7 @@ fn resolve_local_payment_currency_and_collector(
         ).optional().ok().flatten())
     };
     let payment_shift = payment_shift.ok_or_else(|| "SHIFT_CURRENCY_UNAVAILABLE".to_string())?;
-    if fresh_table_collection {
+    if fresh_table_collection && table_waiter.is_none() {
         let (role, staff, status, terminal, branch): (String, String, String, String, String) = conn
             .query_row(
                 "SELECT role_type, staff_id, status, COALESCE(terminal_id, ''), COALESCE(branch_id, '')
@@ -3188,6 +3297,15 @@ pub(crate) fn record_payment_in_connection(
             .filter(|value| !value.is_empty())
             .is_some();
 
+    let dine_in = order_type.eq_ignore_ascii_case("dine-in");
+    let waiter_tip =
+        dine_in && may_stamp_waiter_tip(input) && options.applied_canonical_provenance.is_none();
+    // An explicitly selected table collector still owns untipped cash.
+    let collecting_waiter = if is_table_check && options.enqueue_sync {
+        active_table_waiter_collector(conn, input, &branch_id, &input.currency)
+    } else {
+        None
+    };
     let (resolved_shift_id, resolved_staff_id) =
         if let Some(provenance) = options.applied_canonical_provenance.as_ref() {
             // A canonical receipt already names its collector. Missing historical
@@ -3224,6 +3342,8 @@ pub(crate) fn record_payment_in_connection(
                 .map(|value| value.to_string())
                 .or(Some(shift_staff_id));
             (Some(shift_id), staff_id)
+        } else if let Some((shift_id, staff_id)) = collecting_waiter {
+            (Some(shift_id), Some(staff_id))
         } else if mirrored_with_order_shift {
             (order_staff_shift_id.clone(), order_staff_id.clone())
         } else if keep_delivery_unassigned {
@@ -3247,17 +3367,46 @@ pub(crate) fn record_payment_in_connection(
                     .or(order_staff_id.as_deref()),
             )?
         };
+    let waiter_recipient = if waiter_tip {
+        let tip_collector = if is_table_check {
+            resolved_shift_id.as_deref()
+        } else if explicit_cashier_drawer_shift {
+            None
+        } else {
+            input.requested_staff_shift_id.as_deref().or_else(|| {
+                resolved_shift_id
+                    .as_deref()
+                    .filter(|shift| Some(*shift) == order_staff_shift_id.as_deref())
+            })
+        };
+        tip_collector.and_then(|collector| {
+            resolve_waiter_tip_recipient(
+                conn,
+                input,
+                &branch_id,
+                &terminal_id,
+                collector,
+                is_table_check,
+            )
+        })
+    } else {
+        None
+    };
     let (tip_recipient_role, tip_recipient_staff_id, tip_recipient_staff_shift_id) =
-        resolve_tip_recipient(
-            conn,
-            input,
-            &order_type,
-            &branch_id,
-            &terminal_id,
-            driver_id.as_deref(),
-            resolved_shift_id.as_deref(),
-            resolved_staff_id.as_deref(),
-        )?;
+        if let Some((shift, staff)) = waiter_recipient {
+            (Some("waiter".to_string()), Some(staff), Some(shift))
+        } else {
+            resolve_tip_recipient(
+                conn,
+                input,
+                &order_type,
+                &branch_id,
+                &terminal_id,
+                driver_id.as_deref(),
+                resolved_shift_id.as_deref(),
+                resolved_staff_id.as_deref(),
+            )?
+        };
 
     // A payment recorded set aside already failed this very check: it is kept
     // because its money moved, not because the order had room for it.
@@ -4001,6 +4150,7 @@ pub(crate) fn auto_settle_platform_order(
         seat_number: None,
         requested_staff_id: None,
         requested_staff_shift_id: None,
+        table_collector_shift_id: None,
         requested_tip_recipient_role: None,
         requested_tip_recipient_staff_id: None,
         requested_tip_recipient_staff_shift_id: None,
@@ -4250,6 +4400,7 @@ pub(crate) fn auto_record_kiosk_requested_payment(
         seat_number: None,
         requested_staff_id: None,
         requested_staff_shift_id: None,
+        table_collector_shift_id: None,
         requested_tip_recipient_role: None,
         requested_tip_recipient_staff_id: None,
         requested_tip_recipient_staff_shift_id: None,
@@ -6314,6 +6465,9 @@ mod tests {
             ).unwrap();
         }
     }
+
+    #[path = "waiter_tip_scenarios.rs"]
+    mod waiter_tip_scenarios;
 
     // Test-only SQLite C API authorizer: denies the real metadata-column read
     // while ordinary order headers remain readable. No dependency feature,
@@ -12444,6 +12598,7 @@ mod tests {
             seat_number: None,
             requested_staff_id: None,
             requested_staff_shift_id: None,
+            table_collector_shift_id: None,
             requested_tip_recipient_role: None,
             requested_tip_recipient_staff_id: None,
             requested_tip_recipient_staff_shift_id: None,

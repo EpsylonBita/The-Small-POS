@@ -7143,6 +7143,9 @@ fn build_shift_checkout_doc(
             .map_err(|e| format!("read checkout tip lines: {e}"))?
             .unwrap_or_default(),
         driver_drawer_payout: number_from_paths(&summary, &["/driverDrawerPayout"]),
+        waiter_kept_tips: summary
+            .get("keptTips")
+            .and_then(|tips| serde_json::from_value(tips.clone()).ok()),
         total_sells: 0.0,
         cancelled_or_refunded_total: 0.0,
         cancelled_or_refunded_count: 0,
@@ -7264,6 +7267,16 @@ fn build_shift_checkout_doc(
                         - crate::money::Cents::round_half_even(doc.amount_to_return))
                     .to_f64_dp2(),
                 );
+            }
+        }
+    }
+
+    if let Ok(doc) = doc.as_mut() {
+        if doc.waiter_kept_tips.is_some() {
+            doc.expected_amount = number_from_paths(&summary, &["/amountToReturn"]);
+            if shift["status"] == "closed" || shift["check_out_time"].is_string() {
+                doc.closing_amount = number_from_paths(&shift, &["/closing_cash_amount"]);
+                doc.variance_amount = number_from_paths(&shift, &["/cash_variance"]);
             }
         }
     }
@@ -7572,6 +7585,11 @@ fn z_report_phone_shift_entries(report: &Value) -> Vec<receipt_renderer::ZReport
                     expected_cash: amount(shift, "expectedCash"),
                     cash_variance: amount(shift, "cashVariance"),
                     handover: text(shift, "handover").unwrap_or_default(),
+                    // A saved Z keeps the frozen tips the readiness row carried;
+                    // older reports have none, so no tip line prints.
+                    kept_tips: shift
+                        .get("keptTips")
+                        .and_then(crate::kept_tips::Snapshot::read_wire),
                 })
                 .collect()
         })
@@ -7956,6 +7974,9 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
                             .pointer("/driver/tips")
                             .and_then(Value::as_f64)
                             .unwrap_or(0.0),
+                        waiter_kept_tips: s
+                            .get("keptTips")
+                            .and_then(|tips| serde_json::from_value(tips.clone()).ok()),
                         driver_kept_tips: s.pointer("/driver/keptTips").and_then(Value::as_f64),
                         driver_drawer_payout: s
                             .pointer("/driver/drawerPayout")
@@ -8288,6 +8309,9 @@ fn build_z_report_doc_with_conn(
                             .pointer("/driver/tips")
                             .and_then(Value::as_f64)
                             .unwrap_or(0.0),
+                        waiter_kept_tips: s
+                            .get("keptTips")
+                            .and_then(|tips| serde_json::from_value(tips.clone()).ok()),
                         driver_kept_tips: s.pointer("/driver/keptTips").and_then(Value::as_f64),
                         driver_drawer_payout: s
                             .pointer("/driver/drawerPayout")
@@ -8768,7 +8792,7 @@ fn gift_cents_amount(cents: i64) -> f64 {
 
 /// Test convenience wrapper; production keeps the document and gift binding together.
 #[cfg(test)]
-fn build_document_for_job(
+pub(crate) fn build_document_for_job(
     db: &DbState,
     entity_type: &str,
     entity_id: &str,

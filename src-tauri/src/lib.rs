@@ -63,6 +63,7 @@ mod hosted_staff_sessions;
 mod hotel_folio;
 mod idempotency;
 mod incident_reporting;
+mod kept_tips;
 mod lan_transport;
 mod legacy_shift_currency;
 mod loyalty;

@@ -1,3 +1,4 @@
+import { readKeptTips } from './kept-tips';
 import { resolveZReportSections } from '../../../../shared/reports/z-report-sections';
 import type {
   ZReportData,
@@ -119,6 +120,8 @@ export function normalizeZReportPhoneShifts(value: unknown): ZReportPhoneShift[]
       shift[key] = cents === null ? null : cents / 100;
       shift[`${key}_cents` as const] = cents;
     }
+    const keptTips = readKeptTips(entry.keptTips);
+    if (keptTips) shift.keptTips = keptTips;
     shifts.push(shift);
   }
   return shifts;
