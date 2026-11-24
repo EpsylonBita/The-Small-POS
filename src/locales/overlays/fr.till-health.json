@@ -158,12 +158,39 @@
       "hint": "Uniquement à la demande de l’assistance",
       "attempts": "Ce qui a été tenté",
       "identifiers": "Informations",
-      "automaticActor": "La caisse",
+      "automaticActor": "Automatique",
       "unknownActor": "Employé non identifié",
       "report": "Rapport à The Small",
       "reportTopic": "Sujet du rapport",
       "allTopics": "Toute la caisse",
       "tools": "Outils d’assistance et sauvegardes de la caisse"
+    },
+    "history": {
+      "details": "Informations pour l’assistance",
+      "other": "Autre action sur la caisse",
+      "state": {
+        "resolved": "Terminé",
+        "recorded": "Enregistré",
+        "pending": "En cours",
+        "failed": "Non abouti",
+        "unknown": "Non confirmé"
+      },
+      "kinds": {
+        "orderItems": {
+          "resolved_one": "L’impression d’une commande de plateforme attendait ses articles. La caisse les a récupérés seule et l’impression a continué.",
+          "resolved_other": "L’impression de {{count}} commandes de plateforme attendait leurs articles. La caisse les a récupérés seule et l’impression a continué.",
+          "pending": "L’impression d’une commande de plateforme attend ses articles. La caisse les récupère seule.",
+          "failed": "Les articles d’une commande de plateforme sont arrivés trop tard à la caisse. Si un ticket ne s’est pas imprimé, ouvrez la commande et imprimez-le de nouveau.",
+          "unknown": "La caisse a demandé les articles d’une commande de plateforme pour l’imprimer. On ne sait pas si elle les a reçus."
+        },
+        "platformCash": {
+          "recorded_one": "Une commande de plateforme payée en espèces a été confiée à un livreur du magasin. La caisse a enregistré les espèces dans son service.",
+          "recorded_other": "{{count}} commandes de plateforme payées en espèces ont été confiées à des livreurs du magasin. La caisse a enregistré les espèces dans le service de chacun."
+        },
+        "paymentMethod": {
+          "recorded": "Le mode de paiement d’un paiement a été modifié. Rien n’a été débité de nouveau."
+        }
+      }
     },
     "report": {
       "new": "Nouveau rapport",

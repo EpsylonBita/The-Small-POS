@@ -759,6 +759,11 @@ pub struct ShiftCheckoutDoc {
     pub total_cash_collected: f64,
     #[serde(default)]
     pub total_card_collected: f64,
+    /// A driver's deliveries the customers paid the platform online. The
+    /// driver collected none of it: it prints as its own line and is in no
+    /// total, no return and no variance.
+    #[serde(default)]
+    pub total_paid_online: f64,
     #[serde(default)]
     pub total_delivery_fees: f64,
     #[serde(default)]
@@ -1399,6 +1404,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "DRIVER SUMMARY" => "ΣΥΝΟΨΗ ΟΔΗΓΟΥ",
             "Cash Collected" => "Εισπραχθέντα Μετρητά",
             "Card Collected" => "Εισπραχθείσα Κάρτα",
+            "Card Online" => "Κάρτα online",
             "Delivery Fees" => "Χρεώσεις Παράδοσης",
             "Starting" => "Εκκίνηση",
             "Starting Amount" => "Αρχικό Ποσό",
@@ -1585,6 +1591,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "DRIVER SUMMARY" => "FAHRER-ZUSAMMENFASSUNG",
             "Cash Collected" => "Bar kassiert",
             "Card Collected" => "Karte kassiert",
+            "Card Online" => "Karte online",
             "Delivery Fees" => "Liefergebuhren",
             "Starting" => "Start",
             "Starting Amount" => "Startbetrag",
@@ -1771,6 +1778,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "DRIVER SUMMARY" => "RESUME LIVREUR",
             "Cash Collected" => "Especes encaissees",
             "Card Collected" => "Carte encaissee",
+            "Card Online" => "Carte en ligne",
             "Delivery Fees" => "Frais de livraison",
             "Starting" => "Depart",
             "Starting Amount" => "Montant initial",
@@ -1958,6 +1966,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "DRIVER SUMMARY" => "RIEPILOGO CORRIERE",
             "Cash Collected" => "Contanti incassati",
             "Card Collected" => "Carta incassata",
+            "Card Online" => "Carta online",
             "Delivery Fees" => "Spese consegna",
             "Starting" => "Inizio",
             "Starting Amount" => "Importo iniziale",
@@ -2146,6 +2155,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "DRIVER SUMMARY" => "PËRMBLEDHJE KORRIERI",
             "Cash Collected" => "Mbledhur kesh",
             "Card Collected" => "Mbledhur me kartë",
+            "Card Online" => "Kartë online",
             "Delivery Fees" => "Tarifat e dërgesës",
             "Starting" => "Fillimi",
             "Starting Amount" => "Shuma fillestare",
@@ -2692,7 +2702,9 @@ fn driver_delivery_label(line: &DriverDeliveryLine) -> String {
 
 fn driver_payment_marker(lang: &str, payment_method: &str) -> String {
     let method = payment_method.trim().to_ascii_lowercase();
-    let label = if method.contains("card") {
+    let label = if method.contains("online") {
+        receipt_label(lang, "Card Online")
+    } else if method.contains("card") {
         receipt_label(lang, "Card")
     } else if method.contains("cash") {
         receipt_label(lang, "Cash")
@@ -3894,6 +3906,17 @@ fn driver_shift_checkout_summary_rows(
                 emphasize: false,
             });
         }
+    }
+
+    // Founder, 23/11/2026: the orders paid by card online did not show on the
+    // driver's checkout at all. One line, for the eye: the driver did not
+    // collect this money, so nothing below is computed from it.
+    if has_print_money(doc.total_paid_online) {
+        rows.push(DriverShiftCheckoutSummaryRow {
+            label_key: "Card Online",
+            amount: doc.total_paid_online,
+            emphasize: false,
+        });
     }
 
     if has_print_money(doc.total_expenses) {
@@ -10406,11 +10429,10 @@ fn render_classic_non_customer_raster_exact_ttf(
                 preset.meta_style,
             );
             if !should_render_minimal_shift_checkout(doc) {
-                canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Currency")),
-                    cur.trim(),
-                    preset.meta_style,
-                );
+                // Founder, 23/11/2026 («το row του νομίσματος δε χρειάζεται»):
+                // no currency row here. On this slip every amount carries its
+                // own currency sign. The plain-text and HTML renderings print
+                // bare numbers, so there the row stays as their one unit.
                 if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
                     canvas.draw_pair(
                         &format!("{}:", receipt_label(lang, "Terminal")),
@@ -17528,6 +17550,246 @@ mod tests {
         assert!(text.contains("[Card]"));
         assert!(html.contains("data-payment-icon=\"card\""));
         assert!(!html.contains("[Card]"));
+    }
+
+    /// Founder, 23/11/2026 (Το Μικρό Παρίσι): six BOX orders the customers
+    /// had paid online printed on the driver's checkout with the cash mark,
+    /// and the summary did not mention them.
+    #[test]
+    fn driver_checkout_marks_a_delivery_paid_online_as_card_and_gives_it_one_summary_line() {
+        let online = DriverDeliveryLine {
+            order_number: "#B477".to_string(),
+            box_order_label: Some("#B477".to_string()),
+            delivery_address: Some("Οδός Δ 13".to_string()),
+            total_amount: 5.70,
+            payment_method: "online".to_string(),
+            status: "delivered".to_string(),
+            ..DriverDeliveryLine::default()
+        };
+        let cash = DriverDeliveryLine {
+            order_number: "ORD-23112026-00043".to_string(),
+            delivery_address: Some("Οδός Α 37".to_string()),
+            total_amount: 13.30,
+            payment_method: "cash".to_string(),
+            cash_collected: 13.30,
+            status: "delivered".to_string(),
+            ..DriverDeliveryLine::default()
+        };
+        // The mark: a card, never the banknote, and never both.
+        assert_eq!(driver_payment_icons("online"), &[DriverPaymentIcon::Card]);
+        assert_eq!(driver_payment_icons("cash"), &[DriverPaymentIcon::Cash]);
+        assert_eq!(driver_payment_marker("el", "online"), "[Κάρτα online]");
+        assert_eq!(driver_payment_marker("en", "online"), "[Card Online]");
+        assert_eq!(driver_payment_marker("el", "card"), "[Κάρτα]");
+
+        let doc = ShiftCheckoutDoc {
+            driver_deliveries: vec![cash, online],
+            total_cash_collected: 13.30,
+            total_card_collected: 0.0,
+            total_paid_online: 5.70,
+            opening_amount: 20.0,
+            amount_to_return: 33.30,
+            total_expenses: 0.0,
+            total_sells: 13.30,
+            cancelled_or_refunded_total: 0.0,
+            cancelled_or_refunded_count: 0,
+            closing_amount: None,
+            variance_amount: None,
+            ..sample_driver_shift_checkout_doc()
+        };
+
+        // One line for the money paid online, after what the driver collected
+        // and before the return. The return is the float and the cash.
+        let rows: Vec<(&str, f64)> = driver_shift_checkout_summary_rows(&doc)
+            .iter()
+            .map(|row| (row.label_key, row.amount))
+            .collect();
+        let position = |key: &str| rows.iter().position(|(label, _)| *label == key);
+        let online_row = position("Card Online").expect("the line for orders paid online");
+        assert_eq!(rows[online_row].1, 5.70);
+        assert!(position("Cash").unwrap() < online_row);
+        assert!(online_row < position("Return").unwrap());
+        assert_eq!(rows[position("Return").unwrap()].1, 33.30);
+        // It is its own line: never the card the driver collected.
+        assert_eq!(position("Card"), None);
+        assert_eq!(position("Card Collected"), None);
+
+        // Without such an order the slip is as it was.
+        let without = ShiftCheckoutDoc {
+            total_paid_online: 0.0,
+            ..doc.clone()
+        };
+        assert!(driver_shift_checkout_summary_rows(&without)
+            .iter()
+            .all(|row| row.label_key != "Card Online"));
+
+        for language in ["el", "en", "de", "fr", "it", "sq"] {
+            let label = receipt_label(language, "Card Online");
+            assert!(!label.trim().is_empty(), "{language}");
+            assert_ne!(
+                label,
+                receipt_label(language, "Card Collected"),
+                "{language}"
+            );
+            if language != "en" {
+                assert_ne!(label, "Card Online", "{language}: not translated");
+            }
+        }
+
+        let cfg = |language: &str| LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: language.to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            ..LayoutConfig::default()
+        };
+        let document = ReceiptDocument::ShiftCheckout(doc);
+        // The plain-text bytes are in the printer's code page: read in English.
+        let text = String::from_utf8_lossy(&render_escpos(&document, &cfg("en")).bytes).to_string();
+        assert!(text.contains("[Card Online]"), "{text}");
+        assert!(text.contains("[Cash]"), "{text}");
+        assert_eq!(text.matches("Card Online").count(), 2, "{text}");
+        let html = render_html(&document, &cfg("el"));
+        assert_eq!(html.matches("data-payment-icon=\"card\"").count(), 1);
+        assert_eq!(html.matches("data-payment-icon=\"cash\"").count(), 1);
+        assert!(html.contains("<span>Κάρτα online</span>"), "{html}");
+    }
+
+    /// The slip stores print is the raster one. The evening of 23/11/2026 in
+    /// its shape (six deliveries in cash, six paid online; made-up addresses):
+    /// the line for the money paid online is drawn, and nothing else moves.
+    /// Set DRIVER_CHECKOUT_PREVIEW_PNG to a path to keep the picture.
+    #[test]
+    fn the_printed_driver_checkout_draws_the_line_for_orders_paid_online() {
+        let delivery = |label: &str, address: &str, total: f64, method: &str| DriverDeliveryLine {
+            order_number: label.to_string(),
+            box_order_label: label.starts_with('#').then(|| label.to_string()),
+            delivery_address: Some(address.to_string()),
+            total_amount: total,
+            payment_method: method.to_string(),
+            cash_collected: if method == "cash" { total } else { 0.0 },
+            status: "delivered".to_string(),
+            ..DriverDeliveryLine::default()
+        };
+        let evening = ShiftCheckoutDoc {
+            shift_id: "evening".to_string(),
+            role_type: "driver".to_string(),
+            staff_name: "Οδηγός".to_string(),
+            terminal_name: "Ταμείο".to_string(),
+            check_in: "2026-11-23T16:21:00Z".to_string(),
+            check_out: "2026-11-23T21:50:00Z".to_string(),
+            opening_amount: 20.0,
+            total_cash_collected: 54.5,
+            total_card_collected: 0.0,
+            total_paid_online: 66.7,
+            total_sells: 54.5,
+            amount_to_return: 74.5,
+            closing_amount: Some(74.5),
+            variance_amount: Some(0.0),
+            net_collections: Some(serde_json::json!({
+                "totalCents": 5450,
+                "tenders": [{"tender": "cash", "receivedCents": 5450}],
+            })),
+            driver_deliveries: vec![
+                delivery("043", "Οδός Α 37", 13.3, "cash"),
+                delivery("040", "Οδός Β 104", 5.9, "cash"),
+                delivery("#B478", "Οδός Γ 118", 15.4, "cash"),
+                delivery("#B477", "Οδός Δ 13", 5.7, "online"),
+                delivery("032", "Οδός Ε 52", 6.8, "cash"),
+                delivery("#B476", "Οδός Ζ 5", 24.4, "online"),
+                delivery("#B475", "Οδός Η 27", 10.9, "online"),
+                delivery("#B474", "Οδός Θ 24", 9.6, "online"),
+                delivery("017", "Οδός Ι 27", 7.8, "cash"),
+                delivery("013", "Οδός Κ 47", 5.3, "cash"),
+                delivery("#B473", "Οδός Λ 52", 6.1, "online"),
+                delivery("#B472", "Οδός Μ 8", 10.0, "online"),
+            ],
+            ..ShiftCheckoutDoc::default()
+        };
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            language: "el".to_string(),
+            currency_symbol: "€".to_string(),
+            decimal_comma: true,
+            store_time_zone: Some(chrono_tz::Europe::Athens),
+            ..LayoutConfig::default()
+        };
+        let draw = |doc: ShiftCheckoutDoc| {
+            let document = ReceiptDocument::ShiftCheckout(doc);
+            assert_eq!(
+                render_escpos(&document, &cfg).body_mode,
+                EscPosBodyMode::RasterExact
+            );
+            render_classic_non_customer_raster_exact_ttf(&document, &cfg)
+                .expect("draw the driver checkout")
+        };
+        let with_line = draw(evening.clone());
+        let without_line = draw(ShiftCheckoutDoc {
+            total_paid_online: 0.0,
+            ..evening.clone()
+        });
+        // One summary row taller, at the same width: nothing else was drawn.
+        assert_eq!(with_line.width(), without_line.width());
+        let one_row = with_line.height() - without_line.height();
+        assert!(
+            (20..=80).contains(&one_row),
+            "the line for orders paid online adds {one_row} px"
+        );
+        // Marking a delivery differently changes the picture, never its size:
+        // the card mark stands where the banknote stood.
+        let all_cash = draw(ShiftCheckoutDoc {
+            driver_deliveries: evening
+                .driver_deliveries
+                .iter()
+                .cloned()
+                .map(|line| DriverDeliveryLine {
+                    payment_method: "cash".to_string(),
+                    ..line
+                })
+                .collect(),
+            ..evening.clone()
+        });
+        assert_eq!(all_cash.dimensions(), with_line.dimensions());
+        assert_ne!(all_cash.as_raw(), with_line.as_raw());
+
+        if let Ok(path) = std::env::var("DRIVER_CHECKOUT_PREVIEW_PNG") {
+            with_line.save(&path).expect("keep the picture");
+        }
+    }
+
+    /// Founder, 23/11/2026: «το row του νομίσματος δε χρειάζεται». The slip
+    /// stores print (the raster one) has no currency row on a shift checkout:
+    /// each of its amounts carries its own sign. The plain-text and HTML
+    /// renderings print bare numbers, so they keep the row as their one unit.
+    #[test]
+    fn the_printed_shift_checkout_has_no_currency_row() {
+        // The raster slip draws pixels, so its rows are pinned by the source.
+        let source = include_str!("receipt_renderer.rs");
+        let banner = "canvas.draw_reverse_banner(receipt_label(lang, \"SHIFT CHECKOUT\"));";
+        assert_eq!(source.matches(banner).count(), 1);
+        let arm = &source[source.find(banner).unwrap()..];
+        let arm = &arm[..arm.find("ReceiptDocument::ZReport(doc) => {").unwrap()];
+        let header = &arm[..arm.find("receipt_label(lang, \"Check-in\")").unwrap()];
+        assert!(header.contains("receipt_label(lang, \"Staff\")"));
+        assert!(header.contains("receipt_label(lang, \"Terminal\")"));
+        assert!(!arm.contains("receipt_label(lang, \"Currency\")"));
+        // What makes the row unnecessary there: no amount is a bare number.
+        assert!(arm.matches("money_with_currency_locale(").count() >= 10);
+        assert!(!arm.contains("money_locale("));
+
+        // Where amounts are bare numbers the row still names their unit.
+        let cfg = |language: &str| LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: language.to_string(),
+            currency_symbol: "€".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            ..LayoutConfig::default()
+        };
+        let document = ReceiptDocument::ShiftCheckout(sample_driver_shift_checkout_doc());
+        // The plain-text bytes are in the printer's code page: read in English.
+        let text = String::from_utf8_lossy(&render_escpos(&document, &cfg("en")).bytes).to_string();
+        assert!(text.contains("Currency"), "{text}");
+        assert!(render_html(&document, &cfg("el")).contains("<span>Νόμισμα</span>"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ type PortalReview = {
 const portalReview: Record<string, PortalReview> = {
   'components/FinancialSyncPanel.tsx': { classification: 'recovery', reason: 'Financial sync opens from Health; its root explicitly marks cashier recovery.' },
   'components/PortaledToaster.tsx': { classification: 'non-blocking', reason: 'Toast notifications have no blocking backdrop.' },
-  'components/UtilityRail.tsx': { classification: 'gate-aware', reason: 'The rail is a recovery root for Health; its expenses slot portal unmounts while the cashier gate is locked.' },
+  'components/UtilityRail.tsx': { classification: 'gate-aware', reason: 'The rail is a recovery root for Health; its slot portals (recent calls, expenses) unmount while the cashier gate is locked.' },
   'components/callerid/CallerIdMinimizedPanel.tsx': { classification: 'non-blocking', reason: 'Small movable caller-ID panel has no backdrop.' },
   'components/menu/MenuItemGrid.tsx': { classification: 'gate-aware', reason: 'Preview pointer catcher stays mounted but hidden and inert while locked.' },
   'components/modals/LoyaltyRedeemModal.tsx': { classification: 'gate-aware', reason: 'Redemption draft stays mounted but hidden and inert while locked.' },

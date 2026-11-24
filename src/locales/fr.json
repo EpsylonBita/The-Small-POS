@@ -3657,6 +3657,24 @@
       "viewCustomer": "Voir",
       "startOrder": "Créer commande",
       "addCustomer": "Ajouter client"
+    },
+    "recentCalls": {
+      "title": "Appels récents",
+      "loading": "Chargement des appels…",
+      "count_one": "{{count}} appel",
+      "count_other": "{{count}} appels",
+      "knownCustomer": "Client connu",
+      "newNumber": "Nouveau numéro",
+      "withheld": "Numéro masqué",
+      "withheldHint": "L'appelant n'a pas affiché son numéro",
+      "noNumber": "Sans numéro",
+      "noNumberHint": "L'appareil n'a donné aucun numéro pour cet appel",
+      "orderStarted": "Commande commencée",
+      "search": "Rechercher",
+      "empty": "Aucun appel n'a encore été enregistré.",
+      "loadFailed": "Les appels n'ont pas pu être lus. Réessayez.",
+      "retry": "Réessayer",
+      "retention": "Les appels sont conservés {{days}} jours, uniquement sur cette caisse."
     }
   },
   "sync": {

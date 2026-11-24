@@ -7131,6 +7131,7 @@ fn build_shift_checkout_doc(
         driver_deliveries: Vec::new(),
         total_cash_collected: 0.0,
         total_card_collected: 0.0,
+        total_paid_online: 0.0,
         total_delivery_fees: 0.0,
         total_tips: 0.0,
         tips_received: number_from_paths(&summary, &["/tipsReceived", "/tips_received"])
@@ -7173,6 +7174,9 @@ fn build_shift_checkout_doc(
         .unwrap_or(0.0);
         let mut lines = Vec::new();
         let mut fees_total = 0.0_f64;
+        // Orders the customer paid the platform online: shown, never summed
+        // into what the driver collected or returns.
+        let mut paid_online_total = 0.0_f64;
         let mut cancelled_or_refunded_cash = 0.0_f64;
         let mut cancelled_or_refunded_total = 0.0_f64;
         let mut cancelled_or_refunded_count = 0_i64;
@@ -7187,6 +7191,10 @@ fn build_shift_checkout_doc(
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0);
                 let card = d.get("card_amount").and_then(Value::as_f64).unwrap_or(0.0);
+                let online = d
+                    .get("online_amount")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
                 let fee = d.get("delivery_fee").and_then(Value::as_f64).unwrap_or(0.0);
                 let tip = d.get("tip_amount").and_then(Value::as_f64).unwrap_or(0.0);
                 let total = d.get("total_amount").and_then(Value::as_f64).unwrap_or(0.0);
@@ -7200,6 +7208,7 @@ fn build_shift_checkout_doc(
                 } else {
                     delivery_cash_total += cash;
                     delivery_card_total += card;
+                    paid_online_total += online;
                     fees_total += fee;
                 }
 
@@ -7236,6 +7245,7 @@ fn build_shift_checkout_doc(
         if let Ok(ref mut doc) = doc {
             doc.driver_deliveries = lines;
             doc.total_card_collected = card_total;
+            doc.total_paid_online = paid_online_total;
             doc.total_delivery_fees = fees_total;
             doc.total_tips = doc.tips_received;
             doc.total_sells = cash_total + card_total;

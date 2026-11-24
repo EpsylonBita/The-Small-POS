@@ -158,12 +158,39 @@
       "hint": "Vetëm nëse jua kërkon mbështetja",
       "attempts": "Çfarë u provua",
       "identifiers": "Të dhënat",
-      "automaticActor": "Arka",
+      "automaticActor": "Automatikisht",
       "unknownActor": "Punonjësi nuk u identifikua",
       "report": "Raport për The Small",
       "reportTopic": "Tema e raportit",
       "allTopics": "E gjithë arka",
       "tools": "Mjetet e mbështetjes dhe kopjet e arkës"
+    },
+    "history": {
+      "details": "Të dhëna për mbështetjen",
+      "other": "Veprim tjetër në arkë",
+      "state": {
+        "resolved": "Përfundoi",
+        "recorded": "U regjistrua",
+        "pending": "Në vazhdim",
+        "failed": "Nuk përfundoi",
+        "unknown": "Pa konfirmim"
+      },
+      "kinds": {
+        "orderItems": {
+          "resolved_one": "Shtypja e një porosie nga platforma priste artikujt e saj. Arka i mori vetë dhe shtypja vazhdoi.",
+          "resolved_other": "Shtypja e {{count}} porosive nga platforma priste artikujt e tyre. Arka i mori vetë dhe shtypja vazhdoi.",
+          "pending": "Shtypja e një porosie nga platforma po pret artikujt e saj. Arka po i merr vetë.",
+          "failed": "Artikujt e një porosie nga platforma mbërritën me vonesë në arkë. Nëse ndonjë faturë nuk u shtyp, hapni porosinë dhe shtypeni sërish.",
+          "unknown": "Arka kërkoi artikujt e një porosie nga platforma për ta shtypur. Nuk dihet nëse i mori."
+        },
+        "platformCash": {
+          "recorded_one": "Një porosi nga platforma me para në dorë iu caktua një shpërndarësi të dyqanit. Arka i regjistroi paratë në turnin e tij.",
+          "recorded_other": "{{count}} porosi nga platforma me para në dorë iu caktuan shpërndarësve të dyqanit. Arka i regjistroi paratë në turnin e secilit."
+        },
+        "paymentMethod": {
+          "recorded": "Mënyra e pagesës së një pagese u ndryshua. Nuk u bë asnjë tarifim i ri."
+        }
+      }
     },
     "report": {
       "new": "Raport i ri",

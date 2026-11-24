@@ -3657,6 +3657,24 @@
       "viewCustomer": "Shiko klientin",
       "startOrder": "Nis porosinë",
       "addCustomer": "Shto klient"
+    },
+    "recentCalls": {
+      "title": "Thirrjet e fundit",
+      "loading": "Po ngarkohen thirrjet…",
+      "count_one": "{{count}} thirrje",
+      "count_other": "{{count}} thirrje",
+      "knownCustomer": "Klient i njohur",
+      "newNumber": "Numër i ri",
+      "withheld": "Numër i fshehur",
+      "withheldHint": "Thirrësi nuk e shfaqi numrin e tij",
+      "noNumber": "Pa numër",
+      "noNumberHint": "Pajisja nuk dha numër për këtë thirrje",
+      "orderStarted": "Porosia nisi",
+      "search": "Kërko",
+      "empty": "Ende nuk është regjistruar asnjë thirrje.",
+      "loadFailed": "Thirrjet nuk u lexuan. Provoni përsëri.",
+      "retry": "Provo përsëri",
+      "retention": "Thirrjet ruhen {{days}} ditë, vetëm në këtë arkë."
     }
   },
   "sync": {

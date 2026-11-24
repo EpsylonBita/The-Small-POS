@@ -3657,6 +3657,24 @@
       "viewCustomer": "Anzeigen",
       "startOrder": "Bestellung starten",
       "addCustomer": "Kunde hinzufügen"
+    },
+    "recentCalls": {
+      "title": "Letzte Anrufe",
+      "loading": "Anrufe werden geladen…",
+      "count_one": "{{count}} Anruf",
+      "count_other": "{{count}} Anrufe",
+      "knownCustomer": "Bekannter Kunde",
+      "newNumber": "Neue Nummer",
+      "withheld": "Nummer unterdrückt",
+      "withheldHint": "Der Anrufer hat seine Nummer nicht angezeigt",
+      "noNumber": "Keine Nummer",
+      "noNumberHint": "Das Gerät hat für diesen Anruf keine Nummer geliefert",
+      "orderStarted": "Bestellung begonnen",
+      "search": "Suchen",
+      "empty": "Es wurde noch kein Anruf aufgezeichnet.",
+      "loadFailed": "Die Anrufe konnten nicht gelesen werden. Versuchen Sie es erneut.",
+      "retry": "Erneut versuchen",
+      "retention": "Anrufe bleiben {{days}} Tage gespeichert, nur auf dieser Kasse."
     }
   },
   "sync": {

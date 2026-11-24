@@ -8456,7 +8456,13 @@ pub fn set_setting(
     Ok(())
 }
 
-#[allow(dead_code)] // Legacy rows remain readable; Phase 1 has no native SIP writer.
+/// One row per call in the till's local call record
+/// (`callerid::call_log`, 23/11/2026). `created_at` is the call's own time as
+/// RFC 3339 UTC, bound by the caller: the column default writes zone-less
+/// text, and the two formats sort apart as strings. A second write of the
+/// same `sip_call_id` keeps the first time, and never undoes what staff did
+/// with the call since: an `order_started` mark and a chosen customer stay.
+#[allow(clippy::too_many_arguments)]
 pub fn upsert_caller_id_log(
     conn: &Connection,
     caller_number: &str,
@@ -8465,17 +8471,27 @@ pub fn upsert_caller_id_log(
     customer_name: Option<&str>,
     sip_call_id: &str,
     action_taken: &str,
+    organization_id: Option<&str>,
+    created_at: &str,
 ) -> Result<(), String> {
     conn.execute(
         "INSERT INTO caller_id_log
-            (id, caller_number, caller_name, customer_id, customer_name, sip_call_id, action_taken, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+            (id, caller_number, caller_name, customer_id, customer_name, sip_call_id, action_taken,
+             organization_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(sip_call_id) DO UPDATE SET
             caller_number = excluded.caller_number,
             caller_name = excluded.caller_name,
-            customer_id = excluded.customer_id,
+            customer_id = CASE
+                WHEN action_taken = 'order_started' THEN customer_id
+                ELSE excluded.customer_id
+            END,
             customer_name = excluded.customer_name,
-            action_taken = excluded.action_taken",
+            action_taken = CASE
+                WHEN action_taken = 'order_started' THEN action_taken
+                ELSE excluded.action_taken
+            END,
+            organization_id = COALESCE(excluded.organization_id, organization_id)",
         params![
             uuid::Uuid::new_v4().to_string(),
             caller_number,
@@ -8484,6 +8500,8 @@ pub fn upsert_caller_id_log(
             customer_name,
             sip_call_id,
             action_taken,
+            organization_id,
+            created_at,
         ],
     )
     .map_err(|e| format!("upsert caller_id_log: {e}"))?;

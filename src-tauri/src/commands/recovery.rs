@@ -524,45 +524,125 @@ fn recovery_action_log_outcome(payload_json: Option<&str>) -> Option<String> {
     matches!(outcome, "pending" | "failed" | "unknown" | "resolved").then(|| outcome.to_string())
 }
 
-#[tauri::command]
-pub async fn recovery_list_action_log(
-    arg0: Option<Value>,
-    app: tauri::AppHandle,
-) -> Result<Value, String> {
-    run_blocking_command("recovery_list_action_log", move || {
-        let db = app.state::<db::DbState>();
-        let limit = arg0
-            .as_ref()
-            .and_then(|value| value_field_i64(value, "limit"))
-            .unwrap_or(25)
-            .clamp(1, 100);
-        let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT
-                id, action_id, issue_code, success, created_at, recipe_id,
-                recipe_version, snapshot_point_id, export_path, message,
-                error_message, actor_staff_id, actor_staff_name, entity_id,
-                order_id, order_number, shift_id, payload_json
-             FROM recovery_action_log
-             ORDER BY created_at DESC
-             LIMIT ?1",
-            )
-            .map_err(|e| format!("prepare recovery action log list: {e}"))?;
-        let rows = stmt
-            .query_map(rusqlite::params![limit], |row| {
+/// How long a food-item hydration claim may stay on "started" and still read
+/// as pending. The claim guards one bounded network read; a row older than
+/// this was interrupted (the till closed mid-read), so its result is unknown.
+const FOOD_ITEM_HYDRATION_PENDING_SECONDS: f64 = 120.0;
+
+/// The outcome of one automatic food-item hydration row
+/// (`sync::hydrate_pending_food_print_items`), which stores no `$.outcome`.
+///
+/// `success = 1` proves only that usable structured items were in the order's
+/// local cache when the row was written; the print release is a separate
+/// write. So the repair reads as resolved only when, in `print_jobs` as it is
+/// now, no job of that order still waits for its items (`waiting`) and none
+/// sits failed because they came too late (`expired`). A retried job clears
+/// both. Scheduling or starting the read is never proof.
+fn food_item_hydration_outcome(
+    success: bool,
+    message: Option<&str>,
+    age_seconds: Option<f64>,
+    waiting: bool,
+    expired: bool,
+) -> &'static str {
+    if success {
+        return if waiting {
+            "pending"
+        } else if expired {
+            "failed"
+        } else {
+            "resolved"
+        };
+    }
+    match message {
+        Some(sync::FOOD_ITEM_HYDRATION_UNAVAILABLE) => "failed",
+        Some(sync::FOOD_ITEM_HYDRATION_STARTED)
+            if age_seconds
+                .is_some_and(|age| (0.0..FOOD_ITEM_HYDRATION_PENDING_SECONDS).contains(&age)) =>
+        {
+            "pending"
+        }
+        _ => "unknown",
+    }
+}
+
+/// `created_at` as one instant every reader parses alike. Rows that leave it
+/// to the column default hold SQLite's zone-less UTC text
+/// (`2026-11-23 17:05:12`), which a browser reads as local time: the Health
+/// history showed those rows hours off. Stored rows are not rewritten.
+fn recovery_action_log_timestamp(raw: &str) -> String {
+    if chrono::DateTime::parse_from_rfc3339(raw).is_ok() {
+        return raw.to_string();
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+        .map(|utc| {
+            utc.and_utc()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        })
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+/// The newest audit rows, as the Health history shows them.
+///
+/// Ordered by the instant, not the text: the two `created_at` formats above
+/// sort apart as strings. A row with a staff id and no stored name takes the
+/// name of that staff member's latest shift on this till, when there is one.
+/// The inner query picks the rows; the name and print-job lookups run for
+/// those rows only, however long the log has grown.
+fn list_recovery_action_log(conn: &rusqlite::Connection, limit: i64) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                a.id, a.action_id, a.issue_code, a.success, a.created_at, a.recipe_id,
+                a.recipe_version, a.snapshot_point_id, a.export_path, a.message,
+                a.error_message, a.actor_staff_id,
+                COALESCE(
+                    NULLIF(TRIM(a.actor_staff_name), ''),
+                    (SELECT NULLIF(TRIM(s.staff_name), '') FROM staff_shifts s
+                      WHERE a.actor_staff_id IS NOT NULL AND s.staff_id = a.actor_staff_id
+                        AND TRIM(COALESCE(s.staff_name, '')) != ''
+                      ORDER BY s.check_in_time DESC LIMIT 1)
+                ),
+                a.entity_id, a.order_id, a.order_number, a.shift_id, a.payload_json,
+                (julianday('now') - julianday(a.created_at)) * 86400.0,
+                CASE WHEN a.action_id = ?2 THEN EXISTS(
+                    SELECT 1 FROM print_jobs j
+                     WHERE j.entity_id = a.entity_id AND j.status = 'pending'
+                       AND j.warning_code = ?3) ELSE 0 END,
+                CASE WHEN a.action_id = ?2 THEN EXISTS(
+                    SELECT 1 FROM print_jobs j
+                     WHERE j.entity_id = a.entity_id AND j.status = 'failed'
+                       AND j.warning_code = ?4) ELSE 0 END
+             FROM (SELECT * FROM recovery_action_log
+                    ORDER BY julianday(created_at) DESC, created_at DESC
+                    LIMIT ?1) a
+             ORDER BY julianday(a.created_at) DESC, a.created_at DESC",
+        )
+        .map_err(|e| format!("prepare recovery action log list: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                limit,
+                sync::FOOD_ITEM_HYDRATION_ACTION_ID,
+                crate::print::FOOD_ITEMS_PENDING_CODE,
+                crate::print::FOOD_ITEMS_UNAVAILABLE_CODE
+            ],
+            |row| {
+                let action_id: String = row.get(1)?;
                 let success: i64 = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let message: Option<String> = row.get(9)?;
                 let mut entry = json!({
                     "id": row.get::<_, String>(0)?,
-                    "actionId": row.get::<_, String>(1)?,
+                    "actionId": action_id,
                     "issueCode": row.get::<_, String>(2)?,
                     "success": success != 0,
-                    "timestamp": row.get::<_, String>(4)?,
+                    "timestamp": recovery_action_log_timestamp(&created_at),
                     "recipeId": row.get::<_, Option<String>>(5)?,
                     "recipeVersion": row.get::<_, Option<i64>>(6)?,
                     "snapshotPointId": row.get::<_, Option<String>>(7)?,
                     "exportPath": row.get::<_, Option<String>>(8)?,
-                    "message": row.get::<_, Option<String>>(9)?,
+                    "message": message,
                     "errorMessage": row.get::<_, Option<String>>(10)?,
                     "actor": {
                         "staffId": row.get::<_, Option<String>>(11)?,
@@ -578,17 +658,44 @@ pub async fn recovery_list_action_log(
                 let payload_json: Option<String> = row.get(17)?;
                 if let Some(outcome) = recovery_action_log_outcome(payload_json.as_deref()) {
                     entry["outcome"] = Value::String(outcome);
+                } else if action_id == sync::FOOD_ITEM_HYDRATION_ACTION_ID {
+                    entry["outcome"] = Value::String(
+                        food_item_hydration_outcome(
+                            success != 0,
+                            message.as_deref(),
+                            row.get::<_, Option<f64>>(18)?,
+                            row.get::<_, bool>(19)?,
+                            row.get::<_, bool>(20)?,
+                        )
+                        .to_string(),
+                    );
                 }
                 Ok(entry)
-            })
-            .map_err(|e| format!("query recovery action log: {e}"))?;
+            },
+        )
+        .map_err(|e| format!("query recovery action log: {e}"))?;
 
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row.map_err(|e| format!("read recovery action log row: {e}"))?);
-        }
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row.map_err(|e| format!("read recovery action log row: {e}"))?);
+    }
+    Ok(entries)
+}
 
-        Ok(Value::Array(entries))
+#[tauri::command]
+pub async fn recovery_list_action_log(
+    arg0: Option<Value>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    run_blocking_command("recovery_list_action_log", move || {
+        let db = app.state::<db::DbState>();
+        let limit = arg0
+            .as_ref()
+            .and_then(|value| value_field_i64(value, "limit"))
+            .unwrap_or(25)
+            .clamp(1, 100);
+        let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+        Ok(Value::Array(list_recovery_action_log(&conn, limit)?))
     })
     .await
 }
@@ -2264,6 +2371,228 @@ pub(crate) mod tests {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
         }
+    }
+
+    /// Symptom (Το Μικρό Παρίσι, 23/11/2026): every automatic fetch of a
+    /// platform order's items read «Η αποκατάσταση δεν έχει επιβεβαιωθεί» in
+    /// the Health history, because the row stores no outcome. The rule: done
+    /// only when the items came AND no print of that order is left waiting
+    /// or expired; started, failed and interrupted stay apart.
+    #[test]
+    fn food_item_hydration_outcome_is_resolved_only_on_proof() {
+        let started = Some(sync::FOOD_ITEM_HYDRATION_STARTED);
+        let recovered = Some(sync::FOOD_ITEM_HYDRATION_RECOVERED);
+        let unavailable = Some(sync::FOOD_ITEM_HYDRATION_UNAVAILABLE);
+        for (success, message, age, waiting, expired, outcome) in [
+            (true, recovered, Some(30.0), false, false, "resolved"),
+            // The order has since left the till: nothing waits, nothing expired.
+            (true, recovered, None, false, false, "resolved"),
+            (true, recovered, Some(30.0), true, false, "pending"),
+            (true, recovered, Some(30.0), false, true, "failed"),
+            (true, recovered, Some(30.0), true, true, "pending"),
+            (false, unavailable, Some(30.0), false, false, "failed"),
+            (false, started, Some(5.0), false, false, "pending"),
+            (false, started, Some(119.9), true, false, "pending"),
+            // Interrupted mid-read: neither failed nor pending for ever.
+            (false, started, Some(120.0), false, false, "unknown"),
+            (false, started, None, false, false, "unknown"),
+            (false, started, Some(-5.0), false, false, "unknown"),
+            (false, None, Some(5.0), false, false, "unknown"),
+            (
+                false,
+                Some("anything else"),
+                Some(5.0),
+                false,
+                false,
+                "unknown",
+            ),
+        ] {
+            assert_eq!(
+                food_item_hydration_outcome(success, message, age, waiting, expired),
+                outcome,
+                "success={success} message={message:?} age={age:?} waiting={waiting} expired={expired}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_action_log_timestamp_reads_the_column_default_as_utc() {
+        assert_eq!(
+            recovery_action_log_timestamp("2026-11-23 17:05:12"),
+            "2026-11-23T17:05:12Z"
+        );
+        assert_eq!(
+            recovery_action_log_timestamp("2026-11-23 17:05:12.250"),
+            "2026-11-23T17:05:12Z"
+        );
+        for kept in [
+            "2026-11-23T17:05:12.123Z",
+            "2026-11-23T19:05:12+02:00",
+            "not a time",
+            "",
+        ] {
+            assert_eq!(recovery_action_log_timestamp(kept), kept);
+        }
+    }
+
+    #[test]
+    fn list_recovery_action_log_types_hydration_rows_and_names_the_actor() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let hydration = |id: &str, order: &str, success: bool, message: &str, age: &str| {
+            conn.execute(
+                "INSERT INTO recovery_action_log (id, action_id, issue_code, entity_type, entity_id,
+                    order_id, success, message, payload_json, created_at)
+                 VALUES (?1, 'hydrate_food_print_items', 'food_order_items_pending', 'order', ?2, ?2,
+                    ?3, ?4, '{\"remoteOrderId\":\"r\",\"version\":1}', datetime('now', ?5))",
+                rusqlite::params![id, order, success, message, age],
+            )
+            .unwrap();
+        };
+        let print_job = |id: &str, order: &str, status: &str, code: Option<&str>| {
+            conn.execute(
+                "INSERT INTO print_jobs (id, entity_type, entity_id, status, warning_code, created_at, updated_at)
+                 VALUES (?1, 'delivery_slip', ?2, ?3, ?4, datetime('now'), datetime('now'))",
+                rusqlite::params![id, order, status, code],
+            )
+            .unwrap();
+        };
+        hydration(
+            "done",
+            "order-done",
+            true,
+            sync::FOOD_ITEM_HYDRATION_RECOVERED,
+            "-50 seconds",
+        );
+        // Printed since: a job without the item codes is not a reason to doubt.
+        print_job("job-done", "order-done", "printed", None);
+        hydration(
+            "waiting",
+            "order-waiting",
+            true,
+            sync::FOOD_ITEM_HYDRATION_RECOVERED,
+            "-40 seconds",
+        );
+        print_job(
+            "job-waiting",
+            "order-waiting",
+            "pending",
+            Some(crate::print::FOOD_ITEMS_PENDING_CODE),
+        );
+        hydration(
+            "late",
+            "order-late",
+            true,
+            sync::FOOD_ITEM_HYDRATION_RECOVERED,
+            "-30 seconds",
+        );
+        print_job(
+            "job-late",
+            "order-late",
+            "failed",
+            Some(crate::print::FOOD_ITEMS_UNAVAILABLE_CODE),
+        );
+        hydration(
+            "empty",
+            "order-empty",
+            false,
+            sync::FOOD_ITEM_HYDRATION_UNAVAILABLE,
+            "-20 seconds",
+        );
+        hydration(
+            "running",
+            "order-running",
+            false,
+            sync::FOOD_ITEM_HYDRATION_STARTED,
+            "-10 seconds",
+        );
+        hydration(
+            "cut",
+            "order-cut",
+            false,
+            sync::FOOD_ITEM_HYDRATION_STARTED,
+            "-10 minutes",
+        );
+        // Another order's waiting job never colours this order's row.
+        print_job(
+            "job-other",
+            "order-other",
+            "pending",
+            Some(crate::print::FOOD_ITEMS_PENDING_CODE),
+        );
+
+        conn.execute(
+            "INSERT INTO staff_shifts (id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, opening_cash_amount, opening_cash_amount_cents, status, sync_status,
+                created_at, updated_at, currency)
+             VALUES ('shift-old', 'staff-1', 'Old Name', 'b', 't', 'cashier', '2026-11-01T08:00:00Z',
+                0, 0, 'closed', 'synced', datetime('now'), datetime('now'), 'EUR'),
+                    ('shift-new', 'staff-1', 'Maria', 'b', 't', 'cashier', '2026-11-22T08:00:00Z',
+                0, 0, 'closed', 'synced', datetime('now'), datetime('now'), 'EUR')",
+            [],
+        )
+        .unwrap();
+        // RFC3339 as the other writers bind it; earlier than every row above.
+        let earlier = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+        for (id, staff, stored_name) in [
+            ("manual-known", Some("staff-1"), None),
+            ("manual-stored", Some("staff-1"), Some("Stored Name")),
+            ("manual-unknown", Some("staff-2"), None),
+            ("manual-nobody", None, None),
+        ] {
+            conn.execute(
+                "INSERT INTO recovery_action_log (id, action_id, issue_code, entity_type, entity_id,
+                    order_id, success, payload_json, created_at, actor_staff_id, actor_staff_name)
+                 VALUES (?1, 'manual_payment_method_correction', 'MANUAL_PAYMENT_METHOD_CORRECTION',
+                    'payment', 'pay', 'order-pay', 1, '{}', ?2, ?3, ?4)",
+                rusqlite::params![id, earlier, staff, stored_name],
+            )
+            .unwrap();
+        }
+
+        let entries = list_recovery_action_log(&conn, 100).unwrap();
+        let entry = |id: &str| {
+            entries
+                .iter()
+                .find(|entry| entry["id"] == id)
+                .unwrap_or_else(|| panic!("{id} is listed"))
+        };
+        for (id, outcome) in [
+            ("done", "resolved"),
+            ("waiting", "pending"),
+            ("late", "failed"),
+            ("empty", "failed"),
+            ("running", "pending"),
+            ("cut", "unknown"),
+        ] {
+            assert_eq!(entry(id)["outcome"], outcome, "{id}");
+            let timestamp = entry(id)["timestamp"].as_str().unwrap();
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(timestamp).is_ok(),
+                "{id} lists an instant, not zone-less text: {timestamp}"
+            );
+        }
+        // An audit record of a person's action gets no invented outcome.
+        assert!(entry("manual-known").get("outcome").is_none());
+        assert_eq!(entry("manual-known")["actor"]["staffName"], "Maria");
+        assert_eq!(entry("manual-stored")["actor"]["staffName"], "Stored Name");
+        assert!(entry("manual-unknown")["actor"]["staffName"].is_null());
+        assert_eq!(entry("manual-unknown")["actor"]["staffId"], "staff-2");
+        assert!(entry("manual-nobody")["actor"]["staffName"].is_null());
+        assert!(entry("manual-nobody")["actor"]["staffId"].is_null());
+
+        // By instant: the zone-less rows of the last minute come before the
+        // RFC3339 rows of half an hour ago, which text order put first.
+        let order: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            &order[..6],
+            ["running", "empty", "late", "waiting", "done", "cut"].as_slice()
+        );
+        assert!(order[6..].iter().all(|id| id.starts_with("manual-")));
+        assert_eq!(list_recovery_action_log(&conn, 2).unwrap().len(), 2);
     }
 
     #[derive(Default)]

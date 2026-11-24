@@ -1341,6 +1341,22 @@ fn apply_privacy_tombstones_to_cache(
                 aliases.retain(|entry| {
                     value_str(entry, &["id"]).as_deref() != Some(target_id.as_str())
                 });
+                // Read the numbers before the directory entry goes: the call
+                // record is matched by them once the customer is gone.
+                let phone_keys: Vec<String> = cache
+                    .iter()
+                    .filter(|entry| {
+                        value_str(entry, &["id", "customerId"]).as_deref()
+                            == Some(target_id.as_str())
+                    })
+                    .flat_map(|entry| {
+                        ["phone", "customerPhone", "mobile", "telephone"]
+                            .into_iter()
+                            .filter_map(|field| value_str(entry, &[field]))
+                            .map(|phone| caller_id_phone_key(&phone))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
                 cache.retain(|entry| {
                     value_str(entry, &["id", "customerId"])
                         .map(|id| id != target_id)
@@ -1348,6 +1364,7 @@ fn apply_privacy_tombstones_to_cache(
                 });
                 scrub_order_customer_snapshot(db, &target_id, &action)?;
                 remove_loyalty_customer_copy(db, &target_id)?;
+                forget_caller_id_calls(db, &target_id, &phone_keys)?;
             }
             "customer_address" | "customer_addresses" | "address" => {
                 for entry in &mut cache {
@@ -1714,7 +1731,7 @@ const CALLER_ID_COUNTRY_PREFIXES: [&str; 42] = [
 /// National number used to match a Caller ID number against stored
 /// customers: `+30 210 123 4567`, `00302101234567` and `2101234567` all map to
 /// `2101234567`.
-fn caller_id_phone_key(value: &str) -> String {
+pub(crate) fn caller_id_phone_key(value: &str) -> String {
     let mut digits: String = value.chars().filter(char::is_ascii_digit).collect();
     if let Some(rest) = digits.strip_prefix("00") {
         digits = rest.to_string();
@@ -1778,6 +1795,92 @@ fn find_cached_customer_for_caller_id(
         value_str(entry, &["phone", "customerPhone", "mobile", "telephone"])
             .is_some_and(|stored| caller_id_phone_key(&stored) == key)
     })
+}
+
+/// The id of the cached customer a Caller ID number belongs to, resolved as
+/// the popup's cache-only lookup resolves it: this terminal's directory, no
+/// remote read. The till's call record (`callerid::call_log`) keeps this id
+/// and never a copy of the name.
+pub(crate) fn cached_customer_id_for_caller_id(db: &db::DbState, phone: &str) -> Option<String> {
+    let cache = read_local_json_array(db, "customer_cache_v1").ok()?;
+    find_cached_customer_for_caller_id(cache, phone)
+        .and_then(|customer| value_str(&customer, &["id", "customerId"]))
+        .filter(|id| !id.trim().is_empty())
+}
+
+/// A customer the till's call list names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CallerIdCustomer {
+    pub id: String,
+    pub name: Option<String>,
+}
+
+/// This terminal's customer directory, read once for the call list
+/// (`callerid::call_log::recent_calls`): no remote read. The call record keeps
+/// customer ids only, so the names are looked up here each time the list
+/// opens and an erased or renamed customer is never shown from a stale copy.
+pub(crate) struct CallerIdDirectory {
+    /// In cache order, as the popup's lookup walks it: the customer and the
+    /// lookup key of the phone the directory holds.
+    customers: Vec<(CallerIdCustomer, String)>,
+}
+
+impl CallerIdDirectory {
+    /// An unreadable directory is an empty one: the list then shows numbers.
+    pub(crate) fn load(db: &db::DbState) -> Self {
+        Self::from_cache(read_local_json_array(db, "customer_cache_v1").unwrap_or_default())
+    }
+
+    fn from_cache(cache: Vec<serde_json::Value>) -> Self {
+        let customers = cache
+            .iter()
+            .filter_map(|entry| {
+                let id =
+                    value_str(entry, &["id", "customerId"]).filter(|id| !id.trim().is_empty())?;
+                let name = value_str(entry, &["name", "fullName"])
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty());
+                let phone_key =
+                    value_str(entry, &["phone", "customerPhone", "mobile", "telephone"])
+                        .map(|phone| caller_id_phone_key(&phone))
+                        .unwrap_or_default();
+                Some((CallerIdCustomer { id, name }, phone_key))
+            })
+            .collect();
+        Self { customers }
+    }
+
+    pub(crate) fn by_id(&self, id: &str) -> Option<&CallerIdCustomer> {
+        self.customers
+            .iter()
+            .map(|(customer, _)| customer)
+            .find(|customer| customer.id == id)
+    }
+
+    /// The customer a number belongs to, matched as the popup matches it.
+    pub(crate) fn by_number(&self, number: &str) -> Option<&CallerIdCustomer> {
+        let key = caller_id_phone_key(number);
+        if key.len() < 3 {
+            return None;
+        }
+        self.customers
+            .iter()
+            .find(|(_, phone_key)| *phone_key == key)
+            .map(|(customer, _)| customer)
+    }
+}
+
+/// An erased customer's calls leave the till's call record with the customer:
+/// the rows matched to the id, and the rows of the numbers the directory held
+/// for them (a call can be older than the customer card).
+fn forget_caller_id_calls(
+    db: &db::DbState,
+    customer_id: &str,
+    phone_keys: &[String],
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    crate::callerid::call_log::forget_customer(&conn, customer_id, phone_keys, caller_id_phone_key)
+        .map(|_| ())
 }
 
 #[tauri::command]
@@ -3573,6 +3676,67 @@ mod dto_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn privacy_tombstone_erases_the_customers_calls_from_the_call_record() {
+        let database = crate::tests::harness::TestDb::open();
+        let db = &database.state;
+        write_local_json(
+            db,
+            "customer_cache_v1",
+            &serde_json::json!([
+                { "id": "erased", "phone": "+30 210 123 4567", "mobile": "6971234567" },
+                { "id": "stays", "phone": "2310555000" }
+            ]),
+        )
+        .unwrap();
+        // The directory lookup the call record uses resolves both customers.
+        assert_eq!(
+            cached_customer_id_for_caller_id(db, "00302101234567").as_deref(),
+            Some("erased")
+        );
+        assert_eq!(
+            cached_customer_id_for_caller_id(db, "2310555000").as_deref(),
+            Some("stays")
+        );
+        assert_eq!(cached_customer_id_for_caller_id(db, "2109999999"), None);
+        {
+            let conn = db.conn.lock().unwrap();
+            for (id, number, customer) in [
+                ("matched", "2101234567", Some("erased")),
+                ("before-the-card", "00302101234567", None),
+                ("mobile", "6971234567", None),
+                ("other-customer", "2310555000", Some("stays")),
+                ("stranger", "2109999999", None),
+                ("private", "restricted", None),
+            ] {
+                conn.execute(
+                    "INSERT INTO caller_id_log (id, caller_number, customer_id, sip_call_id, created_at)
+                     VALUES (?1, ?2, ?3, ?1, '2026-11-23T10:00:00.000Z')",
+                    rusqlite::params![id, number, customer],
+                )
+                .unwrap();
+            }
+        }
+
+        let applied = apply_privacy_tombstones_to_cache(
+            db,
+            &[serde_json::json!({"id":"tombstone","target_type":"customer","target_id":"erased","action":"erase"})],
+        )
+        .unwrap();
+        assert_eq!(applied, ["tombstone"]);
+
+        let conn = db.conn.lock().unwrap();
+        let mut statement = conn
+            .prepare("SELECT id FROM caller_id_log ORDER BY id")
+            .unwrap();
+        let kept: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(kept, ["other-customer", "private", "stranger"]);
     }
 
     #[test]

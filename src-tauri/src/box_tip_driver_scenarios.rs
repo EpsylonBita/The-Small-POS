@@ -989,3 +989,271 @@ fn fix2_win_item1_pending_card_tip_follows_change_driver_and_unassign() {
         0.0
     );
 }
+
+/// Το Μικρό Παρίσι, 23/11/2026, a driver's shift from 18:21 to 23:50: five
+/// phone orders and one BOX order paid in cash (54,50 €), and six BOX orders
+/// the customers had paid online (66,70 €). The checkout printed all twelve
+/// with the cash mark and said nothing of the money paid online.
+fn tomikro_evening_orders() -> Vec<Order> {
+    let cash = |code: &str, cents: i64| {
+        json!({
+            "code": code, "source": "phone", "totalCents": cents, "headerTipCents": 0,
+            "flow": "assign_then_pay", "earning": "active",
+            "payments": [{"method": "cash", "amountCents": cents, "tipCents": 0,
+                          "status": "completed", "tipTo": "none"}],
+        })
+    };
+    let online = |code: &str, cents: i64| {
+        json!({
+            "code": code, "source": "box", "fleet": "store", "totalCents": cents,
+            "headerTipCents": 0, "flow": "assign_then_pay", "earning": "active",
+            "payments": [{"method": "platform_settlement", "amountCents": cents, "tipCents": 0,
+                          "status": "completed", "tipTo": "none"}],
+        })
+    };
+    serde_json::from_value(json!([
+        cash("#0013", 530),
+        online("B472", 1000),
+        online("B473", 610),
+        cash("#0017", 780),
+        online("B474", 960),
+        online("B475", 1090),
+        online("B476", 2440),
+        cash("#0032", 680),
+        online("B477", 570),
+        {
+            "code": "B478", "source": "box", "fleet": "store", "totalCents": 1540,
+            "headerTipCents": 0, "flow": "auto_cash_writer", "earning": "active",
+            "payments": [{"method": "cash", "amountCents": 1540, "tipCents": 0,
+                          "status": "completed", "tipTo": "none"}],
+        },
+        cash("#0040", 590),
+        cash("#0043", 1330),
+    ]))
+    .unwrap()
+}
+
+/// What the checkout shows and prints for the evening: per delivery its mark
+/// and what the driver collected, and the document's totals.
+fn evening_checkout(
+    db: &DbState,
+    shift_id: &str,
+) -> (Value, crate::receipt_renderer::ShiftCheckoutDoc) {
+    let summary = get_shift_summary(db, shift_id).unwrap();
+    let doc = crate::print::build_document_for_job(db, "shift_checkout", shift_id, None).unwrap();
+    let crate::receipt_renderer::ReceiptDocument::ShiftCheckout(doc) = doc else {
+        panic!("expected a shift checkout document");
+    };
+    (summary, doc)
+}
+
+#[test]
+fn a_delivery_the_customer_paid_online_is_never_shown_as_cash() {
+    let _fake = crate::tests::fake_keyring::install_empty();
+    let db = test_db();
+    let cashier = open_cashier(&db);
+    let shift_id = open_driver(&db, 20.0);
+    for order in tomikro_evening_orders() {
+        seed_scenario_order(&db, &order);
+        if order.flow == "auto_cash_writer" {
+            record_auto_cash_at_assignment(&db, &order);
+        } else {
+            assign(&db, &order.code);
+            record_receipts(&db, &order, &cashier, Some(&shift_id));
+        }
+    }
+
+    let assert_evening = |when: &str| {
+        let (summary, doc) = evening_checkout(&db, &shift_id);
+        let rows = summary["driverDeliveries"].as_array().unwrap();
+        assert_eq!(rows.len(), 12, "{when}");
+        let marked = |method: &str| -> Vec<&Value> {
+            rows.iter()
+                .filter(|row| row["payment_method"] == method)
+                .collect()
+        };
+        // Six in cash: the driver holds that money.
+        let cash_rows = marked("cash");
+        assert_eq!(cash_rows.len(), 6, "{when}");
+        assert_eq!(
+            cash_rows
+                .iter()
+                .map(|row| cents(&row["cash_collected"]))
+                .sum::<i64>(),
+            5450,
+            "{when}"
+        );
+        assert!(cash_rows
+            .iter()
+            .all(|row| cents(&row["online_amount"]) == 0));
+        // Six paid online: nothing collected, and the order's total shown apart.
+        let online_rows = marked("online");
+        assert_eq!(online_rows.len(), 6, "{when}");
+        for row in &online_rows {
+            assert_eq!(cents(&row["cash_collected"]), 0, "{when}: {row}");
+            assert_eq!(cents(&row["card_amount"]), 0, "{when}: {row}");
+            assert_eq!(row["online_amount"], row["total_amount"], "{when}: {row}");
+        }
+        assert_eq!(
+            online_rows
+                .iter()
+                .map(|row| cents(&row["online_amount"]))
+                .sum::<i64>(),
+            6670,
+            "{when}"
+        );
+        // What the driver returns is the float and the cash, as before.
+        assert_eq!(cents(&summary["amountToReturn"]), 7450, "{when}");
+
+        let money = |value: f64| Cents::round_half_even(value).as_i64();
+        assert_eq!(
+            (
+                money(doc.opening_amount),
+                money(doc.total_cash_collected),
+                money(doc.total_card_collected),
+                money(doc.total_paid_online),
+                money(doc.amount_to_return),
+            ),
+            (2000, 5450, 0, 6670, 7450),
+            "{when}"
+        );
+        // The same twelve lines on paper, each with the mark the screen has.
+        let printed: Vec<(String, String)> = doc
+            .driver_deliveries
+            .iter()
+            .map(|line| (line.order_number.clone(), line.payment_method.clone()))
+            .collect();
+        let shown: Vec<(String, String)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["order_number"].as_str().unwrap().to_owned(),
+                    row["payment_method"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(printed, shown, "{when}");
+        (summary.clone(), doc)
+    };
+
+    let (summary, doc) = assert_evening("before the close");
+
+    // In Greek: six card marks, the line for the money paid online and the
+    // unchanged return. (The currency row is the raster slip's matter:
+    // `the_printed_shift_checkout_has_no_currency_row`.)
+    let layout = crate::receipt_renderer::LayoutConfig {
+        language: "el".to_string(),
+        currency_symbol: "€".to_string(),
+        decimal_comma: true,
+        ..crate::receipt_renderer::LayoutConfig::default()
+    };
+    let document = crate::receipt_renderer::ReceiptDocument::ShiftCheckout(doc);
+    let html = crate::receipt_renderer::render_html(&document, &layout);
+    assert_eq!(html.matches("data-payment-icon=\"card\"").count(), 6);
+    assert_eq!(html.matches("data-payment-icon=\"cash\"").count(), 6);
+    // The slip's own text, whatever decimal sign its layout prints.
+    let slip = html[html.find("<body>").unwrap()..].replace(',', ".");
+    assert!(
+        slip.contains("<span>Κάρτα online</span><span>66.70</span>"),
+        "{slip}"
+    );
+    assert!(
+        slip.contains("<strong>Επιστροφή</strong><strong>74.50</strong>"),
+        "{slip}"
+    );
+    assert!(
+        slip.contains("<span>Εισπραχθέντα Μετρητά</span><span>54.50</span>"),
+        "{slip}"
+    );
+    // Never the twelve orders added up as if all were cash.
+    assert!(!slip.contains("121.20"), "{slip}");
+
+    // The stored earnings keep the label their schema allows; the mark is
+    // read from the order when the checkout is shown.
+    let stored: Vec<String> = {
+        let conn = db.conn.lock().unwrap();
+        let mut statement = conn
+            .prepare("SELECT DISTINCT payment_method FROM driver_earnings ORDER BY 1")
+            .unwrap();
+        let labels = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        labels
+    };
+    assert_eq!(stored, ["cash"]);
+
+    let closed = close_shift(
+        &db,
+        &json!({
+            "shiftId": shift_id, "closingCash": 74.5,
+            "expectedDriverKeptTips": summary["tipsReceived"], "expectedDriverPayout": 0.0,
+        }),
+    )
+    .unwrap();
+    assert_eq!(closed["success"], true, "{closed}");
+    assert_eq!(cents(&closed["expected"]), 7450);
+
+    // A closed shift reprints from its frozen amounts. The mark is not one of
+    // them, so a slip closed before the mark existed reprints with it.
+    let frozen = db::get_setting(
+        &db.conn.lock().unwrap(),
+        "shift_driver_kept_tips",
+        &shift_id,
+    );
+    assert!(
+        frozen
+            .as_deref()
+            .is_some_and(|saved| !saved.contains("online")),
+        "{frozen:?}"
+    );
+    let (reprint, _) = assert_evening("after the close");
+    assert_eq!(reprint["driverDeliveries"], summary["driverDeliveries"]);
+}
+
+#[test]
+fn only_money_the_platform_took_online_reads_as_online() {
+    let delivery = |cash: i64, card: i64| DriverCheckoutDelivery {
+        id: "earning".into(),
+        order_id: "order".into(),
+        order_number: Some("#0001".into()),
+        box_order_label: None,
+        status: "delivered".into(),
+        delivery_address: None,
+        customer_name: None,
+        customer_phone: None,
+        total_amount_cents: Some(1000),
+        delivery_fee_cents: 0,
+        tip_amount_cents: 0,
+        total_earning_cents: 0,
+        cash_collected_cents: cash,
+        card_amount_cents: card,
+        original_cash_collected_cents: cash,
+        cash_returned_to_cashier_cents: 0,
+    };
+    let shown = |cash: i64, card: i64, paid_online: bool| {
+        let row = delivery(cash, card).into_summary(paid_online);
+        (
+            row["payment_method"].as_str().unwrap().to_owned(),
+            cents(&row["online_amount"]),
+        )
+    };
+    assert_eq!(shown(0, 0, true), ("online".to_string(), 1000));
+    // Nothing collected and no platform payment, such as a cancelled delivery:
+    // the line reads as it always has.
+    assert_eq!(shown(0, 0, false), ("cash".to_string(), 0));
+    // Money the driver did collect is never relabelled.
+    assert_eq!(shown(1000, 0, true), ("cash".to_string(), 0));
+    assert_eq!(shown(0, 1000, true), ("card".to_string(), 0));
+    assert_eq!(shown(400, 600, true), ("mixed".to_string(), 0));
+    assert_eq!(shown(1000, 0, false), ("cash".to_string(), 0));
+    assert_eq!(shown(0, 1000, false), ("card".to_string(), 0));
+    // Cash the driver handed back to the cashier was still cash.
+    let mut returned = delivery(0, 0);
+    returned.original_cash_collected_cents = 1000;
+    returned.cash_returned_to_cashier_cents = 1000;
+    let row = returned.into_summary(true);
+    assert_eq!(row["payment_method"], "cash");
+    assert_eq!(cents(&row["online_amount"]), 0);
+}

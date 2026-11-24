@@ -1,6 +1,7 @@
 mod approval_verify_tests;
 mod availability_tests;
 mod breakglass_preemption_tests;
+mod caller_id_call_record_tests;
 pub(crate) mod collector_privacy_scan_tests;
 mod command_approval_tests;
 mod consent_decline_tests;

@@ -3657,6 +3657,24 @@
       "viewCustomer": "View",
       "startOrder": "Start Order",
       "addCustomer": "Add Customer"
+    },
+    "recentCalls": {
+      "title": "Recent calls",
+      "loading": "Loading calls…",
+      "count_one": "{{count}} call",
+      "count_other": "{{count}} calls",
+      "knownCustomer": "Known customer",
+      "newNumber": "New number",
+      "withheld": "Number withheld",
+      "withheldHint": "The caller did not show their number",
+      "noNumber": "No number",
+      "noNumberHint": "The device gave no number for this call",
+      "orderStarted": "Order started",
+      "search": "Search",
+      "empty": "No calls have been recorded yet.",
+      "loadFailed": "The calls could not be read. Try again.",
+      "retry": "Try again",
+      "retention": "Calls are kept for {{days}} days, on this till only."
     }
   },
   "sync": {

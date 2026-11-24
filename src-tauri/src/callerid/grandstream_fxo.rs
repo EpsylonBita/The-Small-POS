@@ -25,6 +25,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::activation::{self, ActivationDecision, RuntimeActivation};
+use super::call_log::{self, CallLogEntry};
 use super::invite_policy::compiled_event_only_policy;
 use super::manager::CallerIdManager;
 use super::types::CallerIdConnectorFamily;
@@ -1924,11 +1925,13 @@ async fn reconcile_active_lines(
         let (event_sender, event_receiver) = mpsc::channel(EVENT_QUEUE_CAPACITY);
         let publisher_stopped = worker_stopped.clone();
         let publisher_app = app_handle.clone();
+        let publisher_call_log = call_log::sink(app_handle);
         let publisher_line = line.clone();
         let publisher_cancel = line_cancel.clone();
         let publisher_task = tauri::async_runtime::spawn(async move {
             run_event_publisher(
                 move |payload| publisher_app.emit(LOCAL_CALL_EVENT, payload).is_ok(),
+                move |entry| publisher_call_log.offer(entry),
                 publisher_line,
                 event_receiver,
                 publisher_cancel,
@@ -2236,13 +2239,19 @@ async fn run_udp_line(
 
 /// Delivers each accepted call to this terminal's renderer. The activated
 /// source always shows its own calls; nothing on this path reaches the network.
-async fn run_event_publisher<E>(
+///
+/// `record_local` keeps the till's own record of the call (`call_log`). It runs
+/// after the event has been emitted, whatever the emit returned, and must not
+/// wait: the next call's popup is behind it in this loop.
+async fn run_event_publisher<E, R>(
     emit_local: E,
+    record_local: R,
     line: GrandstreamFxoSourceLine,
     mut events: mpsc::Receiver<PendingEvent>,
     cancel: CancellationToken,
 ) where
     E: Fn(Value) -> bool + Send + 'static,
+    R: Fn(CallLogEntry) + Send + 'static,
 {
     loop {
         tokio::select! {
@@ -2257,6 +2266,12 @@ async fn run_event_publisher<E>(
                         "Validated local Caller ID event could not reach the renderer"
                     );
                 }
+                record_local(CallLogEntry {
+                    provider_event_id: pending.invite.provider_event_id,
+                    caller_number: pending.invite.caller_number,
+                    presentation: pending.invite.presentation,
+                    occurred_at: pending.occurred_at,
+                });
             }
         }
     }
@@ -3984,6 +3999,7 @@ mod tests {
                 recorder.lock().unwrap().push(payload);
                 true
             },
+            |_| {},
             source_only,
             receiver,
             cancel.clone(),
@@ -4036,6 +4052,346 @@ mod tests {
         assert_eq!(emitted[2]["presentation"], "restricted");
         drop(emitted);
         cancel.cancel();
+    }
+
+    /// What the till reports about one run of the HT813 path: the events the
+    /// renderer got, and the counters of the listener.
+    #[derive(Debug, PartialEq)]
+    struct Ht813RunEvidence {
+        emitted: Vec<Value>,
+        calls_detected: u64,
+        udp_packets_received: u64,
+        trusted_packets_received: u64,
+        caller_id_candidates: u64,
+        rejected_candidates: u64,
+        last_rejection_stage: Option<CallerIdRejectionStage>,
+    }
+
+    /// Drives the real listener and the real publisher with one fixed packet
+    /// script: an INVITE and its retransmission, a syslog record and its
+    /// retransmission, and a malformed candidate. Two calls are accepted.
+    async fn run_ht813_script<R>(record_local: R) -> Ht813RunEvidence
+    where
+        R: Fn(CallLogEntry) + Send + 'static,
+    {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listen_port = socket.local_addr().unwrap().port();
+        let line = GrandstreamFxoSourceLine {
+            source: CallerIdSourceConfig {
+                source_id: Uuid::parse_str(SOURCE_ID).unwrap(),
+                source_version: 7,
+                device_profile_key: "grandstream_ht813_fxo".into(),
+                connector_family: CallerIdConnectorFamily::AnalogFxo,
+                line_id: Uuid::parse_str(LINE_ID).unwrap(),
+                source_channel: "fxo-1".into(),
+                trusted_device_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                listen_port,
+            },
+            name: "Call record test".into(),
+            country_code: Some("GR".into()),
+            line_version: 1,
+            is_receiving_target: true,
+            readiness_attempt: None,
+            source_kind: LocalUdpSourceKind::GrandstreamFxo,
+        };
+        let manager = Arc::new(CallerIdManager::new());
+        let generation = manager
+            .replace_supervisor(
+                CancellationToken::new(),
+                move |_generation, supervisor_cancel| async move {
+                    supervisor_cancel.cancelled().await;
+                },
+            )
+            .await
+            .expect("runtime test generation");
+        let (sender, receiver) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+        let cancel = CancellationToken::new();
+        let listener = tokio::spawn(run_udp_line(
+            socket,
+            line.clone(),
+            Arc::clone(&manager),
+            generation,
+            sender,
+            cancel.clone(),
+        ));
+        let emitted = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let publisher = tokio::spawn(run_event_publisher(
+            {
+                let emitted = Arc::clone(&emitted);
+                move |payload| {
+                    emitted.lock().unwrap().push(payload);
+                    true
+                }
+            },
+            record_local,
+            line,
+            receiver,
+            cancel.clone(),
+        ));
+
+        let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let invite_packet = invite(
+            &format!("sip:callerid@127.0.0.1:{listen_port}"),
+            "<sip:2101234567@127.0.0.1>",
+            "call-record@ht813",
+        );
+        let syslog_packet = ht813_syslog_caller_id("00447799887766");
+        let malformed: &[u8] =
+            b"<15> HT813 malformed SigCtrl::processFxoCallerIdReceived, number = 2101234567";
+        let script: [&[u8]; 5] = [
+            &invite_packet,
+            &invite_packet,
+            &syslog_packet,
+            &syslog_packet,
+            malformed,
+        ];
+        for (sent, packet) in script.iter().enumerate() {
+            client
+                .send_to(packet, (Ipv4Addr::LOCALHOST, listen_port))
+                .await
+                .unwrap();
+            // One packet at a time, so both runs see the same order.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while manager.get_status().udp_packets_received < sent as u64 + 1 {
+                assert!(Instant::now() < deadline, "the listener stopped reading");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while emitted.lock().unwrap().len() < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "the publisher waited on the call record"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Nothing else may follow the two accepted calls.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        cancel.cancel();
+        listener.await.unwrap();
+        publisher.await.unwrap();
+        let status = manager.get_status();
+        manager.stop().await;
+        let emitted = emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(|mut payload| {
+                // The clock and the syslog branch's random id differ by run.
+                assert!(payload["occurredAt"].is_string());
+                payload["occurredAt"] = Value::Null;
+                if payload["providerEventId"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("ht813-syslog-"))
+                {
+                    payload["providerEventId"] = "ht813-syslog-<generated>".into();
+                }
+                payload
+            })
+            .collect();
+        Ht813RunEvidence {
+            emitted,
+            calls_detected: status.calls_detected,
+            udp_packets_received: status.udp_packets_received,
+            trusted_packets_received: status.trusted_packets_received,
+            caller_id_candidates: status.caller_id_candidates,
+            rejected_candidates: status.rejected_candidates,
+            last_rejection_stage: status.last_rejection_stage,
+        }
+    }
+
+    fn recorded_numbers(db: &crate::tests::harness::TestDb) -> Vec<String> {
+        let conn = db.state.conn.lock().unwrap();
+        let mut statement = conn
+            .prepare("SELECT caller_number FROM caller_id_log ORDER BY rowid")
+            .unwrap();
+        let numbers = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        numbers
+    }
+
+    /// Founder, 23/11/2026: the till keeps a local record of every call, and
+    /// Caller ID at a live store must not change. The popup events, the
+    /// retransmission dedup and the rejection counters are compared between a
+    /// run with no record at all and runs with the record working, failing and
+    /// stuck behind a database someone else holds.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_call_record_changes_nothing_the_ht813_path_shows_or_counts() {
+        use crate::tests::harness::TestDb;
+        let _keyring = crate::tests::fake_keyring::install_empty();
+
+        let without_record = run_ht813_script(|_| {}).await;
+        assert_eq!(without_record.emitted.len(), 2);
+        assert_eq!(
+            without_record.emitted[0]["providerEventId"],
+            "call-record@ht813"
+        );
+        assert_eq!(without_record.emitted[0]["callerNumber"], "2101234567");
+        assert_eq!(without_record.emitted[1]["callerNumber"], "00447799887766");
+        let mut keys = without_record.emitted[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "callerNumber",
+                "countryCode",
+                "lineId",
+                "lineName",
+                "lineVersion",
+                "occurredAt",
+                "presentation",
+                "providerEventId",
+                "schemaVersion",
+                "sourceId",
+                "sourceVersion",
+            ],
+            "the renderer refuses a local call event with any other key set"
+        );
+        assert_eq!(without_record.calls_detected, 2);
+        assert_eq!(without_record.udp_packets_received, 5);
+        assert_eq!(without_record.caller_id_candidates, 5);
+        assert_eq!(without_record.rejected_candidates, 1);
+
+        // The record working: one row per accepted call, nothing for the
+        // retransmissions or the rejected candidate.
+        let db = Arc::new(TestDb::open());
+        let (sink, writer) = call_log::call_log_queue(8, {
+            let db = Arc::clone(&db);
+            move |entry| call_log::record_call(&db.state, &entry).unwrap()
+        });
+        let writer = tokio::spawn(writer);
+        let with_record = run_ht813_script(move |entry| sink.offer(entry)).await;
+        writer.await.unwrap();
+        assert_eq!(with_record, without_record);
+        assert_eq!(recorded_numbers(&db), ["2101234567", "00447799887766"]);
+
+        // The database refusing every write.
+        let broken = Arc::new(TestDb::open());
+        broken
+            .state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE caller_id_log")
+            .unwrap();
+        let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (sink, writer) = call_log::call_log_queue(8, {
+            let broken = Arc::clone(&broken);
+            let failed = Arc::clone(&failed);
+            move |entry| {
+                if call_log::record_call(&broken.state, &entry).is_err() {
+                    failed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+        let writer = tokio::spawn(writer);
+        let with_failing_database = run_ht813_script(move |entry| sink.offer(entry)).await;
+        writer.await.unwrap();
+        assert_eq!(with_failing_database, without_record);
+        assert_eq!(failed.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // The database held by someone else for the whole run: both calls are
+        // shown while not one row can be written.
+        let held_db = Arc::new(TestDb::open());
+        let (locked, is_locked) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let held_db = Arc::clone(&held_db);
+            move || {
+                let _held = held_db.state.conn.lock().unwrap();
+                locked.send(()).unwrap();
+                let _ = released.recv();
+            }
+        });
+        is_locked.recv().unwrap();
+        let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (sink, writer) = call_log::call_log_queue(8, {
+            let held_db = Arc::clone(&held_db);
+            let written = Arc::clone(&written);
+            move |entry| {
+                call_log::record_call(&held_db.state, &entry).unwrap();
+                written.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let writer = tokio::spawn(writer);
+        let with_held_database = run_ht813_script(move |entry| sink.offer(entry)).await;
+        assert_eq!(with_held_database, without_record);
+        assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 0);
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        writer.await.unwrap();
+        // Late, never lost: the rows land once the database is free.
+        assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(recorded_numbers(&held_db), ["2101234567", "00447799887766"]);
+    }
+
+    #[tokio::test]
+    async fn a_call_the_renderer_missed_is_still_recorded_once() {
+        let line = parse_source_line(&source_line()).unwrap();
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::<CallLogEntry>::new()));
+        let (sender, receiver) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+        let cancel = CancellationToken::new();
+        let publisher = tokio::spawn(run_event_publisher(
+            // The window is closing: the event cannot be delivered.
+            |_payload| false,
+            {
+                let recorded = Arc::clone(&recorded);
+                move |entry| recorded.lock().unwrap().push(entry)
+            },
+            line,
+            receiver,
+            cancel.clone(),
+        ));
+        let occurred_at = DateTime::parse_from_rfc3339("2026-11-23T18:40:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for (provider_event_id, presentation, caller_number) in [
+            ("missed@ht813", Presentation::Allowed, Some("2101234567")),
+            ("private@ht813", Presentation::Restricted, None),
+        ] {
+            sender
+                .send(PendingEvent {
+                    invite: ParsedInvite {
+                        caller_number: caller_number.map(str::to_string),
+                        presentation,
+                        provider_event_id: provider_event_id.into(),
+                    },
+                    occurred_at,
+                })
+                .await
+                .unwrap();
+        }
+        drop(sender);
+        publisher.await.unwrap();
+
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            [
+                CallLogEntry {
+                    provider_event_id: "missed@ht813".into(),
+                    caller_number: Some("2101234567".into()),
+                    presentation: Presentation::Allowed,
+                    occurred_at,
+                },
+                CallLogEntry {
+                    provider_event_id: "private@ht813".into(),
+                    caller_number: None,
+                    presentation: Presentation::Restricted,
+                    occurred_at,
+                },
+            ]
+        );
     }
 
     #[test]

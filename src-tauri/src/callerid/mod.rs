@@ -5,6 +5,7 @@
 //! continue to use the private per-line Caller ID v2 Realtime path.
 
 pub mod activation;
+pub(crate) mod call_log;
 pub mod grandstream_fxo;
 pub mod invite_policy;
 pub mod manager;

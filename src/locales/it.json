@@ -3657,6 +3657,24 @@
       "viewCustomer": "Apri",
       "startOrder": "Avvia ordine",
       "addCustomer": "Aggiungi cliente"
+    },
+    "recentCalls": {
+      "title": "Chiamate recenti",
+      "loading": "Caricamento chiamate…",
+      "count_one": "{{count}} chiamata",
+      "count_other": "{{count}} chiamate",
+      "knownCustomer": "Cliente noto",
+      "newNumber": "Nuovo numero",
+      "withheld": "Numero nascosto",
+      "withheldHint": "Chi chiama non ha mostrato il numero",
+      "noNumber": "Senza numero",
+      "noNumberHint": "Il dispositivo non ha fornito un numero per questa chiamata",
+      "orderStarted": "Ordine avviato",
+      "search": "Cerca",
+      "empty": "Non è stata ancora registrata nessuna chiamata.",
+      "loadFailed": "Non è stato possibile leggere le chiamate. Riprovate.",
+      "retry": "Riprova",
+      "retention": "Le chiamate restano {{days}} giorni, solo su questa cassa."
     }
   },
   "sync": {

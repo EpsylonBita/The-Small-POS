@@ -235,6 +235,42 @@ describe('StaffShiftModal ordinary cashier ledger and confirmation', { timeout: 
     expect(screen.queryByRole('button', { name: /Ο διανομέας έφερε|modals\.staffShift\.platformCash/ })).toBeNull();
   });
 
+  // Founder 23/11 (Το Μικρό Παρίσι): six BOX orders the customers had paid online showed
+  // on the driver's checkout as cash. The checkout now marks them `online`.
+  it('shows a delivery the customer paid online as a card order, never as cash', async () => {
+    const i18n = i18next.createInstance();
+    await i18n.init({ lng: 'el', resources: { el: { translation: localeBundles.el } } });
+    fixture.localizedT = i18n.getFixedT('el');
+    fixture.activeShift = shift({ id: 'sh1', role_type: 'driver', currency: 'EUR' });
+    bridge.shifts.getSummary.mockResolvedValue({
+      success: true, data: {
+        ...summary(0), shift: fixture.activeShift, currency: 'EUR',
+        driverDeliveries: [
+          { id: 'd1', order_id: 'o1', order_number: '043', customer_name: 'Μαρία', payment_method: 'cash',
+            status: 'delivered', total_amount: 13.3, cash_collected: 13.3 },
+          { id: 'd2', order_id: 'o2', order_number: '#B477', customer_name: 'Λίνα', payment_method: 'online',
+            status: 'delivered', total_amount: 5.7, cash_collected: 0, card_amount: 0, online_amount: 5.7 },
+          { id: 'd3', order_id: 'o3', order_number: '#B476', customer_name: 'Νίκος', payment_method: 'online',
+            status: 'delivered', total_amount: 24.4, cash_collected: 0, card_amount: 0, online_amount: 24.4 },
+        ],
+      },
+    });
+    const { container } = render(<StaffShiftModal {...props} />);
+    expect(await screen.findByText('Λίνα')).toBeInTheDocument();
+
+    // Each line names its tender in the till's language: no stored slug in capitals.
+    const text = container.ownerDocument.body.textContent ?? '';
+    expect(text).not.toMatch(/ONLINE|\bCASH\b|\bCARD\b|\bonline\b/);
+    const card = i18n.t('modals.staffShift.card');
+    const cash = i18n.t('modals.staffShift.cash');
+    const row = (name: string) => screen.getByText(name).closest('.pos-glass-form-card') as HTMLElement;
+    expect(row('Λίνα')).toHaveTextContent(card);
+    expect(row('Νίκος')).toHaveTextContent(card);
+    expect(row('Λίνα')).not.toHaveTextContent(cash);
+    expect(row('Μαρία')).toHaveTextContent(cash);
+    expect(row('Μαρία')).not.toHaveTextContent(card);
+  });
+
   it.each(['returned', 'thrown'] as const)('uses localized cashier refusal text for a %s response', async (kind) => {
     const i18n = i18next.createInstance();
     await i18n.init({

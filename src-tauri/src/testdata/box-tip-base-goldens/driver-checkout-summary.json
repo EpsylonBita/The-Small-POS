@@ -40,6 +40,7 @@
       "delivery_address": null,
       "delivery_fee": 0.0,
       "id": "golden-earning",
+      "online_amount": 0.0,
       "order_id": "golden-order",
       "order_number": "#301",
       "order_status": "delivered",

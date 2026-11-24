@@ -158,12 +158,39 @@
       "hint": "Solo se richiesto dall’assistenza",
       "attempts": "Cosa è stato tentato",
       "identifiers": "Dati",
-      "automaticActor": "La cassa",
+      "automaticActor": "Automatico",
       "unknownActor": "Operatore non identificato",
       "report": "Rapporto a The Small",
       "reportTopic": "Oggetto del rapporto",
       "allTopics": "Tutta la cassa",
       "tools": "Strumenti di assistenza e copie della cassa"
+    },
+    "history": {
+      "details": "Dati per l’assistenza",
+      "other": "Altra azione sulla cassa",
+      "state": {
+        "resolved": "Completato",
+        "recorded": "Registrato",
+        "pending": "In corso",
+        "failed": "Non completato",
+        "unknown": "Non confermato"
+      },
+      "kinds": {
+        "orderItems": {
+          "resolved_one": "La stampa di un ordine da piattaforma aspettava i suoi articoli. La cassa li ha recuperati da sola e la stampa è proseguita.",
+          "resolved_other": "La stampa di {{count}} ordini da piattaforma aspettava i loro articoli. La cassa li ha recuperati da sola e la stampa è proseguita.",
+          "pending": "La stampa di un ordine da piattaforma aspetta i suoi articoli. La cassa li sta recuperando da sola.",
+          "failed": "Gli articoli di un ordine da piattaforma sono arrivati tardi alla cassa. Se una ricevuta non è stata stampata, apri l’ordine e stampala di nuovo.",
+          "unknown": "La cassa ha richiesto gli articoli di un ordine da piattaforma per stamparlo. Non sappiamo se li ha ricevuti."
+        },
+        "platformCash": {
+          "recorded_one": "Un ordine da piattaforma in contanti è stato assegnato a un corriere del negozio. La cassa ha registrato i contanti nel suo turno.",
+          "recorded_other": "{{count}} ordini da piattaforma in contanti sono stati assegnati a corrieri del negozio. La cassa ha registrato i contanti nel turno di ciascuno."
+        },
+        "paymentMethod": {
+          "recorded": "Il metodo di pagamento di un pagamento è stato modificato. Non è stato addebitato nulla di nuovo."
+        }
+      }
     },
     "report": {
       "new": "Nuovo rapporto",

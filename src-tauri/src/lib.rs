@@ -1214,6 +1214,8 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                     caller_id_cancel,
                 );
                 tauri::async_runtime::spawn(caller_id_startup);
+                // The local call record expires whether or not Caller ID runs.
+                callerid::call_log::start_purge_worker(app.handle().clone(), cancel_token.clone());
             }
 
             // Second DB connection for the background sync loop
@@ -1938,6 +1940,8 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::callerid::callerid_start,
             commands::callerid::callerid_stop,
             commands::callerid::callerid_get_status,
+            commands::callerid::callerid_recent_calls,
+            commands::callerid::callerid_record_call_action,
             commands::callerid::callerid_save_config,
             commands::callerid::callerid_get_config,
             commands::callerid::callerid_test_connection,

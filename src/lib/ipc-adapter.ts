@@ -2662,6 +2662,15 @@ export interface PlatformBridge {
     start(): Promise<{ status: string }>;
     stop(): Promise<{ status: string }>;
     getStatus(): Promise<any>;
+    /** The till's local call record, newest first: `{ retentionDays, calls }`. */
+    recentCalls(options?: { limit?: number }): Promise<any>;
+    /** Marks one recorded call as having led to an order: `{ recorded }`. */
+    recordCallAction(action: {
+      callId?: string;
+      number?: string;
+      occurredAt?: string;
+      customerId?: string;
+    }): Promise<any>;
     saveConfig(config: any): Promise<{ success: boolean }>;
     getConfig(): Promise<any>;
     testConnection(config?: any): Promise<{ success: boolean; message: string; reasonCode?: string }>;
@@ -3281,6 +3290,8 @@ export const CHANNEL_MAP: Record<string, string> = {
   "callerid:start": "callerid.start",
   "callerid:stop": "callerid.stop",
   "callerid:get-status": "callerid.getStatus",
+  "callerid:recent-calls": "callerid.recentCalls",
+  "callerid:record-call-action": "callerid.recordCallAction",
   "callerid:save-config": "callerid.saveConfig",
   "callerid:get-config": "callerid.getConfig",
   "callerid:test": "callerid.testConnection",
@@ -4524,6 +4535,14 @@ export class TauriBridge implements PlatformBridge {
     start: () => this.inv("callerid:start"),
     stop: () => this.inv("callerid:stop"),
     getStatus: () => this.inv("callerid:get-status"),
+    recentCalls: (options?: { limit?: number }) =>
+      this.inv("callerid:recent-calls", options),
+    recordCallAction: (action: {
+      callId?: string;
+      number?: string;
+      occurredAt?: string;
+      customerId?: string;
+    }) => this.inv("callerid:record-call-action", action),
     saveConfig: (config: any) => this.inv("callerid:save-config", config),
     getConfig: () => this.inv("callerid:get-config"),
     testConnection: (config?: any) => this.inv("callerid:test", config),

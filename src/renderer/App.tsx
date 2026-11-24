@@ -39,6 +39,8 @@ import { SupportBanner } from './components/support/SupportBanner';
 import { SupportInteractionHost } from './components/support/SupportOnsiteSheet';
 import { SupportRestoreNotice } from './components/support/SupportRestoreNotice';
 import { CallerIdCustomerSearchModalHost } from "./components/callerid/CallerIdCustomerSearchModalHost";
+import { RecentCallsHost } from "./components/callerid/RecentCalls";
+import { recordCallerIdOrderStarted } from "./services/caller-id-call-record";
 import { DeferredModal } from "./components/ui/DeferredModal";
 import { openTillHealth, type TillHealthState } from "./components/recovery/till-health-model";
 import PageLoadMotion from "./components/ui/PageLoadMotion";
@@ -946,6 +948,16 @@ function AppContent() {
     setCallerIdCustomerSearchQueue((queue) => queue.slice(1));
   }, []);
 
+  // Founder 23/11: the till's call record notes that staff went on from a
+  // call's customer search to an order. An observer only: it never throws and
+  // never waits, so the order goes on whatever becomes of the note.
+  const noteCallerIdOrderStarted = useCallback(
+    (customer: { id?: unknown } | null) => {
+      recordCallerIdOrderStarted(callerIdCustomerSearch, customer);
+    },
+    [callerIdCustomerSearch],
+  );
+
   useEffect(() => {
     const handleRecoveryRoute = (event: Event) => {
       const detail = (event as CustomEvent<{
@@ -1789,7 +1801,12 @@ function AppContent() {
             <CallerIdCustomerSearchModalHost
               request={callerIdCustomerSearch}
               onClose={closeCallerIdCustomerSearch}
+              onContinueToOrderType={noteCallerIdOrderStarted}
             />
+
+            {/* Founder 23/11: «Πρόσφατες κλήσεις», the till's own call record behind a phone
+                button in the right rail. A row opens the same customer search a call opens. */}
+            <RecentCallsHost onSearchCustomer={openCallerIdCustomerSearch} />
 
             <CashierRecovery>
             <DeferredModal isOpen={showConnectionSettings} onClose={closeConnectionSettings} preload={loadConnectionSettingsModal}>

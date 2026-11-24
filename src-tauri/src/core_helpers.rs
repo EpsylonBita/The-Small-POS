@@ -427,6 +427,7 @@ fn clear_operational_tables(
         DELETE FROM z_reports;
         DELETE FROM recovery_action_log;
         DELETE FROM conflict_audit_log;
+        DELETE FROM caller_id_log;
         DELETE FROM orders;
         DELETE FROM local_settings WHERE setting_category = 'fiscal_admission_owed';
         ",
@@ -871,6 +872,12 @@ mod tests {
                 [],
             )
             .expect("seed recovery log");
+            conn.execute(
+                "INSERT INTO caller_id_log (id, caller_number, sip_call_id, organization_id, created_at)
+                 VALUES ('call-old', '2101234567', 'call-old', 'org', '2026-11-23T10:00:00.000Z')",
+                [],
+            )
+            .expect("seed call record");
             for table in [
                 "table_session_snapshots_v1",
                 "table_cancel_attempts_v1",
@@ -902,6 +909,7 @@ mod tests {
             "parity_sync_queue",
             "conflict_audit_log",
             "recovery_action_log",
+            "caller_id_log",
             "sync_queue",
             "table_session_snapshots_v1",
             "table_cancel_attempts_v1",

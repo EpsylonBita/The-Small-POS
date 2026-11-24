@@ -3216,9 +3216,18 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                 kept_tips.checkout_earning_ids.as_ref(),
             )?,
         };
+        // Whether the customer paid the platform online is read from the
+        // order each time, live or closed: it is not part of the frozen
+        // amounts, so a slip printed before this mark existed reprints with it.
         driver_deliveries = checkout_deliveries
             .into_iter()
-            .map(DriverCheckoutDelivery::into_summary)
+            .map(|delivery| {
+                let paid_online = matches!(
+                    crate::payments::platform_settlement_kind(&conn, &delivery.order_id),
+                    Some(crate::payments::PlatformSettlementKind::PrepaidOnline)
+                );
+                delivery.into_summary(paid_online)
+            })
             .collect();
     } else if is_waiter_role(&role_type) {
         waiter_tables = build_waiter_tables(&conn, shift_id)?;
@@ -4781,15 +4790,32 @@ struct DriverCheckoutDelivery {
 }
 
 impl DriverCheckoutDelivery {
-    fn into_summary(self) -> Value {
+    /// `paid_online`: the customer paid the delivery platform online, so the
+    /// driver collected nothing for this order (founder, 23/11/2026: the
+    /// checkout showed such an order as cash). The line then reads `online`
+    /// and carries the order's total as `online_amount`, for the eye only:
+    /// no return, drawer or tip amount is derived from either. The stored
+    /// earning keeps its cash, card or mixed label. A delivery with nothing
+    /// collected that the platform did not take online, such as a cancelled
+    /// one, keeps the historic `cash`.
+    fn into_summary(self, paid_online: bool) -> Value {
         let amount = |cents| Cents::new(cents).to_f64_dp2();
+        let shown_online =
+            paid_online && self.original_cash_collected_cents <= 0 && self.card_amount_cents <= 0;
         let payment_method = if self.original_cash_collected_cents > 0 && self.card_amount_cents > 0
         {
             "mixed"
         } else if self.card_amount_cents > 0 {
             "card"
+        } else if shown_online {
+            "online"
         } else {
             "cash"
+        };
+        let online_cents = if shown_online {
+            self.total_amount_cents.unwrap_or(0).max(0)
+        } else {
+            0
         };
         let cash = amount(self.cash_collected_cents);
         let mut detail = json!({
@@ -4808,6 +4834,7 @@ impl DriverCheckoutDelivery {
             "payment_method": payment_method,
             "cash_collected": cash,
             "card_amount": amount(self.card_amount_cents),
+            "online_amount": amount(online_cents),
             "original_cash_collected": amount(self.original_cash_collected_cents),
             "cash_returned_to_cashier": amount(self.cash_returned_to_cashier_cents),
             "cash_to_return": cash,

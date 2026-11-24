@@ -7,6 +7,7 @@ import { SyncStatusIndicator } from './SyncStatusIndicator';
 import { useCashierOperationsLocked } from '../contexts/cashier-gate-context';
 
 export const UTILITY_RAIL_EXPENSES_SLOT_ID = 'pos-utility-rail-expenses';
+export const UTILITY_RAIL_CALLS_SLOT_ID = 'pos-utility-rail-calls';
 
 // Founder 31/10 («ένα άλλο μικρό sidebar όπως αυτό με 3 εικονίδια: έξοδα, κατάσταση υγείας και αλλαγή
 // θέματος· έτσι η υγεία και τα έξοδα έχουν συγκεκριμένες θέσεις και δεν αιωρούνται»): a second small rail
@@ -28,6 +29,9 @@ export const UtilityRail = ({ onHealthState }: { onHealthState?: React.Component
           isDark ? 'bg-black' : 'bg-white/90'
         }`}
       >
+        {/* Founder 23/11: a till that records its calls gets a phone button for the «Πρόσφατες κλήσεις»
+            list, above the three fixed places. The slot stays empty on every other till. */}
+        <div id={UTILITY_RAIL_CALLS_SLOT_ID} className="contents" />
         {/* Founder 31/10: expenses on top, the heart in the middle, the theme below. The expenses
             button comes from the main layout, which owns the expenses window. */}
         <div id={UTILITY_RAIL_EXPENSES_SLOT_ID} className="contents" />
@@ -46,14 +50,24 @@ export const UtilityRail = ({ onHealthState }: { onHealthState?: React.Component
   );
 };
 
-/** Places its button in the rail's expenses spot, between health and theme. The rail is a
- * recovery root so Health stays reachable on a locked till; expenses are an operation, so
- * the button leaves the rail while the cashier gate is locked. */
-export const UtilityRailExpensesSlot = ({ children }: { children: React.ReactNode }) => {
+/** Places a button in one of the rail's slots. The rail is a recovery root so Health stays
+ * reachable on a locked till; a slot's button opens an operation, so it leaves the rail while
+ * the cashier gate is locked. */
+const UtilityRailSlot = ({ slotId, children }: { slotId: string; children: React.ReactNode }) => {
   const [target, setTarget] = useState<HTMLElement | null>(null);
   const cashierLocked = useCashierOperationsLocked();
   useEffect(() => {
-    setTarget(document.getElementById(UTILITY_RAIL_EXPENSES_SLOT_ID));
-  }, []);
+    setTarget(document.getElementById(slotId));
+  }, [slotId]);
   return target && !cashierLocked ? createPortal(children, target) : null;
 };
+
+/** Places its button in the rail's expenses spot, above health and theme. */
+export const UtilityRailExpensesSlot = ({ children }: { children: React.ReactNode }) => (
+  <UtilityRailSlot slotId={UTILITY_RAIL_EXPENSES_SLOT_ID}>{children}</UtilityRailSlot>
+);
+
+/** Places the «Πρόσφατες κλήσεις» button at the top of the rail. */
+export const UtilityRailCallsSlot = ({ children }: { children: React.ReactNode }) => (
+  <UtilityRailSlot slotId={UTILITY_RAIL_CALLS_SLOT_ID}>{children}</UtilityRailSlot>
+);

@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   getBranchId: vi.fn(),
   customerServiceAddCustomerAddress: vi.fn(),
   addCustomerModalProps: vi.fn(),
+  recordCallAction: vi.fn(),
   actualAddCustomerModal: null as any,
   renderModalContent: true,
   translate: vi.fn((key: string, fallback?: string | Record<string, unknown>) => {
@@ -38,6 +39,7 @@ vi.mock('../../../../lib', () => ({
       lookupByPhone: mocks.lookupByPhone,
     },
     terminalConfig: { getBranchId: mocks.getBranchId },
+    callerid: { recordCallAction: mocks.recordCallAction },
   }),
   onEvent: vi.fn(),
   offEvent: vi.fn(),
@@ -162,6 +164,12 @@ vi.mock('../AddCustomerModal', async (importOriginal) => {
 
 import { CustomerSearchModal } from '../CustomerSearchModal'
 import { CallerIdCustomerSearchModalHost } from '../../callerid/CallerIdCustomerSearchModalHost'
+import { recordCallerIdOrderStarted } from '../../../services/caller-id-call-record'
+import {
+  clearCallerIdOrderIntents,
+  subscribeToCallerIdOrderIntents,
+  type CallerIdOrderIntent,
+} from '../../../services/caller-id-order-flow'
 
 interface CallerIdCustomerSearchRequestContract {
   displayPhone: string
@@ -390,6 +398,71 @@ describe('CustomerSearchModal Caller ID lookup', () => {
     const pickupButton = screen.getByRole('button', { name: 'Pickup' })
     fireEvent.click(pickupButton)
     expect(onContinueToOrderType).toHaveBeenCalledWith(null)
+  })
+
+  // Founder 23/11: the till's call record notes that staff went on to an
+  // order. The note rides the observer above, as the app shell wires it, and
+  // must never cost the order.
+  it.each([
+    ['is written', () => Promise.resolve({ recorded: true })],
+    ['finds no such call', () => Promise.resolve({ recorded: false })],
+    ['is refused by the database', () => Promise.reject(new Error('database is locked'))],
+    ['throws on the spot', () => { throw new Error('bridge is gone') }],
+  ])('goes on to the order when the call record note %s', async (_case, answer) => {
+    mocks.posApiGet.mockResolvedValue({ success: true, data: { success: true } })
+    mocks.recordCallAction.mockReset().mockImplementation(answer)
+    clearCallerIdOrderIntents()
+    const intents: CallerIdOrderIntent[] = []
+    const unsubscribe = subscribeToCallerIdOrderIntents((intent) => {
+      intents.push(intent)
+    })
+    const navigations: unknown[] = []
+    const onNavigate = (event: Event) => navigations.push((event as CustomEvent).detail)
+    window.addEventListener('pos:navigate-view', onNavigate)
+    const onClose = vi.fn()
+    const request = {
+      displayPhone: '077 999 02 14',
+      canonicalPhone: '+41779990214',
+      lookupPhone: '779990214',
+      requestKey: 'call:018f7684-1436-7d3d-a3f8-58b1bf600dbd:1795461000250:allowed:79990214',
+      onDisplayed: vi.fn(),
+    }
+
+    try {
+      render(
+        <CallerIdCustomerSearchModalHostUnderContract
+          request={request}
+          onClose={onClose}
+          onContinueToOrderType={(customer) =>
+            recordCallerIdOrderStarted(request, customer as { id?: unknown } | null)
+          }
+        />,
+      )
+      expect(await screen.findByText('Customer not found')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Pickup' }))
+
+      // The call is named as the till recorded it: its number and its own time.
+      expect(mocks.recordCallAction).toHaveBeenCalledExactlyOnceWith({
+        number: '+41779990214',
+        occurredAt: new Date(1795461000250).toISOString(),
+      })
+      // And the order hand-off is whole, whatever the note's fate.
+      await waitFor(() => expect(intents).toHaveLength(1))
+      expect(intents[0]).toMatchObject({
+        requestKey: request.requestKey,
+        displayPhone: '077 999 02 14',
+        canonicalPhone: '+41779990214',
+        lookupPhone: '779990214',
+        customer: null,
+        requestedOrderType: 'pickup',
+      })
+      expect(navigations).toEqual([{ view: 'dashboard' }])
+      expect(onClose).toHaveBeenCalledTimes(1)
+    } finally {
+      window.removeEventListener('pos:navigate-view', onNavigate)
+      unsubscribe()
+      clearCallerIdOrderIntents()
+    }
   })
 
   it('opens the existing new-customer flow with the displayed caller number', async () => {

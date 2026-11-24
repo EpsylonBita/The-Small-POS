@@ -299,7 +299,14 @@ export interface ShiftSummary {
     staff_name?: string;
     role_type?: string;
     total_amount: number;
+    /**
+     * `cash`, `card`, `mixed`, or `online` for an order the customer paid the
+     * delivery platform online: the driver collected nothing for it. A mark for
+     * the eye; no amount is derived from it.
+     */
     payment_method: string;
+    /** The order's total when `payment_method` is `online`, else 0. Shown, never summed into a return. */
+    online_amount?: number;
     delivery_fee: number;
     tip_amount: number;
     total_earning: number;

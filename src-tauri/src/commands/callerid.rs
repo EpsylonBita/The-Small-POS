@@ -185,6 +185,48 @@ pub async fn callerid_get_status(
     Ok(serde_json::to_value(&status).unwrap_or_default())
 }
 
+/// The calls this till recorded, newest first, for the staff list
+/// «Πρόσφατες κλήσεις». A local read: the till's own table and its own
+/// customer directory, nothing from the server. `arg0.limit` is optional.
+#[tauri::command]
+pub async fn callerid_recent_calls(
+    app: tauri::AppHandle,
+    arg0: Option<Value>,
+) -> Result<Value, String> {
+    run_blocking_command("callerid_recent_calls", move || {
+        let db = app.state::<db::DbState>();
+        let limit = arg0
+            .as_ref()
+            .and_then(|payload| payload.get("limit"))
+            .and_then(Value::as_u64)
+            .map(|limit| limit as usize)
+            .unwrap_or(callerid::call_log::RECENT_CALLS_DEFAULT_LIMIT);
+        let calls = callerid::call_log::recent_calls(&db, limit, chrono::Utc::now())?;
+        Ok(serde_json::json!({
+            "retentionDays": callerid::call_log::CALL_LOG_RETENTION_DAYS,
+            "calls": calls,
+        }))
+    })
+    .await
+}
+
+/// Staff went on from a call's customer search to an order: the call's row
+/// says so from now on. The only write the renderer makes to the call record.
+/// A call the till does not hold answers `recorded: false`, never an error
+/// the order flow would have to handle.
+#[tauri::command]
+pub async fn callerid_record_call_action(
+    app: tauri::AppHandle,
+    arg0: Option<Value>,
+) -> Result<Value, String> {
+    run_blocking_command("callerid_record_call_action", move || {
+        let db = app.state::<db::DbState>();
+        let recorded = callerid::call_log::record_order_started(&db, &arg0.unwrap_or(Value::Null))?;
+        Ok(serde_json::json!({ "recorded": recorded }))
+    })
+    .await
+}
+
 /// Legacy SIP configuration is read-only in the Phase 1 runtime.
 #[tauri::command]
 pub async fn callerid_save_config(

@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getBridge, type DiagnosticsTerminalContext, type RecoveryActionDescriptor, type RecoveryActionLogEntry, type RecoveryIssue } from '../../../lib';
 import { redactForExport, sanitizeOperationalError } from '../../../../../shared/pos/health/diagnostics-redaction';
-import { formatDateTime, formatTime } from '../../utils/format';
+import { formatDate, formatDateTime, formatTime } from '../../utils/format';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { SupportConnectAction } from '../support/SupportConnectAction';
 import { SupportDetailsPanel } from '../support/SupportDetailsPanel';
@@ -10,7 +10,13 @@ import { RecoveryPanel } from './RecoveryPanel';
 import { TableAttemptRecoveryNotice } from './TableAttemptRecoveryNotice';
 import { TillHealthButton } from './TillHealthWindow';
 import { tillHealthReportStatus, type TillHealthReport } from './till-health-model';
+import { buildHistoryRows, type HistoryState } from './till-health-history';
 import type { DesktopRecoveryIssue } from './sync-recovery-issues';
+
+/** Colour sits on the state word only, with the window's own tones. */
+const HISTORY_TONES: Record<HistoryState, 'ok' | 'warn' | 'bad'> = {
+  resolved: 'ok', recorded: 'ok', pending: 'warn', failed: 'bad', unknown: 'warn',
+};
 
 interface TillHealthSupportProps {
   issues: DesktopRecoveryIssue[];
@@ -48,6 +54,7 @@ export function TillHealthSupport({
     return () => { current = false; };
   }, []);
   const locale = i18n?.resolvedLanguage || i18n?.language;
+  const historyRows = useMemo(() => buildHistoryRows(recentActions), [recentActions]);
   const reportableIssues = issues.filter(issue => issue.actions.some(action => action.id === 'contactDev'));
   const reportIssue = reportableIssues.find(issue => issue.id === selected);
   const reportStatus = tillHealthReportStatus(lastReport);
@@ -66,15 +73,37 @@ export function TillHealthSupport({
       <h4>{t('tillHealth.support.attempts')}</h4>
       {!recentActions.length && <p>{t('recovery.center.noRecentActions')}</p>}
       <ul className="space-y-3">
-        {recentActions.map(entry => {
-          const automatic = entry.actionId.toLowerCase().includes('automatic') || entry.id.startsWith('automatic:');
-          return <li key={entry.id} className="space-y-1">
+        {historyRows.map(row => {
+          const newest = row.entries[0];
+          const oldest = row.entries[row.entries.length - 1];
+          const clock = (value: string) => formatTime(value, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }, locale);
+          // A folded group shows its day and the span of its entries.
+          const when = row.count > 1
+            ? `${formatDate(newest.timestamp, {}, locale)} · ${clock(oldest.timestamp)}–${clock(newest.timestamp)}`
+            : formatDateTime(newest.timestamp, {}, locale);
+          const sentence = row.sentenceKey
+            ? t(row.sentenceKey, { count: row.count })
+            : t(`recovery.actions.${row.actionId}.label`, { defaultValue: t('tillHealth.history.other') });
+          return <li key={row.id} className="space-y-1" data-testid="till-health-history-row" data-history-state={row.state}>
             <div className="till-health-row">
-              <time dateTime={entry.timestamp}>{formatDateTime(entry.timestamp, {}, locale)}</time>
-              <strong>{entry.actor?.staffName || t(`tillHealth.support.${automatic ? 'automaticActor' : 'unknownActor'}`)}</strong>
+              <time dateTime={newest.timestamp}>{when}</time>
+              <strong>{row.actor.type === 'staff' ? row.actor.name
+                : t(`tillHealth.support.${row.actor.type === 'automatic' ? 'automaticActor' : 'unknownActor'}`)}</strong>
             </div>
-            <p>{t(`recovery.actions.${entry.actionId}.label`, { defaultValue: entry.actionId })} · {t(`recovery.center.outcomes.${entry.outcome ?? 'unknown'}`)}</p>
-            <code>{[entry.issueCode, entry.recipeId, sanitizeOperationalError(entry.errorMessage), sanitizeOperationalError(entry.message)].filter(Boolean).join(' · ')}</code>
+            <p>{sentence} · <span data-health-tone={HISTORY_TONES[row.state]}>{t(`tillHealth.history.state.${row.state}`)}</span></p>
+            <details>
+              <summary className="min-h-11 cursor-pointer py-2">{t('tillHealth.history.details')}</summary>
+              <ul className="space-y-1 pb-2">
+                {row.entries.map(entry => <li key={entry.id}>
+                  <code>{[
+                    row.count > 1 ? clock(entry.timestamp) : null,
+                    entry.actionId, entry.issueCode, entry.recipeId,
+                    entry.targetRefs?.orderNumber ?? entry.targetRefs?.orderId,
+                    sanitizeOperationalError(entry.errorMessage), sanitizeOperationalError(entry.message),
+                  ].filter(Boolean).join(' · ')}</code>
+                </li>)}
+              </ul>
+            </details>
           </li>;
         })}
       </ul>

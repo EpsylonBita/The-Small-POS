@@ -6506,7 +6506,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     <div className="text-right">
                       <div className="font-black liquid-glass-modal-text">{formatCurrency(Number(delivery.total_amount || 0))}</div>
                       <div className="mt-1 text-sm liquid-glass-modal-text-muted font-semibold">
-                        {(delivery.payment_method || 'card').toUpperCase()}
+                        {translateAuditPaymentMethod(delivery.payment_method || 'card')}
                       </div>
                     </div>
                   </div>
@@ -8223,7 +8223,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 const cashTotal = cashOrders.reduce((sum: number, d: any) => sum + (d.total_amount || 0), 0);
                 const cashCount = cashOrders.length;
 
-                const cardOrders = deliveries.filter((d: any) => (d.payment_method || '').toLowerCase() === 'card');
+                // Founder 23/11: an order the customer paid the platform online is a card order.
+                // The checkout marks it `online`; it used to arrive as `cash` and counted there.
+                const cardOrders = deliveries.filter((d: any) =>
+                  ['card', 'online'].includes((d.payment_method || '').toLowerCase()),
+                );
                 const cardTotal = cardOrders.reduce((sum: number, d: any) => sum + (d.total_amount || 0), 0);
                 const cardCount = cardOrders.length;
 
@@ -8358,7 +8362,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                   delivery.payment_method === 'card' ? ' liquid-glass-modal-text-muted' :
                                     ' liquid-glass-modal-text-muted'
                                   }`}>
-                                  {delivery.payment_method.toUpperCase()}
+                                  {translateAuditPaymentMethod(delivery.payment_method)}
                                 </div>
                               </div>
 

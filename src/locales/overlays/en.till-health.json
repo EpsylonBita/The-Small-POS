@@ -158,12 +158,39 @@
       "hint": "Only if support asks you to open it",
       "attempts": "What was tried",
       "identifiers": "Details",
-      "automaticActor": "The till",
+      "automaticActor": "Automatic",
       "unknownActor": "Staff member not identified",
       "report": "Report to The Small",
       "reportTopic": "Report subject",
       "allTopics": "Whole till",
       "tools": "Support tools and till backups"
+    },
+    "history": {
+      "details": "Details for support",
+      "other": "Other action on the till",
+      "state": {
+        "resolved": "Done",
+        "recorded": "Recorded",
+        "pending": "In progress",
+        "failed": "Not completed",
+        "unknown": "Not confirmed"
+      },
+      "kinds": {
+        "orderItems": {
+          "resolved_one": "The printing of a platform order waited for its items. The till fetched them by itself and printing went ahead.",
+          "resolved_other": "The printing of {{count}} platform orders waited for their items. The till fetched them by itself and printing went ahead.",
+          "pending": "The printing of a platform order is waiting for its items. The till is fetching them by itself.",
+          "failed": "The items of a platform order were late reaching the till. If one of its slips did not print, open the order and print it again.",
+          "unknown": "The till asked for the items of a platform order so it could print it. We do not know whether it got them."
+        },
+        "platformCash": {
+          "recorded_one": "A cash platform order was assigned to one of the store’s drivers. The till recorded the cash under that driver’s shift.",
+          "recorded_other": "{{count}} cash platform orders were assigned to the store’s drivers. The till recorded the cash under each driver’s shift."
+        },
+        "paymentMethod": {
+          "recorded": "The payment method of a payment was changed. Nothing was charged again."
+        }
+      }
     },
     "report": {
       "new": "New report",

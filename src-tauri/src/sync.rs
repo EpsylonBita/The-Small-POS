@@ -16590,6 +16590,15 @@ pub(crate) fn sync_remote_order_snapshot_into_local_scoped(
     Ok(updated)
 }
 
+/// `recovery_action_log.action_id` of the bounded food-item hydration, and the
+/// three messages its one row moves through. `commands::recovery` reads them
+/// to tell a claim that is still running, or was interrupted, from one that
+/// finished: these rows carry no `$.outcome` of their own.
+pub(crate) const FOOD_ITEM_HYDRATION_ACTION_ID: &str = "hydrate_food_print_items";
+pub(crate) const FOOD_ITEM_HYDRATION_STARTED: &str = "Authorized item hydration started";
+pub(crate) const FOOD_ITEM_HYDRATION_RECOVERED: &str = "Structured food items recovered";
+pub(crate) const FOOD_ITEM_HYDRATION_UNAVAILABLE: &str = "Structured food items still unavailable";
+
 /// A print intent remains a targeted repair source even when the joined-order
 /// cursor has already passed the parent. Claims are persisted before network I/O.
 async fn hydrate_pending_food_print_items(db: &DbState) -> Result<usize, String> {
@@ -16634,9 +16643,9 @@ async fn hydrate_pending_food_print_items(db: &DbState) -> Result<usize, String>
             params![
                 ready,
                 if ready {
-                    "Structured food items recovered"
+                    FOOD_ITEM_HYDRATION_RECOVERED
                 } else {
-                    "Structured food items still unavailable"
+                    FOOD_ITEM_HYDRATION_UNAVAILABLE
                 },
                 claim_id
             ],
@@ -16694,11 +16703,12 @@ fn claim_food_print_item_hydration(
     conn.execute(
         "INSERT INTO recovery_action_log (id, action_id, issue_code, entity_type, entity_id,
          order_id, success, message, payload_json) VALUES (?1, 'hydrate_food_print_items',
-         'food_order_items_pending', 'order', ?2, ?2, 0, 'Authorized item hydration started', ?3)",
+         'food_order_items_pending', 'order', ?2, ?2, 0, ?4, ?3)",
         params![
             claim_id,
             local_id,
-            serde_json::json!({"remoteOrderId": remote_id, "version": 1}).to_string()
+            serde_json::json!({"remoteOrderId": remote_id, "version": 1}).to_string(),
+            FOOD_ITEM_HYDRATION_STARTED
         ],
     )
     .map_err(|error| error.to_string())?;

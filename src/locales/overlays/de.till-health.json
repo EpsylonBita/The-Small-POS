@@ -158,12 +158,39 @@
       "hint": "Nur auf Bitte des Supports",
       "attempts": "Was versucht wurde",
       "identifiers": "Angaben",
-      "automaticActor": "Die Kasse",
+      "automaticActor": "Automatisch",
       "unknownActor": "Person nicht ermittelt",
       "report": "Bericht an The Small",
       "reportTopic": "Berichtsthema",
       "allTopics": "Gesamte Kasse",
       "tools": "Supportwerkzeuge und Kassensicherungen"
+    },
+    "history": {
+      "details": "Angaben für den Support",
+      "other": "Andere Aktion an der Kasse",
+      "state": {
+        "resolved": "Erledigt",
+        "recorded": "Erfasst",
+        "pending": "Läuft",
+        "failed": "Nicht abgeschlossen",
+        "unknown": "Nicht bestätigt"
+      },
+      "kinds": {
+        "orderItems": {
+          "resolved_one": "Der Druck einer Plattformbestellung wartete auf ihre Artikel. Die Kasse hat sie selbst abgerufen und der Druck lief weiter.",
+          "resolved_other": "Der Druck von {{count}} Plattformbestellungen wartete auf ihre Artikel. Die Kasse hat sie selbst abgerufen und der Druck lief weiter.",
+          "pending": "Der Druck einer Plattformbestellung wartet auf ihre Artikel. Die Kasse ruft sie selbst ab.",
+          "failed": "Die Artikel einer Plattformbestellung kamen zu spät an der Kasse an. Falls ein Beleg nicht gedruckt wurde, öffnen Sie die Bestellung und drucken Sie ihn erneut.",
+          "unknown": "Die Kasse hat die Artikel einer Plattformbestellung für den Druck angefordert. Ob sie angekommen sind, ist nicht bekannt."
+        },
+        "platformCash": {
+          "recorded_one": "Eine Plattformbestellung mit Barzahlung wurde einem Fahrer des Geschäfts zugewiesen. Die Kasse hat das Bargeld in seiner Schicht erfasst.",
+          "recorded_other": "{{count}} Plattformbestellungen mit Barzahlung wurden Fahrern des Geschäfts zugewiesen. Die Kasse hat das Bargeld in der jeweiligen Schicht erfasst."
+        },
+        "paymentMethod": {
+          "recorded": "Die Zahlungsart einer Zahlung wurde geändert. Es wurde nichts erneut belastet."
+        }
+      }
     },
     "report": {
       "new": "Neuer Bericht",
