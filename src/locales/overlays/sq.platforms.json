@@ -1,4 +1,7 @@
 {
+  "woltOrder": {
+    "missingDetails": "Të dhënat e porosisë nga Wolt nuk kanë mbërritur ende."
+  },
   "settings": {
     "settingsHub": {
       "sections": {
@@ -26,6 +29,22 @@
       "lastKnown": "Statusi i fundit i njohur: {{status}}",
       "closedUntil": "Mbyllur deri në {{time}}",
       "closureStatus": "Statusi i efood: {{status}}",
+      "wolt": {
+        "automatic": "Hapja automatike e Wolt",
+        "automaticHelp": "Kur çelësi është i ndezur, Wolt hapet kur arkëtari i parë fillon turnin dhe mbyllet me raportin Z. Kur e fikni, Wolt mbyllet menjëherë dhe mbetet i mbyllur edhe gjatë orarit të hapjes.",
+        "legacyManual": "Tani për tani, e hapni dhe e mbyllni Wolt manualisht.",
+        "holdClosed": "Mbylle dhe mbaje të mbyllur",
+        "closePending": "Wolt ende nuk e ka konfirmuar mbylljen. Mund të vijnë ende porosi.",
+        "retryClose": "Provo sërish mbylljen",
+        "title": "Orari javor i Wolt",
+        "explain": "Vendosni orarin për çdo ditë. Nëse mbylleni pas mesnate, vendosni orën e mbylljes te dita kur hapeni.",
+        "live": "Wolt e konfirmoi këtë orar gjatë kontrollit të fundit.",
+        "save": "Ruaj orarin në Wolt",
+        "unconfirmed": "Wolt nuk e konfirmoi ndryshimin. Ringarkoni orarin përpara se të provoni përsëri.",
+        "changed": "Orari ka ndryshuar. Ringarkoni orarin aktual të Wolt para se të vazhdoni.",
+        "refused": "Wolt e refuzoi këtë ndryshim.",
+        "unavailable": "Cilësimet aktuale të Wolt nuk u ngarkuan. Rifreskoni për të provuar sërish."
+      },
       "box": {
         "detailUnavailable": "BOX nuk u rifreskua dot. Provo përsëri.",
         "throttled": "BOX nuk po përgjigjet. Kontrollo dyqanin në BOX Merchant.",

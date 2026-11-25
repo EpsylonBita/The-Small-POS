@@ -1,4 +1,7 @@
 {
+  "woltOrder": {
+    "missingDetails": "Les détails de la commande Wolt n’ont pas été reçus."
+  },
   "settings": {
     "settingsHub": {
       "sections": {
@@ -26,6 +29,22 @@
       "lastKnown": "Dernier état connu : {{status}}",
       "closedUntil": "Fermé jusqu'à {{time}}",
       "closureStatus": "Statut efood : {{status}}",
+      "wolt": {
+        "automatic": "Ouverture automatique de Wolt",
+        "automaticHelp": "Activez ce réglage pour ouvrir Wolt à la première prise de service en caisse et le fermer à l’édition du Z. Désactivez-le pour fermer Wolt immédiatement et le garder fermé, même pendant les horaires d’ouverture.",
+        "legacyManual": "Pour le moment, vous ouvrez et fermez Wolt manuellement.",
+        "holdClosed": "Fermer et maintenir fermé",
+        "closePending": "Wolt n’a pas encore confirmé la fermeture. Des commandes peuvent encore arriver.",
+        "retryClose": "Réessayer de fermer",
+        "title": "Horaires hebdomadaires Wolt",
+        "explain": "Définissez les horaires de chaque jour. En cas de fermeture après minuit, saisissez l’heure de fermeture sur le jour d’ouverture.",
+        "live": "Wolt a confirmé ces horaires lors de la dernière vérification.",
+        "save": "Enregistrer les horaires sur Wolt",
+        "unconfirmed": "Wolt n’a pas confirmé la modification. Rechargez les horaires avant de réessayer.",
+        "changed": "Les horaires ont changé. Rechargez les horaires actuels de Wolt avant de poursuivre.",
+        "refused": "Wolt a refusé cette modification.",
+        "unavailable": "Impossible de charger les paramètres actuels de Wolt. Actualisez pour réessayer."
+      },
       "box": {
         "detailUnavailable": "Impossible d’actualiser BOX. Réessayez.",
         "throttled": "BOX ne répond pas. Vérifiez le magasin dans BOX Merchant.",

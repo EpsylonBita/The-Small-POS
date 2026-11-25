@@ -22,6 +22,7 @@ import {
   normalizeOrderTypeForDisplay,
 } from '../../utils/orderDisplay';
 import { formatGridOrderNumber } from '../../utils/gridOrderNumber';
+import { hasIncompleteWoltOrderDetails } from '../../../../../shared/platforms/wolt-order-presentation';
 import { formatCurrency } from '../../utils/format';
 import { openExternalUrl } from '../../utils/external-url';
 import {
@@ -130,6 +131,7 @@ export const OrderCard = memo<OrderCardProps>(({
   // Format the stable order number from the order itself
   // The same rule names this order in every other window (utils/gridOrderNumber.ts).
   const formatOrderNumber = () => formatGridOrderNumber(order);
+  const incompleteWolt = hasIncompleteWoltOrderDetails(order);
 
   const getLeftEdgeColor = (createdAt: string) => {
     const minutes = getElapsedMinutes(createdAt);
@@ -515,7 +517,7 @@ export const OrderCard = memo<OrderCardProps>(({
                       <PluginIcon plugin={orderPlugin} size={36} className="shrink-0" showTooltip={false} />
                     )}
                     <div className={`text-base sm:text-lg font-bold truncate min-w-0 ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
-                      {(deliveryAddressNormalized || resolvedAddress)
+                      {incompleteWolt ? t('woltOrder.missingDetails') : (deliveryAddressNormalized || resolvedAddress)
                         ? formatAddressForDisplay(deliveryAddressNormalized || resolvedAddress)
                         : (customerPhoneNormalized && !resolvedAddress
                           ? <span className="italic font-normal">{t('orderCard.loadingAddress') || 'Loading address...'}</span>
@@ -580,7 +582,7 @@ export const OrderCard = memo<OrderCardProps>(({
         <div className="flex flex-col items-center gap-1 sm:gap-2 mr-8 sm:mr-12 shrink-0">
           <span className={`text-base sm:text-xl font-bold ${resolvedTheme === 'light' ? 'text-gray-900' : 'text-white/90'
             }`}>
-            {formatCurrency(totalNormalized, order.currency ?? null)}
+            {incompleteWolt ? '—' : formatCurrency(totalNormalized, order.currency ?? null)}
           </span>
           <div className="flex items-center gap-2">
             <span aria-hidden="true" data-testid="order-card-type-icon" className="inline-flex">

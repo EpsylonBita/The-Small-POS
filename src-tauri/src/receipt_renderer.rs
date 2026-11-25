@@ -270,8 +270,12 @@ pub struct OrderReceiptDoc {
     /// Legacy metadata can supply a platform comment on the ordinary layout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_comment_note_count: Option<usize>,
-    #[serde(default, skip_serializing_if = "box_notes_disabled")]
+    #[serde(default, skip_serializing_if = "disabled_flag")]
     pub preserve_box_customer_notes: bool,
+    /// Wolt can omit recipient fields. Older imports can be recognized for print
+    /// presentation while retaining their original layout and payment banner.
+    #[serde(default, skip_serializing_if = "disabled_flag")]
+    pub compact_wolt_contact: bool,
     /// Set by order_completed_receipt / order_canceled_receipt entity types.
     /// When Some, a status banner is rendered at the top of the receipt.
     #[serde(default)]
@@ -349,7 +353,7 @@ pub struct KitchenTicketDoc {
     pub delivery_notes: Option<String>,
     #[serde(default)]
     pub special_instructions: Option<String>,
-    #[serde(default, skip_serializing_if = "box_notes_disabled")]
+    #[serde(default, skip_serializing_if = "disabled_flag")]
     pub preserve_box_customer_notes: bool,
     #[serde(default)]
     pub delivery_city: Option<String>,
@@ -4208,7 +4212,7 @@ fn push_unique_line(lines: &mut Vec<String>, raw: Option<&str>) {
     lines.push(trimmed);
 }
 
-fn box_notes_disabled(enabled: &bool) -> bool {
+fn disabled_flag(enabled: &bool) -> bool {
     !*enabled
 }
 
@@ -4752,6 +4756,9 @@ fn pickup_customer_block_lines<'a>(
 }
 
 fn delivery_slip_info_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, String)> {
+    if uses_wolt_contact_fields(doc) {
+        return platform_delivery_lines(doc, lang);
+    }
     let (address, city, postal, floor) = normalize_delivery_address_components(doc);
     vec![
         (
@@ -9760,7 +9767,10 @@ fn render_classic_customer_raster_exact_bitmap(
         }
         canvas.draw_rule();
     }
-    if is_delivery_slip && !kiosk_covers_delivery {
+    if (is_delivery_slip
+        || (uses_wolt_contact_fields(doc) && doc.order_type.eq_ignore_ascii_case("delivery")))
+        && !kiosk_covers_delivery
+    {
         for (label, value) in delivery_slip_info_lines(doc, lang) {
             canvas.draw_pair_body(&format!("{label}:"), &value, false, canvas.normal_scale);
         }
@@ -11332,15 +11342,25 @@ fn split_combined_address(address: &str) -> (String, Option<String>, Option<Stri
     (street_parts.join(", "), postal, city)
 }
 
+fn uses_wolt_contact_fields(doc: &OrderReceiptDoc) -> bool {
+    doc.platform_slip
+        .as_ref()
+        .map_or(doc.compact_wolt_contact, |info| {
+            info.plugin.eq_ignore_ascii_case("wolt")
+        })
+}
+
 fn platform_delivery_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, String)> {
-    // The founder's fixed contact form (28/08): on delivery slips all seven
+    // Wolt may withhold the destination. Other providers keep the fixed
+    // contact form (28/08): on their delivery slips all seven
     // labels ALWAYS print, in this order, like efood's own template — a
     // missing field stays visibly blank for handwriting instead of silently
     // vanishing. Non-delivery platform orders keep only the filled lines.
     // The address row is street-only («όχι μονοκόμματη»): postal and city
     // ride in their own rows, extracted from the combined string when the
     // dedicated fields are empty.
-    let force_full = doc.order_type.trim().eq_ignore_ascii_case("delivery");
+    let force_full =
+        doc.order_type.trim().eq_ignore_ascii_case("delivery") && !uses_wolt_contact_fields(doc);
     let raw_address = doc.delivery_address.as_deref().map(str::trim).unwrap_or("");
     let (street, extracted_postal, extracted_city) = split_combined_address(raw_address);
     let field = |value: Option<&str>| {
@@ -16365,6 +16385,59 @@ mod tests {
         assert_eq!(street, "Παπάφη 100, Νέα Ελβετία");
         assert_eq!(postal, None);
         assert_eq!(city, None);
+    }
+
+    #[test]
+    fn wolt_slip_only_prints_provided_recipient_fields() {
+        let mut doc = OrderReceiptDoc {
+            order_type: "delivery".into(),
+            customer_name: Some("Test Recipient".into()),
+            platform_slip: Some(PlatformSlipInfo {
+                plugin: "wolt".into(),
+                delivery_provider: Some("platform_delivery".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let expected = vec![("Customer".to_owned(), "Test Recipient".to_owned())];
+        assert_eq!(platform_delivery_lines(&doc, "en"), expected);
+        assert_eq!(delivery_slip_info_lines(&doc, "en"), expected);
+        let cfg = LayoutConfig {
+            language: "en".into(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            ..Default::default()
+        };
+        for document in [
+            ReceiptDocument::DeliverySlip(doc.clone()),
+            ReceiptDocument::OrderReceipt(doc.clone()),
+        ] {
+            let html = render_html(&document, &cfg);
+            assert!(html.contains("Test Recipient"));
+            assert!(
+                !html.contains(">Floor<")
+                    && !html.contains(">Address<")
+                    && !html.contains(">Phone<")
+            );
+            let text = render_escpos(&document, &cfg).bytes;
+            assert!(String::from_utf8_lossy(&text).contains("Test Recipient"));
+            for missing in ["Address:", "Phone:", "Floor:"] {
+                assert!(!String::from_utf8_lossy(&text).contains(missing));
+            }
+        }
+        doc.platform_slip.as_mut().unwrap().delivery_provider = Some("vendor_delivery".into());
+        doc.delivery_address = Some("Street 4".into());
+        doc.name_on_ringer = Some("Bell surname".into());
+        let own = platform_delivery_lines(&doc, "en");
+        assert!(
+            own.iter().any(|(_, v)| v == "Street 4")
+                && own.iter().any(|(_, v)| v == "Bell surname")
+        );
+        doc.customer_name = None;
+        doc.delivery_address = None;
+        doc.name_on_ringer = None;
+        assert!(platform_delivery_lines(&doc, "en").is_empty());
+        doc.platform_slip.as_mut().unwrap().plugin = "efood".into();
+        assert_eq!(platform_delivery_lines(&doc, "en").len(), 7);
     }
 
     #[test]

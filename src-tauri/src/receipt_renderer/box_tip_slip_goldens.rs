@@ -1,5 +1,6 @@
 // Copy this file and its module declaration to c9100305e, then run
-// box_tip_slip_goldens with BOX_TIP_WRITE_BASE_GOLDENS=1.
+// box_tip_slip_goldens with BOX_TIP_WRITE_BASE_GOLDENS=1. Wolt contact layouts follow
+// the current release; use WOLT_WRITE_SLIP_GOLDENS=1 to regenerate only those fixtures.
 use super::{
     default_printable_width_dots_for_paper, render_classic_customer_raster_exact_bitmap,
     render_classic_customer_raster_exact_ttf, render_escpos, render_html,
@@ -105,6 +106,7 @@ fn pixel_hash(image: GrayImage) -> Vec<u8> {
 #[test]
 fn box_tip_slip_goldens_match_the_release() {
     let write = std::env::var("BOX_TIP_WRITE_BASE_GOLDENS").as_deref() == Ok("1");
+    let update_wolt = std::env::var("WOLT_WRITE_SLIP_GOLDENS").as_deref() == Ok("1");
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/receipt_renderer/testdata/box-tip-base-goldens");
     if write {
@@ -134,6 +136,9 @@ fn box_tip_slip_goldens_match_the_release() {
             true,
         ),
     ] {
+        if update_wolt && plugin != "wolt" {
+            continue;
+        }
         let receipt = SlipFixture {
             name,
             plugin,
@@ -185,7 +190,7 @@ fn box_tip_slip_goldens_match_the_release() {
                     ("html", html.into_bytes()),
                 ] {
                     let path = golden_dir.join(format!("{name}-{kind}-{mm}mm.{ext}"));
-                    if write {
+                    if write || update_wolt {
                         fs::write(path, actual).unwrap();
                     } else {
                         let released = fs::read(&path)

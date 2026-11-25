@@ -40,6 +40,7 @@ import {
 import { isExternalDeliveryPlatform } from '../../../../../shared/platforms/order-platforms';
 import { isFullyRefundedCompletedTable } from '../../../../../shared/pos/orders/returned-table-check';
 import { CashHandIcon } from '../icons/PaymentMethodIcons';
+import { hasIncompleteWoltOrderDetails, woltOrderReference } from '../../../../../shared/platforms/wolt-order-presentation';
 import { OrderSyncNotice } from '../recovery/OrderSyncNotice';
 import { TillHealthOrderEntry } from '../recovery/TillHealthOrderEntry';
 import { listenSupportEvent } from '../../services/support/SupportRemedyRunner';
@@ -1080,8 +1081,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const isDelivered = status?.toLowerCase() === 'completed' || status?.toLowerCase() === 'delivered';
   const isDeliveryOrder = orderType?.toLowerCase() === 'delivery';
   const isPickupOrder = ['pickup', 'takeaway'].includes(orderType?.toLowerCase() ?? '');
+  const incompleteWolt = hasIncompleteWoltOrderDetails(displayOrder, Array.isArray(displayOrder.items ?? displayOrder.order_items) ? items : undefined, orderPayments);
   const rawDisplayOrderNumber = getVisibleOrderNumber(displayOrder) || orderId;
-  const displayOrderNumber = formatCompactOrderNumberForDisplay(
+  const displayOrderNumber = woltOrderReference(displayOrder) ?? formatCompactOrderNumberForDisplay(
     rawDisplayOrderNumber,
     displayOrder.created_at || displayOrder.createdAt,
   );
@@ -1670,7 +1672,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                     </span>
                     <div className="min-w-0">
                       <div className={mutedEyebrowClass}>{t('modals.orderDetails.paymentMethod', { defaultValue: 'Payment Method' })}</div>
-                      <div className="mt-1 text-lg font-semibold liquid-glass-modal-text">{getPaymentMethodLabel(paymentMethodPresentation)}</div>
+                      <div className="mt-1 text-lg font-semibold liquid-glass-modal-text">{incompleteWolt ? '—' : getPaymentMethodLabel(paymentMethodPresentation)}</div>
                       <div className="text-sm capitalize liquid-glass-modal-text-muted">
                         {t('modals.orderDetails.paymentStatus', { defaultValue: 'Payment status' })}: {getPaymentStatusLabel(paymentStatus)}
                       </div>
@@ -1708,7 +1710,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       to collect. `payment_status` alone cannot say this: a
                       failed settlement leaves it `pending`, which looks
                       exactly like money still owed. */}
-                  <PlatformHeldPaymentNotice order={platformHeldOrder} className="mt-3" />
+                  {incompleteWolt ? <p role="status" className="mt-3 text-sm liquid-glass-modal-text">{t('woltOrder.missingDetails')}</p> : <PlatformHeldPaymentNotice order={platformHeldOrder} className="mt-3" />}
                   <UnsavedChargedPaymentBanner
                     payments={unsaved.payments}
                     onSaveAgain={unsaved.saveAgain}
@@ -1724,7 +1726,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                     </span>
                     <div className="min-w-0">
                       <div className={mutedEyebrowClass}>{t('modals.orderDetails.total', { defaultValue: 'Total' })}</div>
-                      <div className="mt-1 text-2xl font-bold tracking-tight liquid-glass-modal-text">{formatCurrency(total)}</div>
+                      <div className="mt-1 text-2xl font-bold tracking-tight liquid-glass-modal-text">{incompleteWolt ? '—' : formatCurrency(total)}</div>
                       <div className="text-sm liquid-glass-modal-text-muted">
                         {totalItemCount} {t('modals.orderDetails.orderItems', { defaultValue: 'Items' })}
                       </div>
@@ -2097,7 +2099,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                         {strikethroughSubtotal !== null && (
                           <span className="line-through text-xs text-zinc-400">{formatCurrency(strikethroughSubtotal)}</span>
                         )}
-                        <span>{formatCurrency(subtotal)}</span>
+                        <span>{incompleteWolt ? '—' : formatCurrency(subtotal)}</span>
                       </div>
                     </div>
                     {tax > 0 && (
@@ -2126,7 +2128,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                         {t('modals.orderDetails.total') || 'Total'}
                       </span>
                       <span className="text-3xl font-bold tracking-tight text-yellow-500 dark:text-yellow-300">
-                        {formatCurrency(total)}
+                        {incompleteWolt ? '—' : formatCurrency(total)}
                       </span>
                     </div>
                   </div>

@@ -100,7 +100,7 @@ vi.mock('../../../services/MenuService', () => ({
 }));
 
 vi.mock('../../ui/PlatformHeldPaymentNotice', () => ({
-  PlatformHeldPaymentNotice: () => null,
+  PlatformHeldPaymentNotice: () => <span data-testid="platform-held-component" />,
   usePlatformHeldNotice: () => null,
 }));
 
@@ -175,6 +175,17 @@ beforeEach(() => {
   mocks.bridge.payments.getPaidItems.mockResolvedValue([]);
   mocks.bridge.payments.getSettlementSnapshot.mockResolvedValue({ success: false });
   mocks.bridge.payments.listUnsavedPayments.mockResolvedValue({ payments: [] });
+});
+
+it('does not say the platform collected money on a verified empty Wolt order header', async () => {
+  row = orderRow({
+    plugin: 'wolt', status: 'confirmed', order_number: 'WOLT-00000-LOCAL', payment_method: 'online',
+    total_amount: 0, subtotal: 0, items: [], ghost_metadata: { food_delivery: { prepaid: true, payment_method: 'online' } },
+  });
+  render(<OrderDetailsModal isOpen orderId={ORDER_ID} onClose={vi.fn()} />);
+  expect(await screen.findByText('Wolt order details have not been received.')).toBeInTheDocument();
+  expect(screen.queryByTestId('platform-held-component')).not.toBeInTheDocument();
+  expect(screen.getAllByText('A1B2C3D4E5F6').length).toBeGreaterThan(0);
 });
 
 describe('OrderDetailsModal cancelled platform payment', () => {

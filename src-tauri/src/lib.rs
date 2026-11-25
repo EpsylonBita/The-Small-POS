@@ -86,6 +86,7 @@ mod payment_review;
 mod payments;
 mod platform_cash_assignment;
 mod platform_cash_notice;
+mod platform_slip_choices;
 mod platforms;
 mod print;
 mod print_dispatch;

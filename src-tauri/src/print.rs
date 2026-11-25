@@ -3818,14 +3818,42 @@ fn parse_item_customizations(item: &Value) -> Vec<ReceiptCustomizationLine> {
     Vec::new()
 }
 
+#[derive(Clone, Copy)]
+enum ReceiptChoiceFormat {
+    Unchanged,
+    Box(&'static str),
+    Wolt,
+}
+
+impl ReceiptChoiceFormat {
+    fn for_order(conn: &rusqlite::Connection, is_box: bool, is_wolt: bool) -> Self {
+        if is_box {
+            let language = setting_text(conn, "general", "language").unwrap_or_default();
+            Self::Box(receipt_renderer::receipt_label(&language, "Without"))
+        } else if is_wolt {
+            Self::Wolt
+        } else {
+            Self::Unchanged
+        }
+    }
+}
+
 fn receipt_customizations(
     item: &Value,
-    box_without_label: Option<&str>,
+    format: ReceiptChoiceFormat,
 ) -> Vec<ReceiptCustomizationLine> {
     let mut lines = parse_item_customizations(item);
-    if let Some(without_label) = box_without_label {
-        for line in &mut lines {
-            crate::box_slip::format_customization(line, without_label);
+    for line in &mut lines {
+        match format {
+            ReceiptChoiceFormat::Box(without) => {
+                crate::box_slip::format_customization(line, without)
+            }
+            ReceiptChoiceFormat::Wolt => {
+                let (name, without) = crate::platform_slip_choices::wolt_selection(&line.name);
+                line.name = name.to_owned();
+                line.is_without |= without;
+            }
+            ReceiptChoiceFormat::Unchanged => {}
         }
     }
     lines
@@ -5609,10 +5637,9 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         )
         .unwrap_or_default();
     let is_box = crate::box_slip::is_box(&plugin, &ghost_metadata);
-    let box_without_label = is_box.then(|| {
-        let language = setting_text(&conn, "general", "language").unwrap_or_default();
-        receipt_renderer::receipt_label(&language, "Without")
-    });
+    let is_wolt =
+        crate::platform_slip_choices::is_wolt_order(&plugin, &ghost_metadata, &raw_order_number);
+    let choice_format = ReceiptChoiceFormat::for_order(&conn, is_box, is_wolt);
     let plugin = if is_box { "box".to_owned() } else { plugin };
     // The release's plugin controls the layout, tender and carrier. Legacy
     // metadata can additionally identify a platform for comments and tips.
@@ -5669,7 +5696,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                 subcategory_name: category_fields.subcategory_name,
                 category_path: category_fields.category_path,
                 note: build_item_note_text(&item),
-                customizations: receipt_customizations(&item, box_without_label),
+                customizations: receipt_customizations(&item, choice_format),
                 vat_letter: None,
             }
         })
@@ -6021,9 +6048,21 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         .filter_map(|r| r.ok())
         .collect();
 
-    let resolved_driver_name = non_empty_field(driver_name)
-        .or_else(|| resolve_driver_name_from_shifts(&conn, &driver_id))
-        .or_else(|| resolve_driver_name_from_shifts(&conn, &staff_id));
+    // Wolt's courier is external. The cashier who accepted the order is not its driver.
+    let wolt_fleet = is_wolt
+        && order_type.eq_ignore_ascii_case("delivery")
+        && comment_and_tip_food
+            .as_ref()
+            .and_then(|food| food.get("delivery_provider"))
+            .and_then(Value::as_str)
+            == Some("platform_delivery");
+    let resolved_driver_name = if wolt_fleet {
+        None
+    } else {
+        non_empty_field(driver_name)
+            .or_else(|| resolve_driver_name_from_shifts(&conn, &driver_id))
+            .or_else(|| resolve_driver_name_from_shifts(&conn, &staff_id))
+    };
     // The platform banner is text built here, before layout: it takes the
     // same app language and order currency the rest of the print uses.
     let print_currency = if is_food_delivery_plugin(&plugin) {
@@ -6093,6 +6132,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         // THE-434 v2: food-delivery orders switch the renderer to the faithful
         // platform slip (modeled on the real efood slip #4579, 27/08/2026).
         preserve_box_customer_notes: is_box,
+        compact_wolt_contact: is_wolt,
         platform_slip: if is_platform {
             let food_delivery = serde_json::from_str::<serde_json::Value>(&ghost_metadata)
                 .ok()
@@ -6259,10 +6299,9 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         .map_err(|_| format!("Order not found for payment: {payment_id}"))?;
 
     let is_box = crate::box_slip::is_box(&plugin, &ghost_metadata);
-    let box_without_label = is_box.then(|| {
-        let language = setting_text(&conn, "general", "language").unwrap_or_default();
-        receipt_renderer::receipt_label(&language, "Without")
-    });
+    let is_wolt =
+        crate::platform_slip_choices::is_wolt_order(&plugin, &ghost_metadata, &raw_order_number);
+    let choice_format = ReceiptChoiceFormat::for_order(&conn, is_box, is_wolt);
     // Check for payment_items (split-by-items mode)
     let mut pi_stmt = conn
         .prepare(
@@ -6305,7 +6344,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
                     category_path: None,
                     note: original.and_then(build_item_note_text),
                     customizations: original
-                        .map(|item| receipt_customizations(item, box_without_label))
+                        .map(|item| receipt_customizations(item, choice_format))
                         .unwrap_or_default(),
                     vat_letter: None,
                 }
@@ -6332,7 +6371,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
                     subcategory_name: category_fields.subcategory_name,
                     category_path: category_fields.category_path,
                     note: build_item_note_text(&item),
-                    customizations: receipt_customizations(&item, box_without_label),
+                    customizations: receipt_customizations(&item, choice_format),
                     vat_letter: None,
                 }
             })
@@ -6456,6 +6495,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         status_label: None,
         cancellation_reason: None,
         preserve_box_customer_notes: is_box,
+        compact_wolt_contact: is_wolt,
         platform_slip: None,
         // Split receipts and the settings sample are plain POS slips.
         kiosk_slip: false,
@@ -6731,10 +6771,9 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
     let menu_lookup = build_menu_category_lookup(&conn);
 
     let is_box = crate::box_slip::is_box(&plugin, &ghost_metadata);
-    let box_without_label = is_box.then(|| {
-        let language = setting_text(&conn, "general", "language").unwrap_or_default();
-        receipt_renderer::receipt_label(&language, "Without")
-    });
+    let is_wolt =
+        crate::platform_slip_choices::is_wolt_order(&plugin, &ghost_metadata, &raw_order_number);
+    let choice_format = ReceiptChoiceFormat::for_order(&conn, is_box, is_wolt);
     let items: Vec<ReceiptItem> = serde_json::from_str::<Value>(&items_json)
         .ok()
         .and_then(|value| value.as_array().cloned())
@@ -6757,7 +6796,7 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
                 subcategory_name: category_fields.subcategory_name,
                 category_path: category_fields.category_path,
                 note: build_item_note_text(&item),
-                customizations: receipt_customizations(&item, box_without_label),
+                customizations: receipt_customizations(&item, choice_format),
                 vat_letter: None,
             }
         })
@@ -8969,7 +9008,13 @@ fn build_document_and_gift_binding_for_job(
                     doc.driver_id =
                         object_text_field(payload, &["driverId", "driver_id", "staff_id"]);
                 }
-                if doc.driver_name.is_none() {
+                if doc.driver_name.is_none()
+                    && !doc.platform_slip.as_ref().is_some_and(|info| {
+                        info.plugin.eq_ignore_ascii_case("wolt")
+                            && info.delivery_provider.as_deref() == Some("platform_delivery")
+                            && doc.order_type.eq_ignore_ascii_case("delivery")
+                    })
+                {
                     doc.driver_name = object_text_field(payload, &["driverName", "driver_name"]);
                 }
             }
@@ -22835,6 +22880,146 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn wolt_slip_rebuilds_imported_choices_and_recipient_from_offline_order() {
+        let db = test_db();
+        let id = "wolt-slip-offline";
+        let items = serde_json::json!([
+            {"name":"Pancakes: House", "quantity":1,"price":8.65, "notes":"Leave: at desk",
+             "customizations":{"modifiers":[
+                {"name":"Pancakes: βάση pancakes (3 τεμάχια)"},
+                {"name":"Πρόσθεσε πραλίνα: nutella","quantity":2,"price":0.5},
+                {"name":"Πρόσθεσε μπισκότα: γκοφρέτα"},
+                {"name":"Αφαιρέστε: Κρεμμύδι"},
+                {"name":"Χωρίς κρεμμύδι"},
+                {"name":"Extras: Cream", "price":0.75},
+                {"name":"Πρόσθεσε extra: Πατάτες"},
+                {"name":"Ζάχαρη: Όχι"},
+                {"name":"Τέλος οικολογικής συσκευασίας: τέλος οικολογικής συσκευασίας","price":0.1},
+                {"name":"Τέλος συσκευασίας: 0,20 €","price":0.2}
+             ]}},
+            {"name":"House recipe", "quantity":1,"price":0,"customizations":{"modifiers":[]}}
+        ]);
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, id, "WOLT-order-receipt", 8.65);
+            conn.execute("UPDATE orders SET plugin='wolt', order_type='delivery', items=?1,
+                customer_name='Test Recipient', customer_phone=NULL, delivery_address=NULL, driver_name='Wrong cashier',
+                ghost_metadata=?2 WHERE id=?3",
+                params![items.to_string(), r#"{"food_delivery":{"short_code":"574","delivery_provider":"platform_delivery"}}"#, id]).unwrap();
+            conn.execute("INSERT INTO order_payments (id,order_id,method,amount,amount_cents,status,created_at,updated_at)
+                VALUES ('wolt-payment',?1,'cash',5,500,'completed',datetime('now'),datetime('now'))", [id]).unwrap();
+        }
+        let receipt = build_order_receipt_doc(&db, id).unwrap();
+        let split = build_split_receipt_doc(&db, "wolt-payment").unwrap();
+        let kitchen = build_kitchen_ticket_doc(&db, id).unwrap();
+        let ReceiptDocument::DeliverySlip(delivery) = build_document_for_job(
+            &db,
+            "delivery_slip",
+            id,
+            Some(r#"{"driverName":"Wrong cashier"}"#),
+        )
+        .unwrap() else {
+            panic!("expected delivery slip")
+        };
+        for doc in [&receipt, &delivery] {
+            assert_eq!(doc.customer_name.as_deref(), Some("Test Recipient"));
+            assert!(
+                doc.customer_phone.is_none()
+                    && doc.delivery_address.is_none()
+                    && doc.driver_name.is_none()
+            );
+        }
+        for items in [
+            &receipt.items,
+            &delivery.items,
+            &kitchen.items,
+            &split.items,
+        ] {
+            assert_eq!(items[0].name, "Pancakes: House");
+            assert_eq!(items[0].note.as_deref(), Some("Leave: at desk"));
+            assert!(items[1].customizations.is_empty());
+            let mods = &items[0].customizations;
+            assert_eq!(
+                mods.iter()
+                    .map(|line| (line.name.as_str(), line.is_without))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("βάση pancakes (3 τεμάχια)", false),
+                    ("nutella", false),
+                    ("γκοφρέτα", false),
+                    ("Κρεμμύδι", true),
+                    ("κρεμμύδι", true),
+                    ("Extras: Cream", false),
+                    ("Πατάτες", false),
+                    ("Ζάχαρη: Όχι", false),
+                    ("τέλος οικολογικής συσκευασίας", false),
+                    ("Τέλος συσκευασίας: 0,20 €", false)
+                ]
+            );
+            assert_eq!((mods[1].quantity, mods[1].price), (2.0, Some(0.5)));
+            assert_eq!(
+                (mods[5].price, mods[8].price, mods[9].price),
+                (Some(0.75), Some(0.1), Some(0.2))
+            );
+        }
+    }
+
+    #[test]
+    fn wolt_slip_recognizes_older_cached_order_without_changing_tender_or_provider_layout() {
+        let db = test_db();
+        for (id, declared, metadata, raw, expected) in [
+            (
+                "legacy-number",
+                "",
+                "{}",
+                "WOLT-1794948068572-2F43E65D",
+                true,
+            ),
+            ("legacy-id", "", "{}", "WOLT-654a60d9e182ac0753d818f7", true),
+            (
+                "legacy-metadata",
+                "",
+                r#"{"food_delivery":{"platform":"wolt"}}"#,
+                "ORDER-1",
+                true,
+            ),
+            (
+                "other-metadata",
+                "",
+                r#"{"food_delivery":{"platform":"efood"}}"#,
+                "WOLT-1794948068572-2F43E666",
+                false,
+            ),
+            (
+                "explicit",
+                "efood",
+                r#"{"food_delivery":{"platform":"wolt"}}"#,
+                "WOLT-1794948068572-2F43E777",
+                false,
+            ),
+            ("arbitrary", "", "{}", "WOLT-local-handwritten-item", false),
+        ] {
+            {
+                let conn = db.conn.lock().unwrap();
+                insert_receipt_order(&conn, id, raw, 1.0);
+                conn.execute(r#"UPDATE orders SET plugin=?1, ghost_metadata=?2,
+                    items='[{"itemName":"Tea","quantity":1,"price":1,"modifiers":[{"name":"Group: Mint"}]}]' WHERE id=?3"#,
+                    params![declared,metadata,id]).unwrap();
+            }
+            let doc = build_order_receipt_doc(&db, id).unwrap();
+            assert_eq!(doc.compact_wolt_contact, expected, "{id}");
+            assert_eq!(
+                doc.items[0].customizations[0].name,
+                if expected { "Mint" } else { "Group: Mint" },
+                "{id}"
+            );
+            if declared.is_empty() {
+                assert!(doc.platform_slip.is_none(), "{id}");
+            }
+        }
     }
 
     #[test]

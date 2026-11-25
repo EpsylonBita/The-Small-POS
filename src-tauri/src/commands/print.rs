@@ -4661,6 +4661,7 @@ fn build_sample_receipt_doc() -> receipt_renderer::OrderReceiptDoc {
         status_label: None,
         cancellation_reason: None,
         preserve_box_customer_notes: false,
+        compact_wolt_contact: false,
         platform_slip: None,
         // Split receipts and the settings sample are plain POS slips.
         kiosk_slip: false,

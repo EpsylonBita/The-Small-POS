@@ -13,41 +13,45 @@ import { solidButton, useReportSettingsDirty } from './SettingsKit'
 export type BoxScheduleSaveResult = 'saved' | 'conflict' | 'busy' | 'provider_rejected' | 'provider_forbidden' | 'failed'
 
 interface Props {
+  provider?: 'box' | 'wolt'
   schedule: BoxWeeklySchedule | null
   savedAt: string | null
   revision?: string
   disabled: boolean
   detailUnavailable: boolean
+  providerPending?: boolean
   save: (week: BoxWeeklySchedule, revision: string) => Promise<BoxScheduleSaveResult | undefined>
   reload: () => Promise<boolean | undefined>
 }
 
 type Draft = { days: Partial<BoxWeeklySchedule>; revision: string }
 
-export function BoxWeeklyScheduleEditor({ schedule, savedAt, revision, disabled, detailUnavailable, save, reload }: Props) {
+export function BoxWeeklyScheduleEditor({ provider = 'box', schedule, savedAt, revision, disabled, detailUnavailable, providerPending = false, save, reload }: Props) {
   const { t, i18n } = useTranslation()
   const [expanded, setExpanded] = useState(false)
   const [draft, setDraft] = useState<Draft | null>(null)
   const [failure, setFailure] = useState<Exclude<BoxScheduleSaveResult, 'saved'> | null>(null)
   const [reloading, setReloading] = useState(false)
   const days: Partial<BoxWeeklySchedule> = draft?.days ?? schedule ?? {}
+  const wolt = provider === 'wolt'
+  const requiresReload = wolt && (providerPending || failure === 'failed')
   const conflict = failure === 'conflict' || (draft !== null && draft.revision !== revision)
   const complete = BOX_WEEKDAYS.every(day => days[day] !== undefined)
   const valid = isValidBoxWeeklySchedule(days)
   const locked = disabled || reloading || !revision
   const failureKey = failure && boxAvailabilityFeedbackKey(failure)
-  useReportSettingsDirty('box-schedule', draft !== null)
+  useReportSettingsDirty(`${provider}-schedule`, draft !== null)
   function updateDay(day: BoxWeekday, intervals: BoxWeeklySchedule[BoxWeekday] | undefined) {
     if (!revision) return
     setDraft(current => ({
       revision: current ? current.revision : revision,
       days: { ...(current?.days ?? schedule), [day]: intervals },
     }))
-    if (failure !== 'conflict') setFailure(null)
+    if (!conflict && !requiresReload) setFailure(null)
   }
 
   async function submit() {
-    if (locked || detailUnavailable || conflict || !draft || !isValidBoxWeeklySchedule(draft.days)) return
+    if (locked || detailUnavailable || conflict || requiresReload || !draft || !isValidBoxWeeklySchedule(draft.days)) return
     const result = await save(draft.days, draft.revision)
     if (result === 'saved') {
       setDraft(null)
@@ -78,12 +82,12 @@ export function BoxWeeklyScheduleEditor({ schedule, savedAt, revision, disabled,
         </button>
       </div>
       {expanded && (
-        <div className="space-y-3" role="group" aria-label={t('settings.platforms.box.hours.title', 'BOX weekly hours')}>
+        <div className="space-y-3" role="group" aria-label={wolt ? t('settings.platforms.wolt.title') : t('settings.platforms.box.hours.title', 'BOX weekly hours')}>
           <p className="pos-row__help">
-            {t('settings.platforms.box.hours.explain', 'Saving replaces all seven days in BOX. Enter hours for each day or mark that no hours start that day.')}
+            {wolt ? t('settings.platforms.wolt.explain') : t('settings.platforms.box.hours.explain', 'Saving replaces all seven days in BOX. Enter hours for each day or mark that no hours start that day.')}
           </p>
           <p className="pos-row__help" role="status">
-            {schedule && savedAt && Number.isFinite(Date.parse(savedAt))
+            {wolt ? t('settings.platforms.wolt.live') : schedule && savedAt && Number.isFinite(Date.parse(savedAt))
               ? t('settings.platforms.box.hours.lastSent', {
                 time: new Date(savedAt).toLocaleString(i18n?.language, { dateStyle: 'short', timeStyle: 'short' }),
                 defaultValue: 'Last schedule sent from the POS · {{time}}. Changes made in BOX Merchant are not shown here.',
@@ -139,24 +143,24 @@ export function BoxWeeklyScheduleEditor({ schedule, savedAt, revision, disabled,
               {t('settings.platforms.box.hours.invalid', 'Use HH:mm and check for overlapping hours, including the next day. Use 00:00–24:00 for a full day.')}
             </p>
           )}
-          {failureKey && !conflict && (
+          {failureKey && !conflict && !requiresReload && (
             <p role="alert" className="pos-row__help">
-              {t(failureKey, boxAvailabilityFeedbackEnglish[failureKey])}
+              {wolt && failure === 'provider_rejected' ? t('settings.platforms.wolt.refused') : t(failureKey, boxAvailabilityFeedbackEnglish[failureKey])}
             </p>
           )}
-          {conflict && (
+          {(conflict || requiresReload) && (
             <div className="space-y-1">
               <p role="alert" className="pos-row__help">
-                {t('settings.platforms.box.hours.conflict', boxAvailabilityFeedbackEnglish['settings.platforms.box.hours.conflict'])}
+                {wolt ? t(requiresReload ? 'settings.platforms.wolt.unconfirmed' : 'settings.platforms.wolt.changed') : t('settings.platforms.box.hours.conflict', boxAvailabilityFeedbackEnglish['settings.platforms.box.hours.conflict'])}
               </p>
               <button type="button" className={solidButton('secondary', 'sm')} disabled={locked} onClick={() => void discardAndReload()}>
                 {t('settings.platforms.weeklySchedule.discardReload', 'Discard my changes and reload')}
               </button>
             </div>
           )}
-          <button type="button" className={solidButton('primary', 'md')} disabled={locked || detailUnavailable || !valid || !draft || conflict}
+          <button type="button" className={solidButton('primary', 'md')} disabled={locked || detailUnavailable || !valid || !draft || conflict || requiresReload}
             onClick={() => void submit()}>
-            {t('settings.platforms.box.hours.save', 'Send week to BOX')}
+            {wolt ? t('settings.platforms.wolt.save') : t('settings.platforms.box.hours.save', 'Send week to BOX')}
           </button>
         </div>
       )}

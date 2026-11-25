@@ -11,6 +11,7 @@ import { calculateSubtotalFromItems } from './order-math';
 import { readPrintedVatAmount } from '../../utils/printedVat';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
+import { hasIncompleteWoltOrderDetails, woltOrderReference } from '../../../../../shared/platforms/wolt-order-presentation';
 import { isKioskOriginOrder } from '../../../../../shared/order-approval';
 import { formatDeliveryAddress, readDeliveryText } from '../../../../../shared/utils/delivery-address-display';
 import { getPluginColor, getPluginName, isExternalPlugin } from '../../utils/plugin-icons';
@@ -461,7 +462,7 @@ export function OrderApprovalPanel({
   });
   const customerPhone = order.customer_phone || order.customerPhone || '';
   const createdAtRaw = order.created_at || order.createdAt;
-  const orderNumber = formatCompactOrderNumberForDisplay(
+  const orderNumber = woltOrderReference(order) ?? formatCompactOrderNumberForDisplay(
     order.display_order_number || order.displayOrderNumber || rawOrderNumber, createdAtRaw,
   );
   const isKioskOrder = isKioskOriginOrder(order) || isKioskOrderNumber(rawOrderNumber.trim());
@@ -536,6 +537,7 @@ export function OrderApprovalPanel({
   const deliveryNotes = order.delivery_notes || '';
   const nameOnRinger = order.name_on_ringer || '';
   const requestedPaymentMethod = resolveRequestedPaymentMethod(fullOrder || order);
+  const incompleteWolt = hasIncompleteWoltOrderDetails(fullOrder || order);
   // Platform cash = cash on delivery: the rider hands off on this line, so it
   // must carry the exact amount to collect.
   const isPlatformCashOnDelivery = requestedPaymentMethod === 'cash' && Boolean(orderPlatform);
@@ -547,7 +549,7 @@ export function OrderApprovalPanel({
       .trim()
       .toLowerCase() === 'platform_delivery';
   const collectAmountLabel = formatCurrency(resolveOrderTotalAmount(fullOrder || order, 0));
-  const paymentMethodLabel = requestedPaymentMethod === 'cash'
+  const paymentMethodLabel = incompleteWolt ? '—' : requestedPaymentMethod === 'cash'
     ? (isPlatformCashOnDelivery
         ? t('orderApprovalPanel.paymentCashOnDelivery', { defaultValue: 'Cash on delivery' })
         : t('orderApprovalPanel.paymentCash', { defaultValue: 'Cash' }))
@@ -556,7 +558,7 @@ export function OrderApprovalPanel({
       : requestedPaymentMethod === 'online'
         ? t('orderApprovalPanel.paymentOnline', { defaultValue: 'Paid online' })
         : t('orderApprovalPanel.paymentPending', { defaultValue: 'Pending' });
-  const paymentMethodDescription = requestedPaymentMethod === 'cash'
+  const paymentMethodDescription = incompleteWolt ? t('woltOrder.missingDetails') : requestedPaymentMethod === 'cash'
     ? (codCollectedByPlatform
         ? t('orderApprovalPanel.paymentCashOnDeliveryPlatformDescription', {
             defaultValue: "The platform's rider collects {{amount}} — the platform settles it to you by bank.",
@@ -1139,7 +1141,7 @@ export function OrderApprovalPanel({
                   {t('orderApprovalPanel.total', { defaultValue: 'Total' })}
                 </p>
                 <p className="text-3xl font-black liquid-glass-modal-text">
-                  {formatCurrency(totalAmount)}
+                  {incompleteWolt ? '—' : formatCurrency(totalAmount)}
                 </p>
               </div>
               {showCloseButton ? (
@@ -1446,7 +1448,7 @@ export function OrderApprovalPanel({
               {!showsBoxDisplayItems ? (
                 <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
                   <span>{t('orderApprovalPanel.subtotal', { defaultValue: 'Subtotal' })}</span>
-                  <span>{formatCurrency(subtotal)}</span>
+                  <span>{incompleteWolt ? '—' : formatCurrency(subtotal)}</span>
                 </div>
               ) : null}
               <AnimatePresence initial={false}>{taxAmount > 0 && (

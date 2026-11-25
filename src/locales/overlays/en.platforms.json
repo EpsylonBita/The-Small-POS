@@ -1,4 +1,7 @@
 {
+  "woltOrder": {
+    "missingDetails": "Wolt order details have not been received."
+  },
   "settings": {
     "settingsHub": {
       "sections": {
@@ -26,6 +29,22 @@
       "lastKnown": "Last known: {{status}}",
       "closedUntil": "Closed until {{time}}",
       "closureStatus": "efood status: {{status}}",
+      "wolt": {
+        "automatic": "Automatic Wolt opening",
+        "automaticHelp": "Turning this on opens Wolt at the first cashier check-in and closes it with the Z report. Turning it off closes Wolt immediately and keeps it closed, even during opening hours.",
+        "legacyManual": "Wolt currently uses manual opening and closing.",
+        "holdClosed": "Close and keep closed",
+        "closePending": "Wolt has not confirmed closure yet. Orders may still arrive.",
+        "retryClose": "Retry closing",
+        "title": "Wolt weekly hours",
+        "explain": "Set the hours for each day. For an overnight shift, enter the closing time on the day the shift starts.",
+        "live": "These are the hours last confirmed by Wolt.",
+        "save": "Save hours to Wolt",
+        "unconfirmed": "Wolt could not confirm the change. Reload its hours before trying again.",
+        "changed": "The hours changed. Reload the current Wolt schedule before editing again.",
+        "refused": "Wolt declined this change.",
+        "unavailable": "Could not load the current Wolt settings. Refresh to check again."
+      },
       "box": {
         "detailUnavailable": "Could not refresh BOX. Try again.",
         "throttled": "BOX is not answering. Check the shop in BOX Merchant.",

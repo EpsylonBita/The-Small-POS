@@ -8,9 +8,10 @@ import frPlatforms from '../../../../locales/overlays/fr.platforms.json';
 import itPlatforms from '../../../../locales/overlays/it.platforms.json';
 import sqPlatforms from '../../../../locales/overlays/sq.platforms.json';
 
-const { posApiGet, posApiPost, boxDetails, fixtures } = vi.hoisted(() => ({
+const { posApiGet, posApiPost, boxDetails, woltDetails, fixtures } = vi.hoisted(() => ({
   posApiGet: vi.fn(),
   boxDetails: vi.fn(),
+  woltDetails: vi.fn(),
   posApiPost: vi.fn(),
   fixtures: { box: undefined as Platform | undefined },
 }));
@@ -18,6 +19,7 @@ vi.mock('../../../utils/api-helpers', () => ({
   posApiPost,
   posApiGet: async (path: string) => {
     if (path.includes('?plugin_id=box')) return boxDetails(path);
+    if (path === '/pos/platforms?plugin_id=wolt') return woltDetails(path);
     const response = await posApiGet(path);
     fixtures.box = response?.data?.platforms?.find((row: Platform) => row.plugin_id === 'box' && row.reason !== 'unsupported');
     if (!fixtures.box) return response;
@@ -123,6 +125,7 @@ describe('PlatformsSection', () => {
     // Also drop queued once-values so no response can leak into the next test.
     posApiGet.mockReset();
     fixtures.box = undefined;
+    woltDetails.mockReset().mockResolvedValue(listResponse(makePlatform({ plugin_id: 'wolt', name: 'Wolt' })));
     boxDetails.mockReset().mockImplementation(async () => listResponse(...(fixtures.box ? [{
       ...fixtures.box, weekly_schedule_revision: fixtures.box.weekly_schedule_revision ?? 'a'.repeat(64),
     }] : [])));
@@ -132,6 +135,96 @@ describe('PlatformsSection', () => {
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+  });
+
+  it('edits the provider-confirmed Wolt week without a previous POS save, and reloads an uncertain update', async () => {
+    const week = { monday: [], tuesday: [], wednesday: [], thursday: [], friday: [], saturday: [], sunday: [{ from: '17:00', to: '06:00' }] };
+    const wolt = makePlatform({ plugin_id: 'wolt', name: 'Wolt', open: false });
+    posApiGet.mockResolvedValue(listResponse(wolt));
+    woltDetails.mockResolvedValue(listResponse({ ...wolt, auto_open: false, weekly_schedule: week, weekly_schedule_revision: 'rev1' }));
+    posApiPost.mockResolvedValue({ success: false, error: 'outcome_unknown (HTTP 502)' });
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Weekly hours' }));
+    expect(screen.getByText('Next day')).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Wolt' })).not.toBeChecked();
+    fireEvent.change(screen.getByLabelText('To'), { target: { value: '07:00' } });
+    const save = screen.getByRole('button', { name: 'settings.platforms.wolt.save' });
+    fireEvent.click(save);
+    expect(posApiPost).toHaveBeenCalledWith('/pos/platforms?plugin_id=wolt', {
+      plugin_id: 'wolt', weekly_schedule: { ...week, sunday: [{ from: '17:00', to: '07:00' }] }, expected_schedule_revision: 'rev1',
+    });
+    await screen.findByText('settings.platforms.wolt.unconfirmed');
+    expect(save).toBeDisabled();
+    woltDetails.mockResolvedValueOnce(listResponse({ ...wolt, weekly_schedule: week, weekly_schedule_revision: 'rev1', weekly_schedule_pending: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Discard my changes and reload' }));
+    await waitFor(() => expect(screen.getByLabelText('To')).toHaveValue('06:00'));
+    fireEvent.change(screen.getByLabelText('To'), { target: { value: '07:30' } });
+    expect(save).toBeDisabled();
+    expect(screen.getByText('settings.platforms.wolt.unconfirmed')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Discard my changes and reload' }));
+    await waitFor(() => expect(screen.getByLabelText('To')).toHaveValue('06:00'));
+    fireEvent.change(screen.getByLabelText('To'), { target: { value: '07:30' } });
+    expect(save).toBeEnabled();
+  });
+
+  it('saves Wolt automation separately from the manual availability switch', async () => {
+    const initial = makePlatform({ plugin_id: 'wolt', name: 'Wolt', open: false });
+    posApiGet.mockResolvedValue(listResponse(initial));
+    woltDetails.mockResolvedValueOnce(listResponse({ ...initial, auto_open: false, wolt_availability_mode: 'manual' }))
+      .mockResolvedValue(listResponse({ ...initial, auto_open: true, wolt_availability_mode: 'shifts' }));
+    posApiPost.mockResolvedValue(actionResponse({ ...initial, auto_open: true, wolt_availability_mode: 'shifts' }));
+    render(<PlatformsSection />);
+    const automation = await screen.findByRole('switch', { name: 'settings.platforms.wolt.automatic' });
+    expect(automation).not.toBeChecked();
+    fireEvent.click(automation);
+    expect(posApiPost).toHaveBeenCalledWith('/pos/platforms?plugin_id=wolt', { plugin_id: 'wolt', auto_open: true });
+    await waitFor(() => expect(automation).toBeChecked());
+    expect(screen.getByRole('switch', { name: 'Wolt' })).not.toBeChecked();
+    const closed = makePlatform({ ...initial, auto_open: false, wolt_availability_mode: 'off', open: false });
+    posApiPost.mockResolvedValue(actionResponse(closed));
+    woltDetails.mockResolvedValue(listResponse(closed));
+    fireEvent.click(automation);
+    await waitFor(() => expect(automation).not.toBeChecked());
+    expect(posApiPost).toHaveBeenLastCalledWith('/pos/platforms?plugin_id=wolt', { plugin_id: 'wolt', auto_open: false });
+    expect(screen.queryByRole('switch', { name: 'Wolt' })).not.toBeInTheDocument();
+  });
+
+  it('holds Wolt closed only after provider confirmation, and keeps the weekly editor available', async () => {
+    const week = { monday: [], tuesday: [], wednesday: [], thursday: [], friday: [], saturday: [], sunday: [] };
+    const manual = makePlatform({ plugin_id: 'wolt', name: 'Wolt', open: true, auto_open: false, wolt_availability_mode: 'manual',
+      weekly_schedule: week, weekly_schedule_revision: 'rev1' });
+    let live = manual;
+    posApiGet.mockResolvedValue(listResponse(manual));
+    woltDetails.mockImplementation(async () => listResponse(live));
+    posApiPost.mockImplementationOnce(async () => {
+      live = { ...manual, wolt_availability_mode: 'off_pending' };
+      return { success: false, error: 'outcome_unknown (HTTP 502)' };
+    }).mockImplementationOnce(async () => {
+      live = { ...manual, wolt_availability_mode: 'off', open: false };
+      return actionResponse(live);
+    });
+    render(<PlatformsSection />);
+    expect(await screen.findByRole('switch', { name: 'Wolt' })).toBeChecked();
+    expect(posApiPost).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button', { name: 'settings.platforms.wolt.holdClosed' }));
+    expect(await screen.findByText('settings.platforms.wolt.closePending')).toBeInTheDocument();
+    expect(screen.getByText('Open')).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Wolt' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'settings.platforms.wolt.retryClose' }));
+    await waitFor(() => expect(screen.getByText('Closed')).toBeInTheDocument());
+    expect(posApiPost).toHaveBeenLastCalledWith('/pos/platforms?plugin_id=wolt', { plugin_id: 'wolt', auto_open: false });
+    expect(screen.queryByText('settings.platforms.wolt.closePending')).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Wolt' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Weekly hours' })).toBeEnabled();
+  });
+
+  it('keeps the existing Wolt manual switch and hides automation and hours on an older backend', async () => {
+    const wolt = makePlatform({ plugin_id: 'wolt', name: 'Wolt', open: false });
+    posApiGet.mockResolvedValue(listResponse(wolt));
+    render(<PlatformsSection />);
+    await waitFor(() => expect(woltDetails).toHaveBeenCalled());
+    expect(screen.getAllByRole('switch')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Weekly hours' })).toBeNull();
   });
 
   it('keeps the efood guidance during the first load and after the first request fails', async () => {
@@ -318,7 +411,8 @@ describe('PlatformsSection', () => {
     const box = makePlatform({ plugin_id: 'box', name: 'BOX', open: null, controllable: false, reason: 'unsupported' });
     posApiGet.mockResolvedValue(listResponse(makePlatform(), box));
     render(<PlatformsSection />);
-    await screen.findByText('Could not refresh BOX. Try again.');
+    const alert = await screen.findByText('Could not refresh BOX. Try again.');
+    expect(alert.closest('[data-platform-hints="box"]')).toHaveClass('pos-row', 'pos-row--stack');
     expect(screen.getByText('BOX')).toBeInTheDocument();
     expect(screen.queryByText('This platform cannot be opened or closed from here.')).not.toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'efood' })).toHaveAttribute('aria-checked', 'true');
@@ -335,6 +429,7 @@ describe('PlatformsSection', () => {
     render(<PlatformsSection />);
     await screen.findByRole('button', { name: 'Open' });
     expect(screen.getAllByText(/Customers only see the shop as open when it is open here and within BOX opening hours/)).toHaveLength(1);
+    expect(screen.getByText(/Customers only see the shop/).closest('[data-platform-hints="box"]')).toHaveClass('pos-row');
     fireEvent.click(screen.getByRole('button', { name: 'Open' }));
     await screen.findByText(`Last accepted POS request · Open, ${time}`);
     expect(screen.getByRole('button', { name: 'Open' })).toBeEnabled();

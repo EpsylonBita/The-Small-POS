@@ -6,7 +6,7 @@ import { POSGlassSwitch } from '../ui/pos-glass-components'
 import { StatusLine, solidButton, type StatusTone } from './SettingsKit'
 import { EfoodWeeklyScheduleEditor } from './EfoodWeeklyScheduleEditor'
 import { BoxWeeklyScheduleEditor, type BoxScheduleSaveResult } from './BoxWeeklyScheduleEditor'
-import type { BoxWeeklySchedule } from '../../../../../shared/platforms/box-weekly-schedule'
+import { isValidBoxWeeklySchedule, type BoxWeeklySchedule } from '../../../../../shared/platforms/box-weekly-schedule'
 import { boxAvailabilityError, boxAvailabilityFeedbackEnglish, boxAvailabilityFeedbackKey } from '../../../../../shared/platforms/box-availability-error'
 import type { EfoodDaySchedule } from '../../services/efoodWeeklySchedule'
 import { useEfoodPartner } from '../../hooks/useEfoodPartner'
@@ -27,11 +27,13 @@ export interface Platform {
   open: boolean | null
   controllable: boolean
   auto_open?: boolean
+  wolt_availability_mode?: 'manual' | 'shifts' | 'off' | 'off_pending'
   last_requested_open?: boolean | null
   last_requested_at?: string | null
   weekly_schedule?: BoxWeeklySchedule | null
   weekly_schedule_at?: string | null
   weekly_schedule_revision?: string
+  weekly_schedule_pending?: boolean
   box_follow_up_error?: 'provider_rejected' | 'box_throttled'
   /** Wolt-only: true when the provider is online AND actually taking orders right now. */
   accepting_orders?: boolean | null
@@ -229,6 +231,11 @@ const REASON_DEFAULTS: Record<string, { key: string; defaultValue: string }> = {
 export const PlatformsSection: React.FC = () => {
   const { t, i18n } = useTranslation()
   const [platforms, setPlatforms] = useState<Platform[]>([])
+  const [woltDetail, setWoltDetail] = useState<Platform | null>(null)
+  const [woltDetailFailed, setWoltDetailFailed] = useState(false)
+  const [woltAutomationUnconfirmed, setWoltAutomationUnconfirmed] = useState(false)
+  const woltListed = useRef(false)
+  const woltReadGeneration = useRef(0)
   const [box, setBox] = useState<Platform | null>(null)
   const [boxDetailFailed, setBoxDetailFailed] = useState(false)
   const [boxBusy, setBoxBusy] = useState(false)
@@ -304,6 +311,24 @@ export const PlatformsSection: React.FC = () => {
     return received.controllable && Boolean(received.weekly_schedule_revision)
   }, [])
 
+  const loadWoltDetails = useCallback(async () => {
+    const read = ++woltReadGeneration.current
+    const mutation = mutationGenerationRef.current.wolt || 0
+    const response = await posApiGet<PlatformsListBody>('/pos/platforms?plugin_id=wolt').catch(() => null)
+    if (!mountedRef.current || read !== woltReadGeneration.current ||
+      mutation % 2 || mutation !== (mutationGenerationRef.current.wolt || 0)) return false
+    const row = response?.data?.platforms?.find(entry => entry.plugin_id === 'wolt')
+    if (!response?.success || response.data?.success === false || !row ||
+      (row.weekly_schedule != null && !isValidBoxWeeklySchedule(row.weekly_schedule))) {
+      setWoltDetailFailed(true)
+      return false
+    }
+    setWoltDetail(row)
+    if (row.wolt_availability_mode) setPlatforms(current => current.map(entry => entry.plugin_id === 'wolt' ? row : entry))
+    setWoltDetailFailed(false)
+    return Boolean(row.controllable && row.weekly_schedule_revision && row.weekly_schedule)
+  }, [])
+
   const loadPlatforms = useCallback(async (options?: { refresh?: boolean }) => {
     const myGeneration = ++listGenerationRef.current
     const mutationSnapshot = { ...mutationGenerationRef.current }
@@ -326,6 +351,19 @@ export const PlatformsSection: React.FC = () => {
     const body = response.data
     const incoming = body?.platforms
     const legacyOk = response.success && body?.success !== false && Array.isArray(incoming)
+    if (legacyOk && incoming.some(entry => entry.plugin_id === 'wolt' && entry.controllable)) {
+      woltListed.current = true
+      void loadWoltDetails()
+    } else {
+      ++woltReadGeneration.current
+      if (legacyOk && woltListed.current) {
+        mutationGenerationRef.current.wolt = (mutationGenerationRef.current.wolt || 0) + 2
+        woltListed.current = false
+      }
+      setWoltAutomationUnconfirmed(false)
+      setWoltDetail(null)
+      setWoltDetailFailed(false)
+    }
     const announcedBox = legacyOk ? incoming.find(entry => entry.plugin_id === 'box') : undefined
     if (announcedBox) {
       boxListed.current = true
@@ -398,7 +436,7 @@ export const PlatformsSection: React.FC = () => {
     setIsLoading(false)
     setIsRefreshing(false)
     return true
-  }, [loadBoxDetails])
+  }, [loadBoxDetails, loadWoltDetails])
 
   useEffect(() => {
     void loadPlatforms()
@@ -475,11 +513,15 @@ export const PlatformsSection: React.FC = () => {
 
   const handleChange = async (platform: Platform, change: PlatformChange): Promise<BoxScheduleSaveResult | undefined> => {
     const isBox = platform.plugin_id === 'box'
+    const woltSetting = platform.plugin_id === 'wolt' && !('open' in change)
+    if (platform.plugin_id === 'wolt' && 'open' in change && change.open &&
+      (platform.wolt_availability_mode === 'off' || platform.wolt_availability_mode === 'off_pending')) return
     if (!isOnline || (isBox && !boxListed.current) || inFlightRef.current.has(platform.plugin_id)) return
     inFlightRef.current.add(platform.plugin_id)
     const mutation = (mutationGenerationRef.current[platform.plugin_id] || 0) + 1
     mutationGenerationRef.current[platform.plugin_id] = mutation
-    const canApply = () => mountedRef.current && (!isBox || (boxListed.current && mutationGenerationRef.current.box === mutation))
+    const canApply = () => mountedRef.current && (!isBox || (boxListed.current && mutationGenerationRef.current.box === mutation)) &&
+      (!woltSetting || (woltListed.current && mutationGenerationRef.current.wolt === mutation))
 
     if (platform.open !== null) {
       setLastKnownOpen((current) => ({ ...current, [platform.plugin_id]: platform.open === true }))
@@ -489,8 +531,13 @@ export const PlatformsSection: React.FC = () => {
     setPending((current) => ({ ...current, [platform.plugin_id]: action }))
     setUncertain((current) => ({ ...current, [platform.plugin_id]: false }))
     if (isBox) setBoxBusy(false)
+    if (woltSetting && action === 'automation') setWoltAutomationUnconfirmed(false)
 
     const showUnconfirmedChange = () => {
+      if (woltSetting) {
+        if (action === 'automation') setWoltAutomationUnconfirmed(true)
+        return
+      }
       if (platform.plugin_id === 'box') {
         setPlatform(platform.plugin_id, {
           ...platform,
@@ -509,7 +556,7 @@ export const PlatformsSection: React.FC = () => {
     }
 
     try {
-      const response = await posApiPost<PlatformActionBody>(platform.plugin_id === 'box' ? '/pos/platforms?plugin_id=box' : '/pos/platforms', {
+      const response = await posApiPost<PlatformActionBody>(isBox || woltSetting ? `/pos/platforms?plugin_id=${platform.plugin_id}` : '/pos/platforms', {
         plugin_id: platform.plugin_id,
         ...change,
       })
@@ -518,7 +565,20 @@ export const PlatformsSection: React.FC = () => {
 
       if (response.success && body?.success !== false && body?.platform) {
         const next = body.platform
-        setPlatform(platform.plugin_id, next)
+        if (woltSetting) {
+          if (next.plugin_id !== 'wolt' ||
+            ('auto_open' in change && (next.auto_open !== change.auto_open ||
+              (change.auto_open ? next.wolt_availability_mode !== 'shifts' : next.wolt_availability_mode !== 'off' || next.open !== false))) ||
+            ('weekly_schedule' in change && (next.weekly_schedule_pending === true || !isValidBoxWeeklySchedule(next.weekly_schedule) || !next.weekly_schedule_revision))) {
+            if (action === 'automation') setWoltAutomationUnconfirmed(true)
+            return 'failed'
+          }
+          setWoltDetail(next)
+          if (next.wolt_availability_mode) setPlatform('wolt', next)
+          setWoltDetailFailed(false)
+        } else {
+          setPlatform(platform.plugin_id, next)
+        }
         setUncertain((current) => ({ ...current, [platform.plugin_id]: false }))
         if (!isBox && isAwaitingProvider(next)) {
           // Accepted, but not yet visible in the provider's status: restart the
@@ -529,9 +589,13 @@ export const PlatformsSection: React.FC = () => {
         return 'saved'
       }
 
-      const boxError = platform.plugin_id === 'box'
+      const boxError = isBox || woltSetting
         ? boxAvailabilityError(body?.error) ?? boxAvailabilityError(response.error) : undefined
       if (action === 'schedule') return boxError ?? 'failed'
+      if (woltSetting) {
+        setWoltAutomationUnconfirmed(true)
+        return
+      }
       if (boxError === 'busy' && (action === 'open' || action === 'close')) {
         setBoxBusy(true)
         return
@@ -591,6 +655,7 @@ export const PlatformsSection: React.FC = () => {
           return next
         })
         if (refreshBox) void loadBoxDetails()
+        if (woltSetting && action === 'automation' && woltListed.current) void loadWoltDetails()
       }
     }
   }
@@ -693,6 +758,12 @@ export const PlatformsSection: React.FC = () => {
         <div className="space-y-4">
           {[...(loadFailed ? [] : platforms), ...(box ? [box] : [])].map((platform) => {
             const isBox = platform.plugin_id === 'box'
+            const isWolt = platform.plugin_id === 'wolt'
+            const settings = isWolt ? woltDetail : platform
+            const woltMode = isWolt ? platform.wolt_availability_mode ?? settings?.wolt_availability_mode : undefined
+            const woltHeld = woltMode === 'off' || woltMode === 'off_pending'
+            const woltCloseUnconfirmed = woltHeld && (woltMode === 'off_pending' || platform.open !== false)
+            const canEditWoltWeek = isWolt && Boolean(settings?.weekly_schedule && settings.weekly_schedule_revision)
             const boxActionTime = isBox && platform.last_requested_at ? Date.parse(platform.last_requested_at) : NaN
             const action = pending[platform.plugin_id]
             const isPending = Boolean(action)
@@ -709,6 +780,9 @@ export const PlatformsSection: React.FC = () => {
               ? boxAvailabilityFeedbackKey(reason) : null
             const boxActionMessage = boxMessageKey ? t(boxMessageKey, boxAvailabilityFeedbackEnglish[boxMessageKey]) : null
             const boxFollowUpKey = isBox && platform.box_follow_up_error ? boxAvailabilityFeedbackKey(platform.box_follow_up_error) : null
+            const woltUnavailable = isWolt && platform.controllable && (woltDetailFailed || (woltDetail?.weekly_schedule === null && !canEditWoltWeek))
+            const hasCardHints = (isBox && (boxDetailFailed || boxFollowUpKey || boxBusy || platform.controllable))
+              || (isWolt && woltAutomationUnconfirmed) || woltUnavailable || woltCloseUnconfirmed || woltMode === 'manual'
             const reasonText = boxActionMessage ?? describeReason(reason, closureEndTime)
             // A closure reason already explains the end (or deliberately hides a
             // safety bound), so the generic "Closed until" line is for the rest.
@@ -819,7 +893,7 @@ export const PlatformsSection: React.FC = () => {
                   </div>
 
                   <div className="pos-row__control">
-                  {!platform.controllable && platform.open === null ? null : !platform.controllable ? (
+                  {woltHeld || (!platform.controllable && platform.open === null) ? null : !platform.controllable ? (
                     <POSGlassSwitch
                       aria-labelledby={`platform-${platform.plugin_id}-label`}
                       checked={false}
@@ -860,56 +934,76 @@ export const PlatformsSection: React.FC = () => {
                   </div>
                 </div>
 
-                {isBox && boxDetailFailed && (
-                  <p role="alert" className="pos-row__help">
-                    {t('settings.platforms.box.detailUnavailable', 'Could not refresh BOX. Try again.')}
-                  </p>
+                {hasCardHints && (
+                  <div className="pos-row pos-row--stack" data-platform-hints={platform.plugin_id}>
+                    {isBox && boxDetailFailed && (
+                      <p role="alert" className="pos-row__help">
+                        {t('settings.platforms.box.detailUnavailable', 'Could not refresh BOX. Try again.')}
+                      </p>
+                    )}
+                    {boxFollowUpKey && (
+                      <p role="alert" className="pos-row__help">
+                        {t(boxFollowUpKey, boxAvailabilityFeedbackEnglish[boxFollowUpKey])}
+                      </p>
+                    )}
+                    {isBox && boxBusy && (
+                      <p role="alert" className="pos-row__help">
+                        {t(boxAvailabilityFeedbackKey('busy'), boxAvailabilityFeedbackEnglish['settings.platforms.reason.busy'])}
+                      </p>
+                    )}
+                    {isBox && platform.controllable && (
+                      <p className="pos-row__help">
+                        {t('settings.platforms.box.customerHoursHelp', 'Customers only see the shop as open when it is open here and within BOX opening hours.')}
+                      </p>
+                    )}
+                    {woltMode === 'manual' && <p className="pos-row__help">{t('settings.platforms.wolt.legacyManual')}</p>}
+                    {woltCloseUnconfirmed && <p className="pos-row__help" role="alert">{t('settings.platforms.wolt.closePending')}</p>}
+                    {(woltMode === 'manual' || woltCloseUnconfirmed) && platform.controllable && (
+                      <div><button type="button" className={solidButton('secondary', 'sm')}
+                        disabled={!isOnline || isPending} onClick={() => void handleChange(platform, { auto_open: false })}>
+                        {t(woltCloseUnconfirmed ? 'settings.platforms.wolt.retryClose' : 'settings.platforms.wolt.holdClosed')}
+                      </button></div>
+                    )}
+                    {isWolt && woltAutomationUnconfirmed && !woltCloseUnconfirmed && (
+                      <p className="pos-row__help" role="alert">{t('settings.platforms.uncertain')}</p>
+                    )}
+                    {woltUnavailable && (
+                      <p className="pos-row__help" role="status">{t('settings.platforms.wolt.unavailable')}</p>
+                    )}
+                  </div>
                 )}
-                {boxFollowUpKey && (
-                  <p role="alert" className="pos-row__help">
-                    {t(boxFollowUpKey, boxAvailabilityFeedbackEnglish[boxFollowUpKey])}
-                  </p>
-                )}
-                {isBox && boxBusy && (
-                  <p role="alert" className="pos-row__help">
-                    {t(boxAvailabilityFeedbackKey('busy'), boxAvailabilityFeedbackEnglish['settings.platforms.reason.busy'])}
-                  </p>
-                )}
-                {isBox && platform.controllable && (
-                  <p className="pos-row__help">
-                    {t('settings.platforms.box.customerHoursHelp', 'Customers only see the shop as open when it is open here and within BOX opening hours.')}
-                  </p>
-                )}
-                {isBox && platform.controllable && typeof platform.auto_open === 'boolean' && (
+                {(isBox || (isWolt && woltMode)) && platform.controllable && settings?.controllable && typeof settings.auto_open === 'boolean' && (
                   <div className="pos-row">
                     <div className="pos-row__label">
-                      <span id="box-auto-open-label" className="pos-row__title">
-                        {t('settings.platforms.box.autoOpen', 'Automatic BOX opening')}
+                      <span id={`${platform.plugin_id}-auto-open-label`} className="pos-row__title">
+                        {isWolt ? t('settings.platforms.wolt.automatic') : t('settings.platforms.box.autoOpen', 'Automatic BOX opening')}
                       </span>
                       <span className="pos-row__help">
-                        {t('settings.platforms.box.autoHelp', 'Opens at the first cashier check-in and closes with the Z report.')}
+                        {isWolt ? t('settings.platforms.wolt.automaticHelp') : t('settings.platforms.box.autoHelp', 'Opens at the first cashier check-in and closes with the Z report.')}
                       </span>
                     </div>
                     <div className="pos-row__control flex items-center gap-2">
                       {action === 'automation' && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
                       <POSGlassSwitch
-                        aria-labelledby="box-auto-open-label"
-                        checked={platform.auto_open}
-                        disabled={!isOnline || isPending}
+                        aria-labelledby={`${platform.plugin_id}-auto-open-label`}
+                        checked={settings.auto_open}
+                        disabled={!isOnline || isPending || (isWolt && woltDetailFailed)}
                         onChange={(next) => void handleChange(platform, { auto_open: next })}
                       />
                     </div>
                   </div>
                 )}
 
-                {isBox && platform.weekly_schedule !== undefined && (
+                {settings && ((isBox && settings.weekly_schedule !== undefined) || canEditWoltWeek) && (
                   <BoxWeeklyScheduleEditor
-                    schedule={platform.weekly_schedule}
-                    savedAt={platform.weekly_schedule_at ?? null}
-                    revision={platform.weekly_schedule_revision}
+                    provider={isWolt ? 'wolt' : 'box'}
+                    schedule={settings.weekly_schedule ?? null}
+                    savedAt={settings.weekly_schedule_at ?? null}
+                    revision={settings.weekly_schedule_revision}
+                    providerPending={isWolt && settings.weekly_schedule_pending === true}
                     disabled={!isOnline || isPending}
-                    detailUnavailable={boxDetailFailed || !platform.controllable}
-                    reload={() => loadBoxDetails()}
+                    detailUnavailable={(isWolt ? woltDetailFailed : boxDetailFailed) || !platform.controllable || !settings.controllable}
+                    reload={isWolt ? loadWoltDetails : () => loadBoxDetails()}
                     save={(weekly_schedule, expected_schedule_revision) =>
                       handleChange(platform, { weekly_schedule, expected_schedule_revision })}
                   />

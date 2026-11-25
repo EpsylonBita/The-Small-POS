@@ -76,6 +76,7 @@ import {
   type SinglePaymentCollectionResult,
 } from "./modals/SinglePaymentCollectionModal";
 import OrderDetailsModal from "./modals/OrderDetailsModal";
+import { useResolvedWoltApproval } from '../hooks/useResolvedWoltApproval';
 import { useOrderNotices } from '../services/OrderSyncNoticeStore';
 import {
   observeQueuedPrintJob,
@@ -1886,6 +1887,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         window.removeEventListener("online", processCouponQueue);
       };
     }, []);
+
+    const closeResolvedWoltApproval = useCallback(() => {
+      setShowApprovalPanel(false);
+      setSelectedOrderForApproval(null);
+    }, []);
+    useResolvedWoltApproval(
+      showApprovalPanel && !isViewOnlyMode ? selectedOrderForApproval : null,
+      orders, pendingExternalOrders, bridge.orders.getById, closeResolvedWoltApproval,
+    );
 
     // Auto-open the approval panel for pending platform / customer orders
     // (queue head first). The sound is NOT played here: the App-level alert

@@ -1,4 +1,7 @@
 {
+  "woltOrder": {
+    "missingDetails": "Die Bestelldaten von Wolt liegen noch nicht vor."
+  },
   "settings": {
     "settingsHub": {
       "sections": {
@@ -26,6 +29,22 @@
       "lastKnown": "Zuletzt bekannt: {{status}}",
       "closedUntil": "Geschlossen bis {{time}}",
       "closureStatus": "efood-Status: {{status}}",
+      "wolt": {
+        "automatic": "Wolt automatisch öffnen",
+        "automaticHelp": "Eingeschaltet öffnet Wolt bei der ersten Kassenanmeldung und schließt beim Z-Abschluss. Beim Ausschalten schließt Wolt sofort und bleibt auch während der Öffnungszeiten geschlossen.",
+        "legacyManual": "Wolt wird derzeit manuell geöffnet und geschlossen.",
+        "holdClosed": "Schließen und geschlossen halten",
+        "closePending": "Wolt hat die Schließung noch nicht bestätigt. Es können weiterhin Bestellungen eingehen.",
+        "retryClose": "Schließen erneut versuchen",
+        "title": "Wochenöffnungszeiten bei Wolt",
+        "explain": "Öffnungszeiten für jeden Tag festlegen. Für Schichten über Mitternacht die Schließzeit beim Tag der Öffnung eintragen.",
+        "live": "Diese Zeiten wurden zuletzt von Wolt bestätigt.",
+        "save": "Öffnungszeiten bei Wolt speichern",
+        "unconfirmed": "Wolt hat die Änderung nicht bestätigt. Öffnungszeiten vor einem erneuten Versuch neu laden.",
+        "changed": "Die Öffnungszeiten haben sich geändert. Den aktuellen Wolt-Zeitplan vor dem Bearbeiten neu laden.",
+        "refused": "Wolt hat diese Änderung abgelehnt.",
+        "unavailable": "Die aktuellen Wolt-Einstellungen konnten nicht geladen werden. Bitte aktualisieren."
+      },
       "box": {
         "detailUnavailable": "BOX konnte nicht aktualisiert werden. Versuche es erneut.",
         "throttled": "BOX antwortet nicht. Prüfe den Laden in BOX Merchant.",

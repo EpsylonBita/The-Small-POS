@@ -22,9 +22,9 @@ const eur = (value: number, locale: string): string =>
     maximumFractionDigits: 2,
   }).format(value);
 
-test('OrderCard renders the card amount via formatCurrency, not hardcoded € + toFixed(2)', () => {
+test('OrderCard shows a dash for incomplete Wolt orders and formats known amounts in the order currency', () => {
   assert.match(cardSource, /import \{ formatCurrency \} from '\.\.\/\.\.\/utils\/format';/);
-  assert.match(cardSource, /\{formatCurrency\(totalNormalized, order\.currency \?\? null\)\}/);
+  assert.match(cardSource, /\{incompleteWolt\s*\?\s*'—'\s*:\s*formatCurrency\(totalNormalized, order\.currency \?\? null\)\}/);
   // Historical money keeps its original unit; an unknown unit stays unknown
   // instead of inheriting the currently configured store currency.
   assert.doesNotMatch(cardSource, /\{formatCurrency\(totalNormalized\)\}/);
