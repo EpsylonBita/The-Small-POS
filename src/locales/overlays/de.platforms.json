@@ -43,6 +43,9 @@
         "unconfirmed": "Wolt hat die Änderung nicht bestätigt. Öffnungszeiten vor einem erneuten Versuch neu laden.",
         "changed": "Die Öffnungszeiten haben sich geändert. Den aktuellen Wolt-Zeitplan vor dem Bearbeiten neu laden.",
         "refused": "Wolt hat diese Änderung abgelehnt.",
+        "scheduleUnavailable": "Die wöchentlichen Wolt-Öffnungszeiten sind nicht verfügbar. Bitte aktualisieren.",
+        "openRequestUnconfirmed": "Wolt hat die Anfrage zum Öffnen um {{time}} erhalten. Die anschließende Prüfung konnte die Öffnung nicht bestätigen.",
+        "closeRequestUnconfirmed": "Wolt hat die Anfrage zum Schließen um {{time}} erhalten. Die anschließende Prüfung konnte die Schließung nicht bestätigen.",
         "unavailable": "Die aktuellen Wolt-Einstellungen konnten nicht geladen werden. Bitte aktualisieren."
       },
       "box": {

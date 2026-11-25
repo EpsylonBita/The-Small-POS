@@ -43,6 +43,9 @@
         "unconfirmed": "Wolt could not confirm the change. Reload its hours before trying again.",
         "changed": "The hours changed. Reload the current Wolt schedule before editing again.",
         "refused": "Wolt declined this change.",
+        "scheduleUnavailable": "Wolt weekly hours are unavailable. Refresh to check again.",
+        "openRequestUnconfirmed": "Wolt received the request to open at {{time}}. The next check did not confirm that the store had opened.",
+        "closeRequestUnconfirmed": "Wolt received the request to close at {{time}}. The next check did not confirm that the store had closed.",
         "unavailable": "Could not load the current Wolt settings. Refresh to check again."
       },
       "box": {

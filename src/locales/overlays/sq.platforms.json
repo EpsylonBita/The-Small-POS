@@ -43,6 +43,9 @@
         "unconfirmed": "Wolt nuk e konfirmoi ndryshimin. Ringarkoni orarin përpara se të provoni përsëri.",
         "changed": "Orari ka ndryshuar. Ringarkoni orarin aktual të Wolt para se të vazhdoni.",
         "refused": "Wolt e refuzoi këtë ndryshim.",
+        "scheduleUnavailable": "Orari javor i Wolt nuk është i disponueshëm. Rifreskoni për ta kontrolluar sërish.",
+        "openRequestUnconfirmed": "Wolt mori kërkesën për hapje në orën {{time}}. Kontrolli pasues nuk konfirmoi hapjen.",
+        "closeRequestUnconfirmed": "Wolt mori kërkesën për mbyllje në orën {{time}}. Kontrolli pasues nuk konfirmoi mbylljen.",
         "unavailable": "Cilësimet aktuale të Wolt nuk u ngarkuan. Rifreskoni për të provuar sërish."
       },
       "box": {

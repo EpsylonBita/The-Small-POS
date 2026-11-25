@@ -29,6 +29,7 @@ export interface Platform {
   auto_open?: boolean
   wolt_availability_mode?: 'manual' | 'shifts' | 'off' | 'off_pending'
   last_requested_open?: boolean | null
+  wolt_weekly_schedule_unavailable?: true
   last_requested_at?: string | null
   weekly_schedule?: BoxWeeklySchedule | null
   weekly_schedule_at?: string | null
@@ -311,7 +312,7 @@ export const PlatformsSection: React.FC = () => {
     return received.controllable && Boolean(received.weekly_schedule_revision)
   }, [])
 
-  const loadWoltDetails = useCallback(async () => {
+  const loadWoltDetails = useCallback(async (afterManualAction = false) => {
     const read = ++woltReadGeneration.current
     const mutation = mutationGenerationRef.current.wolt || 0
     const response = await posApiGet<PlatformsListBody>('/pos/platforms?plugin_id=wolt').catch(() => null)
@@ -324,7 +325,16 @@ export const PlatformsSection: React.FC = () => {
       return false
     }
     setWoltDetail(row)
-    if (row.wolt_availability_mode) setPlatforms(current => current.map(entry => entry.plugin_id === 'wolt' ? row : entry))
+    if (row.wolt_availability_mode || afterManualAction) {
+      setPlatforms(current => current.map(entry => entry.plugin_id === 'wolt' ? row : entry))
+      if (typeof row.open === 'boolean') {
+        const observed = row.open
+        setLastKnownOpen(current => ({ ...current, wolt: observed }))
+      }
+      if (typeof row.open === 'boolean' || row.reason === 'wolt_request_unconfirmed') {
+        setUncertain(current => current.wolt ? { ...current, wolt: false } : current)
+      }
+    }
     setWoltDetailFailed(false)
     return Boolean(row.controllable && row.weekly_schedule_revision && row.weekly_schedule)
   }, [])
@@ -353,7 +363,8 @@ export const PlatformsSection: React.FC = () => {
     const legacyOk = response.success && body?.success !== false && Array.isArray(incoming)
     if (legacyOk && incoming.some(entry => entry.plugin_id === 'wolt' && entry.controllable)) {
       woltListed.current = true
-      void loadWoltDetails()
+      const mutation = mutationGenerationRef.current.wolt || 0
+      if (!(mutation % 2) && mutation === (mutationSnapshot.wolt || 0)) void loadWoltDetails()
     } else {
       ++woltReadGeneration.current
       if (legacyOk && woltListed.current) {
@@ -521,7 +532,7 @@ export const PlatformsSection: React.FC = () => {
     const mutation = (mutationGenerationRef.current[platform.plugin_id] || 0) + 1
     mutationGenerationRef.current[platform.plugin_id] = mutation
     const canApply = () => mountedRef.current && (!isBox || (boxListed.current && mutationGenerationRef.current.box === mutation)) &&
-      (!woltSetting || (woltListed.current && mutationGenerationRef.current.wolt === mutation))
+      (platform.plugin_id !== 'wolt' || (woltListed.current && mutationGenerationRef.current.wolt === mutation))
 
     if (platform.open !== null) {
       setLastKnownOpen((current) => ({ ...current, [platform.plugin_id]: platform.open === true }))
@@ -533,6 +544,7 @@ export const PlatformsSection: React.FC = () => {
     if (isBox) setBoxBusy(false)
     if (woltSetting && action === 'automation') setWoltAutomationUnconfirmed(false)
 
+    let readWoltAfterAction = false
     const showUnconfirmedChange = () => {
       if (woltSetting) {
         if (action === 'automation') setWoltAutomationUnconfirmed(true)
@@ -545,6 +557,7 @@ export const PlatformsSection: React.FC = () => {
         })
         return
       }
+      readWoltAfterAction = platform.plugin_id === 'wolt'
       setPlatform(platform.plugin_id, {
         ...platform,
         open: null,
@@ -655,7 +668,7 @@ export const PlatformsSection: React.FC = () => {
           return next
         })
         if (refreshBox) void loadBoxDetails()
-        if (woltSetting && action === 'automation' && woltListed.current) void loadWoltDetails()
+        if (woltListed.current && (readWoltAfterAction || (woltSetting && action === 'automation'))) void loadWoltDetails(readWoltAfterAction)
       }
     }
   }
@@ -781,9 +794,16 @@ export const PlatformsSection: React.FC = () => {
             const boxActionMessage = boxMessageKey ? t(boxMessageKey, boxAvailabilityFeedbackEnglish[boxMessageKey]) : null
             const boxFollowUpKey = isBox && platform.box_follow_up_error ? boxAvailabilityFeedbackKey(platform.box_follow_up_error) : null
             const woltUnavailable = isWolt && platform.controllable && (woltDetailFailed || (woltDetail?.weekly_schedule === null && !canEditWoltWeek))
+            const woltScheduleUnavailable = woltDetail?.wolt_weekly_schedule_unavailable === true ||
+              (typeof woltDetail?.open === 'boolean' && woltDetail.weekly_schedule === null)
             const hasCardHints = (isBox && (boxDetailFailed || boxFollowUpKey || boxBusy || platform.controllable))
               || (isWolt && woltAutomationUnconfirmed) || woltUnavailable || woltCloseUnconfirmed || woltMode === 'manual'
-            const reasonText = boxActionMessage ?? describeReason(reason, closureEndTime)
+            const requestAt = isWolt && reason === 'wolt_request_unconfirmed' && platform.last_requested_at ? Date.parse(platform.last_requested_at) : NaN
+            const reasonText = Number.isFinite(requestAt) && typeof platform.last_requested_open === 'boolean'
+              ? t(platform.last_requested_open ? 'settings.platforms.wolt.openRequestUnconfirmed' : 'settings.platforms.wolt.closeRequestUnconfirmed', {
+                  time: new Date(requestAt).toLocaleString(i18n?.language, { dateStyle: 'short', timeStyle: 'short' }),
+                })
+              : boxActionMessage ?? describeReason(reason, closureEndTime)
             // A closure reason already explains the end (or deliberately hides a
             // safety bound), so the generic "Closed until" line is for the rest.
             const showClosedUntil = closureEndTime !== null && !awaitingProvider && !closureExplained
@@ -968,7 +988,8 @@ export const PlatformsSection: React.FC = () => {
                       <p className="pos-row__help" role="alert">{t('settings.platforms.uncertain')}</p>
                     )}
                     {woltUnavailable && (
-                      <p className="pos-row__help" role="status">{t('settings.platforms.wolt.unavailable')}</p>
+                      <p className="pos-row__help" role="status">{t(!woltDetailFailed && woltScheduleUnavailable
+                        ? 'settings.platforms.wolt.scheduleUnavailable' : 'settings.platforms.wolt.unavailable')}</p>
                     )}
                   </div>
                 )}

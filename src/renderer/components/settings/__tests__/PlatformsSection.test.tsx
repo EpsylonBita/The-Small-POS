@@ -34,7 +34,8 @@ vi.mock('../../../utils/api-helpers', () => ({
 // render can put dependent useCallback/useEffect chains into a render loop.
 const translate = (key: string, defaultValueOrOptions?: string | { defaultValue?: string; [k: string]: unknown }) => {
   if (typeof defaultValueOrOptions === 'string') return defaultValueOrOptions;
-  const template = defaultValueOrOptions?.defaultValue ?? key;
+  const template = defaultValueOrOptions?.defaultValue ??
+    (key.startsWith('settings.platforms.wolt.') && defaultValueOrOptions?.time ? valueAt(enPlatforms, key) as string : key);
   if (typeof template !== 'string' || !defaultValueOrOptions) return template;
   return template.replace(/\{\{(\w+)\}\}/g, (_, name) => String((defaultValueOrOptions as Record<string, unknown>)[name] ?? ''));
 };
@@ -165,6 +166,33 @@ describe('PlatformsSection', () => {
     await waitFor(() => expect(screen.getByLabelText('To')).toHaveValue('06:00'));
     fireEvent.change(screen.getByLabelText('To'), { target: { value: '07:30' } });
     expect(save).toBeEnabled();
+  });
+
+  it.each([true, false])('reads back an unconfirmed manual Wolt change (requested open: %s) without resending it', async (requestedOpen) => {
+    const initial = makePlatform({ plugin_id: 'wolt', name: 'Wolt', open: !requestedOpen,
+      wolt_availability_mode: 'shifts', weekly_schedule: null, wolt_weekly_schedule_unavailable: true });
+    let live = initial;
+    posApiGet.mockImplementation(async () => listResponse(live));
+    woltDetails.mockImplementation(async () => listResponse(live));
+    posApiPost.mockImplementationOnce(async () => {
+      live = { ...initial, last_requested_open: requestedOpen, last_requested_at: '2026-11-25T15:01:53Z', reason: 'wolt_request_unconfirmed' };
+      return { success: false, error: 'outcome_unknown (HTTP 502)' };
+    });
+    render(<PlatformsSection />);
+    await screen.findByText('settings.platforms.wolt.scheduleUnavailable');
+    fireEvent.click(screen.getByRole('switch', { name: 'Wolt' }));
+    const key = requestedOpen ? 'settings.platforms.wolt.openRequestUnconfirmed' : 'settings.platforms.wolt.closeRequestUnconfirmed';
+    const at = new Date('2026-11-25T15:01:53Z').toLocaleString('en', { dateStyle: 'short', timeStyle: 'short' });
+    const hint = (valueAt(enPlatforms, key) as string).replace('{{time}}', at);
+    expect(await screen.findByText(hint)).toBeInTheDocument();
+    expect(screen.getByText(requestedOpen ? 'Closed' : 'Open')).toBeInTheDocument();
+    expect(screen.queryByText(UNCERTAIN_TEXT)).not.toBeInTheDocument();
+    expect(woltDetails).toHaveBeenCalledTimes(2);
+    live = { ...initial, open: requestedOpen };
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.queryByText(hint)).not.toBeInTheDocument());
+    expect(screen.getByText(requestedOpen ? 'Open' : 'Closed')).toBeInTheDocument();
+    expect(posApiPost).toHaveBeenCalledTimes(1);
   });
 
   it('saves Wolt automation separately from the manual availability switch', async () => {
